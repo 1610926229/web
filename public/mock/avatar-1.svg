@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200" role="img" aria-label="Mock 用户头像占位 A">
+  <rect width="200" height="200" rx="100" fill="#DCEAF8" />
+  <circle cx="100" cy="78" r="34" fill="#7FB4E8" />
+  <path d="M32 186c0-35 30-58 68-58s68 23 68 58z" fill="#7FB4E8" />
+</svg>

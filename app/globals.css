@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/*
+ * 设计令牌（Tailwind v4 CSS-first 配置，无 tailwind.config.js）。
+ * 颜色取自用户端原型；后续如需换肤，只改这里。
+ */
+@theme {
+  /*
+   * 中文系统字体栈：不引入 next/font/google，
+   * 避免构建期外网依赖，同时保证中文字形覆盖。
+   */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* 中性色 */
+  --color-page: #f2f3f5; /* 页面底色 / 容器外底色 */
+  --color-surface: #ffffff; /* 卡片、容器主底色 */
+  --color-ink: #1a1a1a; /* 主要文字 */
+  --color-ink-2: #333333; /* 次要文字 */
+  --color-ink-3: #8a8a8a; /* 辅助文字、未选中图标 */
+  --color-line: #ededed; /* 分割线、描边 */
+
+  /* 品牌色 */
+  --color-brand-yellow: #ffd400;
+  --color-brand-yellow-deep: #f5c400;
+  --color-brand-red: #e60012;
+  --color-brand-blue: #4a9ef0;
+  --color-brand-blue-soft: #eaf4fe;
+  --color-brand-blue-border: #b8dcfb;
+}
+
+:root {
+  /* 桌面端居中容器最大宽度 */
+  --shell-width: 480px;
+  /* 底部导航高度（不含安全区） */
+  --tabbar-height: 56px;
+}
+
+/*
+ * 视口高度兜底。
+ *
+ * 部分旧版 Android 微信内核（Chromium < 108）不支持 dvh，遇到 `min-h-dvh` 会把整条声明丢弃，
+ * 短页面于是退化成「内容多高就多高」，底部导航贴不到视口底部。这里显式补一个 vh 兜底。
+ *
+ * 之所以用 @supports 而不是在同一个规则里连写两条同属性声明，是因为后者会被 CSS 压缩器
+ * 判定为重复而合并掉（已实测），兜底会静默失效。
+ */
+@supports not (height: 100dvh) {
+  .min-h-dvh {
+    min-height: 100vh;
+  }
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  min-height: 100%;
+  background-color: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+/*
+ * 本阶段不提供暗色主题：原型只有一套浅色视觉，
+ * 若跟随系统切暗会出现未设计的配色。
+ */
