@@ -17,8 +17,18 @@ import type { UserProfile } from "@/lib/types/user";
  *
  * 长文本：昵称与简介都可能很长，右侧按钮又是固定宽度，因此文字列用 `min-w-0` + `truncate`
  * 收缩，绝不允许把卡片撑破或把按钮挤出屏幕。
+ *
+ * `children` 渲染在资料行**下方、同一块深色底内**（「我的」页用它放消费等级摘要）。
+ * 之所以放在这里面而不是下面另起一张卡：等级摘要是资料的一部分，且这样只占一个背景块，
+ * 不会出现「两块深色渐变叠在一起」的分层错乱。摘要取数失败时也只影响这一块。
  */
-export default function ProfileCard({ profile }: { profile: UserProfile }) {
+export default function ProfileCard({
+  profile,
+  children,
+}: {
+  profile: UserProfile;
+  children?: ReactNode;
+}) {
   return (
     <div className="mine-hero px-4 pb-14 pt-8">
       <div className="flex items-start gap-3">
@@ -50,6 +60,8 @@ export default function ProfileCard({ profile }: { profile: UserProfile }) {
           </RoundLink>
         </div>
       </div>
+
+      {children ? <div className="mt-5">{children}</div> : null}
     </div>
   );
 }

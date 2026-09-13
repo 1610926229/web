@@ -27,6 +27,10 @@ export type MockSurface = "server" | "http";
 /**
  * 空数据注入的作用范围。首页各模块是独立的视觉段落，因此空态也按模块区分，
  * 而不是「一处为空 = 整页为空」。
+ *
+ * `levels` / `agreements` / `rankings` 不属于首页，而是给消费等级、协议与排行榜
+ * 三个页面用的：它们的空态是**整块功能没有数据**（等级配置为空、协议全部未配置、
+ * 榜单无人上榜），既不可能靠改一条数据造出来，也不该为了验收去删预置数据。
  */
 export type MockEmptyScope =
   | "none"
@@ -34,6 +38,9 @@ export type MockEmptyScope =
   | "announcements"
   | "activity"
   | "shortcuts"
+  | "levels"
+  | "agreements"
+  | "rankings"
   | "all";
 
 const SCOPE_VALUES: readonly MockEmptyScope[] = [
@@ -41,6 +48,9 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "announcements",
   "activity",
   "shortcuts",
+  "levels",
+  "agreements",
+  "rankings",
   "all",
 ];
 
@@ -138,4 +148,36 @@ export async function withMockHomeDebug(
   return withMockDebug(params, surface, async () =>
     applyMockEmpty(await load(), mockEmptyScope(params)),
   );
+}
+
+/**
+ * 本次请求是否要求把 `scope` 清空（`?mockEmpty=all` 视为清空全部范围）。
+ *
+ * 首页之外的空态不是「某个字段为空」，而是**整块数据一条不剩**，所以这里给的是
+ * 一个判定函数而不是改写数据的函数：由各服务自己决定空数据长什么样——
+ * 消费等级要变成「配置暂不可用」，协议要变成「内容暂未配置」，排行榜要变成空列表。
+ */
+export function mockEmptyApplies(
+  params: URLSearchParams | undefined,
+  scope: Exclude<MockEmptyScope, "none" | "all">,
+): boolean {
+  const current = mockEmptyScope(params);
+  return current === "all" || current === scope;
+}
+
+/**
+ * 在通用调试包装之上叠加一次「按范围清空」的取数：命中范围时返回空数组。
+ *
+ * 与首页空态一致：**空数据不是错误**，不抛错，由调用方渲染各自的空态文案。
+ */
+export async function withMockEmptyDebug<T>(
+  params: URLSearchParams | undefined,
+  surface: MockSurface,
+  scope: Exclude<MockEmptyScope, "none" | "all">,
+  load: () => Promise<readonly T[]>,
+): Promise<T[]> {
+  return withMockDebug(params, surface, async () => {
+    const rows = await load();
+    return mockEmptyApplies(params, scope) ? [] : [...rows];
+  });
 }

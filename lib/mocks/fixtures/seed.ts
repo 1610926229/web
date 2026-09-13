@@ -21,12 +21,19 @@ import type { Product, ProductDetail } from "@/lib/types/product";
  */
 
 /**
- * 两个 Mock 用户，用于验证「切换用户后个人信息展示随之变化」。
+ * Mock 用户。
+ *
+ * 前两位（老板A / 老板B）用于验证「切换用户后个人信息展示随之变化」与订单归属隔离；
+ * 其余八位是为**消费排行榜**补的：两个人排不出前三名与普通列表，也造不出
+ * 「金额相同的两个人」「有订单但有效消费为 0 的人」这类必须被验收到的边界。
  *
  * `displayId` 是**平台展示给用户的 ID**（原型资料卡上那一行），形如 UUID 但纯属虚构，
  * 与微信 OpenID / UnionID 没有任何关系——真实身份标识只在服务端保存，不进任何 DTO。
  *
  * `bio` 故意留一个为空：资料卡「暂未填写个人简介」的占位状态要能被验收看到。
+ *
+ * 昵称一律带「（占位）」后缀：排行榜会把这些昵称直接展示给用户，
+ * 不标清楚就会被当成真实用户。
  */
 export const userSeed: UserRecord[] = [
   {
@@ -42,6 +49,154 @@ export const userSeed: UserRecord[] = [
     nickname: "老板B（占位）",
     avatarUrl: "/mock/avatar-2.svg",
     bio: "对局节奏轻一点，谢谢（占位）",
+  },
+  {
+    id: "u-1003",
+    displayId: "b7d2f0a5-3e18-4c96-8a37-1f6c9e2b4d70",
+    nickname: "星野（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "只打巴克什（占位）",
+  },
+  {
+    id: "u-1004",
+    displayId: "c1e8a473-5b26-4d19-9f83-0a7b2c5e6d91",
+    nickname: "日落（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    bio: "",
+  },
+  {
+    id: "u-1005",
+    displayId: "d4a91b62-7c35-4e08-b1f6-2d8e5a3c9047",
+    nickname: "叶缘（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    bio: "周末白天在线（占位）",
+  },
+  {
+    id: "u-1006",
+    displayId: "e8b3c507-9d41-4a72-8e05-6f1b4d2a9375",
+    nickname: "阿柴（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    bio: "",
+  },
+  {
+    id: "u-1007",
+    displayId: "f2c7d861-1e94-4b30-a5d7-8c3f6e0b2749",
+    nickname: "白露（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "开麦就行（占位）",
+  },
+  {
+    id: "u-1008",
+    displayId: "a5e1f739-4b62-4c85-9d20-7e8a3b1f6504",
+    nickname: "小满（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    bio: "",
+  },
+  {
+    // 有订单但**有效消费为 0**：一单已退款、一单还在进行中 → 不应进入排行榜
+    id: "u-1009",
+    displayId: "b9d6a204-8f13-4e57-92c8-5a0d7b3e4618",
+    nickname: "青柠（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    bio: "第一次来（占位）",
+  },
+  {
+    // 完全没有订单 → 同样不应进入排行榜
+    id: "u-1010",
+    displayId: "c3f8b152-6a74-4d09-8b31-9e2c5f7a0d86",
+    nickname: "未消费（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    bio: "",
+  },
+  {
+    // ————— 以下十一人只服务周期榜 —————
+    // 他们的订单不在 `orderSeed` 里，而是由 `buildRankingPeriodOrders(now)` **相对当前时间**生成，
+    // 分摊在六个周期上（今日 / 昨日 / 本周 / 本月 / 上月 / 累计）。
+    // 见 `orderSeed.ts` 里的预置表。
+    //
+    // 这样拆开的原因有两个：
+    // 1. 周期榜要的是「相对今天」的订单，写死绝对日期的话第二天「今日」就永远是空的；
+    // 2. 既有种子的绝对日期一旦被改成相对时间，P4/P5 的订单列表与售后用例就会跟着一起漂。
+    //
+    // 最后五位（u-1017…u-1021）是给「上月」补的：只靠一位用户不足以让人工验收看出
+    // 同额并列排序，也不足以证明这一档在任意月份都自给自足。
+    id: "u-1011",
+    displayId: "d7a2e945-1c68-4b03-9e52-8f1a6d4c7b20",
+    nickname: "惊蛰（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "",
+  },
+  {
+    id: "u-1012",
+    displayId: "e1c5b073-8d29-4a61-9f47-2b6e8c0a5d31",
+    nickname: "长夏（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    bio: "",
+  },
+  {
+    id: "u-1013",
+    displayId: "f4b8d216-3a95-4c07-8e1b-7d0c5a9f2e68",
+    nickname: "陈屿（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    bio: "",
+  },
+  {
+    id: "u-1014",
+    displayId: "a8f3c650-2e17-4d94-b5a3-6c9e1b7d0f42",
+    nickname: "南栀（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    bio: "",
+  },
+  {
+    id: "u-1015",
+    displayId: "b2d9a784-5c31-42e8-8f60-3a1d7e4b9c05",
+    nickname: "远山（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "",
+  },
+  {
+    id: "u-1016",
+    displayId: "c6e1f408-7b52-4a39-9d18-5f2c0a8e3b71",
+    nickname: "微凉（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    bio: "",
+  },
+  {
+    // 以下五位：昨日 / 本周 / 本月 / 上月 各自的第二位用户，
+    // 其中 u-1021 与 u-1016 在「上月」金额完全相同（137.00），用来验证周期榜内同额并列的稳定排序。
+    id: "u-1017",
+    displayId: "d9b4e257-8f13-4a60-9c75-3e1b8d0a2f94",
+    nickname: "归舟（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    bio: "",
+  },
+  {
+    id: "u-1018",
+    displayId: "e3a7c918-4b62-4d80-a517-6f0c9e2b3d48",
+    nickname: "云开（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    bio: "",
+  },
+  {
+    id: "u-1019",
+    displayId: "f8c2d643-1e95-4a07-b380-2d5f7c9e1a60",
+    nickname: "拾光（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "",
+  },
+  {
+    id: "u-1020",
+    displayId: "a5e9b174-6c28-4f93-8d61-0b7a3e5c9f82",
+    nickname: "泊野（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    bio: "",
+  },
+  {
+    id: "u-1021",
+    displayId: "b7f3a805-2d49-4c16-9e52-8a1c6b4d7e03",
+    nickname: "听澜（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    bio: "",
   },
 ];
 

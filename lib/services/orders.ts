@@ -4,6 +4,7 @@ import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
+import { getReviewRepository } from "@/lib/data/reviewRepository";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { PageResult } from "@/lib/types/common";
 import type {
@@ -17,6 +18,7 @@ import type {
 import { toOrderComplaintSummary } from "./complaints";
 import { buildConversationStats } from "./conversations";
 import { buildRefundActions, toRefundSummary } from "./refunds";
+import { buildReviewActions, toReviewSummary } from "./reviews";
 
 /**
  * 订单查询服务 —— 订单列表页、订单详情页与两个接口共用的唯一入口。
@@ -76,6 +78,7 @@ export type OrderDetailExtras = {
   refundSummary: OrderDetail["refundSummary"];
   complaintSummary: OrderDetail["complaintSummary"];
   conversationSummary: OrderDetail["conversationSummary"];
+  reviewSummary: OrderDetail["reviewSummary"];
   allowedActions: OrderAllowedActions;
 };
 
@@ -144,6 +147,8 @@ export async function getOrderDetailForUser(
 
   const refund = await getRefundRepository().findRefundByOrderId(order.id);
   const complaintStats = await getComplaintRepository().summarizeComplaintsByOrder(order.id);
+  // 评价与退款一样属于「这一单做过什么」，因此按订单 id 查（并按用户隔离）
+  const review = await getReviewRepository().findReviewByOrderId(userId, order.id);
 
   // 会话不存在时摘要为 null（页面上不显示「订单沟通」的进度），存在就带上未读数
   const conversation = await getMessageRepository().findConversation(userId, order.id);
@@ -158,9 +163,12 @@ export async function getOrderDetailForUser(
     refundSummary: refund ? toRefundSummary(refund) : null,
     complaintSummary: toOrderComplaintSummary(complaintStats),
     conversationSummary,
+    reviewSummary: review ? toReviewSummary(review) : null,
     allowedActions: {
       // 退款相关由退款规则统一算：既看订单状态，也看这一单有没有退款申请
       ...buildRefundActions(order, refund),
+      // 评价同样由评价规则统一算：已完成、未评价、且没有进行中 / 已通过的退款
+      ...buildReviewActions(order, review, refund),
       // 自己的订单一律可以沟通、可以投诉：投诉不会自动退款，也不改订单状态
       canOpenConversation: true,
       canSubmitComplaint: true,

@@ -46,6 +46,11 @@ export const mockUserRepository: UserRepository = {
     return store().users.get(id) ?? null;
   },
 
+  async listUsers() {
+    // 复制一层再返回：调用方拿到的是快照，后续对 store 的修改不会影响正在聚合的这一次
+    return [...store().users.values()].map((user) => ({ ...user }));
+  },
+
   async updateProfile(id, patch: UserProfilePatch): Promise<UserRecord | null> {
     const current = store();
 

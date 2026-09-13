@@ -18,6 +18,7 @@
 import type { OrderComplaintSummary } from "./complaint";
 import type { ConversationStats } from "./message";
 import type { RefundSummary } from "./refund";
+import type { ReviewSummary } from "./review";
 
 /**
  * 用户端订单状态。
@@ -142,6 +143,13 @@ export type OrderAllowedActions = {
   canCancelRefund: boolean;
   canOpenConversation: boolean;
   canSubmitComplaint: boolean;
+  /**
+   * 能不能评价这一单。
+   *
+   * 与退款同理，**不是只看订单状态**：还要看这一单有没有评价、有没有进行中 / 已通过的退款
+   * （见 `lib/constants/reviews.ts` 的 `canReviewOrder`）。前端只按这个值显示入口。
+   */
+  canReview: boolean;
 };
 
 /**
@@ -172,5 +180,7 @@ export type OrderDetail = OrderListItem & {
   complaintSummary: OrderComplaintSummary | null;
   /** 这一单的订单沟通摘要；没有会话为 null */
   conversationSummary: ConversationStats | null;
+  /** 这一单的评价摘要；没有评价过为 null */
+  reviewSummary: ReviewSummary | null;
   allowedActions: OrderAllowedActions;
 };

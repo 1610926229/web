@@ -27,7 +27,13 @@ export type MockStoreName =
   | "message"
   | "notification"
   | "user"
-  | "favorite";
+  | "favorite"
+  | "coupon"
+  | "review"
+  | "tip"
+  | "suggestion"
+  | "level"
+  | "agreement";
 
 const PREFIX = "__youmuMockStore__";
 

@@ -68,6 +68,26 @@ export type PaymentRepository = {
 
   /** 按 id 取单个订单（不做归属判断，归属由 service 校验）。 */
   findOrderById(id: string): Promise<Order | null>;
+
+  /**
+   * 某个用户的**全部订单**（不分页、不筛状态），消费金额统计用。
+   *
+   * ⚠️ 刻意**不在这里筛「已完成」**：「哪些订单计入累计有效消费」是业务口径，
+   * 只写在 `lib/constants/levels.ts` 的 `sumEffectiveSpend` 里。仓储若也筛一遍，
+   * 同一套口径就有两份实现，改动时必然漏掉一处。
+   *
+   * 与 `queryOrders` 一样，`userId` 是**查询条件**而不是可选的过滤项：
+   * 本方法只可能返回该用户的订单。
+   */
+  listOrdersByUser(userId: string): Promise<Order[]>;
+
+  /**
+   * 全部用户的**全部订单**（不分页、不筛状态），消费排行榜聚合用。
+   *
+   * ⚠️ 返回值**只在服务端参与聚合**，任何情况下都不会作为响应体返回：
+   * 排行榜对外只有公开 DTO（名次 / 昵称 / 头像 / 等级 / 金额）。
+   */
+  listAllOrders(): Promise<Order[]>;
 };
 
 export function getPaymentRepository(): PaymentRepository {

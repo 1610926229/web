@@ -40,6 +40,15 @@ export type UserRepository = {
   findUserById(id: string): Promise<UserRecord | null>;
 
   /**
+   * 全部用户记录（消费排行榜聚合用）。
+   *
+   * 返回值**只在服务端使用**：聚合出的是公开榜单 DTO（名次 / 昵称 / 头像 / 等级 / 金额），
+   * `id` 与 `displayId` 都不会进入任何响应。用户资料是用户自己可改的数据，
+   * 排行榜因此读这里的**当前值**，而不是订单里的历史快照。
+   */
+  listUsers(): Promise<UserRecord[]>;
+
+  /**
    * 覆盖式更新资料。用户不存在返回 null（由服务层转成 404）。
    *
    * 只改这三个字段，**身份字段（id / displayId）一个字都不动**：

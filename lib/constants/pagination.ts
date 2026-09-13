@@ -43,13 +43,28 @@ export function clampPageSize(raw: string | null, fallback: number, maxPageSize:
  * 规则只写这一处：组件不自己拼数组，也就不会出现「某个列表忘了去重」。
  * 新一页的 `page` / `hasMore` / `total` 一律采用 `next` 的（它才代表最新一次请求的结果）。
  */
-export function mergePageResult<T extends { id: string }>(
-  current: PageResult<T>,
-  next: PageResult<T>,
-): PageResult<T> {
-  const seen = new Set(current.items.map((item) => item.id));
+export function mergePageResult<T extends { id: string }, P extends PageResult<T>>(
+  current: P,
+  next: P,
+): P {
+  // 显式写出回调参数类型：`T` 只出现在 `P` 的约束里，推断不出，否则会被当成 unknown
+  return mergePageResultBy(current, next, (item: T) => item.id);
+}
+
+/**
+ * 同上，但由调用方给出「哪一项算同一条」。
+ *
+ * 待评价订单列表里的身份字段是 `orderId` 而不是 `id`（它不是一条评价记录，
+ * 只是一笔还没评价的订单），因此不能套用按 `id` 去重的版本。
+ */
+export function mergePageResultBy<T, P extends PageResult<T>>(
+  current: P,
+  next: P,
+  keyOf: (item: T) => string,
+): P {
+  const seen = new Set(current.items.map(keyOf));
   return {
     ...next,
-    items: [...current.items, ...next.items.filter((item) => !seen.has(item.id))],
-  };
+    items: [...current.items, ...next.items.filter((item) => !seen.has(keyOf(item)))],
+  } as P;
 }

@@ -1,8 +1,12 @@
 import EmptyState from "@/components/common/EmptyState";
+import LevelSummaryPanel from "@/components/mine/LevelSummaryPanel";
 import MineMenu from "@/components/mine/MineMenu";
 import ProfileCard from "@/components/mine/ProfileCard";
 import RequireAuth from "@/lib/auth/RequireAuth";
+import { getConsumptionLevelForUser } from "@/lib/services/levels";
 import { getUserProfile } from "@/lib/services/profile";
+import type { ConsumptionLevelSummary } from "@/lib/types/level";
+import { toSearchParams } from "@/lib/utils/query";
 
 /**
  * 我的（需登录）。
@@ -16,18 +20,21 @@ import { getUserProfile } from "@/lib/services/profile";
  * - 这是**一级 Tab 页**，保留底部 TabBar；二级页（编辑资料 / 设置 / 收藏）在别的路由组，不带 TabBar。
  * - 资料由服务端取（不通过 HTTP 请求自己的接口），首屏就没有加载闪烁；
  *   同一份取数也供 `/api/me` 使用，两条链路的字段与规则只有一套。
- * - 这里**不注入 Mock 故障参数**：服务端首屏被一个查询参数打成错误页不是想要的调试体验，
- *   故障注入只在浏览器端请求时生效（与订单页一致）。
+ * - 资料取数**不注入 Mock 故障参数**：服务端首屏被一个查询参数打成错误页不是想要的调试体验。
+ *   唯一的例外是下面的等级摘要——它的错误态是「局部降级 + 单独重试」，**页面本身不崩**，
+ *   因此这里把查询参数传了下去，`?mockError=1` 可以直接演示这个降级卡片。
  */
-export default function MinePage() {
+export default async function MinePage({ searchParams }: PageProps<"/mine">) {
+  const params = toSearchParams(await searchParams);
+
   return (
     <RequireAuth>
-      {(user) => <MineBody userId={user.id} />}
+      {(user) => <MineBody userId={user.id} params={params} />}
     </RequireAuth>
   );
 }
 
-async function MineBody({ userId }: { userId: string }) {
+async function MineBody({ userId, params }: { userId: string; params: URLSearchParams }) {
   const profile = await getUserProfile(userId, undefined, "server");
 
   // 会话有效但资料已不存在：如实说明，不编一份假资料出来
@@ -42,9 +49,18 @@ async function MineBody({ userId }: { userId: string }) {
     );
   }
 
+  // 等级摘要单独取、单独失败：它挂了只是少一块信息，
+  // 订单、投诉、优惠券等入口都不依赖它，整页必须照常可用。
+  const levelSummary = await loadLevelSummary(userId, params);
+
   return (
     <>
-      <ProfileCard profile={profile} />
+      <ProfileCard profile={profile}>
+        <LevelSummaryPanel
+          initialSummary={levelSummary.summary}
+          initialError={levelSummary.error}
+        />
+      </ProfileCard>
 
       {/* 圆角白纸上浮，压住信息卡下沿，形成原型里「纸张盖在背景上」的分层 */}
       <div className="-mt-6 flex-1 rounded-t-[24px] bg-surface px-4 pb-8 pt-2">
@@ -53,6 +69,29 @@ async function MineBody({ userId }: { userId: string }) {
       </div>
     </>
   );
+}
+
+/**
+ * 取当前用户的消费等级摘要。
+ *
+ * 返回 `{ summary, error }` 而不是直接抛出：**等级摘要取数失败不允许把「我的」页打挂**。
+ * 失败原因交给 `LevelSummaryPanel` 显示，并给它一个只重取这一块的按钮。
+ *
+ * 金额与等级仍然只在服务端算（复用 `getConsumptionLevelForUser`），
+ * 页面与浏览器端都没有订单数据，也就没有「客户端自己算一套等级」的可能。
+ */
+async function loadLevelSummary(
+  userId: string,
+  params: URLSearchParams,
+): Promise<{ summary: ConsumptionLevelSummary | null; error: string }> {
+  try {
+    return { summary: await getConsumptionLevelForUser(userId, params, "server"), error: "" };
+  } catch (cause) {
+    return {
+      summary: null,
+      error: cause instanceof Error ? cause.message : "等级信息加载失败。",
+    };
+  }
 }
 
 /** 白纸顶部的抓手（原型样式：短横线 + 向下的小三角）。 */

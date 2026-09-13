@@ -39,8 +39,14 @@ export function formatYuan(cents: number): string {
   return (Math.trunc(cents) / 100).toFixed(2);
 }
 
-/** 北京时间偏移（分钟）。订单时间统一按北京时间展示，见下方说明。 */
-const BEIJING_OFFSET_MINUTES = 8 * 60;
+/**
+ * 北京时间偏移（分钟）。订单时间统一按北京时间展示，见下方说明。
+ *
+ * 导出是为了让**按天/按月划分的规则**（例如评价的「近一月 / 今年」）与展示口径一致：
+ * 那些规则必须和用户看到的日期算在同一个时区里，否则会出现「显示 2026-01-01，
+ * 却被「今年」筛掉」这种自相矛盾的结果。
+ */
+export const BEIJING_OFFSET_MINUTES = 8 * 60;
 
 function pad2(value: number): string {
   return String(value).padStart(2, "0");

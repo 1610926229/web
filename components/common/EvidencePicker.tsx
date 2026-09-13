@@ -5,18 +5,19 @@
 
 import { useRef, useState } from "react";
 import {
+  EVIDENCE_KINDS,
   EVIDENCE_KIND_LABELS,
   EVIDENCE_MAX_COUNT,
   EVIDENCE_NAME_MAX_LENGTH,
   EVIDENCE_NAME_TOO_LONG_MESSAGE,
   EVIDENCE_PLACEHOLDER_URL,
-  EVIDENCE_TOO_MANY_MESSAGE,
+  evidenceTooManyMessage,
   type EvidenceDraft,
 } from "@/lib/constants/evidence";
 import type { EvidenceKind } from "@/lib/types/evidence";
 
 /**
- * 售后凭证选择器（退款申请与投诉共用）。
+ * 售后凭证选择器（退款申请、投诉、评价与建议共用）。
  *
  * ⚠️ **只取文件名，不真的上传**：
  * - 选中的文件不会被读取、不会被上传、也不会产生任何地址；
@@ -27,15 +28,25 @@ import type { EvidenceKind } from "@/lib/types/evidence";
  * 正式地址**存进数据里（那会在别的设备上变成一个打不开的地址）。
  *
  * 数量与文件名长度在提交前就按服务端的同一套常量校验，用户不会等到点了提交才被告知超限。
+ *
+ * `kinds` 决定显示哪几个「添加」入口：评价与建议只收图片（与服务端的
+ * `parseEvidenceInput(raw, maxCount, kinds)` 传的是同一份取值），
+ * 因此不会出现界面上能加视频、提交却被服务端拒掉的情况。
  */
 export default function EvidencePicker({
   value,
   onChange,
   disabled = false,
+  maxCount = EVIDENCE_MAX_COUNT,
+  kinds = EVIDENCE_KINDS,
 }: {
   value: EvidenceDraft[];
   onChange: (next: EvidenceDraft[]) => void;
   disabled?: boolean;
+  /** 数量上限。评价与建议各有一个更小的上限，与服务端校验用的是同一个数。 */
+  maxCount?: number;
+  /** 允许添加的凭证类型。默认图片 + 视频（退款申请与投诉的现状）。 */
+  kinds?: readonly EvidenceKind[];
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -55,8 +66,8 @@ export default function EvidencePicker({
       setError("");
       return;
     }
-    if (value.length >= EVIDENCE_MAX_COUNT) {
-      setError(EVIDENCE_TOO_MANY_MESSAGE);
+    if (value.length >= maxCount) {
+      setError(evidenceTooManyMessage(maxCount));
       return;
     }
 
@@ -74,7 +85,7 @@ export default function EvidencePicker({
       <div className="flex items-center justify-between">
         <span className="text-[13px] text-ink-2">凭证（选填）</span>
         <span className="text-[12px] text-ink-3">
-          {value.length}/{EVIDENCE_MAX_COUNT}
+          {value.length}/{maxCount}
         </span>
       </div>
 
@@ -105,45 +116,53 @@ export default function EvidencePicker({
       ) : null}
 
       <div className="mt-2 flex gap-2">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => imageInputRef.current?.click()}
-          className="flex-1 rounded-[8px] border border-dashed border-line py-2 text-[13px] text-ink-2 disabled:opacity-60"
-        >
-          ＋ 添加图片
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => videoInputRef.current?.click()}
-          className="flex-1 rounded-[8px] border border-dashed border-line py-2 text-[13px] text-ink-2 disabled:opacity-60"
-        >
-          ＋ 添加视频
-        </button>
+        {kinds.includes("image") ? (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => imageInputRef.current?.click()}
+            className="flex-1 rounded-[8px] border border-dashed border-line py-2 text-[13px] text-ink-2 disabled:opacity-60"
+          >
+            ＋ 添加图片
+          </button>
+        ) : null}
+        {kinds.includes("video") ? (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => videoInputRef.current?.click()}
+            className="flex-1 rounded-[8px] border border-dashed border-line py-2 text-[13px] text-ink-2 disabled:opacity-60"
+          >
+            ＋ 添加视频
+          </button>
+        ) : null}
       </div>
 
-      {/* 两个隐藏的 file input：只用来取文件名，选中后立刻清空，便于重复选择同一个文件 */}
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(event) => {
-          add("image", event.target.files?.[0]);
-          event.target.value = "";
-        }}
-      />
-      <input
-        ref={videoInputRef}
-        type="file"
-        accept="video/*"
-        className="hidden"
-        onChange={(event) => {
-          add("video", event.target.files?.[0]);
-          event.target.value = "";
-        }}
-      />
+      {/* 隐藏的 file input：只用来取文件名，选中后立刻清空，便于重复选择同一个文件 */}
+      {kinds.includes("image") ? (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(event) => {
+            add("image", event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+      ) : null}
+      {kinds.includes("video") ? (
+        <input
+          ref={videoInputRef}
+          type="file"
+          accept="video/*"
+          className="hidden"
+          onChange={(event) => {
+            add("video", event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+      ) : null}
 
       <p className="mt-1.5 text-[11px] leading-4 text-ink-3">
         凭证仅保存在本地 Mock 数据中，不会真实上传；提交后以占位图展示。

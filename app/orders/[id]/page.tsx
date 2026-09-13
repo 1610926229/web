@@ -173,12 +173,15 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
  * - `refundSummary` —— 已经申请过就引到退款详情，看进度或撤销；
  * - `allowedActions.canOpenConversation` —— 订单沟通入口，带未读数；
  * - `allowedActions.canSubmitComplaint` —— 提交投诉（带上订单 id，自动关联这一单）；
- * - `complaintSummary` —— 投诉过就引到最近一条投诉的详情。
+ * - `complaintSummary` —— 投诉过就引到最近一条投诉的详情；
+ * - `allowedActions.canReview` —— 评价服务（已完成、未评价、且没有进行中 / 已通过的退款）；
+ * - `reviewSummary` —— 评价过就显示星级，并引到我的评价。
  *
  * 前端只读这些值，不拿 `status` 自己推断——写接口那边还会再校验一次，按钮只是提示，不是权限。
  */
 function AfterSalesSection({ detail }: { detail: OrderDetail }) {
-  const { allowedActions, refundSummary, complaintSummary, conversationSummary } = detail;
+  const { allowedActions, refundSummary, complaintSummary, conversationSummary, reviewSummary } =
+    detail;
   const unread = conversationSummary?.unreadCount ?? 0;
 
   return (
@@ -218,6 +221,19 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
             label="投诉记录"
             hint={`${complaintSummary.latestStatusLabel} · 共 ${complaintSummary.count} 条`}
             hintClass={COMPLAINT_STATUS_CLASS[complaintSummary.latestStatus]}
+          />
+        ) : null}
+
+        {/* 已完成且还没评价：给一个入口；评价过之后换成「我的评价」，不会两个同时出现 */}
+        {allowedActions.canReview ? (
+          <ActionRow href={`/reviews/new/${detail.id}`} label="评价服务" hint="已完成，可以评价" />
+        ) : null}
+
+        {reviewSummary ? (
+          <ActionRow
+            href="/reviews"
+            label="我的评价"
+            hint={`已评价 · ${reviewSummary.rating} 星`}
           />
         ) : null}
       </div>

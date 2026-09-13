@@ -61,6 +61,11 @@ function pathnameOf(href) {
   return href.split("?")[0];
 }
 
+/** 去掉注释后再做「源码里不该出现某标识」的断言：文档注释里说明「本页没有 X」不算出现 X。 */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
 test("扫描器本身正确：能找到已知路由、并排除动态段与不存在的路径", () => {
   assert.equal(ROUTES.has("/"), true);
   assert.equal(ROUTES.has("/mine"), true);
@@ -138,13 +143,247 @@ test("/join 需要登录：套用统一 RequireAuth，导航留在鉴权之外",
 test("/companions、/rank、/agreements 继续允许游客访问", () => {
   for (const route of ["/companions", "/rank", "/agreements"]) {
     assert.equal(ROUTES.has(route), true, `缺少 ${route} 页面`);
+    // 先去掉注释：P7A 的页面在文档里写明了「这里刻意不用 RequireAuth」，
+    // 那句话本身不构成鉴权（注释不该让这条断言误判）
     assert.equal(
-      readFileSync(ROUTES.get(route), "utf8").includes("RequireAuth"),
+      stripComments(readFileSync(ROUTES.get(route), "utf8")).includes("RequireAuth"),
       false,
       `${route} 是浏览型页面，不该因为本次改动被一起保护起来`,
     );
     assert.equal(ROUTES.get(route).includes("(protected)"), false);
   }
+});
+
+/**
+ * P6B 新增的二级页面：优惠券 / 评价 / 鸡腿记录 / 意见反馈（含各自的表单页）。
+ * `/reviews/new/[orderId]` 是动态段，不进静态路由表，由下面单独一条测试覆盖。
+ */
+const P6B_SECONDARY_ROUTES = [
+  "/coupons",
+  "/reviews",
+  "/tips",
+  "/tips/new",
+  "/suggestions",
+  "/suggestions/new",
+];
+
+test("P6B 的七个页面全部存在，且都是「需登录 + 顶部返回 + 无 TabBar」的二级页面", () => {
+  for (const route of P6B_SECONDARY_ROUTES) {
+    const file = ROUTES.get(route);
+    assert.ok(file, `缺少 ${route} 页面`);
+
+    // 不在 (tabs) 里：因此不会带上底部 TabBar
+    assert.equal(file.includes("(tabs)"), false, `${route} 不该在一级 Tab 里`);
+    assert.equal(file.includes("(protected)"), false, `${route} 自己有鉴权，不该挂进受保护的一级 Tab`);
+    // 路由组不该绕过 URL 段：地址就是上面写的那一个
+    assert.equal(route.includes("("), false);
+
+    const source = readFileSync(file, "utf8");
+    assert.ok(source.includes("RequireAuth"), `${route} 必须走统一鉴权`);
+    assert.ok(source.includes("<NavBar"), `${route} 应有顶部返回导航`);
+    // 导航必须在鉴权之外渲染：未登录时也要有返回入口，不能把人困在登录页上
+    assert.ok(
+      source.indexOf("<NavBar") < source.indexOf("<RequireAuth"),
+      `${route} 的导航栏应在 RequireAuth 之外渲染`,
+    );
+  }
+});
+
+test("评价表单按订单地址进入：/reviews/new/[orderId] 是动态段，改由数据层覆盖资格判定", () => {
+  const file = path.join(APP_DIR, "reviews", "new", "[orderId]", "page.tsx");
+  assert.equal(existsSync(file), true, "缺少 /reviews/new/[orderId] 页面");
+
+  const source = readFileSync(file, "utf8");
+  assert.ok(source.includes("RequireAuth"));
+  assert.ok(source.includes("<NavBar"));
+  // 资格判定只在服务端做：页面调用服务而不是自己看订单状态
+  assert.ok(source.includes("getReviewTargetForUser"), "评价资格必须由服务端判定");
+});
+
+test("「我的」页四个 P6B 入口指向真实页面，且标签与页面标题一致", () => {
+  const entries = [...MINE_PRIMARY_ENTRIES, ...MINE_GRID_ENTRIES];
+  const expected = {
+    coupon: { label: "我的优惠券", href: "/coupons" },
+    review: { label: "我的评价", href: "/reviews" },
+    tips: { label: "鸡腿记录", href: "/tips" },
+    suggestion: { label: "功能建议", href: "/suggestions" },
+  };
+
+  for (const [id, want] of Object.entries(expected)) {
+    const entry = entries.find((item) => item.id === id);
+    assert.ok(entry, `「我的」页缺少入口 ${id}`);
+    assert.equal(entry.label, want.label);
+    assert.equal(entry.href, want.href);
+    assert.equal(ROUTES.has(want.href), true, `${want.label} 指向了不存在的路由`);
+  }
+});
+
+test("优惠券与鸡腿记录不再有占位页式的「待开放」入口", () => {
+  // 四个入口必须都是真实地址，不能还停在 /placeholder
+  for (const entry of [...MINE_PRIMARY_ENTRIES, ...MINE_GRID_ENTRIES]) {
+    if (!["coupon", "review", "tips", "suggestion"].includes(entry.id)) continue;
+    assert.equal(entry.kind, "link", `${entry.label} 应是可跳转的入口`);
+    assert.equal(pathnameOf(entry.href).startsWith("/placeholder"), false);
+  }
+});
+
+// ————————————————— P7A：消费等级 / 消费排行榜 / 相关协议 —————————————————
+
+/** P7A 的三个页面，以及它们各自的性质。 */
+const P7A_PAGES = [
+  // /rights 需要登录：等级与金额都是私有数据
+  { path: "/rights", requiresAuth: true },
+  // /rank 与 /agreements 游客可访问：榜单与协议是公开内容
+  { path: "/rank", requiresAuth: false },
+  { path: "/agreements", requiresAuth: false },
+];
+
+test("P7A 三个页面都不是占位页：入口已经落到真实实现上", () => {
+  for (const { path: route } of P7A_PAGES) {
+    const file = ROUTES.get(route);
+    assert.ok(file, `缺少 ${route} 页面`);
+
+    const code = stripComments(readFileSync(file, "utf8"));
+    assert.equal(code.includes("PlaceholderPage"), false, `${route} 还是占位页`);
+
+    // 二级页面：不在 (tabs) 内，因此不会带上底部 TabBar
+    assert.equal(file.includes("(tabs)"), false, `${route} 不该在一级 Tab 里`);
+    assert.ok(code.includes("<NavBar"), `${route} 应有顶部返回导航`);
+
+    // 错误边界：取数失败时给出「返回」与「重试」，而不是白屏
+    const errorFile = path.join(APP_DIR, route.slice(1), "error.tsx");
+    assert.equal(existsSync(errorFile), true, `${route} 缺少 error.tsx`);
+    const errorSource = readFileSync(errorFile, "utf8");
+    assert.ok(
+      errorSource.includes("ErrorState"),
+      `${route} 的错误边界应复用统一 ErrorState（含「重试」）`,
+    );
+    assert.ok(
+      errorSource.includes("<NavBar") && errorSource.includes("showBack"),
+      `${route} 的错误边界要有返回入口`,
+    );
+
+    // 加载边界不是可选项：这三个页面在渲染前先 `await` 取数，没有同段的 Suspense 边界时，
+    // 取数失败发生在外壳阶段，React 无法恢复，响应会退化成 500（HTTP 冒烟测试实测）。
+    // 有了它，响应保持 200，错误由上面的 error.tsx 接管。
+    const loadingFile = path.join(APP_DIR, route.slice(1), "loading.tsx");
+    assert.equal(existsSync(loadingFile), true, `${route} 缺少 loading.tsx`);
+    assert.ok(
+      readFileSync(loadingFile, "utf8").includes("<NavBar"),
+      `${route} 的加载态应保留返回导航，加载时布局不跳`,
+    );
+  }
+});
+
+test("/rights 需要登录：走统一 RequireAuth，导航留在鉴权之外", () => {
+  const file = ROUTES.get("/rights");
+  const source = readFileSync(file, "utf8");
+
+  assert.ok(source.includes("RequireAuth"), "/rights 必须走统一鉴权，而不是自己写一套登录判断");
+  // 导航在鉴权之外：未登录时也要有返回入口，登录后地址仍是 /rights（不会跳走）
+  assert.ok(source.indexOf("<NavBar") < source.indexOf("<RequireAuth"));
+  // 等级与进度由服务端算好：页面不得自己遍历订单
+  assert.ok(source.includes("getConsumptionLevelForUser"));
+  assert.equal(stripComments(source).includes("sumEffectiveSpend"), false);
+});
+
+test("/rank 与 /agreements 保持游客可访问，并且不再要求登录", () => {
+  for (const route of ["/rank", "/agreements"]) {
+    const code = stripComments(readFileSync(ROUTES.get(route), "utf8"));
+    assert.equal(code.includes("RequireAuth"), false, `${route} 是公开页面，不该被保护起来`);
+  }
+
+  // 榜单服务端聚合、协议一次取回，两者都通过服务层而不是直接读仓储
+  assert.ok(readFileSync(ROUTES.get("/rank"), "utf8").includes("getConsumptionRanking"));
+  assert.ok(readFileSync(ROUTES.get("/agreements"), "utf8").includes("listAgreements"));
+});
+
+test("排行榜的六个周期都是真实页签：没有「尚未开放」，也不是先拿累计再在本地过滤", () => {
+  const boardFile = path.join(ROOT, "components", "rank", "RankingBoard.tsx");
+  assert.equal(existsSync(boardFile), true, "缺少排行榜列表组件");
+  const code = stripComments(readFileSync(boardFile, "utf8"));
+
+  // 六个周期全部可切换：任何一个写成「暂未开放」都说明页签只是摆设
+  for (const copy of ["尚未开放", "暂未开放", "敬请期待"]) {
+    assert.equal(code.includes(copy), false, `排行榜页签里不该再出现「${copy}」`);
+  }
+
+  const tabsSource = readFileSync(path.join(ROOT, "lib", "constants", "rankingPeriods.ts"), "utf8");
+  for (const period of ["today", "yesterday", "week", "month", "lastMonth", "all"]) {
+    assert.ok(tabsSource.includes(`"${period}"`), `周期表里缺少 ${period}`);
+  }
+  for (const label of ["今日", "昨日", "本周", "本月", "上月", "累计"]) {
+    assert.ok(tabsSource.includes(label), `周期表里缺少「${label}」`);
+  }
+
+  // 页签从常量表渲染，而不是在组件里手写一遍（两份清单一定会分叉）
+  assert.ok(code.includes("RANKING_PERIOD_TABS"), "页签应来自统一的周期常量表");
+  // 选中态不能只靠颜色：还要有 aria-pressed 之类的语义标记
+  assert.ok(code.includes("aria-pressed"), "当前页签需要可被读屏识别的选中态");
+
+  // 切周期必须重新取数，并且**先按周期聚合再分页**：把周期带进请求，由服务端重新聚合
+  assert.ok(code.includes("fetchConsumptionRanking"), "切周期必须重新请求服务端");
+  assert.ok(code.includes("period"), "请求里必须带上周期");
+  assert.equal(code.includes("buildConsumptionRanking"), false, "客户端不该拿到全量订单自己聚合");
+
+  // 迟到的响应不能覆盖界面：序号与周期都要对得上
+  assert.ok(code.includes("shouldApplyRankingResponse"), "缺少过期响应守卫");
+
+  // 页面只在调用服务前规范化周期；服务端仍然是严格的（非法值回 400）
+  const pageCode = stripComments(readFileSync(ROUTES.get("/rank"), "utf8"));
+  assert.ok(pageCode.includes("normalizeRankingPeriod"));
+});
+
+test("/suggestions 有了自己的错误边界：不再落回全局错误页或白屏", () => {
+  for (const name of ["error.tsx", "loading.tsx"]) {
+    const file = path.join(APP_DIR, "suggestions", name);
+    assert.equal(existsSync(file), true, `/suggestions 缺少 ${name}`);
+  }
+
+  const errorSource = readFileSync(path.join(APP_DIR, "suggestions", "error.tsx"), "utf8");
+  // 与其它二级列表页一致：统一 ErrorState（含「重试」）+ 顶部返回
+  assert.ok(errorSource.includes("ErrorState"));
+  assert.ok(errorSource.includes("<NavBar") && errorSource.includes("showBack"));
+  // 二级页面：不该带上底部 TabBar（注释里说明「这里没有 TabBar」不算出现）
+  assert.equal(stripComments(errorSource).includes("TabBar"), false);
+
+  const loadingSource = readFileSync(path.join(APP_DIR, "suggestions", "loading.tsx"), "utf8");
+  assert.ok(loadingSource.includes("<NavBar"), "加载态也要保留返回入口");
+  assert.equal(stripComments(loadingSource).includes("TabBar"), false);
+
+  // 正常提交流程没有被改动：列表仍然由原来的页面与服务层负责
+  const pageCode = stripComments(readFileSync(ROUTES.get("/suggestions"), "utf8"));
+  assert.ok(pageCode.includes("querySuggestionsForUser"), "反馈列表仍然走服务层");
+});
+
+test("「我的」页保留消费等级、排行榜与协议入口，并展示等级摘要", () => {
+  const entries = [...MINE_PRIMARY_ENTRIES, ...MINE_GRID_ENTRIES];
+  const expected = {
+    level: { label: "消费等级", href: "/rights" },
+    rank: { label: "消费排行榜", href: "/rank" },
+    agreement: { label: "相关协议", href: "/agreements" },
+  };
+
+  for (const [id, want] of Object.entries(expected)) {
+    const entry = entries.find((item) => item.id === id);
+    assert.ok(entry, `「我的」页缺少入口 ${id}`);
+    assert.equal(entry.kind, "link");
+    assert.equal(entry.label, want.label);
+    assert.equal(entry.href, want.href);
+  }
+
+  const mineFile = ROUTES.get("/mine");
+  const source = readFileSync(mineFile, "utf8");
+
+  // 一级 Tab 页：保留底部 TabBar（不在二级页那套结构里）
+  assert.equal(mineFile.includes("(tabs)"), true, "「我的」页仍是一级 Tab");
+
+  // 等级摘要在服务端取，且**失败不让整页崩**：包在 try/catch 里，交给局部重试
+  assert.ok(source.includes("LevelSummaryPanel"), "缺少等级摘要");
+  assert.ok(source.includes("getConsumptionLevelForUser"), "等级摘要必须由服务端算");
+  assert.ok(source.includes("try {") && source.includes("catch"), "等级摘要失败必须被兜住");
+  // 页面不得自己遍历订单算等级
+  assert.equal(stripComments(source).includes("sumEffectiveSpend"), false);
 });
 
 test("不存在指向 /placeholder?title=考核入驻 的入口", () => {

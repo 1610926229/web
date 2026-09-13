@@ -175,6 +175,16 @@
 }
 
 /*
+ * 消费等级进度条已填充部分。
+ *
+ * 与 Tab 胶囊取同一组渐变令牌：进度条与选中态是同一套品牌色，改一处两处都变。
+ * 组件只负责给出宽度百分比，颜色不写在组件里。
+ */
+.level-progress-fill {
+  background-image: linear-gradient(90deg, var(--color-tab-from), var(--color-tab-to));
+}
+
+/*
  * 视口高度兜底。
  *
  * 部分旧版 Android 微信内核（Chromium < 108）不支持 dvh，遇到 `min-h-dvh` 会把整条声明丢弃，

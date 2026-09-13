@@ -1,5 +1,6 @@
 import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
-import { orderSeed } from "@/lib/mocks/fixtures/orderSeed";
+import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
+import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
 import type { Order } from "@/lib/types/order";
 import type {
   MockPaymentResult,
@@ -36,11 +37,18 @@ type MockStore = {
  * 只有建仓这一次会写入预置数据，之后所有读写都发生在这个 Map 上，
  * 因此支付成功产生的订单与预置订单在列表里是同一种数据、走同一条查询路径，
  * 也不会出现「访问一次列表就把动态订单冲掉」这种事。
+ *
+ * 周期榜那批预置订单在这里生成，且**基准时间在进程内只取一次**
+ * （`getMockSeedNow()`）：每次查询都按「此刻」重算的话，翻页前后订单的完成时间都在变，
+ * 榜单会自己漂移；固定一次之后，同一进程内榜单稳定、可复现，重启服务才会按新的当天重建。
  */
 function createStore(): MockStore {
+  const seedNow = getMockSeedNow();
+  const orders = [...orderSeed, ...buildRankingPeriodOrders(seedNow)];
+
   return {
     paymentRequests: new Map(),
-    orders: new Map(orderSeed.map((order) => [order.id, order])),
+    orders: new Map(orders.map((order) => [order.id, order])),
     payments: new Map(),
     requestIdByKey: new Map(),
   };
@@ -156,5 +164,15 @@ export const mockPaymentRepository: PaymentRepository = {
 
   async findOrderById(id) {
     return store().orders.get(id) ?? null;
+  },
+
+  async listOrdersByUser(userId) {
+    // 与 queryOrders 走同一个 Map：支付成功新生成的订单会立刻计入消费统计
+    return [...store().orders.values()].filter((order) => order.userId === userId);
+  },
+
+  async listAllOrders() {
+    // 订单在 Map 里按 id 键控，因此每条订单只会出现一次——「同一订单只累计一次」的**数据侧**保证
+    return [...store().orders.values()];
   },
 };

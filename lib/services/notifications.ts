@@ -82,7 +82,7 @@ export function mergeNotificationPage(
   current: NotificationPage,
   next: NotificationPage,
 ): NotificationPage {
-  const merged = mergePageResult<NotificationListItem>(current, next);
+  const merged = mergePageResult(current, next);
   return { ...merged, unreadCount: next.unreadCount };
 }
 
