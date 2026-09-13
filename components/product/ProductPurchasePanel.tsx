@@ -42,8 +42,10 @@ export default function ProductPurchasePanel({
 
   function run(action: GatedAction) {
     if (action === "buy") {
-      // P4 才实现结算：这里只进入预留的占位页，不生成订单、不结算金额、不发起支付
-      router.push("/checkout");
+      // 结算页只接收 ID：价格由服务端按 productId + specId 重算，地址里不出现任何金额
+      const query = new URLSearchParams({ productId: product.id });
+      if (specId) query.set("specId", specId);
+      router.push(`/checkout?${query.toString()}`);
       return;
     }
     if (action === "favorite") {

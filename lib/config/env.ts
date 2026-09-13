@@ -21,3 +21,14 @@ export function isMockAuthEnabled(): boolean {
 export function isMockDebugEnabled(): boolean {
   return readFlag("ENABLE_MOCK_DEBUG");
 }
+
+/**
+ * 模拟支付是否启用。
+ *
+ * 关闭时 `/api/payments/mock-confirm` 返回 404，支付结果页也不渲染「模拟支付成功/失败/取消」
+ * 三个控件——没有支付渠道时，不能给出一个看起来能确认支付状态的按钮。
+ * 注意：本项目**没有**任何真实微信支付凭据，也永远不会因为开启这个开关而调用真实接口。
+ */
+export function isMockPaymentEnabled(): boolean {
+  return readFlag("ENABLE_MOCK_PAYMENT");
+}

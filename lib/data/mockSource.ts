@@ -1,4 +1,6 @@
 import {
+  addonSeed,
+  companionSeed,
   gameSeed,
   homeSeed,
   productSeed,
@@ -71,5 +73,21 @@ export const mockDataSource: DataSource = {
   async getProductDetail(id) {
     const record = productSeed.find((item) => item.id === id);
     return record ? toDetail(record) : null;
+  },
+
+  async getGame(id) {
+    return gameSeed.find((game) => game.id === id) ?? null;
+  },
+
+  async listAddons() {
+    return addonSeed;
+  },
+
+  async listCompanions() {
+    return companionSeed;
+  },
+
+  async getCompanion(id) {
+    return companionSeed.find((companion) => companion.id === id) ?? null;
   },
 };

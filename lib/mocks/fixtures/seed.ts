@@ -1,4 +1,5 @@
-import type { Game } from "@/lib/types/catalog";
+import type { Addon, Game } from "@/lib/types/catalog";
+import type { Companion } from "@/lib/types/companion";
 import type { HomeData } from "@/lib/types/content";
 import type { Product, ProductDetail } from "@/lib/types/product";
 import type { User } from "@/lib/types/user";
@@ -44,6 +45,7 @@ export const gameSeed: Game[] = [
       { id: "c-fun", name: "趣味得吃单" },
       { id: "c-speed", name: "一口气打完" },
     ],
+    regions: ["手游", "端游"],
   },
   {
     id: "g-valorant",
@@ -52,6 +54,56 @@ export const gameSeed: Game[] = [
       { id: "c-v-rank", name: "排位护航" },
       { id: "c-v-train", name: "陪练教学" },
     ],
+    regions: ["端游"],
+  },
+];
+
+/**
+ * 增值服务目录。
+ *
+ * ⚠️ 原型结算页没有给出增值服务的价格，这里的名称与价格是**开发阶段的 Mock 规则**，
+ * 不是最终业务定价。计费口径：**按单计费，不随购买数量变化**。
+ */
+export const addonSeed: Addon[] = [
+  { id: "ad-rush", name: "加急处理", price: 1500 },
+  { id: "ad-voice", name: "全程语音", price: 1000 },
+  { id: "ad-insure", name: "掉段保险", price: 2000 },
+];
+
+/**
+ * 陪玩名单。
+ *
+ * 其中一位**故意设为不可选**，用于验证「不可用陪玩不能被写入支付请求」；
+ * 不可选的陪玩仍会出现在列表里并置灰，不静默隐藏。
+ */
+export const companionSeed: Companion[] = [
+  {
+    id: "cp-1",
+    name: "阿泽（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    rankLabel: "钻石打手",
+    available: true,
+  },
+  {
+    id: "cp-2",
+    name: "小北（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    rankLabel: "星耀打手",
+    available: true,
+  },
+  {
+    id: "cp-3",
+    name: "老K（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    rankLabel: "王者打手",
+    available: true,
+  },
+  {
+    id: "cp-4",
+    name: "临时工（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    rankLabel: "休息中",
+    available: false,
   },
 ];
 
@@ -451,7 +503,7 @@ export function toCard(record: CatalogProductRecord): Product {
   };
 }
 
-/** 商品记录 → 对外详情。显式挑字段，避免把 Mock 内部的归属信息泄漏到接口响应里。 */
+/** 商品记录 → 对外详情。显式挑字段，避免把 Mock 内部字段整体泄漏到接口响应里。 */
 export function toDetail(record: CatalogProductRecord): ProductDetail {
   return {
     id: record.id,
@@ -463,6 +515,8 @@ export function toDetail(record: CatalogProductRecord): ProductDetail {
     gameTag: record.gameTag,
     status: record.status,
     specs: record.specs,
+    // 结算页需要据此取大区列表；categoryId 这类只服务于列表筛选的字段仍然不外传
+    gameId: record.gameId,
   };
 }
 

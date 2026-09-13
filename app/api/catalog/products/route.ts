@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { fail, ok, toApiError } from "@/lib/api/route";
 import { queryProducts } from "@/lib/services/catalog";
 import type { ProductListQuery } from "@/lib/types/catalog";
 
@@ -21,27 +22,14 @@ function parseQuery(searchParams: URLSearchParams): ProductListQuery {
 }
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const query = parseQuery(searchParams);
-
-  if (!query.gameId) {
-    return Response.json(
-      { error: { code: "BAD_REQUEST", message: "缺少参数 gameId" } },
-      { status: 400 },
-    );
-  }
-
   try {
-    return Response.json({ data: await queryProducts(query, searchParams, "http") });
-  } catch (cause) {
-    const error =
-      cause instanceof ApiError
-        ? cause
-        : new ApiError("SERVER_ERROR", "服务暂时不可用，请稍后重试");
+    const { searchParams } = new URL(request.url);
+    const query = parseQuery(searchParams);
 
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status > 0 ? error.status : 500 },
-    );
+    if (!query.gameId) throw new ApiError("BAD_REQUEST", "缺少参数 gameId", 400);
+
+    return ok(await queryProducts(query, searchParams, "http"));
+  } catch (cause) {
+    return fail(toApiError(cause));
   }
 }

@@ -1,4 +1,4 @@
-import { ApiError } from "@/lib/api/ApiError";
+import { fail, ok, toApiError } from "@/lib/api/route";
 import { getHomeData } from "@/lib/services/home";
 
 /**
@@ -11,19 +11,10 @@ import { getHomeData } from "@/lib/services/home";
  * `ENABLE_MOCK_DEBUG=true` 时生效。
  */
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-
   try {
-    return Response.json({ data: await getHomeData(searchParams, "http") });
+    const { searchParams } = new URL(request.url);
+    return ok(await getHomeData(searchParams, "http"));
   } catch (cause) {
-    const error =
-      cause instanceof ApiError
-        ? cause
-        : new ApiError("SERVER_ERROR", "服务暂时不可用，请稍后重试");
-
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status > 0 ? error.status : 500 },
-    );
+    return fail(toApiError(cause));
   }
 }

@@ -41,4 +41,11 @@ export type ProductDetail = Product & {
   status: ProductStatus;
   /** 单组规格，单选；至少一项。默认选中第一项 */
   specs: ProductSpec[];
+  /**
+   * 所属游戏。
+   *
+   * 归属信息对列表是内部字段，但结算页需要用它取出该游戏的大区列表并校验用户选择，
+   * 因此进入对外的详情类型——它只暴露「这个商品属于哪个游戏」，不含任何筛选用的内部状态。
+   */
+  gameId: string;
 };

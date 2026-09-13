@@ -17,6 +17,24 @@ export type Game = {
   id: string;
   name: string;
   categories: Category[];
+  /**
+   * 可选的游戏大区／平台（结算页的「大区选择」）。
+   * 取值属于游戏本身而不是商品：商品只是恰好标了其中一个平台。
+   */
+  regions: string[];
+};
+
+/**
+ * 增值服务。
+ *
+ * ⚠️ 原型结算页没有给出增值服务的价格，这里的名称与价格是**开发阶段的 Mock 规则**，
+ * 不是最终业务定价，也不参与任何真实结算。
+ */
+export type Addon = {
+  id: string;
+  name: string;
+  /** 单位：分。按单计费，不随购买数量变化 */
+  price: number;
 };
 
 /** 商品列表查询条件。 */

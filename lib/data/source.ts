@@ -1,5 +1,6 @@
-import type { Game, ProductListQuery } from "@/lib/types/catalog";
+import type { Addon, Game, ProductListQuery } from "@/lib/types/catalog";
 import type { PageResult } from "@/lib/types/common";
+import type { Companion } from "@/lib/types/companion";
 import type { HomeData } from "@/lib/types/content";
 import type { Product, ProductDetail } from "@/lib/types/product";
 import type { User } from "@/lib/types/user";
@@ -31,6 +32,14 @@ export type DataSource = {
   queryProducts(query: ProductListQuery): Promise<PageResult<Product>>;
   /** 商品详情；不存在返回 null。下架商品仍可取到（详情页需要展示下架状态）。 */
   getProductDetail(id: string): Promise<ProductDetail | null>;
+  /** 单个游戏；不存在返回 null。结算页据此校验大区取值。 */
+  getGame(id: string): Promise<Game | null>;
+  /** 增值服务目录，用于结算页选择与金额计算。 */
+  listAddons(): Promise<Addon[]>;
+  /** 陪玩名单，**包含当前不可选的**（列表中标灰，服务端会拒绝选中）。 */
+  listCompanions(): Promise<Companion[]>;
+  /** 单个陪玩；不存在返回 null。 */
+  getCompanion(id: string): Promise<Companion | null>;
 };
 
 export function getDataSource(): DataSource {
