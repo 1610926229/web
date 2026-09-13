@@ -24,7 +24,7 @@ import { toSearchParams } from "@/lib/utils/query";
 export default async function HomePage({ searchParams }: PageProps<"/">) {
   // 查询参数原样交给 service，页面不判断开关、也不关心哪些参数有意义；
   // 与 /api/home 的处理方式完全一致，两处行为不会分叉。
-  const data = await getHomeData(toSearchParams(await searchParams));
+  const data = await getHomeData(toSearchParams(await searchParams), "server");
 
   return <HomeModules data={data} />;
 }

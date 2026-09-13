@@ -5,8 +5,9 @@ import type { HomeData } from "@/lib/types/content";
 /**
  * Mock 调试装置（仅服务端使用，由 `ENABLE_MOCK_DEBUG` 总开关控制）。
  *
- * 首页 Server Component 与 `/api/home` 都调用 `withMockHomeDebug`，保证
- * 「页面看到的」与「接口返回的」永远一致，不会出现只在某一条链路上生效的特例。
+ * 同一条取数链路（`lib/services/*`）被两侧调用：页面在服务端直接取数渲染，浏览器则经
+ * Route Handler 取数。两侧传入同一组调试参数、共用同一套实现，因此「页面看到的」与
+ * 「接口返回的」不会分叉。
  *
  * 关闭开关时本模块全部退化为直通：不加延迟、不改数据、不抛错。
  * 真实后端不存在这一层，接入后整个文件删除。
@@ -15,7 +16,13 @@ import type { HomeData } from "@/lib/types/content";
 export const MOCK_LATENCY_MS = 400;
 const MOCK_LATENCY_MAX_MS = 5000;
 
-export const MOCK_FAULT_MESSAGE = "Mock 故障注入：服务端返回错误（?mockError=1）";
+/**
+ * 取数发生在哪一侧。
+ *
+ * 存在的意义是支持 `?mockError=api`：只让**浏览器端请求**失败，从而观察列表等局部
+ * 区域的错误态与重试，而不把整个服务端渲染的页面打挂。`?mockError=1` 则两侧都失败。
+ */
+export type MockSurface = "server" | "http";
 
 /**
  * 空数据注入的作用范围。首页各模块是独立的视觉段落，因此空态也按模块区分，
@@ -51,10 +58,17 @@ function mockEmptyScope(params?: URLSearchParams): MockEmptyScope {
     : "none";
 }
 
-/** 仅当 `?mockError=1` 且调试开关打开时返回 true。 */
-function mockErrorRequested(params?: URLSearchParams): boolean {
-  if (!isMockDebugEnabled()) return false;
-  return params?.get("mockError") === "1";
+/** 返回本次请求要注入的错误写法（`1` / `api`），未要求注入时返回 null。 */
+function mockErrorScope(
+  params: URLSearchParams | undefined,
+  surface: MockSurface,
+): "1" | "api" | null {
+  if (!isMockDebugEnabled()) return null;
+
+  const raw = params?.get("mockError");
+  if (raw === "1") return "1";
+  if (raw === "api" && surface === "http") return "api";
+  return null;
 }
 
 /** 模拟网络延迟；`?mockDelay=<ms>` 可覆盖，上限 5 秒。调试关闭时不延迟。 */
@@ -87,20 +101,41 @@ function applyMockEmpty(data: HomeData, scope: MockEmptyScope): HomeData {
 }
 
 /**
- * 按调试参数执行一次首页取数：延迟 → 抛错 / 置空 → 返回数据。
+ * 按调试参数执行一次取数：延迟 → （必要时）抛错 → 返回真实数据。
  *
- * 错误以 `ApiError` 抛出：Route Handler 据此生成错误信封，页面交给 error.tsx 展示。
+ * 错误以 `ApiError` 抛出：Route Handler 据此生成错误信封，页面交给 error.tsx
+ * 或调用方的局部错误态展示。
+ */
+export async function withMockDebug<T>(
+  params: URLSearchParams | undefined,
+  surface: MockSurface,
+  load: () => Promise<T>,
+): Promise<T> {
+  await mockLatency(params);
+
+  const scope = mockErrorScope(params, surface);
+  if (scope) {
+    throw new ApiError(
+      "SERVER_ERROR",
+      `Mock 故障注入：取数失败（?mockError=${scope}）`,
+      500,
+    );
+  }
+
+  return load();
+}
+
+/**
+ * 首页取数：在通用调试包装之上，再叠加按模块的空数据注入。
+ *
  * 返回空数据集时**不抛错**——空数据不是错误，各模块自行决定隐藏还是显示局部空态。
  */
 export async function withMockHomeDebug(
   params: URLSearchParams | undefined,
+  surface: MockSurface,
   load: () => Promise<HomeData>,
 ): Promise<HomeData> {
-  await mockLatency(params);
-
-  if (mockErrorRequested(params)) {
-    throw new ApiError("SERVER_ERROR", MOCK_FAULT_MESSAGE, 500);
-  }
-
-  return applyMockEmpty(await load(), mockEmptyScope(params));
+  return withMockDebug(params, surface, async () =>
+    applyMockEmpty(await load(), mockEmptyScope(params)),
+  );
 }

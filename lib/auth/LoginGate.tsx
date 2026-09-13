@@ -8,16 +8,28 @@ import { authAdapter } from "./MockAuthAdapter";
 /**
  * 统一的登录拦截界面。
  *
- * 所有需登录的页面都由 `RequireAuth` 渲染本组件，页面自身不重复编写登录判断。
+ * 两处复用，登录逻辑只此一份：
+ * - 需登录的**整页**由 `RequireAuth` 渲染本组件：不跳转，当前地址保持不变，
+ *   登录成功后 `router.refresh()` 让服务端重新渲染该地址，用户自然回到原本要访问的页面；
+ * - 免登录页面上的**受限操作**（详情页的收藏 / 客服 / 立即购买）由 `LoginSheet` 以浮层
+ *   形式渲染本组件，`onSuccess` 用来关闭浮层并继续原来的操作。
  *
- * 拦截时**不跳转**，当前地址保持不变；登录成功后 `router.refresh()` 让服务端重新
- * 渲染该地址，用户自然回到原本要访问的页面（即回跳原地址）。
- * 未来接入公众号网页授权后，这里的按钮改为触发授权跳转即可。
+ * 未来接入公众号网页授权后，这里的按钮改为触发授权跳转即可，两处调用方都不用改。
  *
  * `mockAuthEnabled` 由服务端传入：未开启模拟登录时，界面上不出现任何模拟登录入口，
  * 只如实说明「登录功能尚未开放」。
  */
-export default function LoginGate({ mockAuthEnabled }: { mockAuthEnabled: boolean }) {
+export default function LoginGate({
+  mockAuthEnabled,
+  title = "需要登录",
+  description,
+  onSuccess,
+}: {
+  mockAuthEnabled: boolean;
+  title?: string;
+  description?: string;
+  onSuccess?: () => void;
+}) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +41,7 @@ export default function LoginGate({ mockAuthEnabled }: { mockAuthEnabled: boolea
     try {
       await authAdapter.login();
       router.refresh();
+      onSuccess?.();
     } catch {
       setError("登录失败，请重试");
       setPending(false);
@@ -38,11 +51,12 @@ export default function LoginGate({ mockAuthEnabled }: { mockAuthEnabled: boolea
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 bg-surface px-4 py-16">
       <EmptyState
-        title="需要登录"
+        title={title}
         description={
-          mockAuthEnabled
+          description ??
+          (mockAuthEnabled
             ? "登录后即可查看订单、联系客服与个人中心。当前为开发阶段的模拟登录，不会调用真实微信接口。"
-            : "登录后即可查看订单、联系客服与个人中心。登录功能正在接入中，敬请期待。"
+            : "登录后即可查看订单、联系客服与个人中心。登录功能正在接入中，敬请期待。")
         }
       />
 

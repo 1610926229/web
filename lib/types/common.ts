@@ -21,3 +21,17 @@ export type ApiErrorBody = {
     message: string;
   };
 };
+
+/**
+ * 分页结果。
+ *
+ * 只在确实有分页列表时才使用（P3 的分类页商品列表）；详情等单条读取不使用本类型。
+ * `page` 从 1 开始；`hasMore` 由服务端算好，前端不自行用 total 推导，避免两侧口径不一致。
+ */
+export type PageResult<T> = {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+};

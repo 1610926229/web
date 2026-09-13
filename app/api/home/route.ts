@@ -14,7 +14,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
 
   try {
-    return Response.json({ data: await getHomeData(searchParams) });
+    return Response.json({ data: await getHomeData(searchParams, "http") });
   } catch (cause) {
     const error =
       cause instanceof ApiError

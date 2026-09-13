@@ -8,14 +8,14 @@ import type { User } from "@/lib/types/user";
 /**
  * 登录态上下文。
  *
- * 用户信息来源是**服务端**（`lib/auth/RequireAuth.tsx` 读取会话后传入），
- * 客户端不重复拉取，避免出现两份真相。
- * 登录/登出后调用 `router.refresh()` 让服务端重新渲染，页面随之切换。
+ * 用户信息来源是**服务端**（`lib/auth/session.ts` 读取会话），客户端不重复拉取，
+ * 避免出现两份真相。登录/登出后调用 `router.refresh()` 让服务端重新渲染。
  *
- * 仅在 RequireAuth 内部可用；因此 `user` 必定非空，使用方无需判空。
+ * `user` 可以为空：商品详情页这类**免登录可浏览、但部分操作需登录**的页面也需要
+ * 读取登录态。需要「必定已登录」的场景请用 `useAuthUser()`。
  */
 type AuthContextValue = {
-  user: User;
+  user: User | null;
   login: () => Promise<void>;
   logout: () => Promise<void>;
 };
@@ -26,7 +26,7 @@ export default function AuthProvider({
   user,
   children,
 }: {
-  user: User;
+  user: User | null;
   children: ReactNode;
 }) {
   const router = useRouter();
@@ -57,7 +57,21 @@ export default function AuthProvider({
 export function useAuth(): AuthContextValue {
   const value = useContext(AuthContext);
   if (!value) {
-    throw new Error("useAuth 只能在 RequireAuth 保护的页面内使用");
+    throw new Error("useAuth 只能在 AuthProvider 内使用");
   }
   return value;
+}
+
+/**
+ * 取当前登录用户，并断言必定已登录。
+ *
+ * 只在 `RequireAuth` 保护的页面里可用——那些页面在未登录时根本渲染不到，
+ * 因此这里多一层断言，省去调用方的判空分支。
+ */
+export function useAuthUser(): User {
+  const { user } = useAuth();
+  if (!user) {
+    throw new Error("useAuthUser 只能在 RequireAuth 保护的页面内使用");
+  }
+  return user;
 }
