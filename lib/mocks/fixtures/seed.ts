@@ -545,7 +545,7 @@ export const homeSeed: HomeData = {
     { id: "service", label: "联系客服", href: "/service" },
     { id: "benefits", label: "点单权益", href: "/placeholder?title=点单权益" },
     { id: "join", label: "考核入驻", href: "/placeholder?title=考核入驻" },
-    { id: "complaint", label: "投诉客服专区", href: "/placeholder?title=投诉客服专区" },
+    { id: "complaint", label: "投诉客服专区", href: "/complaints" },
   ],
 
   sections: [

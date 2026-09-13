@@ -5,16 +5,19 @@ import EmptyState from "@/components/common/EmptyState";
 import NavBar from "@/components/common/NavBar";
 import PriceText from "@/components/common/PriceText";
 import RequireAuth from "@/lib/auth/RequireAuth";
+import { COMPLAINT_STATUS_CLASS } from "@/lib/constants/complaints";
 import {
   ORDER_STATUS_CLASS,
   ORDER_STATUS_HINTS,
   ORDER_STATUS_LABELS,
 } from "@/lib/constants/orders";
+import { REFUND_STATUS_CLASS, REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
 import { getOrderDetailForUser } from "@/lib/services/orders";
+import type { OrderDetail } from "@/lib/types/order";
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
- * 订单详情页（需登录，只读）。
+ * 订单详情页（需登录，只读 + 售后入口）。
  *
  * 归属由服务端判定：`getOrderDetailForUser` 在订单不存在**或不属于当前用户**时都返回 null，
  * 页面因此对两种情况展示同一个「订单不存在」——不能拿订单 id 去试探别人有没有这一单。
@@ -22,8 +25,9 @@ import { formatDateTime } from "@/lib/utils/format";
  * 页面内容全部来自订单自己的快照：商品名、规格、单价、游戏名、打手信息都是下单那一刻的值，
  * 今天商品改名下架、打手改名换头像或被停用，都不影响这里的展示。
  *
- * 本阶段**只读**：不提供退款、投诉、评价、联系客服、再来一单等入口。
- * 这些交互要等对应阶段确认后再加，现在放上来只会是点了没反应的按钮。
+ * 底部的售后与沟通入口**完全按服务端返回的 `allowedActions` 显示**，前端不用订单状态推断：
+ * 「能不能退款」既取决于订单状态，也取决于这一单有没有退款记录，只看状态一定会算错。
+ * 三个摘要（退款 / 投诉 / 沟通）都是摘要，原因说明、投诉描述、消息正文要去各自详情页看。
  *
  * 该路由位于 `(tabs)` 之外（与商品详情一致），是二级页面，用顶部返回而非底部 TabBar。
  * NavBar 放在 `RequireAuth` 外面：未登录时也能返回上一页，不会卡在登录拦截界面上。
@@ -152,10 +156,98 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
         </ol>
       </section>
 
+      <AfterSalesSection detail={detail} />
+
       <div className="mt-5 flex justify-center">
         <BackToOrders />
       </div>
     </div>
+  );
+}
+
+/**
+ * 售后与沟通。
+ *
+ * 每一项都由**服务端给出的值**决定显不显示：
+ * - `allowedActions.canRequestRefund` —— 能不能申请退款（订单状态 + 有没有退款记录）；
+ * - `refundSummary` —— 已经申请过就引到退款详情，看进度或撤销；
+ * - `allowedActions.canOpenConversation` —— 订单沟通入口，带未读数；
+ * - `allowedActions.canSubmitComplaint` —— 提交投诉（带上订单 id，自动关联这一单）；
+ * - `complaintSummary` —— 投诉过就引到最近一条投诉的详情。
+ *
+ * 前端只读这些值，不拿 `status` 自己推断——写接口那边还会再校验一次，按钮只是提示，不是权限。
+ */
+function AfterSalesSection({ detail }: { detail: OrderDetail }) {
+  const { allowedActions, refundSummary, complaintSummary, conversationSummary } = detail;
+  const unread = conversationSummary?.unreadCount ?? 0;
+
+  return (
+    <section className="mt-2 bg-surface px-4 py-3">
+      <h2 className="text-[14px] font-medium text-ink">售后与沟通</h2>
+
+      <div className="mt-1">
+        {allowedActions.canRequestRefund ? (
+          <ActionRow href={`/orders/${detail.id}/refund`} label="申请退款" hint="整单退款" />
+        ) : null}
+
+        {refundSummary ? (
+          <ActionRow
+            href={`/refunds/${refundSummary.id}`}
+            label="退款进度"
+            hint={REFUND_STATUS_LABELS[refundSummary.status]}
+            hintClass={REFUND_STATUS_CLASS[refundSummary.status]}
+          />
+        ) : null}
+
+        {allowedActions.canOpenConversation ? (
+          <ActionRow
+            href={`/service/chat/${detail.id}`}
+            label="订单沟通"
+            hint={unread > 0 ? `未读 ${unread} 条` : "与客服 / 打手沟通"}
+            hintClass={unread > 0 ? "text-brand-red" : undefined}
+          />
+        ) : null}
+
+        {allowedActions.canSubmitComplaint ? (
+          <ActionRow href={`/complaints/new?orderId=${detail.id}`} label="提交投诉" hint="由客服跟进" />
+        ) : null}
+
+        {complaintSummary ? (
+          <ActionRow
+            href={`/complaints/${complaintSummary.latestId}`}
+            label="投诉记录"
+            hint={`${complaintSummary.latestStatusLabel} · 共 ${complaintSummary.count} 条`}
+            hintClass={COMPLAINT_STATUS_CLASS[complaintSummary.latestStatus]}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+/** 售后入口行：整行是一个链接，右侧是状态或说明。 */
+function ActionRow({
+  href,
+  label,
+  hint,
+  hintClass,
+}: {
+  href: string;
+  label: string;
+  hint: string;
+  hintClass?: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center gap-3 border-b border-line py-2.5 text-[13px] last:border-b-0"
+    >
+      <span className="shrink-0 text-ink">{label}</span>
+      <span className={`ml-auto min-w-0 truncate text-right ${hintClass ?? "text-ink-3"}`}>{hint}</span>
+      <span className="shrink-0 text-ink-3" aria-hidden>
+        ›
+      </span>
+    </Link>
   );
 }
 

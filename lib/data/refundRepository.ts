@@ -1,0 +1,66 @@
+import type { RefundRequest } from "@/lib/types/refund";
+import { mockRefundRepository } from "./mockRefundRepository";
+
+/**
+ * 退款申请的可替换仓储。
+ *
+ * 与 `PaymentRepository` 同一套路：**写入侧**保证原子性与幂等，读取侧只按 id / 订单查。
+ *
+ * 两条约束由本层负责，不能靠调用方自觉：
+ *
+ * 1. **一笔订单只能有一条退款申请**（本阶段不开放重复申请）。「检查是否已存在」与
+ *    「写入新记录」在同一段同步代码里完成，因此快速连点不会产生两条。
+ * 2. **撤销只能发生在待审核（pending）**。状态判断与写入同样是原子的——
+ *    否则「审核中」的申请在极端时序下会被用户撤销掉。
+ *
+ * ⚠️ 本层**不判断**「这笔订单能不能退款」「这个订单是不是你的」：那是业务规则，
+ * 在 `lib/services/refunds.ts` 里做。仓储只保证自己这份数据的一致性。
+ *
+ * 当前实现是进程内内存存储，将来由数据库的唯一索引与事务替换——
+ * 替换时这份契约不变（`orders/create` 服务不用改）。
+ */
+
+/** 创建结果：要么成功（含幂等命中），要么这笔订单已经有退款申请了。 */
+export type CreateRefundOutcome =
+  | { ok: true; refund: RefundRequest; created: boolean }
+  | { ok: false; reason: "order_already_has_refund"; existing: RefundRequest };
+
+/** 撤销结果。非法状态与不存在分开报，但**对外都是同一个错误**（见服务层）。 */
+export type CancelRefundOutcome =
+  | { ok: true; refund: RefundRequest }
+  | { ok: false; reason: "not_found" | "not_cancellable" };
+
+export type RefundRepository = {
+  /** 按 id 取退款申请（不做归属判断，归属由服务层校验）。 */
+  findRefundById(id: string): Promise<RefundRequest | null>;
+
+  /** 按「用户 + 幂等键」查已提交过的申请；不存在返回 null。 */
+  findRefundByKey(userId: string, idempotencyKey: string): Promise<RefundRequest | null>;
+
+  /** 按订单取退款申请（一单一申请，所以最多一条）；不存在返回 null。 */
+  findRefundByOrderId(orderId: string): Promise<RefundRequest | null>;
+
+  /**
+   * 创建退款申请。
+   *
+   * 幂等：同「用户 + 幂等键」已存在时返回既有记录并把 `created` 置为 false，
+   * 快速连点或网络重试都不会多出第二条。
+   *
+   * 同一订单已有申请（无论什么状态、也无论幂等键是否相同）时**拒绝创建**，
+   * 并把已存在的那条返回给调用方——服务层据此区分「已有进行中的申请」与
+   * 「已有退款记录，本阶段不支持重复申请」两种提示。
+   */
+  createRefundRequest(refund: RefundRequest, idempotencyKey: string): Promise<CreateRefundOutcome>;
+
+  /**
+   * 撤销退款申请：只有**待审核**且属于 `userId` 的申请会被撤销。
+   *
+   * 归属与状态都在同一段同步代码里判断，因此不存在「先查到是你的、写之前状态变了」的窗口。
+   * 不属于当前用户的申请一律按 `not_found` 处理，避免用它来试探别人退款申请的存在。
+   */
+  cancelRefund(id: string, userId: string, cancelledAt: string): Promise<CancelRefundOutcome>;
+};
+
+export function getRefundRepository(): RefundRepository {
+  return mockRefundRepository;
+}

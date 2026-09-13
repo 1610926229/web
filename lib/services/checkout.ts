@@ -4,6 +4,7 @@ import {
   REMARK_MAX_LENGTH,
   validateGameAccount,
 } from "@/lib/constants/checkout";
+import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getDataSource } from "@/lib/data/source";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
@@ -35,9 +36,6 @@ import type { ProductDetail, ProductSpec } from "@/lib/types/product";
  * 服务端页面（`/checkout`、`/pay/result`）直接调用本文件；浏览器经 `/api/orders/*`
  * 与 `/api/payments/*` 调用同一批函数。
  */
-
-/** 幂等键格式：客户端用 crypto.randomUUID() 生成，这里只做基本约束。 */
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 
 // ——————————————————————————— 只读目录 ———————————————————————————
 
@@ -294,10 +292,9 @@ export async function createPaymentRequest(
   rawInput: Record<string, unknown>,
   userId: string,
 ): Promise<{ request: PaymentRequest; created: boolean }> {
-  const idempotencyKey = trimString(rawInput.idempotencyKey);
-  if (!IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-    throw new ApiError("BAD_REQUEST", "缺少或非法的幂等键");
-  }
+  // 幂等键的格式与提示文案由 `lib/constants/writes.ts` 统一提供（退款与投诉用的是同一套）
+  const idempotencyKey = readIdempotencyKey(rawInput);
+  if (!idempotencyKey) throw new ApiError("BAD_REQUEST", IDEMPOTENCY_KEY_MISSING_MESSAGE);
 
   const repository = getPaymentRepository();
 

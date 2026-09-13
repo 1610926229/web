@@ -7,20 +7,17 @@ import type {
   PaymentRequest,
   PaymentStatus,
 } from "@/lib/types/payment";
+import { getMockStore } from "./mockStore";
 import type { PaymentRepository } from "./paymentRepository";
 
 /**
  * 支付与订单的**进程内** Mock 存储。
  *
- * ⚠️ 仅用于本地开发：
- * - 数据只在内存里，**开发服务器重启后全部丢失**，这是预期行为；
- * - 不写 localStorage、不写文件、不写数据库，客户端也拿不到任何「可信状态」；
- * - 将来由真实数据库替换（唯一索引 + 事务），本文件的删除不影响上层接口。
+ * ⚠️ 仅用于本地开发：数据只在内存里，开发服务器重启后全部丢失；不写 localStorage、
+ * 不写文件、不写数据库，客户端也拿不到任何「可信状态」；将来由真实数据库替换
+ * （唯一索引 + 事务），本文件的删除不影响上层接口。
  *
- * 存储挂在 globalThis 上：开发模式热更新会重新执行模块，若存在模块作用域里，
- * 每次改动文件都会把已创建的支付请求和订单清空，联调时非常难用。
- * 挂到 globalThis 后同一个 Node 进程内始终是同一个 store。
- *
+ * store 的挂载与建仓语义见 `lib/data/mockStore.ts`：`createStore` 只执行一次。
  * 并发安全的前提：Node 是单线程的，而下面的「读—判断—写」区段里**没有 await**，
  * 因此不会被别的请求插入执行。将来换成数据库时，这段需要换成真正的事务。
  */
@@ -32,8 +29,6 @@ type MockStore = {
   /** `${userId}:${idempotencyKey}` → 支付请求 id */
   requestIdByKey: Map<string, string>;
 };
-
-const STORE_KEY = "__youmuMockPaymentStore";
 
 /**
  * 建仓时把预置订单放进**同一个** `orders` Map。
@@ -52,9 +47,7 @@ function createStore(): MockStore {
 }
 
 function store(): MockStore {
-  const holder = globalThis as typeof globalThis & { [STORE_KEY]?: MockStore };
-  if (!holder[STORE_KEY]) holder[STORE_KEY] = createStore();
-  return holder[STORE_KEY];
+  return getMockStore("payment", createStore);
 }
 
 function keyOf(userId: string, idempotencyKey: string): string {

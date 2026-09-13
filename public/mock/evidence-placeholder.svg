@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" role="img" aria-label="Mock 售后凭证占位图">
+  <rect width="240" height="240" rx="20" fill="#EEF1F6" />
+  <rect x="36" y="56" width="168" height="128" rx="12" fill="#D7DEE8" />
+  <path d="M60 160l40-46 30 34 22-24 28 36z" fill="#A9B6C7" />
+  <circle cx="150" cy="92" r="14" fill="#A9B6C7" />
+  <text x="120" y="212" font-size="20" font-family="sans-serif" text-anchor="middle" fill="#8B98A9">凭证占位</text>
+</svg>

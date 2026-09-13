@@ -1,15 +1,22 @@
 import { ApiError } from "@/lib/api/ApiError";
 import { ORDER_STATUS_LABELS, parseOrderListQuery } from "@/lib/constants/orders";
+import { getComplaintRepository } from "@/lib/data/complaintRepository";
+import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
+import { getRefundRepository } from "@/lib/data/refundRepository";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { PageResult } from "@/lib/types/common";
 import type {
   Order,
+  OrderAllowedActions,
   OrderDetail,
   OrderListItem,
   OrderStatus,
   OrderTimelineEntry,
 } from "@/lib/types/order";
+import { toOrderComplaintSummary } from "./complaints";
+import { buildConversationStats } from "./conversations";
+import { buildRefundActions, toRefundSummary } from "./refunds";
 
 /**
  * 订单查询服务 —— 订单列表页、订单详情页与两个接口共用的唯一入口。
@@ -59,8 +66,21 @@ export function toOrderListItem(order: Order): OrderListItem {
   };
 }
 
+/**
+ * 订单详情里的三个售后摘要 + 可执行动作。
+ *
+ * 单独成类型是为了让「订单本身长什么样」与「这一单现在还能做什么」分开：
+ * 前者来自订单，后者来自退款 / 投诉 / 会话三份数据，两者拼装只在这里发生。
+ */
+export type OrderDetailExtras = {
+  refundSummary: OrderDetail["refundSummary"];
+  complaintSummary: OrderDetail["complaintSummary"];
+  conversationSummary: OrderDetail["conversationSummary"];
+  allowedActions: OrderAllowedActions;
+};
+
 /** 订单 → 详情。游戏 ID 与备注只在这里出现，且只返回给订单所属用户。 */
-export function toOrderDetail(order: Order): OrderDetail {
+export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDetail {
   return {
     ...toOrderListItem(order),
     createdAt: order.createdAt,
@@ -73,6 +93,7 @@ export function toOrderDetail(order: Order): OrderDetail {
     addonsAmount: order.addonsAmount,
     addons: order.addons,
     timeline: buildTimeline(order),
+    ...extras,
   };
 }
 
@@ -103,6 +124,10 @@ export async function queryOrdersForUser(
  *
  * 订单不存在、或不属于当前用户，一律返回 null——**两种情况的对外表现完全相同**，
  * 调用方据此返回同一个 404，从而不能拿别人的订单 id 来试探它是否存在。
+ *
+ * 详情在这里一次性拼好订单本身的字段与三个售后摘要、可执行动作：
+ * 页面与接口都拿不到「半成品」详情，也就不存在某一处忘了算权限、或者自己去推断权限的问题。
+ * 三个摘要的查询都按订单 id 走（退款 / 投诉 / 会话各自带归属校验），因此不会串到别人的数据。
  */
 export async function getOrderDetailForUser(
   orderId: string,
@@ -117,5 +142,28 @@ export async function getOrderDetailForUser(
   );
   if (!order || order.userId !== userId) return null;
 
-  return toOrderDetail(order);
+  const refund = await getRefundRepository().findRefundByOrderId(order.id);
+  const complaintStats = await getComplaintRepository().summarizeComplaintsByOrder(order.id);
+
+  // 会话不存在时摘要为 null（页面上不显示「订单沟通」的进度），存在就带上未读数
+  const conversation = await getMessageRepository().findConversation(userId, order.id);
+  const conversationSummary = conversation
+    ? buildConversationStats(
+        conversation,
+        await getMessageRepository().listMessages(userId, order.id),
+      )
+    : null;
+
+  return toOrderDetail(order, {
+    refundSummary: refund ? toRefundSummary(refund) : null,
+    complaintSummary: toOrderComplaintSummary(complaintStats),
+    conversationSummary,
+    allowedActions: {
+      // 退款相关由退款规则统一算：既看订单状态，也看这一单有没有退款申请
+      ...buildRefundActions(order, refund),
+      // 自己的订单一律可以沟通、可以投诉：投诉不会自动退款，也不改订单状态
+      canOpenConversation: true,
+      canSubmitComplaint: true,
+    },
+  });
 }

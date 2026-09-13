@@ -45,6 +45,21 @@
   /* 订单页状态 Tab 选中态（原型为品红→紫色渐变，与全站品牌红不同，故单独成对令牌） */
   --color-tab-from: #ff5fa2;
   --color-tab-to: #8a5cf6;
+
+  /*
+   * 售后状态色（退款 / 投诉）。与订单状态色同一套思路：颜色只在这里定义，
+   * 状态的文字色由 `lib/constants/refunds.ts` 与 `lib/constants/complaints.ts`
+   * 的 `*_STATUS_CLASS` 映射引用，页面与卡片不写死颜色。
+   *
+   * 「待处理」用橙色是因为它是**唯一需要用户等待平台动作的状态**；
+   * 「审核中 / 处理中」用蓝色表示正在推进；「已通过 / 已处理」用绿色表示结果已出；
+   * 「已拒绝」用品牌红（需要用户注意）；两个终态（已撤销 / 已关闭）用中性灰。
+   */
+  --color-status-pending: #f59a23;
+  --color-status-info: #4a9ef0;
+  --color-status-success: #07a35a;
+  --color-status-danger: #e60012;
+  --color-status-muted: #8a8a8a;
 }
 
 :root {
@@ -55,10 +70,12 @@
 }
 
 /*
- * 订单页状态 Tab 的选中态：原型是一个品红→紫的渐变胶囊。
+ * 选中态胶囊：原型里订单页状态 Tab、投诉页筛选、客服页三个子 Tab 都是同一个
+ * 品红→紫的渐变胶囊，因此共用一条规则——改一次三处都跟着变。
  * 颜色取自上方的 `--color-tab-from` / `--color-tab-to`，组件只加类名，不写颜色值。
  */
-.order-tab-active {
+.order-tab-active,
+.seg-tab-active {
   background-image: linear-gradient(135deg, var(--color-tab-from), var(--color-tab-to));
   color: #fff;
 }

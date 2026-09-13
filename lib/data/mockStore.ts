@@ -1,0 +1,62 @@
+/**
+ * 进程内 Mock 存储的**唯一**挂载方式。
+ *
+ * ⚠️ 仅用于本地开发与自动化测试：
+ * - 数据只在内存里，**开发服务器重启后全部丢失**，这是预期行为；
+ * - 不写 localStorage、不写文件、不写数据库，客户端也拿不到任何「可信状态」；
+ * - 将来由真实数据库替换（唯一索引 + 事务），删除本文件不影响上层接口。
+ *
+ * 为什么挂在 `globalThis` 上：开发模式热更新会重新执行模块，若存在模块作用域里，
+ * 每次改动文件都会把联调时创建的数据清空，非常难用。挂到 globalThis 后，
+ * 同一个 Node 进程内始终是同一个 store。
+ *
+ * 为什么统一在这里建仓：四个新仓储（退款 / 投诉 / 消息 / 通知）与既有的支付仓储
+ * 需要同一套「建仓时写入预置数据、之后读写都在同一份 Map 上」的语义。
+ * 各仓储自己写一遍 `globalThis` 取值，迟早会出现有的仓储忘了挂 globalThis、
+ * 有的仓储建仓时覆盖了已有数据这类问题。
+ *
+ * 并发安全的前提：Node 是单线程的，而各仓储里「读—判断—写」的**原子区段内没有 await**，
+ * 因此不会被别的请求插入执行。将来换成数据库时，这段需要换成真正的事务。
+ */
+
+/** 各仓储的 store 名。集中列出，避免同一个仓储在两处用了不同的名字。 */
+export type MockStoreName = "payment" | "refund" | "complaint" | "message" | "notification";
+
+const PREFIX = "__youmuMockStore__";
+
+function holder(): Record<string, unknown> {
+  return globalThis as unknown as Record<string, unknown>;
+}
+
+function storeKey(name: MockStoreName): string {
+  return `${PREFIX}${name}`;
+}
+
+/**
+ * 取（必要时创建）某个仓储的 store。
+ *
+ * `create` **只在第一次调用时执行一次**：预置数据在建仓时写入，之后所有读写
+ * 都发生在这个 store 上，因此「预置数据」与「用户新提交的数据」在列表里是同一种数据、
+ * 走同一条查询路径——不会出现「访问一次列表就把新提交的记录冲掉」。
+ */
+export function getMockStore<T>(name: MockStoreName, create: () => T): T {
+  const target = holder();
+  const key = storeKey(name);
+  const existing = target[key];
+  if (existing === undefined) {
+    const created = create();
+    target[key] = created;
+    return created;
+  }
+  return existing as T;
+}
+
+/**
+ * 丢弃某个仓储的 store，下次取用时按预置数据重新建仓。
+ *
+ * **只给自动化测试用**：测试需要从一份干净的数据出发（例如「这一单还没有退款申请」），
+ * 而各仓储的预置数据恰好就是这个起点。业务代码不要调用它——那等于清空用户数据。
+ */
+export function resetMockStore(name: MockStoreName): void {
+  delete holder()[storeKey(name)];
+}

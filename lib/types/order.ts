@@ -15,6 +15,10 @@
  * `lib/services/orders.ts` 负责。
  */
 
+import type { OrderComplaintSummary } from "./complaint";
+import type { ConversationStats } from "./message";
+import type { RefundSummary } from "./refund";
+
 /**
  * 用户端订单状态。
  *
@@ -127,9 +131,26 @@ export type OrderTimelineEntry = {
 };
 
 /**
+ * 订单详情页可以执行的动作。
+ *
+ * **由服务端给出**（见 `lib/services/orders.ts`），前端只负责按值显示或隐藏入口，
+ * 不允许自己用订单状态推断——「能不能退款」既取决于订单状态，也取决于这一单有没有退款记录，
+ * 前端只看状态一定会算错。写接口同样会再校验一次，按钮只是提示，不是权限。
+ */
+export type OrderAllowedActions = {
+  canRequestRefund: boolean;
+  canCancelRefund: boolean;
+  canOpenConversation: boolean;
+  canSubmitComplaint: boolean;
+};
+
+/**
  * 订单详情 DTO：在列表项之上补齐详情页所需字段。
  *
  * 游戏 ID 属于用户订单信息，只在这里出现，且只返回给订单所属用户。
+ *
+ * 三个售后摘要都是**摘要**：只回答「有没有、到哪一步了」，原因说明、凭证、投诉描述、
+ * 消息正文都不在这里——那些内容要进对应的详情页看。列表 DTO 更是一个都不带。
  */
 export type OrderDetail = OrderListItem & {
   createdAt: string;
@@ -144,4 +165,12 @@ export type OrderDetail = OrderListItem & {
   addons: OrderAddonSnapshot[];
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
+
+  /** 这一单的退款申请摘要；没有申请过为 null */
+  refundSummary: RefundSummary | null;
+  /** 这一单的投诉摘要；没有投诉过为 null */
+  complaintSummary: OrderComplaintSummary | null;
+  /** 这一单的订单沟通摘要；没有会话为 null */
+  conversationSummary: ConversationStats | null;
+  allowedActions: OrderAllowedActions;
 };
