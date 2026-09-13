@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import PriceText from "@/components/common/PriceText";
 import LoginSheet from "@/components/auth/LoginSheet";
+import { FAVORITE_FAILED_MESSAGE } from "@/lib/constants/favorites";
+import { addFavorite, removeFavorite } from "@/lib/services/favoritesHttp";
 import { abbreviateNumber, formatYuan } from "@/lib/utils/format";
 import type { ProductDetail } from "@/lib/types/product";
 
@@ -13,19 +15,25 @@ type GatedAction = "service" | "favorite" | "buy";
 /**
  * 商品详情的商品信息、规格选择与底部操作栏。
  *
- * 客户端组件的原因有二：规格选择是需要即时响应的本地状态；受限操作要弹登录浮层。
- * 首屏内容（标题、月售、价格、规格）依然由它 SSR 输出，不会因为标记了 "use client" 就变空。
+ * 客户端组件的原因有二：规格选择与收藏状态需要即时响应；受限操作要弹登录浮层。
+ * 首屏内容（标题、月售、价格、规格、收藏状态）依然由它 SSR 输出，
+ * 不会因为标记了 "use client" 就变空。
  *
- * `loggedIn` 由服务端读取会话后传入——是否登录只由服务端说了算，客户端不自行判断，
- * 也不重复拉取登录态。登录成功后 `router.refresh()` 会让这个值变为 true。
+ * `loggedIn` 与 `initialFavorited` 都由服务端读取后传入——是否登录、有没有收藏
+ * 只由服务端说了算，客户端不自行判断，也不从 localStorage 取信。
+ *
+ * 登录后的继续操作：游客点「收藏」时先把动作记在 `pendingAction` 里并弹登录浮层，
+ * 登录成功（`onSuccess`）后**自动接着执行收藏**，不要求用户再点一次。
  */
 export default function ProductPurchasePanel({
   product,
   loggedIn,
+  initialFavorited,
   mockAuthEnabled,
 }: {
   product: ProductDetail;
   loggedIn: boolean;
+  initialFavorited: boolean;
   mockAuthEnabled: boolean;
 }) {
   // 单组规格、单选：默认选中第一项。种子保证至少一项，取不到时回落到商品自身价格。
@@ -36,9 +44,43 @@ export default function ProductPurchasePanel({
   const offShelf = product.status === "off";
   const [pendingAction, setPendingAction] = useState<GatedAction | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+
+  const [favorited, setFavorited] = useState(initialFavorited);
+  const [favoritePending, setFavoritePending] = useState(false);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  /** 同步闸门：state 更新是异步的，连点两次可能都在重渲染之前到达 */
+  const favoriteRunningRef = useRef(false);
+
+  /** 已下架且尚未收藏：不能再新增收藏（服务端同样会拒绝）。已收藏的仍可取消。 */
+  const favoriteDisabled = offShelf && !favorited;
 
   const router = useRouter();
+
+  /**
+   * 切换收藏状态。
+   *
+   * 结果以**服务端返回的最终状态**为准（不是本地取反），因此重复请求不会让按钮显示错误状态：
+   * 收藏同一商品是幂等的，取消收藏重复请求也安全。
+   */
+  async function toggleFavorite() {
+    if (favoriteRunningRef.current) return;
+    favoriteRunningRef.current = true;
+    setFavoritePending(true);
+    setFavoriteError(null);
+
+    try {
+      const result = favorited
+        ? await removeFavorite(product.id)
+        : await addFavorite(product.id);
+      setFavorited(result.favorited);
+    } catch (cause) {
+      // 失败时保持原状态，并说明原因（如商品已下架不能新增收藏）
+      setFavoriteError(cause instanceof Error ? cause.message : FAVORITE_FAILED_MESSAGE);
+    } finally {
+      favoriteRunningRef.current = false;
+      setFavoritePending(false);
+    }
+  }
 
   function run(action: GatedAction) {
     if (action === "buy") {
@@ -49,10 +91,11 @@ export default function ProductPurchasePanel({
       return;
     }
     if (action === "favorite") {
-      setNotice("已加入收藏（占位）。收藏列表属于 P6 内容。");
+      void toggleFavorite();
       return;
     }
-    setNotice("客服会话属于 P6 内容，当前为占位反馈。");
+    // 客服是已实现的模块，直接进客服页，不再走占位提示
+    router.push("/service");
   }
 
   function request(action: GatedAction) {
@@ -89,7 +132,9 @@ export default function ProductPurchasePanel({
 
         {offShelf ? (
           <p className="mt-3 rounded-[8px] bg-page px-3 py-2 text-[12px] leading-5 text-ink-3">
-            该商品已下架，暂不可购买。
+            {favorited
+              ? "该商品已下架，暂不可购买；已收藏的记录仍可保留或取消。"
+              : "该商品已下架，暂不可购买与收藏。"}
           </p>
         ) : null}
       </section>
@@ -123,8 +168,10 @@ export default function ProductPurchasePanel({
         </section>
       ) : null}
 
-      {notice ? (
-        <p className="mt-2 bg-surface px-4 pb-4 text-[13px] leading-5 text-ink-3">{notice}</p>
+      {favoriteError ? (
+        <p role="alert" className="mt-2 bg-surface px-4 pb-4 text-[13px] leading-5 text-brand-red">
+          {favoriteError}
+        </p>
       ) : null}
 
       {/* 底部操作栏：sticky 且在文档流内，因此始终可见，正文也不会被它盖住 */}
@@ -138,13 +185,24 @@ export default function ProductPurchasePanel({
           <span className="text-[11px]">客服</span>
         </button>
 
+        {/*
+          已下架且尚未收藏：按钮置灰并给出无障碍名称说明原因。
+          下架商品不能被新增收藏，因此这里不放进登录流程——点了必然失败，不如直接说明。
+          已收藏的下架商品仍可点（取消收藏是安全的）。
+        */}
         <button
           type="button"
+          disabled={favoriteDisabled || favoritePending}
           onClick={() => request("favorite")}
-          className="flex w-12 shrink-0 flex-col items-center gap-0.5 py-1 text-ink-2"
+          aria-label={
+            favoriteDisabled ? "商品已下架，暂不能收藏" : favorited ? "取消收藏" : "收藏"
+          }
+          className={`flex w-12 shrink-0 flex-col items-center gap-0.5 py-1 disabled:opacity-50 ${
+            favorited ? "text-brand-red" : "text-ink-2"
+          }`}
         >
-          <StarIcon />
-          <span className="text-[11px]">收藏</span>
+          <StarIcon filled={favorited} />
+          <span className="text-[11px]">{favorited ? "已收藏" : "收藏"}</span>
         </button>
 
         <button
@@ -194,12 +252,13 @@ function HeadsetIcon() {
   );
 }
 
-function StarIcon() {
+/** 收藏图标。已收藏时填色——形状不再是唯一的区分手段，色盲用户同样能分辨。 */
+function StarIcon({ filled = false }: { filled?: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24"
       className="h-5 w-5"
-      fill="none"
+      fill={filled ? "currentColor" : "none"}
       stroke="currentColor"
       strokeWidth={1.8}
       strokeLinecap="round"

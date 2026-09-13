@@ -20,7 +20,14 @@
  */
 
 /** 各仓储的 store 名。集中列出，避免同一个仓储在两处用了不同的名字。 */
-export type MockStoreName = "payment" | "refund" | "complaint" | "message" | "notification";
+export type MockStoreName =
+  | "payment"
+  | "refund"
+  | "complaint"
+  | "message"
+  | "notification"
+  | "user"
+  | "favorite";
 
 const PREFIX = "__youmuMockStore__";
 

@@ -6,6 +6,7 @@ import ProductPurchasePanel from "@/components/product/ProductPurchasePanel";
 import { getSessionUser } from "@/lib/auth/session";
 import { isMockAuthEnabled } from "@/lib/config/env";
 import { getProductDetail } from "@/lib/services/catalog";
+import { isFavoritedForUser } from "@/lib/services/favorites";
 import { toSearchParams } from "@/lib/utils/query";
 
 /**
@@ -36,6 +37,12 @@ export default async function ProductDetailPage({
   // 商品不存在（或已从数据源删除）→ 明确的「不存在」状态，而不是空页面
   if (!product) notFound();
 
+  /**
+   * 收藏状态在**服务端**读：游客一律为未收藏（不查数据），登录用户查自己的记录。
+   * 因此刷新页面后状态不丢，也不会出现「先渲染成未收藏、再跳成已收藏」的闪烁。
+   */
+  const favorited = user ? await isFavoritedForUser(user.id, product.id, query, "server") : false;
+
   return (
     <>
       <NavBar title="商品详情" showBack />
@@ -46,6 +53,7 @@ export default async function ProductDetailPage({
         <ProductPurchasePanel
           product={product}
           loggedIn={user !== null}
+          initialFavorited={favorited}
           mockAuthEnabled={isMockAuthEnabled()}
         />
       </div>

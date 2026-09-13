@@ -1,8 +1,8 @@
+import type { UserRecord } from "@/lib/data/userRepository";
 import type { Addon, Game } from "@/lib/types/catalog";
 import type { Companion } from "@/lib/types/companion";
 import type { HomeData } from "@/lib/types/content";
 import type { Product, ProductDetail } from "@/lib/types/product";
-import type { User } from "@/lib/types/user";
 
 /**
  * Mock 数据种子。
@@ -20,17 +20,28 @@ import type { User } from "@/lib/types/user";
  * 接入真实后端后，本目录随 lib/mocks 一并移除。
  */
 
-/** 两个 Mock 用户，用于验证「切换用户后个人信息展示随之变化」。 */
-export const userSeed: User[] = [
+/**
+ * 两个 Mock 用户，用于验证「切换用户后个人信息展示随之变化」。
+ *
+ * `displayId` 是**平台展示给用户的 ID**（原型资料卡上那一行），形如 UUID 但纯属虚构，
+ * 与微信 OpenID / UnionID 没有任何关系——真实身份标识只在服务端保存，不进任何 DTO。
+ *
+ * `bio` 故意留一个为空：资料卡「暂未填写个人简介」的占位状态要能被验收看到。
+ */
+export const userSeed: UserRecord[] = [
   {
     id: "u-1001",
+    displayId: "3f2a9c14-6b7d-4e58-9c21-8d4f0b7a5e63",
     nickname: "老板A（占位）",
     avatarUrl: "/mock/avatar-1.svg",
+    bio: "",
   },
   {
     id: "u-1002",
+    displayId: "9c4e1d78-2a53-47f6-b0c8-5e7d3a91f204",
     nickname: "老板B（占位）",
     avatarUrl: "/mock/avatar-2.svg",
+    bio: "对局节奏轻一点，谢谢（占位）",
   },
 ];
 
@@ -544,7 +555,7 @@ export const homeSeed: HomeData = {
   shortcuts: [
     { id: "service", label: "联系客服", href: "/service" },
     { id: "benefits", label: "点单权益", href: "/placeholder?title=点单权益" },
-    { id: "join", label: "考核入驻", href: "/placeholder?title=考核入驻" },
+    { id: "join", label: "考核入驻", href: "/join" },
     { id: "complaint", label: "投诉客服专区", href: "/complaints" },
   ],
 

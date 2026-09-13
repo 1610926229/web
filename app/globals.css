@@ -60,6 +60,36 @@
   --color-status-success: #07a35a;
   --color-status-danger: #e60012;
   --color-status-muted: #8a8a8a;
+
+  /*
+   * 「我的」页配色。原型顶部是深紫渐变 + 点阵纹理，四个主功能入口各一块**浅色**渐变磁贴
+   * （饱和色落在图标上，不落在底上），因此渐变端点集中在这里，
+   * 页面只加类名（`.mine-hero` / `.mine-tile-*`）不写颜色值。
+   */
+  --color-mine-hero-from: #2b2244;
+  --color-mine-hero-to: #4c3b7a;
+  --color-mine-hero-ink: #ffffff;
+  /* 昵称以外的两行（ID / 简介）：白字降透明度，而不是换成灰字，深紫底上更干净 */
+  --color-mine-hero-ink-soft: #cfc6e6;
+  --color-mine-avatar-ring: #ef86cf;
+  /* 右上两个圆形按钮：半透明白底 + 更亮的描边 */
+  --color-mine-hero-button: rgba(255, 255, 255, 0.16);
+  --color-mine-hero-button-border: rgba(255, 255, 255, 0.3);
+  --color-mine-tile-pink-from: #ffe4ef;
+  --color-mine-tile-pink-to: #ffd0e3;
+  --color-mine-tile-pink-ink: #ff4d7e;
+  --color-mine-tile-magenta-from: #ffe0f2;
+  --color-mine-tile-magenta-to: #ffc9e6;
+  --color-mine-tile-magenta-ink: #f0399c;
+  --color-mine-tile-blue-from: #e2f1ff;
+  --color-mine-tile-blue-to: #cde7ff;
+  --color-mine-tile-blue-ink: #2f8ef5;
+  --color-mine-tile-amber-from: #fff1da;
+  --color-mine-tile-amber-to: #ffe4bd;
+  --color-mine-tile-amber-ink: #f59317;
+  /* 小宫格图标统一用一个淡紫底 + 紫色描边，不逐项换色（见 components/mine/MineIcons.tsx） */
+  --color-mine-grid-icon: #7c5cf6;
+  --color-mine-grid-icon-soft: #f1ecff;
 }
 
 :root {
@@ -78,6 +108,70 @@
 .seg-tab-active {
   background-image: linear-gradient(135deg, var(--color-tab-from), var(--color-tab-to));
   color: #fff;
+}
+
+/*
+ * 「我的」页顶部用户信息卡：深紫渐变 + 点阵纹理。
+ *
+ * 点阵用一层 `radial-gradient` 平铺出来，不引图片资源——这样缩放、换色、换分辨率都不用重新切图，
+ * 也不会多一个静态文件请求。渐变本身从 `--color-mine-hero-*` 取色。
+ */
+.mine-hero {
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.15) 1.2px, transparent 1.3px),
+    linear-gradient(158deg, var(--color-mine-hero-from), var(--color-mine-hero-to));
+  background-size:
+    18px 18px,
+    100% 100%;
+}
+
+/* 「全部功能」标题左侧的竖条（原型为品红→紫渐变）。 */
+.mine-section-bar {
+  background-image: linear-gradient(180deg, var(--color-tab-from), var(--color-tab-to));
+}
+
+/*
+ * 四个主功能入口的磁贴底。与上面的 Tab 胶囊同一思路：颜色只在这里定义，
+ * 组件按 `lib/constants/mine.ts` 里的 `tile` 字段加类名。
+ *
+ * 底是**浅色**渐变（原型如此：饱和度在图标上，不在底上），因此图标颜色另有一组 `--ink`——
+ * 一块磁贴要同时用到「底色」和「图标色」两个令牌，故这里用 `background-color`/`color`
+ * 两个属性一次写清，组件只加一个类名。
+ */
+.mine-tile-pink {
+  background-image: linear-gradient(
+    140deg,
+    var(--color-mine-tile-pink-from),
+    var(--color-mine-tile-pink-to)
+  );
+  color: var(--color-mine-tile-pink-ink);
+}
+
+.mine-tile-magenta {
+  background-image: linear-gradient(
+    140deg,
+    var(--color-mine-tile-magenta-from),
+    var(--color-mine-tile-magenta-to)
+  );
+  color: var(--color-mine-tile-magenta-ink);
+}
+
+.mine-tile-blue {
+  background-image: linear-gradient(
+    140deg,
+    var(--color-mine-tile-blue-from),
+    var(--color-mine-tile-blue-to)
+  );
+  color: var(--color-mine-tile-blue-ink);
+}
+
+.mine-tile-amber {
+  background-image: linear-gradient(
+    140deg,
+    var(--color-mine-tile-amber-from),
+    var(--color-mine-tile-amber-to)
+  );
+  color: var(--color-mine-tile-amber-ink);
 }
 
 /*

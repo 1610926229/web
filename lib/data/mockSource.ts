@@ -6,9 +6,9 @@ import {
   productSeed,
   toCard,
   toDetail,
-  userSeed,
 } from "@/lib/mocks/fixtures/seed";
 import type { DataSource } from "./source";
+import { getUserRepository, toSessionUser } from "./userRepository";
 
 /**
  * Mock 数据源：直接读取进程内的种子数据，不经过任何网络。
@@ -31,7 +31,10 @@ export const mockDataSource: DataSource = {
   },
 
   async findUserById(id) {
-    return userSeed.find((user) => user.id === id) ?? null;
+    // 用户数据只有**一份**：登录态也从这个仓储读，用户在编辑资料页改完昵称后
+    // 会话里读到的是新值，不会出现「资料页显示新昵称、会话还是旧昵称」两份真相。
+    const record = await getUserRepository().findUserById(id);
+    return record ? toSessionUser(record) : null;
   },
 
   async getGames() {
