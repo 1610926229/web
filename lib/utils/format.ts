@@ -38,3 +38,31 @@ export function formatYuan(cents: number): string {
   if (!Number.isFinite(cents)) return "0.00";
   return (Math.trunc(cents) / 100).toFixed(2);
 }
+
+/** 北京时间偏移（分钟）。订单时间统一按北京时间展示，见下方说明。 */
+const BEIJING_OFFSET_MINUTES = 8 * 60;
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+/**
+ * 时间展示：ISO 字符串 → `2026-09-12 21:18`（**北京时间，固定 UTC+8**）。
+ *
+ * 刻意不用 `toLocaleString` / `Intl`：
+ * 1. 订单列表与详情同时被服务端与浏览器渲染，`toLocaleString` 的结果取决于运行环境的
+ *    时区与语言设置，两侧不一致会直接触发 React 水合不一致告警；
+ * 2. 本项目的用户与订单都在国内，展示口径固定为北京时间，比「跟随访问者时区」更符合预期。
+ *
+ * 因此这里只做一次固定偏移的 UTC 格式化，任何环境下结果都相同。
+ */
+export function formatDateTime(iso: string): string {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return "";
+
+  const shifted = new Date(time + BEIJING_OFFSET_MINUTES * 60_000);
+  return (
+    `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}` +
+    ` ${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}`
+  );
+}

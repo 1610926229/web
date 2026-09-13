@@ -59,6 +59,13 @@ export type PaymentRequestSnapshot = {
   productCoverUrl: string;
   specName: string;
   unitPrice: number;
+  /**
+   * 游戏名快照。
+   *
+   * 与商品名一样在下单时固定下来，订单详情因此可以直接显示「哪个游戏」，
+   * 不必在读取时回头查商品——商品改名或下架都不会影响历史订单。
+   */
+  gameName: string;
   addons: OrderAddonSnapshot[];
   companion: OrderCompanionSnapshot | null;
 };

@@ -19,10 +19,14 @@ pnpm dev      # dev server on :3000 (Turbopack; output in .next/dev)
 pnpm build    # production build
 pnpm start    # serve the production build
 pnpm lint     # ESLint CLI (flat config: eslint.config.mjs)
+pnpm test     # node's built-in test runner (see below)
 next typegen  # regenerate route types only, without a full build
 ```
 
-There is no test runner — no `test` script and no test framework installed. (Next ships an experimental `next experimental-test` defaulting to Playwright; it is not configured here.)
+`tests/*.test.mjs` run on **Node's built-in runner** (`node --test`) — no test framework was added. Node 24 strips TypeScript types natively, so the tests import the real `lib/**` modules; `tests/alias-loader.mjs` is a ~20-line ESM resolve hook that teaches Node the two rules it does not implement (the `@/*` alias and bundler-style extensionless relative imports). Two consequences worth remembering:
+
+- JSX is *not* stripped, so tests cover non-component modules only (constants, repositories, services) — client component behaviour is verified by hand.
+- Tests are `.mjs` on purpose: tsconfig's `include` covers `**/*.ts`, so `.mjs` stays out of `tsc` without an `exclude` entry.
 
 ## Next.js 16: read the vendored docs before writing framework code
 

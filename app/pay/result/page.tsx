@@ -96,11 +96,18 @@ async function ResultBody({
         amount={request.totalAmount}
         actions={
           <>
+            {/* 直接进入这一单的详情；订单一时取不到时退回列表，绝不给出指向不存在订单的链接 */}
             <Link
-              href="/orders"
+              href={order ? `/orders/${order.id}` : "/orders"}
               className="flex h-11 items-center justify-center rounded-full bg-brand-red px-8 text-[15px] font-medium text-white"
             >
               查看订单
+            </Link>
+            <Link
+              href="/orders"
+              className="flex h-11 items-center justify-center rounded-full border border-line px-8 text-[15px] text-ink-2"
+            >
+              查看全部订单
             </Link>
             <HomeLink />
           </>

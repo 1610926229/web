@@ -29,6 +29,22 @@
   --color-brand-blue: #4a9ef0;
   --color-brand-blue-soft: #eaf4fe;
   --color-brand-blue-border: #b8dcfb;
+
+  /*
+   * 订单状态色。集中在这里：状态的文字色只由 `lib/constants/orders.ts` 的
+   * `ORDER_STATUS_CLASS` 映射引用，页面与卡片不写死颜色，换色只改这一处。
+   * 「已付款」用品牌红是因为它是**唯一需要用户等待/关注的进行中状态**；
+   * 两个终态（已完成 / 已退款）用中性灰，不再吸引注意力。
+   */
+  --color-status-paid: #e60012;
+  --color-status-accepted: #4a9ef0;
+  --color-status-serving: #7a5cf0;
+  --color-status-completed: #8a8a8a;
+  --color-status-refunded: #8a8a8a;
+
+  /* 订单页状态 Tab 选中态（原型为品红→紫色渐变，与全站品牌红不同，故单独成对令牌） */
+  --color-tab-from: #ff5fa2;
+  --color-tab-to: #8a5cf6;
 }
 
 :root {
@@ -36,6 +52,15 @@
   --shell-width: 480px;
   /* 底部导航高度（不含安全区） */
   --tabbar-height: 56px;
+}
+
+/*
+ * 订单页状态 Tab 的选中态：原型是一个品红→紫的渐变胶囊。
+ * 颜色取自上方的 `--color-tab-from` / `--color-tab-to`，组件只加类名，不写颜色值。
+ */
+.order-tab-active {
+  background-image: linear-gradient(135deg, var(--color-tab-from), var(--color-tab-to));
+  color: #fff;
 }
 
 /*

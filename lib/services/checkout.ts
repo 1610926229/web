@@ -154,6 +154,7 @@ async function resolveSelection(selection: CheckoutSelection): Promise<{
   selection: CheckoutSelection;
   product: ProductDetail;
   spec: ProductSpec;
+  game: Game;
   addons: Addon[];
   companion: Companion | null;
   itemsAmount: number;
@@ -192,6 +193,7 @@ async function resolveSelection(selection: CheckoutSelection): Promise<{
     selection: { ...selection, quantity },
     product,
     spec,
+    game,
     addons,
     companion,
     itemsAmount,
@@ -250,6 +252,11 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     status: "paid",
     createdAt: now.toISOString(),
     paidAt: now.toISOString(),
+    // 新订单只有「已付款」一个时间节点，其余状态由后续阶段推进时写入
+    acceptedAt: null,
+    servingAt: null,
+    completedAt: null,
+    refundedAt: null,
 
     productId: request.productId,
     productTitle: request.snapshot.productTitle,
@@ -259,6 +266,7 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     unitPrice: request.snapshot.unitPrice,
 
     quantity: request.quantity,
+    gameName: request.snapshot.gameName,
     region: request.region,
     gameAccountId: request.gameAccountId,
     remark: request.remark,
@@ -309,6 +317,7 @@ export async function createPaymentRequest(
     productCoverUrl: resolved.product.coverUrl,
     specName: resolved.spec.name,
     unitPrice: resolved.spec.price,
+    gameName: resolved.game.name,
     addons: resolved.addons.map((addon) => ({
       id: addon.id,
       name: addon.name,

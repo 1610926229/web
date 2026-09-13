@@ -1,3 +1,5 @@
+import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
+import { orderSeed } from "@/lib/mocks/fixtures/orderSeed";
 import type { Order } from "@/lib/types/order";
 import type {
   MockPaymentResult,
@@ -33,10 +35,17 @@ type MockStore = {
 
 const STORE_KEY = "__youmuMockPaymentStore";
 
+/**
+ * 建仓时把预置订单放进**同一个** `orders` Map。
+ *
+ * 只有建仓这一次会写入预置数据，之后所有读写都发生在这个 Map 上，
+ * 因此支付成功产生的订单与预置订单在列表里是同一种数据、走同一条查询路径，
+ * 也不会出现「访问一次列表就把动态订单冲掉」这种事。
+ */
 function createStore(): MockStore {
   return {
     paymentRequests: new Map(),
-    orders: new Map(),
+    orders: new Map(orderSeed.map((order) => [order.id, order])),
     payments: new Map(),
     requestIdByKey: new Map(),
   };
@@ -128,6 +137,28 @@ export const mockPaymentRepository: PaymentRepository = {
     // —— 原子区段结束 ——
 
     return { request: updated, order, orderCreated: order !== null };
+  },
+
+  async queryOrders(query) {
+    const { userId, status, keyword, page, pageSize } = query;
+
+    const filtered = [...store().orders.values()]
+      .filter((order) => order.userId === userId)
+      .filter((order) => status === null || order.status === status)
+      .filter((order) => matchesOrderKeyword(order.orderNo, keyword))
+      .sort(compareOrdersNewestFirst);
+
+    const start = (page - 1) * pageSize;
+    const items = filtered.slice(start, start + pageSize);
+
+    return {
+      items,
+      page,
+      pageSize,
+      total: filtered.length,
+      // 由服务端算好，前端不自行用 total 推导，避免两侧口径不一致
+      hasMore: start + items.length < filtered.length,
+    };
   },
 
   async findOrderById(id) {
