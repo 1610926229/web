@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach, beforeEach } from "node:test";
+import { resolveSource } from "./app-path.mjs";
 import {
   CONSUMPTION_CALCULATION_NOTICE,
   CONSUMPTION_ORDER_STATUS,
@@ -532,13 +533,13 @@ test("页面必须标注 Mock 配置与统计口径，且不直接引用 lib/moc
     "components/mine/LevelSummaryPanel.tsx",
   ]) {
     // 先去掉注释：注释里写一句「数据来自 lib/mocks/fixtures/...」不算引用
-    const code = stripComments(readFileSync(file, "utf8"));
+    const code = stripComments(readFileSync(resolveSource(file), "utf8"));
     assert.equal(code.includes("lib/mocks"), false, `${file} 不该引用 lib/mocks`);
     assert.equal(code.includes("lib/data/"), false, `${file} 不该直接引用 lib/data`);
   }
 
   // 「页面组件不得遍历订单算金额」：页面与服务端组件里不出现订单集合的求和/筛选
-  const rightsPage = readFileSync("app/rights/page.tsx", "utf8");
+  const rightsPage = readFileSync(resolveSource("app/rights/page.tsx"), "utf8");
   assert.equal(rightsPage.includes("sumEffectiveSpend"), false, "页面不得自己算消费金额");
   assert.equal(/\.filter\(/.test(rightsPage), false, "页面不得自己筛订单");
 });

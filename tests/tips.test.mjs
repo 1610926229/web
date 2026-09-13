@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { beforeEach } from "node:test";
+import { resolveSource } from "./app-path.mjs";
 import {
   TIP_MOCK_NOTICE,
   TIP_PAGE_SIZE,
@@ -242,7 +243,7 @@ function stripComments(source) {
 
 test("/tips/new 是纯说明页：不读数据、不发请求、不接支付", () => {
   // 页面组件无法在 node 里渲染（JSX 不会被剥离），因此用源码守住这几条硬规则
-  const source = readFileSync("app/tips/new/page.tsx", "utf8");
+  const source = readFileSync(resolveSource("app/tips/new/page.tsx"), "utf8");
   const code = stripComments(source);
 
   // 不产生任何记录、不调用支付：整页没有导入仓储 / 服务 / 浏览器请求

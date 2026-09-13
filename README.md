@@ -2,7 +2,7 @@
 
 平台普通用户（老板）使用的移动端网页。手机端优先，微信内置浏览器是主要运行环境，桌面端使用居中的移动端容器。
 
-管理后台是另一个独立网站，不在本仓库内。
+同一份代码里还带着一个**桌面优先的管理后台** `/admin`：不套用户端的 480px 移动容器、不显示底部 TabBar、使用**另一套完全独立的登录态**（见「管理后台」一节）。它目前有后台概览、入驻审核（列表与详情、开始审核 / 通过 / 拒绝）、护航管理（名单与详情、资料编辑、启用 / 停用 / 暂停接单 / 恢复接单 / 移除）三个模块；申请与护航共用同一份护航数据源，后台改完用户端立刻可见。
 
 ## 开发
 
@@ -20,7 +20,7 @@ pnpm build
 
 - **Next.js 16 App Router**：`params` / `searchParams` / `cookies()` / `headers()` 均为 Promise，必须 `await`。本版本的破坏性变更与旧版本差异较大，编码前先查阅 `node_modules/next/dist/docs/`。
 - **Tailwind CSS v4**：CSS-first 配置，设计令牌写在 `app/globals.css` 的 `@theme` 中，没有 `tailwind.config.js`。
-- **路由结构**：一级 Tab 页面在 `app/(tabs)/`，共用底部导航；需登录的一级页（订单/客服/我的）在 `app/(tabs)/(protected)/`；不显示底部导航的页面（`app/product/[id]` 商品详情、`app/checkout` 确认订单、`app/pay/result` 支付结果）放在 `(tabs)` 之外。
+- **路由结构**：用户端整体在 `app/(mobile)/` 这个路由组里，由 `app/(mobile)/layout.tsx` 套上 480px 的移动壳层。**壳层之所以下移到路由组，就是为了不让它罩住 `/admin`**；`app/layout.tsx` 只剩文档骨架（`<html>` / `<body>` / 字体），不含任何产品级布局。组内：一级 Tab 页面在 `app/(mobile)/(tabs)/`，共用底部导航；需登录的一级页（订单/客服/我的）在 `app/(mobile)/(tabs)/(protected)/`；不显示底部导航的页面（商品详情、确认订单、支付结果等）放在 `(tabs)` 之外。管理后台在 `app/admin/`，自己渲染桌面布局，**不复用移动壳层**。
 - **取数必须分层**：**页面和组件不得直接 `fetch`，也不得 import `lib/mocks/*`**。两条链路共用同一个 service，只有最底层实现不同：
 
   ```
@@ -38,23 +38,25 @@ pnpm build
 
 ## 环境变量
 
-Mock 能力由三个开关控制，取值必须**显式等于字符串 `true`** 才开启；留空、`false` 或删除该行都等同于关闭。
+Mock 能力由四个开关控制，取值必须**显式等于字符串 `true`** 才开启；留空、`false` 或删除该行都等同于关闭。
 
 | 变量 | 作用 |
 |---|---|
-| `ENABLE_MOCK_AUTH` | 模拟登录：`/api/auth/mock-login`、`/api/auth/logout`、`mock_user_id` 会话 Cookie、拦截页上的「模拟微信登录」按钮 |
+| `ENABLE_MOCK_AUTH` | 用户端模拟登录：`/api/auth/mock-login`、`/api/auth/logout`、`mock_user_id` 会话 Cookie、拦截页上的「模拟微信登录」按钮 |
 | `ENABLE_MOCK_DEBUG` | 调试查询参数：`mockError` / `mockEmpty` / `mockDelay` |
 | `ENABLE_MOCK_PAYMENT` | 模拟支付：`/api/payments/mock-confirm` 与支付结果页上的「模拟支付成功 / 失败 / 取消」三个按钮 |
+| `ENABLE_MOCK_ADMIN` | **管理端**模拟登录：`/api/admin/auth/*`、`mock_admin_id` 会话 Cookie、`/admin/login` 上的「模拟管理员登录」按钮 |
 
 ```bash
 cp .env.example .env.local   # .env.local 已被 .gitignore 忽略
 ```
 
-**正式部署不要设置这三个变量**。关闭时无需改动任何代码：
+**正式部署不要设置这四个变量**。关闭时无需改动任何代码：
 
 - 未开启 `ENABLE_MOCK_AUTH`：两个认证接口返回 404；`mock_user_id` Cookie 不再产生登录身份（伪造该 Cookie 只会看到登录拦截页）；拦截页上不出现任何模拟登录控件。
 - 未开启 `ENABLE_MOCK_DEBUG`：三个调试查询参数被完全忽略，数据与延迟都不受影响，首页照常渲染。
 - 未开启 `ENABLE_MOCK_PAYMENT`：模拟支付确认接口返回 404，页面上不出现任何模拟支付控件；此时**创建支付请求仍然可用**（那是真实业务逻辑，不属于模拟渠道），只是待支付的请求无法在本地走到「已支付」。
+- 未开启 `ENABLE_MOCK_ADMIN`：管理端登录与退出接口返回 **404**；`/admin/login` 不出现「模拟管理员登录」按钮，只显示一行说明；伪造 `mock_admin_id` Cookie 拿不到任何权限（管理页面照常跳登录、管理接口 401）。**用户端的 `ENABLE_MOCK_AUTH` 不受影响**，两个开关各自独立。
 
 开关在**服务端运行时**读取（`lib/config/env.ts` 用动态 key 访问 `process.env`，刻意避免被构建期内联成常量），因此「构建时开、运行时关」也能正确生效。
 
@@ -79,8 +81,15 @@ Mock 数据在 `lib/mocks/`，接入真实后端后整个目录删除。
 | `announcements` | 隐藏公告区域，其余照常 |
 | `activity` | 隐藏活动展示图，其余照常 |
 | `shortcuts` | 隐藏快捷入口，其余照常 |
-| `all` | 四个模块都为空 → 整页「暂无内容」空态（底部导航保留） |
+| `levels` | 消费等级页：等级配置为空 |
+| `agreements` | 协议页：全部未配置 |
+| `rankings` | 排行榜页：榜上无人 |
+| `companions` | 陪玩列表页：名单为空；管理后台护航管理页：三个数归零 |
+| `applications` | 管理后台：入驻申请四个数归零（概览页与入驻审核页同时生效） |
+| `all` | 以上范围全部清空（首页即整页「暂无内容」空态，底部导航保留） |
 | 其他/缺省 | 不生效 |
+
+首页之外的范围是**整块功能**没有数据，不是某个字段为空，因此各自的空态由对应服务自己决定文案（等级 → 「配置暂不可用」、协议 → 「内容暂未配置」、榜单与名单 → 空列表、管理后台 → 数字为 0 并补一句说明）。
 
 页面地址与接口地址都支持这些参数，两者共用同一个 service，行为一致：
 
@@ -103,6 +112,21 @@ curl -i -X POST -H 'content-type: application/json' \
   -d '{"userId":"u-1002"}' http://localhost:3000/api/auth/mock-login
 curl -X POST http://localhost:3000/api/auth/logout
 ```
+
+### Mock 管理端认证（需 `ENABLE_MOCK_ADMIN=true`）
+
+**与用户端认证彻底分离**：不同的 Cookie 名（`mock_admin_id`）、不同的仓储、不同的开关，两套会话互不产生对方的身份。用普通用户 Cookie 调管理接口一律 401，用管理 Cookie 调用户端接口（`/api/me`、`/api/orders`、`/api/suggestions`）同样 401——**不是靠「页面不显示按钮」保护的**，每个管理接口自己执行服务端鉴权。
+
+```bash
+curl -i -X POST http://localhost:3000/api/admin/auth/mock-login   # 只有一个固定入口，不接受任何参数
+curl -i http://localhost:3000/api/admin/auth/session              # 未登录 401；有会话但不是 admin 403
+curl -i -X POST http://localhost:3000/api/admin/auth/logout
+```
+
+- 登录接口**不读请求体**：没有账号、密码、角色字段可言，也就没有「客户端传 `role: "admin"` 就能提权」这条路径。返回的只有 `{ id, username, displayName, role, roleLabel }`，不返回密码、密钥或完整管理员实体。
+- 会话 Cookie 为 HttpOnly / SameSite=Lax / Path=/，生产环境加 `Secure`，有效期 7 天，退出立即失效（`Max-Age=0`）。
+- 角色只有 `admin` 能进管理后台：`customer_service`、`companion`、以及被停用的管理员都拿不到权限（403）。判断集中在 `canEnterAdminConsole()`，页面、布局、接口守卫都调它，不各自写 `role === "admin"`。
+- 本地验证请在 `pnpm dev`（`http://localhost:3000`）下做：`pnpm start` 出的生产构建会给 Cookie 加 `Secure`，用明文 `http://` 非 localhost 地址访问时浏览器不会回传它。
 
 ### 模拟支付（需 `ENABLE_MOCK_PAYMENT=true`）
 
@@ -149,6 +173,94 @@ Mock 数据中有几个**只能通过直链访问**的商品，不出现在任�
 | `/product/不存在的 id` | 商品不存在 → 404 + 明确的「商品不存在」状态 |
 
 列表层面的其它场景：`c-loss` 有 6 个上架商品、默认每页 4 条，因此能看到「加载更多」与「没有更多了」；搜索 `绝密` 有结果、搜索任意不存在的词命中空状态（只替换列表区域，搜索框与左侧类目栏照常）。
+
+## 管理后台
+
+桌面优先的独立后台，路由统一在 `/admin` 下。**不套用户端的 480px 移动容器、不复用移动壳层、不显示底部 TabBar**，左侧固定导航 + 右侧内容区，顶部显示当前管理者与退出入口，小屏下侧栏塌到顶部。
+
+| 路由 | 内容 |
+|---|---|
+| `/admin/login` | 固定的「模拟管理员登录」入口（**没有账号切换器**）。已登录的管理者访问会被送回 `/admin` |
+| `/admin` | 后台概览 |
+| `/admin/applications` | 入驻申请列表（按状态 / 申请单号 / 昵称 / 游戏筛选，分页，默认按提交时间倒序） |
+| `/admin/applications/[id]` | 申请详情：正文、申请人摘要、凭证、状态时间轴与**服务端给出的**可执行动作 |
+| `/admin/companions` | 护航名单（关键词 / 游戏 / 启用状态 / 可接单 / 是否已移除筛选，分页） |
+| `/admin/companions/[id]` | 护航详情：白名单资料编辑 + 启用 / 停用 / 暂停接单 / 恢复接单 / 移除 |
+
+未登录访问 `/admin/**` 会被送到 `/admin/login`（由 `app/admin/(console)/layout.tsx` 统一处理，页面自身不写鉴权）；管理接口未登录返回 401、有会话但无权限返回 403，都走统一错误信封。
+
+概览页的七个数字（待审核 / 审核中 / 已通过 / 已拒绝申请数，已启用 / 已停用 / 暂不可接单护航数）**全部从当前仓储实时聚合**，页面上没有任何写死的展示值；点任意一张卡进入对应列表的筛选。加载态用同段 `loading.tsx`，错误态与重试用同段 `error.tsx`。
+
+调试参数在**服务层**处理，因此 `app/admin/**` 的页面组件与用户端一样**不引用 `lib/mocks/*`**。`?mockEmpty=applications` 把申请四个数清零、`?mockEmpty=companions` 把护航三个数清零（`all` 两者都清），用于验证全部为 0 时的降级文案。
+
+### 审核状态机
+
+```
+pending ──开始审核──→ reviewing ──通过──→ approved   （终态）
+   └──────────────────通过/拒绝──────────────────→ rejected   （终态）
+                                                     withdrawn  （用户撤销，终态）
+```
+
+- **动作由服务端决定**：详情页渲染的是接口返回的 `allowedActions`，页面不自己「看状态猜按钮」。终态没有任何动作，因此同一条申请不会出现第二个可点的审核按钮。
+- 用户可以撤销自己的申请（`pending` 时），**但撤销后不可恢复**；管理端没有「撤销」这个动作。
+- 「开始审核」只把状态改成 `reviewing`，**不通过、不建护航、不发资格**——通过有它自己的接口，因为那是四笔一起写的事。
+- 「拒绝」必须给出审核意见，空字符串与纯空白都拒绝（错误信息不只说「必填」，而是说清少了什么）。
+
+### 通过一条申请＝四笔一起写
+
+审核通过在**一段没有 `await` 的同步区段**里同时完成（服务端单线程，这段代码不会被打断）：
+
+1. 申请状态改为 `approved`，写入审核人与审核时间；
+2. 该用户获得**护航资格**；
+3. **创建或关联**那条唯一的护航记录；
+4. 写一条管理操作审计。
+
+新护航的规则：独立且不会与预置数据冲突的 id；`enabled = true`、`available = false`、`unavailableReason = "资料待完善"`；`rating = null`，完成单数 / 评价数 / 鸡腿数**全部为 0**；昵称、游戏、大区、标签、介绍取自这条申请。**不自动接单、不绑定订单、不产生任何收入**，也没有「打手工作台」。
+
+⚠️ **一名用户最多一条有效护航**，靠的是「用户 ID → 护航 ID」的索引，**不是昵称**：同名用户会各自建出一条，重复或并发审核也只会建出一条。移除（软删除）会把索引清掉，因此这位用户日后可以重新通过审核。
+
+⚠️ **采用多角色结构**：审核通过**不覆盖**用户的普通消费者身份。该用户在用户端仍然是普通用户，收藏、订单、鸡腿、等级与排行榜全部照旧——资格是加在身上的一层，不是把账号换了个类型。
+
+### 暂停 / 停用 / 移除的区别
+
+| 动作 | 启用状态 | 用户端列表 | 直链详情 | 结算页可选 | 后台可见 | 历史记录 |
+|---|---|---|---|---|---|---|
+| 暂停接单 | 仍启用 | 在 | 正常展示 | **不可选** | 可见 | 保留 |
+| 停用 | 停用 | 不在 | 只读「不提供服务」 | 不可选 | 可见（可按状态筛） | 保留 |
+| 移除 | 停用 | 不在 | 只读，记录仍在 | 不可选 | 可见（按「已移除」筛） | **保留** |
+
+- `enabled = false` 会**强制** `available = false`（服务端归一，不是靠界面禁用）；`available = false` 必须有 `unavailableReason`，用户端看到的就是这句话。
+- **移除是软删除**：只写 `removedAt`，不物理删除，订单 / 评价 / 鸡腿里的历史一条不少。移除是后台能改的最后一个状态，因此界面必须二次确认。
+- 「暂停」与「停用」分成两个接口，而不是一个「改状态」：后者会让调用方自己去拼目标状态，拼错的结果是「只是歇两天」变成「这个人下架了」。
+
+### 管理接口与权限
+
+| 接口 | 方法 |
+|---|---|
+| `/api/admin/companion-applications` | GET |
+| `/api/admin/companion-applications/[id]` | GET |
+| `/api/admin/companion-applications/[id]/start-review` | POST |
+| `/api/admin/companion-applications/[id]/approve` | POST |
+| `/api/admin/companion-applications/[id]/reject` | POST |
+| `/api/admin/companions` | GET |
+| `/api/admin/companions/[id]` | GET / PATCH |
+| `/api/admin/companions/[id]/enable`、`/disable`、`/pause`、`/resume`、`/remove` | POST |
+
+（另有三个认证接口 `/api/admin/auth/mock-login`、`/logout`、`/session`。）
+
+- **每一个**都先执行 `requireAdmin()`，再做别的。未登录 401、有会话但无权限 403——**拒绝文案只有一句**：不区分「角色不对」与「账号被停用」，也不区分「对象不存在」与「无权访问」，否则这就是一个可以探测账号状态的接口。
+- **不能依赖按钮禁用防重**：五个写动作（开始审核 / 通过 / 拒绝 / 停用 / 移除…）都要求 `idempotencyKey`，重试同一个键返回第一次的结果且不再写第二条审计。按钮挡不住网络重试，真正的防重在服务端。
+- 列表 DTO **不带**完整正文、联系方式、凭证与审核意见（这些只在详情里），统计与关联用户 ID 是**只读**的，客户端多传也没有入口——不是「忘了校验」，是类型里就没有位置。
+
+### 审计记录
+
+每次管理写操作落一条审计：`id`、`adminId`、`action`、`targetType`、`targetId`、精简 `before` / `after`、`operationId`、`createdAt`。业务写入与审计写入**在同一段同步区段**里完成；重复的幂等请求只留一条。
+
+审计**只记动作不记内容**：没有 Cookie、没有登录凭据、没有完整凭证与正文，快照里只有状态类的标量字段。审计仓储对外**只有读方法**（`countAudits` / `findAuditByOperationId` / `listAudits`），没有 create / update / delete 的入口。P8A 不做审计查询页。
+
+### 唯一数据源
+
+护航名单**只有一份**：`lib/data/mockCompanionRepository.ts` 的**可写**存储，从 `companionSeed` 逐字段复制初始化，由 `lib/data/source.ts` 统一委派。管理端列表 / 详情 / 编辑，与用户端陪玩列表、陪玩详情、P4 结算页读的是同一个仓储——因此后台改完立即生效，**不存在「前台要等同步」这种事**，也不需要第二份名单。
 
 ## 结算与支付
 
@@ -215,8 +327,8 @@ P1 已完成：项目基础布局与全局样式、桌面端居中容器、底�
 P2 已完成（含修订）：领域类型、统一取数边界、域服务、可替换数据源、Mock Route Handler、Mock 认证适配层、免登录/需登录边界。
 
 - 首页主体为 Server Component，商品等首屏数据直接输出到 HTML；公告轮播单独为 Client Component。
-- 加载态由 `app/(tabs)/loading.tsx` 兜底，错误态由 `app/(tabs)/error.tsx` 兜底，空态按模块独立判断。
-- Mock 能力由 `ENABLE_MOCK_AUTH` / `ENABLE_MOCK_DEBUG` 两个环境开关隔离，默认关闭。
+- 加载态由一级 Tab 段的 `loading.tsx` 兜底，错误态由同段 `error.tsx` 兜底，空态按模块独立判断。（这两个文件随用户端一起搬到了 `app/(mobile)/(tabs)/`。）
+- Mock 能力由环境开关隔离，默认关闭（当时是 `ENABLE_MOCK_AUTH` / `ENABLE_MOCK_DEBUG` 两个，现共四个，见「环境变量」）。
 - 「我的」已接入登录态；订单、客服仍为骨架。
 
 P3 已完成：分类页 `/category`、商品详情页 `/product/[id]`，以及首页 → 分类 → 详情之间的浏览链路。
@@ -235,6 +347,25 @@ P4 已完成：确认订单页 `/checkout`、服务端金额试算、模拟支�
 - 结算与结果页都在 `(tabs)` 之外，**不显示底部 TabBar**；两页都需登录，复用同一个 `RequireAuth`。
 - 与原型仍有差异：原型结算页的「商品规格」占位文案写的是「请选择增值服务」（原型自身笔误），本实现按字段本意显示；增值服务在原型中没有价格，本实现用标注了「Mock 选项，非最终业务规则」的开发价格；原型中的优惠券入口本阶段不做（不放占位入口）；陪玩选择用底部弹出面板承载，原型为一行入口。
 
-未开始：P5 订单与售后（订单列表/详情、陪玩接单、退款、投诉、客服沟通）、P6 个人中心，以及真实微信授权/支付与真实数据库。
+P5 已完成：订单与售后——订单列表与状态筛选、订单详情、退款申请与进度、投诉提交与进度、用户客服会话（`/orders`、`/refunds`、`/complaints`、`/service`）。
 
-相关占位说明：`/activities`、`/help` 为统一占位页；订单、客服仍为骨架页；订单列表与详情、退款、优惠券规则均属 P5+，本阶段未实现。
+P6 已完成：个人中心与资料设置、商品收藏、鸡腿（打赏）记录、意见反馈与评价（`/mine`、`/profile`、`/favorites`、`/tips`、`/suggestions`、`/reviews`、`/settings`）。
+
+P7A 已完成：消费等级、周期排行榜与协议展示（`/rank`、`/rights`、`/agreements`）。
+
+P7B 已完成：寻找陪玩与护航入驻申请（`/companions`、`/join` 及其状态页）。
+
+P8A 已完成（当前阶段）：
+
+- 用户端整体移入 `app/(mobile)` 路由组，移动壳层不再罩住 `/admin`；所有 URL 未变。
+- **独立的管理端登录态**：`mock_admin_id` Cookie、独立仓储、独立开关 `ENABLE_MOCK_ADMIN`，与用户端认证互不影响；管理接口逐个执行服务端鉴权（未登录 401、无权限 403）。
+- `/admin` 后台概览、`/admin/applications`（列表 + 详情）、`/admin/companions`（名单 + 详情）四个模块，桌面优先布局。
+- 入驻申请的审核状态机与三个动作（开始审核 / 通过 / 拒绝），拒绝必须给出审核意见；动作由服务端下发的 `allowedActions` 决定。
+- 审核通过＝四笔一起写的伪事务：改状态 + 发护航资格 + 创建/关联唯一护航 + 写审计；一名用户最多一条有效护航，采用多角色结构，不覆盖用户的消费者身份。
+- 护航管理：白名单资料编辑，启用 / 停用 / 暂停接单 / 恢复接单 / 移除（软删除）五个动作，危险操作二次确认。
+- 护航名单成为**唯一的可写 Mock 存储**，由 `lib/data/source.ts` 统一委派；用户端列表、详情、结算页与后台读的是同一份数据。
+- 管理操作审计（只记动作不记内容），与业务写入同区段；写接口全部要求幂等键。
+
+未开始：真实微信授权与支付、真实数据库（PostgreSQL / Prisma）、对象存储与 CDN；管理后台其余模块（商品与类目、订单、退款与投诉、客服工作台、公告与协议、等级与优惠券、鸡腿结算、数据统计图表、**审计查询页**）。
+
+相关占位说明：`/activities`、`/help` 为统一占位页（`/placeholder?title=...`）。

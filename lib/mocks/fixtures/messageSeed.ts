@@ -35,7 +35,8 @@ function userName(userId: string): string {
 function companionName(id: string): string {
   const companion = companionSeed.find((item) => item.id === id);
   if (!companion) throw new Error(`Mock 种子缺失陪玩：${id}`);
-  return companion.name;
+  // 陪玩只有一个昵称字段 `displayName`，列表 / 详情 / 结算页 / 订单快照都从它取值
+  return companion.displayName;
 }
 
 /** 客服在预置历史里的显示名。 */

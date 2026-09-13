@@ -46,6 +46,31 @@ async function loginAs(userId = "u-1001") {
 const SESSION = BASE ? await loginAs() : null;
 const SKIP_SESSION = SKIP || (SESSION ? false : "服务端未开启 ENABLE_MOCK_AUTH，跳过需要登录态的用例");
 
+/**
+ * P7B 用的额外 Mock 身份。
+ *
+ * 账号切换只发生在接口层（`/api/auth/mock-login` 的请求体里），**用户端页面没有任何
+ * 切换入口**；这里用它来覆盖「预置里有申请」的几种状态，以及一条不与其他用例争抢的
+ * 申请人身份（`u-1008`：预置里没有申请、也没有任何有效消费，写进去不会影响排行榜）。
+ */
+const SESSION_JOIN_PENDING = BASE ? await loginAs("u-1002") : null; // 预置「待查看」
+const SESSION_JOIN_REVIEWING = BASE ? await loginAs("u-1003") : null; // 预置「审核中」
+const SESSION_JOIN_APPROVED = BASE ? await loginAs("u-1004") : null; // 预置「已通过」
+const SESSION_JOIN_APPLICANT = BASE ? await loginAs("u-1008") : null; // 预置没有申请
+
+/**
+ * 去掉 `<script>` 标签后再做「页面上不该出现某段文字」的断言。
+ *
+ * 理由：Next 的 HTML 里有两段**不是页面内容**的东西——RSC 的 flight 载荷与
+ * Turbopack 的分块文件名（`/_next/static/chunks/05w-twpn2bx9w.js`）。
+ * 它们由构建产物决定，会随任何一次改动变化，且长相随机：
+ * 「金额不该用 k / w 缩写」这类断言扫到它们就会红，而且红得与断言的本意毫无关系。
+ * 因此凡是判断**页面上看得见的文字**的断言，都应当先过一遍这里。
+ */
+function stripScripts(html) {
+  return html.replace(/<script[\s\S]*?<\/script>/g, "");
+}
+
 async function get(path, cookie) {
   const response = await fetch(new URL(path, BASE), {
     headers: cookie ? { cookie } : undefined,
@@ -58,7 +83,15 @@ test("游客可以打开 /companions：不是 404，也不是登录拦截", { sk
 
   assert.equal(status, 200);
   assert.ok(html.includes("寻找陪玩"), "缺少「寻找陪玩」标题");
-  assert.ok(html.includes("功能开发中"), "缺少「功能开发中」占位状态");
+  assert.equal(html.includes("功能开发中"), false, "陪玩列表不该还是占位页");
+  // Mock 标注与「绑定规则待确认」必须写在页面上，否则会被当成真实名单与真实预约
+  assert.ok(html.includes("陪玩与订单的绑定、定价与排班规则待确认"), "缺少 Mock 与规则待确认说明");
+  // 名单来自数据层：至少有一位陪玩、有可用状态筛选
+  assert.ok(html.includes("（占位）"), "缺少 Mock 陪玩卡片");
+  assert.ok(html.includes("当前可接单"), "缺少可用状态筛选");
+  // 二级页面：只有顶部返回，没有底部 TabBar
+  assert.ok(html.includes("返回"), "缺少返回入口");
+  assert.equal(html.includes(TABBAR_TEXT), false, "/companions 不该显示底部 TabBar");
   assert.equal(html.includes(LOGIN_GATE_TEXT), false, "/companions 不该要求登录");
 });
 
@@ -85,13 +118,44 @@ test("游客打开 /join 命中统一登录引导（不是 404，也不是占位
   assert.ok(html.includes("返回"), "未登录时缺少返回入口");
 });
 
-test("登录后 /join 显示「成为护航」占位内容，且没有底部 TabBar", { skip: SKIP_SESSION }, async () => {
+test("登录后 /join 是入驻表单：字段齐全、不承诺回报，且没有底部 TabBar", { skip: SKIP_SESSION }, async () => {
   const { status, html } = await get("/join", SESSION);
 
   assert.equal(status, 200);
   assert.ok(html.includes("成为护航"));
-  assert.ok(html.includes("页面待实现"), "登录后应看到入驻占位内容");
+  assert.equal(html.includes("页面待实现"), false, "入驻页不该还是占位页");
   assert.equal(html.includes(LOGIN_GATE_TEXT), false, "已登录不该再出现登录引导");
+
+  // 表单字段（u-1001 没有申请，看到的是表单）
+  for (const label of ["陪玩昵称", "擅长游戏", "可服务大区", "服务标签", "经验说明", "自我介绍"]) {
+    assert.ok(html.includes(label), `入驻表单缺少「${label}」`);
+  }
+  assert.ok(html.includes("提交入驻申请"), "缺少提交按钮");
+  // 游戏选项来自真实游戏目录，不在页面里写死第二份名单
+  assert.ok(html.includes("三角洲行动"), "缺少游戏选项");
+  // 不承诺任何回报，也不给审核时限
+  assert.ok(html.includes("审核规则待确认"), "缺少「审核规则待确认」说明");
+  assert.equal(html.includes("开通接单权限"), false, "/join 不该承诺开通权限");
+  // 不收集敏感信息：原型里的身份证 / 银行卡 / 真实姓名 / 所在城市都不是可填内容
+  for (const forbidden of ["身份证", "银行卡", "真实姓名", "所在城市"]) {
+    assert.equal(html.includes(forbidden), false, `入驻表单不该出现「${forbidden}」`);
+  }
+  // 手机号 / 微信号 / QQ / 邮箱也不是输入项（只在「不采集」那句说明里被提到）
+  for (const attribute of [
+    'name="phone"',
+    'name="wechat"',
+    'name="qq"',
+    'name="email"',
+    'name="realName"',
+    'placeholder="手机号',
+    'placeholder="微信号',
+  ]) {
+    assert.equal(html.includes(attribute), false, `入驻表单不该有「${attribute}」字段`);
+  }
+  assert.ok(html.includes("不采集手机号、微信号"), "联系说明必须写明不采集具体联系方式");
+  // 输入框不使用 maxLength 静默截断（超限是给出错误提示，不是悄悄截断）
+  assert.equal(/maxlength/i.test(html), false, "入驻表单不该用 maxLength 静默截断");
+
   // 二级页面：只有顶部返回，没有底部 TabBar
   assert.equal(html.includes(TABBAR_TEXT), false, "/join 不该显示底部 TabBar");
 });
@@ -460,9 +524,14 @@ test("游客可以打开 /rank：拿到完整榜单，但没有「我的排名�
   // 二级页面：没有底部 TabBar
   assert.equal(html.includes(TABBAR_TEXT), false, "/rank 不该显示底部 TabBar");
 
-  // 榜单金额是完整两位小数，没有 k / w 缩写
-  assert.ok(/¥\d+\.\d{2}/.test(html), "榜单金额应保留两位小数");
-  assert.equal(/\d+k\b|\d+w\b/.test(html), false, "榜单金额不该使用 k / w 缩写");
+  // 榜单金额是完整两位小数，没有 k / w 缩写。
+  // ⚠️ 这一条必须**排除 script 标签**再判断：Turbopack 的分块文件名是内容哈希，
+  // 形如 `/_next/static/chunks/05w-twpn2bx9w.js`，天然会命中 `\d+w\b`。
+  // 早先直接扫整页 HTML，是因为当时的哈希恰好没有撞上——那属于运气，不是保证：
+  // 换一次构建产物就会红，而且红得跟金额毫无关系。
+  const visible = stripScripts(html);
+  assert.ok(/¥\d+\.\d{2}/.test(visible), "榜单金额应保留两位小数");
+  assert.equal(/\d+k\b|\d+w\b/.test(visible), false, "榜单金额不该使用 k / w 缩写");
 });
 
 /** 六个周期与它们的页签文案。 */
@@ -895,3 +964,362 @@ test("/suggestions 的错误页可重试：重试会去掉调试参数，而不�
   assert.ok(healed.html.includes("功能建议"), "去掉调试参数后页面应恢复正常");
   assert.equal(healed.html.includes("__next_error__"), false);
 });
+
+// ————————————————— P7B：寻找陪玩 / 护航入驻申请 —————————————————
+
+/** 陪玩列表项 DTO 的字段集合（多一个少一个都会在这里被发现）。 */
+const COMPANION_LIST_ITEM_KEYS = [
+  "available",
+  "avatarUrl",
+  "completedOrderCount",
+  "displayName",
+  "games",
+  "id",
+  "introBrief",
+  "rating",
+  "regions",
+  "reviewCount",
+  "serviceTags",
+  "tipsCount",
+  "unavailableReason",
+];
+
+test("游客可以打开陪玩详情：资料与「选择」入口都在，但没有下单入口", { skip: SKIP }, async () => {
+  const { status, html } = await get("/companions/cp-1");
+
+  assert.equal(status, 200, "陪玩详情不该 404");
+  assert.ok(html.includes("陪玩资料"), "缺少详情页标题");
+  assert.ok(html.includes("选择这位陪玩"), "缺少选择入口");
+  // 选择只是本地演示：必须写明不会创建订单、不会写入任何陪玩关系
+  assert.ok(html.includes("陪玩与订单的最终绑定规则待确认"), "缺少绑定规则待确认说明");
+  assert.ok(html.includes("不会创建订单"), "缺少「不会创建订单」说明");
+  // 详情页没有任何结算或购买入口
+  assert.equal(html.includes("/checkout"), false, "陪玩详情不该有结算入口");
+  assert.equal(html.includes("立即购买"), false, "陪玩详情不该有购买按钮");
+  // 游客可见，且是二级页面
+  assert.equal(html.includes(LOGIN_GATE_TEXT), false, "/companions/[id] 不该要求登录");
+  assert.equal(html.includes(TABBAR_TEXT), false, "陪玩详情不该显示底部 TabBar");
+});
+
+test("不可用的陪玩：按钮禁用 + 具体原因，不是只把按钮置灰", { skip: SKIP }, async () => {
+  const { status, html } = await get("/companions/cp-4");
+
+  assert.equal(status, 200, "在架但暂不可用的陪玩应当能打开详情");
+  assert.ok(html.includes("该陪玩当前不可提供服务"), "缺少不可选结论");
+  assert.ok(html.includes("暂不接单"), "缺少具体原因");
+  assert.ok(html.includes("disabled"), "按钮应当是禁用的");
+  // 不可用仍要能看到这位陪玩的资料，而不是一个空页
+  assert.ok(html.includes("（占位）"));
+});
+
+test("已下架的陪玩：只读资料页，没有选择或下单入口", { skip: SKIP }, async () => {
+  const { status, html } = await get("/companions/cp-7");
+
+  assert.equal(status, 200, "已下架的陪玩不该 404");
+  assert.ok(html.includes("没有选择或下单入口"), "缺少只读说明");
+  assert.equal(html.includes("选择这位陪玩"), false, "已下架不该出现选择入口");
+  assert.equal(html.includes("/checkout"), false);
+});
+
+test("不存在的陪玩是 404，并且给出回到列表的入口", { skip: SKIP }, async () => {
+  const { status, html } = await get("/companions/cp-not-exist");
+
+  // 状态码是这里最要紧的一条：只有它正确，爬虫与用户代理才不会把「没有这位陪玩」
+  // 记成一个正常页面。与 `/product/nope` 完全一致（同一套 notFound() 处理）。
+  assert.equal(status, 404);
+  assert.ok(html.includes("陪玩不存在"));
+  assert.ok(html.includes("该陪玩可能已下线，或链接已失效。"), "缺少 404 说明");
+  // 退路：文案在响应里。**不**断言 `href="/companions"` 这个 HTML 属性——
+  // 这条路由不挂加载边界（否则状态码会退化成 200），notFound() 因此由客户端运行时渲染，
+  // 响应体是 `<html id="__next_error__">` + RSC 载荷，锚点写在载荷里而不是 HTML 属性里
+  // （`/product/nope` 一模一样）。源码级的「404 页必须指向 /companions」在 routes.test.mjs。
+  assert.ok(html.includes("返回陪玩列表"), "404 页缺少返回列表的入口");
+  assert.equal(html.includes(TABBAR_TEXT), false);
+});
+
+test("陪玩列表接口：游客可访问，非法枚举回 400，分页参数规范化", { skip: SKIP }, async () => {
+  // 页面侧：手改坏了的地址不该变成错误页
+  const broken = await get("/companions?availability=online&gameId=g-not-exist&mockDelay=0");
+  assert.equal(broken.status, 200, "非法筛选值不该把页面打挂");
+  assert.ok(broken.html.includes("寻找陪玩"));
+
+  // 接口侧：明确的业务条件写错必须报错
+  for (const query of ["availability=online", "gameId=g-not-exist"]) {
+    const response = await fetch(new URL(`/api/companions?${query}`, BASE));
+    assert.equal(response.status, 400, `?${query} 应当被拒绝`);
+    const body = await response.json();
+    assert.equal(body.error.code, "BAD_REQUEST");
+    assert.equal("data" in body, false);
+  }
+
+  // 游客可访问；分页参数越界时规范化而不是报错
+  const response = await fetch(new URL("/api/companions?page=-1&pageSize=999", BASE));
+  assert.equal(response.status, 200, "陪玩名单是公开内容，不该 401");
+  const { data } = await response.json();
+  assert.equal(data.page, 1);
+  assert.equal(data.pageSize, 20);
+  assert.ok(data.items.length > 0, "预置的 Mock 名单应当能读到");
+  assert.equal(typeof data.hasMore, "boolean");
+
+  // 已下架的 cp-7 不进公开列表
+  assert.equal(data.items.some((item) => item.id === "cp-7"), false);
+  // 列表项字段是确定的一份，且没有内部字段与用户标识
+  for (const item of data.items) {
+    assert.deepEqual(Object.keys(item).sort(), COMPANION_LIST_ITEM_KEYS);
+  }
+  const serialized = JSON.stringify(data);
+  for (const forbidden of ["sortOrder", "enabled", "rankLabel", "userId", "openid", "unionid"]) {
+    assert.equal(serialized.includes(forbidden), false, `陪玩列表响应不该出现 ${forbidden}`);
+  }
+
+  // 关键词在服务端生效：命中昵称
+  const named = await fetch(new URL(`/api/companions?keyword=${encodeURIComponent("老K")}`, BASE));
+  assert.deepEqual(
+    (await named.json()).data.items.map((item) => item.id),
+    ["cp-3"],
+  );
+});
+
+test("陪玩详情是服务端渲染的只读页面：没有任何「把陪玩带出去」的接口", { skip: SKIP }, async () => {
+  // 详情页由 Server Component 直接取数渲染，页面上的选择动作只改本地状态，
+  // 因此本阶段**不需要也不存在**陪玩详情的取数接口，更不存在「创建陪玩关系」的写接口。
+  for (const path of ["/api/companions/cp-1", "/api/companions/cp-1/relationship"]) {
+    const response = await fetch(new URL(path, BASE));
+    assert.equal(response.status, 404, `${path} 不该存在`);
+  }
+
+  const write = await fetch(new URL("/api/companions", BASE), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ companionId: "cp-1" }),
+  });
+  assert.equal(write.status, 405, "陪玩列表接口不该支持写入");
+});
+
+test("入驻申请接口：一个人最多一条、幂等提交、撤销幂等，且只返回本人的申请", { skip: SKIP_SESSION }, async () => {
+  const cookie = SESSION_JOIN_APPLICANT;
+  const headers = { cookie, "content-type": "application/json" };
+  const readMine = async () => {
+    const response = await fetch(new URL("/api/me/companion-application", BASE), {
+      headers: { cookie },
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).data;
+  };
+
+  const send = (idempotencyKey) =>
+    fetch(new URL("/api/companion-applications", BASE), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        idempotencyKey,
+        displayName: "接口冒烟（占位）",
+        gameIds: ["g-valorant"],
+        regions: ["端游"],
+        serviceTags: ["护航"],
+        experience: "冒烟测试提交的经验说明（Mock 文案）",
+        introduction: "冒烟测试提交的自我介绍（Mock 文案）",
+        contactNote: "",
+        evidence: [],
+      }),
+    });
+
+  // 同一台服务可能被跑过一遍：从现在的状态出发，不假设「一定没有申请」
+  const before = await readMine();
+  let justCreated = false;
+
+  if (!before.application) {
+    const key = `smoke-${crypto.randomUUID().slice(0, 18)}`;
+    const first = await send(key);
+    assert.equal(first.status, 200);
+    const created = (await first.json()).data;
+    assert.equal(created.created, true);
+    assert.equal(created.status, "pending", "用户新提交的申请只会是「待查看」");
+
+    // 同一个键第二次：不是错误，返回第一次的结果，不会多出一条
+    const repeated = await send(key);
+    assert.equal(repeated.status, 200);
+    const again = (await repeated.json()).data;
+    assert.equal(again.created, false);
+    assert.equal(again.applicationId, created.applicationId);
+    assert.equal(again.applicationNo, created.applicationNo);
+    justCreated = true;
+  }
+
+  // 换一个键也写不进第二条
+  const conflict = await send(`smoke-${crypto.randomUUID().slice(0, 18)}`);
+  assert.equal(conflict.status, 400);
+  assert.equal((await conflict.json()).error.message, "你已有一条入驻申请，请在入驻进度页查看");
+
+  // 详情：只有本人看得到，响应里没有 userId
+  const mine = await readMine();
+  assert.ok(mine.application, "提交之后应当能读到自己的申请");
+  assert.equal("userId" in mine.application, false, "入驻申请 DTO 不该带 userId");
+  assert.equal(mine.application.evidence.length, 0);
+  if (justCreated) {
+    assert.equal(mine.application.status, "pending");
+    assert.equal(mine.application.reviewNote, "");
+    assert.equal(mine.application.reviewedAt, null);
+    assert.equal(mine.application.experience, "冒烟测试提交的经验说明（Mock 文案）");
+  }
+
+  // 撤销：只有本人能撤、重复撤销幂等、撤销只改状态不删记录
+  const withdrawUrl = new URL(
+    `/api/companion-applications/${mine.application.id}/withdraw`,
+    BASE,
+  );
+  const withdraw = () =>
+    fetch(withdrawUrl, { method: "POST", headers: { cookie, "content-type": "application/json" } });
+
+  const first = await withdraw();
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).data.status, "withdrawn");
+
+  const second = await withdraw();
+  assert.equal(second.status, 200);
+  const repeated = (await second.json()).data;
+  assert.equal(repeated.withdrawn, false, "重复撤销不该再产生一次变更");
+  assert.equal(repeated.applicationId, mine.application.id);
+
+  const after = await readMine();
+  assert.equal(after.application.status, "withdrawn");
+  assert.equal(after.application.submittedAt, mine.application.submittedAt);
+  assert.equal(after.application.experience, mine.application.experience, "撤销不该删掉申请内容");
+
+  // 不存在与不属于本人返回同一个 404：拿别人的 id 试探得不到信息
+  const missing = await fetch(
+    new URL("/api/companion-applications/ca-not-exist/withdraw", BASE),
+    { method: "POST", headers: { cookie, "content-type": "application/json" } },
+  );
+  const notMine = await fetch(new URL("/api/companion-applications/ca-1002/withdraw", BASE), {
+    method: "POST",
+    headers: { cookie, "content-type": "application/json" },
+  });
+  assert.equal(missing.status, 404);
+  assert.equal(notMine.status, 404);
+  assert.equal(
+    (await missing.json()).error.message,
+    (await notMine.json()).error.message,
+    "「不存在」与「不是本人的」对外表现必须一致",
+  );
+});
+
+test("审核状态没有任何用户端入口：撤不掉审核中的申请，也没有改状态接口", { skip: SKIP_SESSION }, async () => {
+  const cookie = SESSION_JOIN_REVIEWING;
+
+  const response = await fetch(new URL("/api/companion-applications/ca-1003/withdraw", BASE), {
+    method: "POST",
+    headers: { cookie, "content-type": "application/json" },
+  });
+  assert.equal(response.status, 400);
+  assert.ok((await response.json()).error.message.includes("不能撤销"));
+
+  // 申请接口只有 POST：没有 GET，也没有任何「改这条申请」的地址
+  const list = await fetch(new URL("/api/companion-applications", BASE), { headers: { cookie } });
+  assert.equal(list.status, 405, "提交接口不该支持读取");
+  for (const method of ["GET", "PATCH", "PUT", "DELETE"]) {
+    const write = await fetch(new URL("/api/companion-applications/ca-1003", BASE), {
+      method,
+      headers: { cookie, "content-type": "application/json" },
+    });
+    assert.equal(write.status, 404, `${method} /api/companion-applications/[id] 不该存在`);
+  }
+
+  // 状态仍然没有被改动
+  const mine = (
+    await (
+      await fetch(new URL("/api/me/companion-application", BASE), { headers: { cookie } })
+    ).json()
+  ).data;
+  assert.equal(mine.application.status, "reviewing");
+});
+
+test("三个入驻申请接口都要求登录：游客拿到 401 而不是别人的申请", { skip: SKIP }, async () => {
+  const cases = [
+    { path: "/api/me/companion-application", method: "GET" },
+    { path: "/api/companion-applications", method: "POST" },
+    { path: "/api/companion-applications/ca-1002/withdraw", method: "POST" },
+  ];
+
+  for (const { path, method } of cases) {
+    const response = await fetch(new URL(path, BASE), {
+      method,
+      headers: { "content-type": "application/json" },
+      body: method === "POST" ? "{}" : undefined,
+    });
+    assert.equal(response.status, 401, `${method} ${path} 未登录时应返回 401`);
+    const body = await response.json();
+    assert.equal(body.error.code, "UNAUTHORIZED");
+    assert.equal("data" in body, false);
+  }
+});
+
+test("入驻进度页：状态与时间轴来自服务端，没有申请就有回填入口", { skip: SKIP_SESSION }, async () => {
+  // u-1002 预置为「待查看」：时间轴只有已经发生的节点，并给出撤销入口
+  const pending = await get("/join/status", SESSION_JOIN_PENDING);
+  assert.equal(pending.status, 200);
+  assert.equal(pending.html.includes(LOGIN_GATE_TEXT), false);
+  assert.ok(pending.html.includes("入驻进度"), "缺少页面标题");
+  assert.ok(pending.html.includes("RA-MOCK-0002"), "缺少申请单号");
+  assert.ok(pending.html.includes("入驻申请已提交，等待平台查看"), "缺少已发生的节点说明");
+  assert.ok(pending.html.includes("撤销申请"), "「待查看」应当可以撤销");
+  // 用「小节标题」判断，而不是「正文里出现过这四个字」：
+  // 页面底部的 Mock 说明句里本来就含「审核结果」，那不是在展示结论。
+  assert.equal(pending.html.includes(">审核结果<"), false, "还没有结果时不该出现审核结果区");
+  assert.equal(pending.html.includes(TABBAR_TEXT), false, "/join/status 不该显示底部 TabBar");
+
+  // u-1004 预置为「已通过」：审核备注与结果时间只在真的有结果时出现
+  const approved = await get("/join/status", SESSION_JOIN_APPROVED);
+  assert.equal(approved.status, 200);
+  assert.ok(approved.html.includes(">审核结果<"), "有结果时应当出现审核结果区");
+  assert.ok(approved.html.includes("（Mock 备注）"), "缺少服务端下发的审核备注");
+  assert.equal(approved.html.includes("撤销申请"), false, "已通过不该出现撤销入口");
+
+  // u-1001 没有申请：说明「还没有申请」并给出去填写的入口
+  const none = await get("/join/status", SESSION);
+  assert.equal(none.status, 200);
+  assert.ok(none.html.includes("还没有入驻申请"));
+  assert.ok(none.html.includes('href="/join"'), "缺少去填写入驻申请的入口");
+});
+
+test("P7B 页面取数失败时停在路由错误边界，不是 500 白屏", { skip: SKIP_SESSION }, async () => {
+  // 断言的是**正文独有的**文案，不是页面标题：错误边界自己也会渲染同一个顶部
+  // NavBar，拿标题当「正文没渲染」的证据必然误判（它本来就该出现在错误态里）。
+  //
+  // 这里没有 `/companions/cp-1`：详情路由刻意不带 `loading.tsx`（否则 notFound()
+  // 只能返回 200），代价就是外壳阶段的取数失败没有边界可接，行为与
+  // `/product/[id]` 完全一致（500 + `__next_error__`），因此不适合放进这张表。
+  const cases = [
+    { path: "/companions?mockError=1", body: "陪玩名单与评价均为本地 Mock 数据" },
+    { path: "/join?mockError=1", body: "陪玩昵称" },
+    { path: "/join/status?mockError=1", body: "还没有入驻申请" },
+  ];
+
+  for (const { path, body } of cases) {
+    const response = await get(path, SESSION);
+
+    assert.equal(response.status, 200, `${path} 应停在路由错误边界，而不是 500`);
+    assert.equal(
+      response.html.includes("__next_error__"),
+      false,
+      `${path} 落到了应用级错误页，说明路由边界没接住`,
+    );
+    assert.match(response.html, /\$RX\("B:\d+","\d+"\)/, `${path} 没有把错误交给路由错误边界`);
+    assert.equal(response.html.includes(TABBAR_TEXT), false, `${path} 错误态不该有 TabBar`);
+    assert.ok(response.html.includes("返回"), `${path} 错误态缺少返回入口`);
+    assert.equal(response.html.includes(body), false, `${path} 失败时不该渲染正文`);
+  }
+});
+
+test("P7B 在调试参数下也不 500：空名单是空态，不是错误", { skip: SKIP_SESSION }, async () => {
+  const { status, html } = await get("/companions?mockEmpty=companions&mockDelay=0", SESSION);
+
+  assert.equal(status, 200, "空名单不该 500");
+  assert.equal(html.includes("__next_error__"), false);
+  assert.equal(html.includes("加载失败"), false, "空数据不能被伪装成取数失败");
+  assert.ok(html.includes("暂无陪玩"), "缺少空态文案");
+  assert.ok(html.includes("名单还没有内容"), "缺少空态说明");
+  // 空态仍然保留筛选栏：改筛选条件仍然是有意义的下一步
+  assert.ok(html.includes("当前可接单"), "空态不该把筛选栏一起隐藏");
+});
+

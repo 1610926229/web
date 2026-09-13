@@ -25,3 +25,45 @@ export function readTrimmedString(body: Record<string, unknown>, key: string): s
   const raw = body[key];
   return typeof raw === "string" ? raw.trim() : "";
 }
+
+/**
+ * 从请求体里取布尔字段。
+ *
+ * 只认真正的布尔值与字符串 `"true"` / `"false"`——**不认 `1` / `0` / `"on"`**：
+ * 这些写法谁也说不准调用方想表达什么，猜错的代价是「停用」变成「启用」。
+ * 其余一律用 `fallback`，把「没传」与「传了个看不懂的值」都交给调用方的校验去处理。
+ */
+export function readBoolean(
+  body: Record<string, unknown>,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const raw = body[key];
+  if (typeof raw === "boolean") return raw;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return fallback;
+}
+
+/** 从请求体里取整数；非整数（含小数、字符串数字）一律用 `fallback`。 */
+export function readInteger(
+  body: Record<string, unknown>,
+  key: string,
+  fallback: number,
+): number {
+  const raw = body[key];
+  return typeof raw === "number" && Number.isInteger(raw) ? raw : fallback;
+}
+
+/**
+ * 从请求体里取字符串数组：非数组返回空数组，数组里的非字符串项被丢掉。
+ *
+ * 丢掉而不是报错，是因为调用方本来就要逐项校验取值（游戏、大区、标签都必须在目录里），
+ * 一个混进来的数字会在那里变成「所选游戏不是有效游戏」，这比在这里先说一句
+ * 「数组里有非字符串」更贴近调用方真正要判断的事。
+ */
+export function readStringArray(body: Record<string, unknown>, key: string): string[] {
+  const raw = body[key];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is string => typeof item === "string");
+}

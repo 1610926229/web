@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { isCompanionListed } from "@/lib/constants/companions";
 import {
   MAX_QUANTITY,
   REMARK_MAX_LENGTH,
@@ -116,13 +117,26 @@ async function resolveAddons(rawIds: string[]): Promise<Addon[]> {
   return resolved;
 }
 
-/** 陪玩：选填；填了就必须存在且当前可选。 */
+/**
+ * 陪玩：选填；填了就必须存在、**在公开名单里**且当前可选。
+ *
+ * 两个条件都要查，而且方向不同（P8A）：
+ * - `isCompanionListed()` 挡的是**停用与被移除**——这两类在用户端任何地方都不该出现，
+ *   但 `getCompanion()` 取得到它们（后台要管理、直链详情要展示），
+ *   所以「取得到」不等于「可以拿来下单」；
+ * - `available` 挡的是**暂停接单**——仍在名单里、详情页正常可见，只是结算时不可选。
+ *
+ * 少了第一个判断，被移除的护航只要 id 还留在浏览器缓存里就能下单；
+ * 少了第二个，「暂停接单」就只是列表上的一个字。
+ */
 async function resolveCompanion(id: string | null): Promise<Companion | null> {
   if (!id) return null;
 
   const companion = await getDataSource().getCompanion(id);
   if (!companion) throw new ApiError("BAD_REQUEST", "陪玩不存在，请重新选择");
-  if (!companion.available) throw new ApiError("BAD_REQUEST", "该陪玩当前不可选，请重新选择");
+  if (!isCompanionListed(companion) || !companion.available) {
+    throw new ApiError("BAD_REQUEST", "该陪玩当前不可选，请重新选择");
+  }
   return companion;
 }
 
@@ -323,7 +337,10 @@ export async function createPaymentRequest(
     companion: resolved.companion
       ? {
           id: resolved.companion.id,
-          name: resolved.companion.name,
+          // 快照字段名保持 `name`（订单与评价的历史展示都按它读），
+          // 值取陪玩唯一的昵称字段 `displayName`：订单快照是**那一刻的抄本**，
+          // 含义不变，只是源头改了名字
+          name: resolved.companion.displayName,
           avatarUrl: resolved.companion.avatarUrl,
         }
       : null,

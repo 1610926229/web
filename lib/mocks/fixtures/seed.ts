@@ -3,6 +3,7 @@ import type { Addon, Game } from "@/lib/types/catalog";
 import type { Companion } from "@/lib/types/companion";
 import type { HomeData } from "@/lib/types/content";
 import type { Product, ProductDetail } from "@/lib/types/product";
+import { getMockSeedNow } from "./mockClock";
 
 /**
  * Mock 数据种子。
@@ -237,39 +238,357 @@ export const addonSeed: Addon[] = [
 ];
 
 /**
- * 陪玩名单。
+ * 陪玩名单 —— 全站**唯一**的一份。
  *
- * 其中一位**故意设为不可选**，用于验证「不可用陪玩不能被写入支付请求」；
- * 不可选的陪玩仍会出现在列表里并置灰，不静默隐藏。
+ * 结算页的「推荐陪玩」面板（P4）与公开的陪玩列表 / 陪玩详情读的都是这份数据，
+ * 因此同一位陪玩在三处的昵称、头像与可用状态必然一致，不存在第二套名单。
+ *
+ * ⚠️ 全部为 Mock 身份：昵称一律带「（占位）」后缀，头像复用 `public/mock` 下的四张占位图。
+ * 名单里没有价格、佣金、排期与联系方式——陪玩定价与订单绑定规则尚未确认，
+ * 这里就不留「先填个数字」的字段。
+ *
+ * 覆盖的边界（缺一个就会有某个界面状态看不到）：
+ * - `cp-1`…`cp-3`、`cp-8`、`cp-9` 当前可选；其中 `cp-3` 与 `cp-8` **没有任何评价**
+ *   （详情页显示「暂无评分」而不是 0 分）；
+ * - `cp-4`（休息中）与 `cp-6`（已排满）**在架但当前不可选**：仍然出现在列表里并标注原因，
+ *   不静默隐藏——直接消失会让人以为名单里没有这个人；
+ *   `cp-4` 同时是「不可用陪玩不能被写入支付请求」这条服务端规则的验证用例；
+ * - `cp-7` **已下架**（`enabled: false`）：不进公开列表，直链打开只有一页只读资料，
+ *   没有任何选择或下单入口；
+ * - `cp-5` 是超长昵称 + 超长自我介绍，`cp-9` 是超长自我介绍 + 4 条评价
+ *   （详情页因此能看到「评价只展示前几条」的状态）；
+ * - 游戏覆盖 g-delta 与 g-valorant 两个游戏、手游与端游两个大区，
+ *   服务标签覆盖目录里的五项。
+ *
+ * 评价时间相对**进程内冻结的基准时间**构造（`getMockSeedNow()`），不写绝对日期：
+ * 写死日期的话，过一段时间打开详情页看到的全是几个月前的评价。
+ *
+ * P8A 给每条记录补上了三个**平台侧**字段，这里全部取「没有」：
+ * - `userId: null` / `applicationId: null`：这批陪玩是平台早期数据，不由任何入驻申请产生。
+ *   审核通过产生的那一条则两者都有值（见 `lib/data/companionRepository.ts`），
+ *   因此「这份名单里有没有人是审核进来的」是看得出来的；
+ * - `removedAt: null`：没有被移除。软移除是后台动作，预置数据不该一上来就有一条移除记录
+ *   ——那样「筛选出已移除的护航」这一条筛选项就没有一个干净的空态可看。
+ * 三个字段都**不进任何公开 DTO**。
  */
+const DAY_MS = 24 * 60 * 60 * 1000;
+const COMPANION_SEED_NOW_MS = getMockSeedNow().getTime();
+
+/** 评价时间：相对基准时间往前推若干天。 */
+function reviewDaysAgo(days: number): string {
+  return new Date(COMPANION_SEED_NOW_MS - days * DAY_MS).toISOString();
+}
+
 export const companionSeed: Companion[] = [
   {
     id: "cp-1",
-    name: "阿泽（占位）",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "阿泽（占位）",
     avatarUrl: "/mock/avatar-1.svg",
     rankLabel: "钻石打手",
+    intro:
+      "三角洲行动机密单常驻，主打稳扎稳打，掉线重连也算我的。（占位文案）",
+    gameIds: ["g-delta"],
+    regions: ["手游", "端游"],
+    serviceTags: ["护航", "上分"],
     available: true,
+    unavailableReason: "",
+    completedOrderCount: 128,
+    rating: 4.8,
+    tipsCount: 21,
+    reviewCount: 3,
+    sortOrder: 10,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-1-r1",
+        nickname: "老板A（占位）",
+        rating: 5,
+        content: "全程在线，节奏很好。（Mock 评价）",
+        createdAt: reviewDaysAgo(4),
+      },
+      {
+        id: "cp-1-r2",
+        nickname: "老板B（占位）",
+        rating: 5,
+        content: "沟通顺畅，按时交付。（Mock 评价）",
+        createdAt: reviewDaysAgo(11),
+      },
+      {
+        id: "cp-1-r3",
+        nickname: "星野（占位）",
+        rating: 4,
+        content: "整体不错，中间等了十分钟。（Mock 评价）",
+        createdAt: reviewDaysAgo(26),
+      },
+    ],
   },
   {
     id: "cp-2",
-    name: "小北（占位）",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "小北（占位）",
     avatarUrl: "/mock/avatar-2.svg",
     rankLabel: "星耀打手",
+    intro: "偏爱新手带打，会讲思路不会只报点。（占位文案）",
+    gameIds: ["g-delta"],
+    regions: ["手游"],
+    serviceTags: ["陪练", "新手带打"],
     available: true,
+    unavailableReason: "",
+    completedOrderCount: 29,
+    rating: 5,
+    tipsCount: 4,
+    reviewCount: 1,
+    sortOrder: 20,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-2-r1",
+        nickname: "日落（占位）",
+        rating: 5,
+        content: "讲得很细，第二把就能自己走了。（Mock 评价）",
+        createdAt: reviewDaysAgo(2),
+      },
+    ],
   },
   {
     id: "cp-3",
-    name: "老K（占位）",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "老K（占位）",
     avatarUrl: "/mock/avatar-3.svg",
     rankLabel: "王者打手",
+    intro: "无畏契约排位常驻，端游只打排位。（占位文案）",
+    gameIds: ["g-valorant"],
+    regions: ["端游"],
+    serviceTags: ["上分", "语音开黑"],
     available: true,
+    unavailableReason: "",
+    // 没有任何评价：详情页要能显示「暂无评分」，而不是用 0 分冒充
+    completedOrderCount: 31,
+    rating: null,
+    tipsCount: 0,
+    reviewCount: 0,
+    sortOrder: 30,
+    enabled: true,
+    reviews: [],
   },
   {
     id: "cp-4",
-    name: "临时工（占位）",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "临时工（占位）",
     avatarUrl: "/mock/avatar-4.svg",
     rankLabel: "休息中",
+    intro: "接单时间不固定，来之前先问一句。（占位文案）",
+    gameIds: ["g-delta"],
+    regions: ["手游"],
+    serviceTags: ["护航"],
     available: false,
+    unavailableReason: "该陪玩当前休息中，暂不接单",
+    completedOrderCount: 12,
+    rating: 4.1,
+    tipsCount: 2,
+    reviewCount: 2,
+    sortOrder: 40,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-4-r1",
+        nickname: "叶缘（占位）",
+        rating: 4,
+        content: "打完了，中间换过一次大区。（Mock 评价）",
+        createdAt: reviewDaysAgo(9),
+      },
+      {
+        id: "cp-4-r2",
+        nickname: "阿柴（占位）",
+        rating: 4,
+        content: "还行，回复稍慢。（Mock 评价）",
+        createdAt: reviewDaysAgo(38),
+      },
+    ],
+  },
+  {
+    id: "cp-5",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "有目•凌晨三点还在打巴克什的占位陪玩（占位）",
+    avatarUrl: "/mock/avatar-1.svg",
+    rankLabel: "钻石打手",
+    intro:
+      "夜里在线，白天大概率在睡。三角洲行动机密单打了两年，巴克什、长弓、航天基地都能带；无畏契约端游排位也接，语音优先。不接加急，打不完的单会提前说清楚，不会拖着不做。（占位长文案，用于验证长昵称与长自我介绍在列表卡片、详情页和结算页选择面板里的换行与截断）",
+    gameIds: ["g-delta", "g-valorant"],
+    regions: ["手游", "端游"],
+    serviceTags: ["护航", "陪练", "语音开黑"],
+    available: true,
+    unavailableReason: "",
+    completedOrderCount: 306,
+    rating: 4.6,
+    tipsCount: 57,
+    reviewCount: 2,
+    sortOrder: 50,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-5-r1",
+        nickname: "晚风（占位）",
+        rating: 5,
+        content: "凌晨两点还接单，很难得。（Mock 评价）",
+        createdAt: reviewDaysAgo(1),
+      },
+      {
+        id: "cp-5-r2",
+        nickname: "拾光（占位）",
+        rating: 4,
+        content: "单子有点多，等了一会儿。（Mock 评价）",
+        createdAt: reviewDaysAgo(16),
+      },
+    ],
+  },
+  {
+    id: "cp-6",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "星野（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    rankLabel: "星耀打手",
+    intro: "只打无畏契约，排位护航为主。（占位文案）",
+    gameIds: ["g-valorant"],
+    regions: ["端游"],
+    serviceTags: ["护航", "上分"],
+    available: false,
+    unavailableReason: "该陪玩本周已排满，暂不接单",
+    completedOrderCount: 74,
+    rating: 4.9,
+    tipsCount: 13,
+    reviewCount: 1,
+    sortOrder: 60,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-6-r1",
+        nickname: "云开（占位）",
+        rating: 5,
+        content: "很稳，一晚上上了两段。（Mock 评价）",
+        createdAt: reviewDaysAgo(6),
+      },
+    ],
+  },
+  {
+    id: "cp-7",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "云开（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    rankLabel: "已下线",
+    intro: "暂时不再接单，资料留档。（占位文案）",
+    gameIds: ["g-delta"],
+    regions: ["手游"],
+    serviceTags: ["护航"],
+    available: false,
+    unavailableReason: "该陪玩已下线",
+    completedOrderCount: 58,
+    rating: 4.4,
+    tipsCount: 9,
+    reviewCount: 1,
+    sortOrder: 70,
+    // 已下架：不进公开列表，直链详情只有只读资料页
+    enabled: false,
+    reviews: [
+      {
+        id: "cp-7-r1",
+        nickname: "听澜（占位）",
+        rating: 4,
+        content: "已经是最后一单了。（Mock 评价）",
+        createdAt: reviewDaysAgo(52),
+      },
+    ],
+  },
+  {
+    id: "cp-8",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "归舟（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    rankLabel: "青铜打手",
+    intro: "刚开始接单，手游端游都学。（占位文案）",
+    gameIds: ["g-delta"],
+    regions: ["手游", "端游"],
+    serviceTags: ["陪练"],
+    available: true,
+    unavailableReason: "",
+    // 刚接单：既没有评价也没有鸡腿，列表卡片要能显示「暂无评分」
+    completedOrderCount: 3,
+    rating: null,
+    tipsCount: 0,
+    reviewCount: 0,
+    sortOrder: 80,
+    enabled: true,
+    reviews: [],
+  },
+  {
+    id: "cp-9",
+    userId: null,
+    applicationId: null,
+    removedAt: null,
+    displayName: "泊野（占位）",
+    avatarUrl: "/mock/avatar-2.svg",
+    rankLabel: "王者打手",
+    intro:
+      "三角洲行动全职护航，机密单、开业特惠单都接；主打不换人、不加价、不拖单。每天在线 10 小时以上，语音全程可开。新手可以先聊两句再决定要不要下单，不勉强。（占位长文案）",
+    gameIds: ["g-delta", "g-valorant"],
+    regions: ["手游", "端游"],
+    serviceTags: ["护航", "上分", "语音开黑", "新手带打"],
+    available: true,
+    unavailableReason: "",
+    completedOrderCount: 512,
+    rating: 4.9,
+    tipsCount: 96,
+    reviewCount: 4,
+    sortOrder: 90,
+    enabled: true,
+    // 4 条评价 > 详情页上限，用于验证「只展示前几条」的提示确实会出现
+    reviews: [
+      {
+        id: "cp-9-r1",
+        nickname: "老板A（占位）",
+        rating: 5,
+        content: "第三次找他了，还是稳。（Mock 评价）",
+        createdAt: reviewDaysAgo(3),
+      },
+      {
+        id: "cp-9-r2",
+        nickname: "老板B（占位）",
+        rating: 5,
+        content: "全程没换人，体验很好。（Mock 评价）",
+        createdAt: reviewDaysAgo(13),
+      },
+      {
+        id: "cp-9-r3",
+        nickname: "星野（占位）",
+        rating: 5,
+        content: "响应很快，半夜也在。（Mock 评价）",
+        createdAt: reviewDaysAgo(21),
+      },
+      {
+        id: "cp-9-r4",
+        nickname: "阿柴（占位）",
+        rating: 4,
+        content: "价格没变，速度稍慢一点。（Mock 评价）",
+        createdAt: reviewDaysAgo(45),
+      },
+    ],
   },
 ];
 

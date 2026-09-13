@@ -383,7 +383,7 @@ export default function CheckoutForm({
             <span className="block text-[14px] font-medium text-ink">推荐陪玩</span>
             <span className="block truncate text-[12px] text-ink-3">
               {companion
-                ? `${companion.name} · ${companion.rankLabel}`
+                ? `${companion.displayName} · ${companion.rankLabel}`
                 : "未选择，可由平台后续接单或分配"}
             </span>
           </span>

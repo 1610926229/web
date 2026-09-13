@@ -33,7 +33,18 @@ export type MockStoreName =
   | "tip"
   | "suggestion"
   | "level"
-  | "agreement";
+  | "agreement"
+  | "companionApplication"
+  /**
+   * 护航（陪玩）名单。P8A 起这份名单**可写**（审核通过会往里加记录、后台会改资料），
+   * 因此它从「只读种子」变成了一个真正的仓储——但名单仍然只有这一份。
+   */
+  | "companion"
+  /** 用户资格（多角色结构）。见 `lib/data/qualificationRepository.ts`。 */
+  | "qualification"
+  /** 管理操作审计记录（只由服务端写入）。见 `lib/data/adminAuditRepository.ts`。 */
+  | "adminAudit"
+  | "admin";
 
 const PREFIX = "__youmuMockStore__";
 

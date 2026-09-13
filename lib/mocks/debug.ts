@@ -28,9 +28,10 @@ export type MockSurface = "server" | "http";
  * 空数据注入的作用范围。首页各模块是独立的视觉段落，因此空态也按模块区分，
  * 而不是「一处为空 = 整页为空」。
  *
- * `levels` / `agreements` / `rankings` 不属于首页，而是给消费等级、协议与排行榜
- * 三个页面用的：它们的空态是**整块功能没有数据**（等级配置为空、协议全部未配置、
- * 榜单无人上榜），既不可能靠改一条数据造出来，也不该为了验收去删预置数据。
+ * `levels` / `agreements` / `rankings` / `companions` 不属于首页，而是给消费等级、
+ * 协议、排行榜与陪玩列表四个页面用的：它们的空态是**整块功能没有数据**
+ * （等级配置为空、协议全部未配置、榜单无人上榜、陪玩名单为空），
+ * 既不可能靠改一条数据造出来，也不该为了验收去删预置数据。
  */
 export type MockEmptyScope =
   | "none"
@@ -41,6 +42,8 @@ export type MockEmptyScope =
   | "levels"
   | "agreements"
   | "rankings"
+  | "companions"
+  | "applications"
   | "all";
 
 const SCOPE_VALUES: readonly MockEmptyScope[] = [
@@ -51,6 +54,9 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "levels",
   "agreements",
   "rankings",
+  "companions",
+  // 管理后台概览：把申请与护航两组数字分别清零，用来验证「全部为 0」时的安全降级
+  "applications",
   "all",
 ];
 

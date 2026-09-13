@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach, beforeEach } from "node:test";
+import { resolveSource } from "./app-path.mjs";
 import {
   AGREEMENT_MOCK_NOTICE,
   AGREEMENT_TYPES,
@@ -221,7 +222,8 @@ test("只读：仓储没有写方法，接口只有 GET，客户端没有编辑�
     "app/agreements/page.tsx",
     "components/agreements/AgreementTabs.tsx",
   ]) {
-    const code = stripComments(readFileSync(file, "utf8"));
+    // resolveSource：`app/...` 按路由找（路由组已忽略），`components/...` 原样
+    const code = stripComments(readFileSync(resolveSource(file), "utf8"));
     assert.equal(code.includes("lib/mocks"), false, `${file} 不该引用 lib/mocks`);
     assert.equal(code.includes("lib/data/"), false, `${file} 不该直接引用 lib/data`);
     // 不使用不受控 HTML
@@ -230,7 +232,7 @@ test("只读：仓储没有写方法，接口只有 GET，客户端没有编辑�
   }
 
   // 页面不写死条款正文：正文只能来自数据层
-  const pageCode = stripComments(readFileSync("app/agreements/page.tsx", "utf8"));
+  const pageCode = stripComments(readFileSync(resolveSource("app/agreements/page.tsx"), "utf8"));
   for (const clause of ["争议解决", "免责", "不可抗力", "账号注册"]) {
     assert.equal(pageCode.includes(clause), false, `页面里写死了条款正文：${clause}`);
   }

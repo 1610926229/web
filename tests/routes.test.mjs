@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MINE_GRID_ENTRIES, MINE_PRIMARY_ENTRIES } from "../lib/constants/mine.ts";
 import { homeSeed } from "../lib/mocks/fixtures/seed.ts";
+import { findAppFile, hasAppFile } from "./app-path.mjs";
 
 /**
  * 路由表与入口地址的持续测试。
@@ -61,6 +62,23 @@ function pathnameOf(href) {
   return href.split("?")[0];
 }
 
+/**
+ * 从一个目录往上列出**整条祖先链**（含自身），直到 `app/` 为止。
+ *
+ * 用来查「有没有 `loading.tsx` 罩在这一段上面」这类问题：Suspense 边界的作用范围是整棵
+ * 子树，只看本层会漏掉上提的那一层，而状态码正是在那一层被定死的。
+ */
+function ancestorDirs(dir) {
+  const levels = [];
+  let current = dir;
+  while (current.startsWith(APP_DIR)) {
+    levels.push(current);
+    if (current === APP_DIR) break;
+    current = path.dirname(current);
+  }
+  return levels;
+}
+
 /** 去掉注释后再做「源码里不该出现某标识」的断言：文档注释里说明「本页没有 X」不算出现 X。 */
 function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
@@ -79,7 +97,9 @@ test("扫描器本身正确：能找到已知路由、并排除动态段与不�
 test("陪玩列表用复数 /companions，单数 /companion 不再是页面路由", () => {
   assert.equal(ROUTES.has("/companions"), true, "缺少 /companions 页面");
   assert.equal(ROUTES.has("/companion"), false, "/companion（单数）不应再是页面路由");
-  assert.equal(existsSync(path.join(APP_DIR, "companion")), false, "残留了单数路由目录");
+  // hasAppFile 忽略路由组：页面搬进 `(mobile)` 之后，写死 `app/companion` 这种检查
+  // 会因为「目录压根不在这儿」而永远通过，变成一条不起作用的断言。
+  assert.equal(hasAppFile("companion/page.tsx"), false, "残留了单数路由目录");
 });
 
 test("「我的」页每个入口地址都真实存在，且寻找陪玩指向 /companions", () => {
@@ -133,9 +153,10 @@ test("/join 需要登录：套用统一 RequireAuth，导航留在鉴权之外",
   assert.ok(source.includes("RequireAuth"), "/join 必须走统一鉴权，而不是自己写一套登录判断");
   // 导航栏必须在鉴权之外渲染：未登录时也要有返回入口，不能把人困在登录页上
   assert.ok(source.includes("<NavBar"), "导航栏应在 RequireAuth 之外渲染");
-  // 仍只是占位：不提前开发正式申请表单
-  assert.ok(source.includes("PlaceholderPage"));
-  assert.equal(source.includes("useState"), false, "本阶段不该出现申请表单");
+  assert.ok(
+    source.indexOf("<NavBar") < source.indexOf("<RequireAuth"),
+    "/join 的导航栏应在 RequireAuth 之外渲染",
+  );
   // 二级页面：不在 (tabs) 里，因此不会出现底部 TabBar
   assert.equal(ROUTES.get("/join").includes("(tabs)"), false);
 });
@@ -190,8 +211,8 @@ test("P6B 的七个页面全部存在，且都是「需登录 + 顶部返回 + �
 });
 
 test("评价表单按订单地址进入：/reviews/new/[orderId] 是动态段，改由数据层覆盖资格判定", () => {
-  const file = path.join(APP_DIR, "reviews", "new", "[orderId]", "page.tsx");
-  assert.equal(existsSync(file), true, "缺少 /reviews/new/[orderId] 页面");
+  // 动态段不是入口地址，进不了 ROUTES 表，只能按路径找；findAppFile 会忽略路由组
+  const file = findAppFile("reviews/new/[orderId]/page.tsx");
 
   const source = readFileSync(file, "utf8");
   assert.ok(source.includes("RequireAuth"));
@@ -251,7 +272,10 @@ test("P7A 三个页面都不是占位页：入口已经落到真实实现上", (
     assert.ok(code.includes("<NavBar"), `${route} 应有顶部返回导航`);
 
     // 错误边界：取数失败时给出「返回」与「重试」，而不是白屏
-    const errorFile = path.join(APP_DIR, route.slice(1), "error.tsx");
+    // 边界就找页面自己所在的那一段，而不是把地址拼回目录名——
+    // 路由组不产生 URL 段，按地址拼出来的路径根本不存在。
+    const dir = path.dirname(file);
+    const errorFile = path.join(dir, "error.tsx");
     assert.equal(existsSync(errorFile), true, `${route} 缺少 error.tsx`);
     const errorSource = readFileSync(errorFile, "utf8");
     assert.ok(
@@ -266,7 +290,7 @@ test("P7A 三个页面都不是占位页：入口已经落到真实实现上", (
     // 加载边界不是可选项：这三个页面在渲染前先 `await` 取数，没有同段的 Suspense 边界时，
     // 取数失败发生在外壳阶段，React 无法恢复，响应会退化成 500（HTTP 冒烟测试实测）。
     // 有了它，响应保持 200，错误由上面的 error.tsx 接管。
-    const loadingFile = path.join(APP_DIR, route.slice(1), "loading.tsx");
+    const loadingFile = path.join(dir, "loading.tsx");
     assert.equal(existsSync(loadingFile), true, `${route} 缺少 loading.tsx`);
     assert.ok(
       readFileSync(loadingFile, "utf8").includes("<NavBar"),
@@ -335,19 +359,20 @@ test("排行榜的六个周期都是真实页签：没有「尚未开放」，�
 });
 
 test("/suggestions 有了自己的错误边界：不再落回全局错误页或白屏", () => {
+  // 边界与页面同段，因此从页面自己的位置推出来，而不是把地址拼回目录名
+  const dir = path.dirname(ROUTES.get("/suggestions"));
   for (const name of ["error.tsx", "loading.tsx"]) {
-    const file = path.join(APP_DIR, "suggestions", name);
-    assert.equal(existsSync(file), true, `/suggestions 缺少 ${name}`);
+    assert.equal(existsSync(path.join(dir, name)), true, `/suggestions 缺少 ${name}`);
   }
 
-  const errorSource = readFileSync(path.join(APP_DIR, "suggestions", "error.tsx"), "utf8");
+  const errorSource = readFileSync(path.join(dir, "error.tsx"), "utf8");
   // 与其它二级列表页一致：统一 ErrorState（含「重试」）+ 顶部返回
   assert.ok(errorSource.includes("ErrorState"));
   assert.ok(errorSource.includes("<NavBar") && errorSource.includes("showBack"));
   // 二级页面：不该带上底部 TabBar（注释里说明「这里没有 TabBar」不算出现）
   assert.equal(stripComments(errorSource).includes("TabBar"), false);
 
-  const loadingSource = readFileSync(path.join(APP_DIR, "suggestions", "loading.tsx"), "utf8");
+  const loadingSource = readFileSync(path.join(dir, "loading.tsx"), "utf8");
   assert.ok(loadingSource.includes("<NavBar"), "加载态也要保留返回入口");
   assert.equal(stripComments(loadingSource).includes("TabBar"), false);
 
@@ -404,4 +429,329 @@ test("不存在指向 /placeholder?title=考核入驻 的入口", () => {
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+// ————————————————— P7B：寻找陪玩 / 护航入驻申请 —————————————————
+
+/** P7B 的四个页面，以及它们各自的性质。 */
+const P7B_PAGES = [
+  // 陪玩名单与陪玩资料是浏览型内容：游客可访问
+  { path: "/companions", requiresAuth: false },
+  // /join 与 /join/status 是私有数据：必须登录
+  { path: "/join", requiresAuth: true },
+  { path: "/join/status", requiresAuth: true },
+];
+
+test("P7B 四个页面都不是占位页，且都是「顶部返回 + 无 TabBar」的二级页面", () => {
+  for (const { path: route, requiresAuth } of P7B_PAGES) {
+    const file = ROUTES.get(route);
+    assert.ok(file, `缺少 ${route} 页面`);
+
+    const code = stripComments(readFileSync(file, "utf8"));
+    assert.equal(code.includes("PlaceholderPage"), false, `${route} 还是占位页`);
+
+    // 二级页面：不在 (tabs) 内，因此不会带上底部 TabBar
+    assert.equal(file.includes("(tabs)"), false, `${route} 不该在一级 Tab 里`);
+    assert.ok(code.includes("<NavBar"), `${route} 应有顶部返回导航`);
+
+    if (requiresAuth) {
+      assert.ok(code.includes("RequireAuth"), `${route} 必须走统一鉴权`);
+      assert.ok(
+        code.indexOf("<NavBar") < code.indexOf("<RequireAuth"),
+        `${route} 的导航栏应在 RequireAuth 之外渲染`,
+      );
+    } else {
+      // 浏览型页面不读会话：不该因为这次改动被一起保护起来
+      assert.equal(code.includes("RequireAuth"), false, `${route} 是浏览型页面，不该要求登录`);
+    }
+
+    // 边界就找**页面自己所在的那一段**（`page.tsx` 的兄弟文件），而不是把地址拼回目录名：
+    // 路由组（如 `app/companions/(list)`）不产生 URL 段，按地址拼出来的路径根本不存在。
+    const dir = path.dirname(file);
+
+    // 错误边界：取数失败时给出「返回」与「重试」，而不是白屏
+    const errorFile = path.join(dir, "error.tsx");
+    assert.equal(existsSync(errorFile), true, `${route} 缺少 error.tsx`);
+    const errorSource = readFileSync(errorFile, "utf8");
+    assert.ok(errorSource.includes("ErrorState"), `${route} 的错误边界应复用统一 ErrorState`);
+    assert.ok(
+      errorSource.includes("<NavBar") && errorSource.includes("showBack"),
+      `${route} 的错误边界要有返回入口`,
+    );
+
+    // 加载边界不是可选项：页面在渲染前先 `await` 取数，没有同段的 Suspense 边界时，
+    // 取数失败发生在外壳阶段，React 无法恢复，响应会退化成 500（与 /rank、/suggestions 同理）。
+    const loadingFile = path.join(dir, "loading.tsx");
+    assert.equal(existsSync(loadingFile), true, `${route} 缺少 loading.tsx`);
+    assert.ok(
+      readFileSync(loadingFile, "utf8").includes("<NavBar"),
+      `${route} 的加载态应保留返回导航，加载时布局不跳`,
+    );
+  }
+});
+
+test("陪玩列表与详情分成两个同级的路由段：加载边界收在列表自己那一段里", () => {
+  // 位置一律从页面自己推出来（ROUTES 扫出来的就是真实路径），不写死 `app/companions`：
+  // 用户端整体搬进 `(mobile)` 之后，写死路径的断言会连整段逻辑一起失效——
+  // 检查的是一个并不存在的位置，然后「通过」。
+  const listDir = path.dirname(ROUTES.get("/companions"));
+  const segmentDir = path.dirname(listDir); // companions 这一层
+  const detailDir = path.join(segmentDir, "[id]");
+
+  assert.equal(path.basename(listDir), "(list)", "陪玩列表应当待在路由组 (list) 里");
+  assert.equal(existsSync(detailDir), true, "陪玩详情应当是列表的同级段");
+
+  // 分家的理由：列表需要加载边界（否则取数失败会退化成 500），
+  // 而详情一旦被它罩住，「不存在的陪玩」就会变成一屏 200 的 404 文案。
+  for (const name of ["page.tsx", "loading.tsx", "error.tsx"]) {
+    assert.equal(existsSync(path.join(listDir, name)), true, `列表段缺少 ${name}`);
+  }
+  // 列表那三个文件不该被上提到 companions 这一层：上提一层就等于罩住 [id]
+  for (const name of ["page.tsx", "loading.tsx", "error.tsx"]) {
+    assert.equal(
+      existsSync(path.join(segmentDir, name)),
+      false,
+      `${path.relative(ROOT, path.join(segmentDir, name))} 不该存在：上提一层会罩住 [id]，让真实 404 变成 200`,
+    );
+  }
+});
+
+test("陪玩详情是动态段：不存在走 notFound()，且没有 loading 边界（否则状态码会变成 200）", () => {
+  const dir = path.dirname(findAppFile("companions/[id]/page.tsx"));
+
+  for (const name of ["page.tsx", "error.tsx", "not-found.tsx"]) {
+    assert.equal(existsSync(path.join(dir, name)), true, `陪玩详情缺少 ${name}`);
+  }
+
+  // 与 `app/product/[id]` 一致：加了 loading.tsx 之后外壳会先以 200 发出，
+  // 随后到达的 notFound() 只能改页面内容、改不了已经发出的状态码——
+  // 「不存在的陪玩」会变成一屏 200 的 404 文案。这里选状态码正确的那一边。
+  //
+  // 检查的是**整条祖先链**而不只是这一层：真正决定状态码的是「谁的 Suspense 边界罩住了
+  // 这次取数」，兄弟目录 `app/companions/(list)/loading.tsx` 一度就是这样把详情罩住的
+  // （实测 /companions/cp-not-exist 返回 200）。只查本层查不出这类上提。
+  for (const level of ancestorDirs(dir)) {
+    assert.equal(
+      existsSync(path.join(level, "loading.tsx")),
+      false,
+      `${path.relative(ROOT, level)} 的 loading.tsx 罩住了陪玩详情：不存在的 ID 会返回 200 而不是 404`,
+    );
+  }
+
+  const code = stripComments(readFileSync(path.join(dir, "page.tsx"), "utf8"));
+  // 不存在 → 项目统一的 404；不在名单里的陪玩仍然能打开详情，因此这里只对 null 生效
+  assert.ok(code.includes("notFound()"), "不存在的陪玩 ID 应走项目统一的 404");
+  assert.ok(code.includes("getCompanionDetail"), "详情必须由服务端取数");
+  // 详情页没有下单能力：不出现任何创建订单 / 支付请求的调用
+  for (const forbidden of ["createPaymentRequest", "createOrder", "confirmPaymentRequest"]) {
+    assert.equal(code.includes(forbidden), false, `陪玩详情不该出现 ${forbidden}`);
+  }
+
+  // 不存在的 ID 与「取数失败」是两件事，不能合并成一屏
+  const notFoundSource = readFileSync(path.join(dir, "not-found.tsx"), "utf8");
+  assert.ok(notFoundSource.includes("EmptyState"));
+  assert.ok(notFoundSource.includes('href="/companions"'), "404 页应给一条回到名单的退路");
+});
+
+test("不在名单里的陪玩是只读资料页：没有选择入口，且靠服务端的 listed 与「暂不可用」区分", () => {
+  const constants = stripComments(
+    readFileSync(path.join(ROOT, "lib", "constants", "companions.ts"), "utf8"),
+  );
+  // 「下架」与「在架但暂不可用」两种情况的 available 都是 false，只能靠 listed 区分。
+  // 规则只有一处定义：`isCompanionListed()`（`enabled && removedAt === null`）——
+  // 公开列表的筛选、详情与结算都调它，各自写一遍迟早会分叉。
+  assert.ok(
+    constants.includes("companion.enabled && companion.removedAt === null"),
+    "listed 必须来自仓储的上架标记",
+  );
+  assert.ok(
+    constants.includes("listed: isCompanionListed(companion)"),
+    "详情的 listed 必须由 isCompanionListed() 算，不能另起一套判断",
+  );
+  assert.ok(
+    constants.includes("selectable: isCompanionListed(companion) && companion.available"),
+    "能不能选必须由服务端算好",
+  );
+
+  const code = stripComments(
+    readFileSync(path.join(ROOT, "components", "companions", "CompanionDetailView.tsx"), "utf8"),
+  );
+  assert.ok(code.includes("companion.listed"), "详情组件应按服务端给的 listed 分支");
+  // 只读说明必须写清「没有选择或下单入口」，而不是给一个灰按钮
+  assert.ok(constants.includes("没有选择或下单入口"), "只读页的说明文案不完整");
+  assert.ok(code.includes("COMPANION_DETAIL_DISABLED_NOTICE"), "只读页应给出这段说明");
+});
+
+test("列表项与详情的共有字段只有一份：同一个字段不会在两处各写一遍", () => {
+  const source = stripComments(
+    readFileSync(path.join(ROOT, "lib", "constants", "companions.ts"), "utf8"),
+  );
+
+  assert.ok(source.includes("toCompanionListItem"), "缺少列表项 DTO 转换");
+  assert.ok(source.includes("toCompanionDetail"), "缺少详情 DTO 转换");
+  // 一个定义 + 两处引用：两份 DTO 从 toCompanionBase 出发，差别只有自我介绍与评价。
+  // 不共用的话，昵称 / 头像 / 可用状态会在两处各拼一遍，迟早出现「两处写法不一样」。
+  assert.equal(
+    (source.match(/toCompanionBase\(/g) ?? []).length,
+    3,
+    "列表项与详情应当共用同一份共有字段（一个定义 + 两处引用）",
+  );
+  assert.ok(source.includes("...toCompanionBase(companion, gameNameById)"));
+});
+
+test("陪玩的选择交互不产生任何业务结果：不发请求、不写存储、不进结算页", () => {
+  const file = path.join(ROOT, "components", "companions", "CompanionDetailView.tsx");
+  assert.equal(existsSync(file), true, "缺少陪玩详情组件");
+
+  const code = stripComments(readFileSync(file, "utf8"));
+
+  // 不创建订单、不创建支付请求、不写入陪玩关系仓储：连可以调用的入口都不该有
+  for (const forbidden of [
+    "createPaymentRequest",
+    "createOrder",
+    "confirmPaymentRequest",
+    "fetchCompanions",
+    "companionsHttp",
+    "apiPost",
+    "fetch(",
+  ]) {
+    assert.equal(code.includes(forbidden), false, `选择陪玩不该调用 ${forbidden}`);
+  }
+
+  // 不写 localStorage / sessionStorage / Cookie
+  for (const forbidden of ["localStorage", "sessionStorage", "document.cookie"]) {
+    assert.equal(code.includes(forbidden), false, `陪玩详情不该写 ${forbidden}`);
+  }
+
+  // 不改动 P4 结算页的地址：连跳转都不该有
+  assert.equal(code.includes("/checkout"), false, "陪玩详情不该把用户带进结算页");
+  assert.equal(code.includes("companionId"), false, "陪玩 ID 不该被注入任何订单 / 支付参数");
+
+  // 文案必须说明「绑定规则待确认」，而不是声称已经预约 / 锁定 / 分配。
+  // 只看常量本身（去掉注释）：注释里写「不使用『已预约』这类词」不算文案里出现了它。
+  assert.ok(code.includes("COMPANION_SELECTION_NOTICE"), "缺少「绑定规则待确认」的说明");
+  const notice = stripComments(
+    readFileSync(path.join(ROOT, "lib", "constants", "companions.ts"), "utf8"),
+  );
+  assert.ok(notice.includes("待确认"));
+  for (const claim of ["已预约", "已锁定", "已分配", "预约成功", "锁定成功"]) {
+    assert.equal(notice.includes(claim), false, `说明文案里出现了未确认的结论：${claim}`);
+  }
+});
+
+test("入驻申请表单不使用 maxLength 静默截断，且游戏选项来自服务端目录", () => {
+  const file = path.join(ROOT, "components", "companions", "CompanionApplicationForm.tsx");
+  assert.equal(existsSync(file), true, "缺少入驻申请表单组件");
+
+  const code = stripComments(readFileSync(file, "utf8"));
+  // 超限要能继续输入并给出错误，不能用 maxLength 把字挡住
+  assert.equal(code.includes("maxLength"), false, "输入框不该用 maxLength 静默截断");
+  assert.ok(code.includes("countCharacters"), "字数要用全站统一的口径");
+  // 无障碍：出错字段可被读屏识别
+  assert.ok(code.includes("aria-invalid"), "表单缺少 aria-invalid");
+  assert.ok(code.includes("aria-describedby"), "表单缺少 aria-describedby");
+  assert.ok(code.includes('role="alert"'), "表单缺少 role=\"alert\"");
+  // 防重不能只靠按钮禁用：还要有同步闸门与幂等键
+  assert.ok(code.includes("submittingRef"), "缺少同步提交闸门");
+  assert.ok(code.includes("crypto.randomUUID"), "缺少幂等键");
+  assert.ok(code.includes('router.replace("/join/status")'), "提交成功后应 replace 到进度页");
+
+  // 申请页面的游戏选项来自服务层，且服务层读的是真实游戏目录
+  const service = readFileSync(
+    path.join(ROOT, "lib", "services", "companionApplications.ts"),
+    "utf8",
+  );
+  assert.ok(service.includes("listCompanionApplicationGameOptions"));
+  assert.ok(service.includes("getGames()"), "游戏选项必须来自真实游戏目录");
+});
+
+test("陪玩组件不引用 Mock / 数据层，且客户端只引用 *Http 取数模块", () => {
+  const files = [];
+  for (const file of walk(path.join(ROOT, "components", "companions"))) {
+    if (file.endsWith(".tsx") || file.endsWith(".ts")) files.push(file);
+  }
+  assert.ok(files.length >= 5, "陪玩组件目录文件过少，检查是否扫错目录");
+
+  for (const file of files) {
+    const code = stripComments(readFileSync(file, "utf8"));
+    for (const forbidden of ["@/lib/mocks", "@/lib/data"]) {
+      assert.equal(
+        code.includes(forbidden),
+        false,
+        `${path.basename(file)} 引用了 ${forbidden}：Mock 层与内存存储会被打进浏览器产物`,
+      );
+    }
+    // 种子数据与仓储实体也不能出现在客户端组件里
+    for (const forbidden of ["companionApplicationSeed", "companionSeed", "getMockStore"]) {
+      assert.equal(
+        code.includes(forbidden),
+        false,
+        `${path.basename(file)} 直接引用了 ${forbidden}`,
+      );
+    }
+  }
+
+  // 服务端模块与浏览器模块分开：客户端只能引用 *Http 那一个，或只取类型
+  for (const file of files) {
+    const code = stripComments(readFileSync(file, "utf8"));
+    for (const line of code.split("\n")) {
+      if (!line.includes('from "@/lib/services/')) continue;
+      assert.ok(
+        line.includes("Http\"") || line.includes("import type"),
+        `${path.basename(file)} 引用了服务端服务模块：${line.trim()}`,
+      );
+    }
+  }
+});
+
+test("陪玩与入驻的路由地址没有第二种写法", () => {
+  // 单数 /companion 不是页面路由，也没有残留目录
+  assert.equal(ROUTES.has("/companion"), false);
+  assert.equal(hasAppFile("companion/page.tsx"), false, "残留了单数路由目录");
+
+  // 入驻进度是 /join/status，不是 /joinStatus 之类的第二种写法
+  assert.equal(ROUTES.has("/join/status"), true);
+  assert.equal(ROUTES.has("/joinStatus"), false);
+  assert.equal(ROUTES.has("/companion/join"), false);
+
+  // 二级页面不该出现底部 TabBar 组件
+  for (const { path: route } of P7B_PAGES) {
+    const code = stripComments(readFileSync(ROUTES.get(route), "utf8"));
+    assert.equal(code.includes("TabBar"), false, `${route} 不该渲染底部 TabBar`);
+  }
+});
+
+test("陪玩与入驻的 DTO 边界：公开接口不夹带身份与申请内容", () => {
+  const code = stripComments(
+    readFileSync(path.join(ROOT, "lib", "constants", "companions.ts"), "utf8"),
+  );
+
+  // 公开 DTO 的字段是显式列举的，而不是整体展开内部实体
+  // （`[...companion.regions]` 这种是数组拷贝，允许；要挡住的是 `{ ...companion }`）
+  assert.equal(
+    /\.\.\.\s*companion\s*[,}]/.test(code),
+    false,
+    "公开 DTO 不该整体展开内部实体",
+  );
+  for (const forbidden of [
+    "userId",
+    "openId",
+    "unionId",
+    "contactNote",
+    "reviewNote",
+    "evidence",
+  ]) {
+    assert.equal(
+      code.includes(forbidden),
+      false,
+      `公开陪玩 DTO 的构造里出现了不该外流的字段：${forbidden}`,
+    );
+  }
+
+  // 陪玩列表接口不要求登录，也不接受任何用户标识
+  const apiFile = path.join(APP_DIR, "api", "companions", "route.ts");
+  assert.equal(existsSync(apiFile), true, "缺少 GET /api/companions");
+  const apiCode = stripComments(readFileSync(apiFile, "utf8"));
+  assert.equal(apiCode.includes("requireUser"), false, "陪玩列表是公开内容，接口不该要求登录");
+  assert.ok(apiCode.includes("resolveCompanionListQuery"));
 });

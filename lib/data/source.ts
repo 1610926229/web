@@ -1,3 +1,4 @@
+import type { CompanionListQuery } from "@/lib/constants/companions";
 import type { Addon, Game, ProductListQuery } from "@/lib/types/catalog";
 import type { PageResult } from "@/lib/types/common";
 import type { Companion } from "@/lib/types/companion";
@@ -40,6 +41,22 @@ export type DataSource = {
   listCompanions(): Promise<Companion[]>;
   /** 单个陪玩；不存在返回 null。 */
   getCompanion(id: string): Promise<Companion | null>;
+  /**
+   * 公开陪玩列表查询：关键词、游戏、可用状态过滤 + 分页，按 `sortOrder` 排序。
+   *
+   * 与 `listCompanions()` 的差别只有两点，且都是**公开列表自己的规则**：
+   * 过滤在数据层完成（页面与接口都不自己过滤，否则两侧会慢慢长成两套行为），
+   * 并且**不下架的陪玩不出现在结果里**。结算页仍然用 `listCompanions()`——
+   * 那里要的是完整名单（含当前不可选的），语义不变。
+   */
+  queryCompanions(query: CompanionListQuery): Promise<PageResult<Companion>>;
+  /**
+   * 陪玩筛选栏的游戏选项。
+   *
+   * 取自**真实的游戏数据**，而不是在筛选栏里写死一份：写死两份迟早出现
+   * 「界面上能选、数据里筛不出任何结果」的空选项。
+   */
+  listCompanionGames(): Promise<Game[]>;
 };
 
 export function getDataSource(): DataSource {

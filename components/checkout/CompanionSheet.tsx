@@ -10,7 +10,11 @@ import type { Companion } from "@/lib/types/companion";
  * 订单会以「已付款 + 未指定陪玩」的状态等待后续接单或平台分配。
  *
  * 当前不可选的陪玩仍然列出并置灰：直接隐藏会让人以为名单里没有这个人，
- * 标注「暂不可选」既说明情况，也解释了为什么点不动（服务端同样会拒绝）。
+ * 给出**具体原因**（`unavailableReason`，与陪玩列表、陪玩详情页是同一句）既说明情况，
+ * 也解释了为什么点不动（服务端同样会拒绝）。
+ *
+ * 名单来自与公开陪玩列表**同一个数据源**，因此同一位陪玩在这里的昵称与头像
+ * 与列表 / 详情页完全一致；`displayName` 就是那个唯一的昵称字段。
  */
 export default function CompanionSheet({
   open,
@@ -93,10 +97,14 @@ export default function CompanionSheet({
                 />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[14px] font-medium text-ink">
-                    {companion.name}
+                    {companion.displayName}
                   </span>
                   <span className="block truncate text-[12px] text-ink-3">
-                    {companion.available ? companion.rankLabel : "暂不可选"}
+                    {/* 不可选时给出**具体原因**（陪玩列表与详情页用的是同一句），
+                        只说「暂不可选」会让人不知道为什么 */}
+                    {companion.available
+                      ? companion.rankLabel
+                      : companion.unavailableReason || "暂不可选"}
                   </span>
                 </span>
                 {active ? <span className="shrink-0 text-[12px] text-brand-red">已选择</span> : null}

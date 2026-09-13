@@ -90,6 +90,23 @@
   /* 小宫格图标统一用一个淡紫底 + 紫色描边，不逐项换色（见 components/mine/MineIcons.tsx） */
   --color-mine-grid-icon: #7c5cf6;
   --color-mine-grid-icon-soft: #f1ecff;
+
+  /*
+   * PC 管理后台配色。与用户端的浅色移动端风格刻意不同：后台是长时间盯着的桌面界面，
+   * 侧栏用深色底板把导航和内容分开，内容区沿用用户端的中性色（`--color-page` /
+   * `--color-surface`），因此两端的卡片、分割线观感是一致的。
+   *
+   * 与用户端同一套规矩：颜色只在这里定义，组件按类名引用，不写死色值。
+   */
+  --color-admin-sidebar: #232733;
+  --color-admin-sidebar-ink: #e8eaf0;
+  /* 侧栏次级文字（模块说明、分组标题）：深底上用降透明度更干净 */
+  --color-admin-sidebar-ink-soft: #9aa1b3;
+  --color-admin-sidebar-active: #343b4b;
+  /* 侧栏选中项左侧的竖条，与用户端「全部功能」标题同色 */
+  --color-admin-accent: #4a9ef0;
+  /* 内容区卡片描边：比用户端的 --color-line 略深，桌面大屏上 1px 太淡会看不见 */
+  --color-admin-line: #e2e5ea;
 }
 
 :root {

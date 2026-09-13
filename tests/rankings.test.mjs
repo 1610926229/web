@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach, beforeEach } from "node:test";
+import { resolveSource } from "./app-path.mjs";
 import {
   RANKING_MAX_PAGE_SIZE,
   RANKING_MIN_SPEND,
@@ -962,7 +963,7 @@ test("聚合在服务端且只读：浏览器端只有一个读函数，接口�
   assert.ok(routeCode.includes("getSessionUser"));
 
   // 榜单页同样是游客可访问的
-  const pageCode = stripComments(readFileSync("app/rank/page.tsx", "utf8"));
+  const pageCode = stripComments(readFileSync(resolveSource("app/rank/page.tsx"), "utf8"));
   assert.equal(pageCode.includes("RequireAuth"), false, "/rank 不该因为本次改动被保护起来");
   // 页面侧只做周期规范化，聚合仍然全部在服务端
   assert.ok(pageCode.includes("normalizeRankingPeriod"));

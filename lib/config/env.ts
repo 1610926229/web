@@ -23,6 +23,20 @@ export function isMockDebugEnabled(): boolean {
 }
 
 /**
+ * 模拟管理员登录是否启用（**独立于 `ENABLE_MOCK_AUTH`**）。
+ *
+ * 关闭时 `/api/admin/auth/mock-login` 返回 404，管理登录页不渲染「模拟管理员登录」按钮，
+ * 管理端 Cookie 也不再产生任何管理者身份——伪造该 Cookie 只会被引导回登录页。
+ *
+ * ⚠️ 与用户端开关**互不影响**：关掉这一个，普通用户的模拟登录照常可用；
+ * 关掉 `ENABLE_MOCK_AUTH` 也不会顺带关掉管理端。两个开关、两套会话、两套 Cookie，
+ * 「用户 Cookie 不能获得管理权限」「管理 Cookie 不能冒充普通用户」由此在开关层面也不会串。
+ */
+export function isMockAdminEnabled(): boolean {
+  return readFlag("ENABLE_MOCK_ADMIN");
+}
+
+/**
  * 模拟支付是否启用。
  *
  * 关闭时 `/api/payments/mock-confirm` 返回 404，支付结果页也不渲染「模拟支付成功/失败/取消」

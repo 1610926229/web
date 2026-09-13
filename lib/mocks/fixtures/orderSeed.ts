@@ -164,7 +164,8 @@ function build(input: PresetOrderInput): Order {
 
     companionId: companion ? companion.id : null,
     companion: companion
-      ? { id: companion.id, name: companion.name, avatarUrl: companion.avatarUrl }
+      // 订单快照的字段名保持 `name`（订单与评价的历史展示都按它读），值取陪玩唯一的昵称字段
+      ? { id: companion.id, name: companion.displayName, avatarUrl: companion.avatarUrl }
       : null,
   };
 }
