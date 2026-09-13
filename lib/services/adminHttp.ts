@@ -4,11 +4,31 @@ import {
   type AdminApplicationStatusFilter,
 } from "@/lib/constants/adminApplications";
 import {
+  type AdminCatalogRemovalFilter,
+  type AdminEnabledFilter,
+  type AdminRecommendedFilter,
+  type AdminStatusFilter,
+} from "@/lib/constants/adminCatalog";
+import { ADMIN_CATEGORY_PAGE_SIZE } from "@/lib/constants/adminCategories";
+import {
   ADMIN_COMPANION_PAGE_SIZE,
   type AdminCompanionRemovalFilter,
   type AdminCompanionStateFilter,
 } from "@/lib/constants/adminCompanions";
+import { ADMIN_PRODUCT_PAGE_SIZE } from "@/lib/constants/adminProducts";
 import type { AdminLoginResult, AdminSessionUser } from "@/lib/types/admin";
+import type {
+  AdminCategoryListData,
+  AdminCategoryListItem,
+  AdminCategoryProfilePatch,
+  AdminCategoryWriteResult,
+} from "@/lib/types/catalog";
+import type {
+  AdminProductListData,
+  AdminProductListItem,
+  AdminProductWriteResult,
+  ProductProfilePatch,
+} from "@/lib/types/product";
 import type {
   AdminCompanionDetail,
   AdminCompanionListData,
@@ -233,6 +253,224 @@ export function removeCompanion(
   idempotencyKey: string,
 ): Promise<AdminCompanionWriteResult> {
   return apiPost<AdminCompanionWriteResult>(`/api/admin/companions/${encodeURIComponent(id)}/remove`, {
+    idempotencyKey,
+  });
+}
+
+// ——————————————————————————— 类目管理 ———————————————————————————
+
+export type AdminCategoryListRequest = {
+  keyword?: string;
+  /** 空串表示全部游戏 */
+  gameId?: string;
+  enabled?: AdminEnabledFilter;
+  removal?: AdminCatalogRemovalFilter;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 取一页类目（含已停用与已移除——后台要能回查自己改过什么）。
+ *
+ * 只有筛选与分页参数：**没有任何身份信息**。调用方是谁由服务端会话决定，
+ * 不由地址栏声明（§九：客户端伪造字段必须被忽略）。
+ */
+export function fetchAdminCategories(
+  input: AdminCategoryListRequest = {},
+): Promise<AdminCategoryListData> {
+  const params = new URLSearchParams();
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.gameId) params.set("gameId", input.gameId);
+  if (input.enabled) params.set("enabled", input.enabled);
+  if (input.removal) params.set("removal", input.removal);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_CATEGORY_PAGE_SIZE));
+
+  return apiGet<AdminCategoryListData>(`/api/admin/categories?${params.toString()}`);
+}
+
+/** 取一条类目详情。**已移除的类目照样返回**：后台要能查到「这条类目被移除过」。 */
+export function fetchAdminCategory(id: string): Promise<AdminCategoryListItem> {
+  return apiGet<AdminCategoryListItem>(`/api/admin/categories/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 新建 / 编辑类目。
+ *
+ * 请求体是**整份白名单**：所属游戏、名称、排序、启用状态。
+ * `removedAt`、`createdAt`、`updatedAt`、`id` **没有可传的位置**——
+ * 一次普通保存因此永远无法把一条已移除的类目改回未移除。
+ */
+export function saveCategoryProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminCategoryProfilePatch,
+): Promise<AdminCategoryWriteResult> {
+  return apiPatch<AdminCategoryWriteResult>(`/api/admin/categories/${encodeURIComponent(id)}`, {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function createCategory(
+  idempotencyKey: string,
+  patch: AdminCategoryProfilePatch,
+): Promise<AdminCategoryWriteResult> {
+  return apiPost<AdminCategoryWriteResult>("/api/admin/categories", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+/**
+ * 启用 / 停用 / 移除，三个**窄写入**接口。
+ *
+ * ⚠️ 不是一个「把 enabled 改成 X」的接口：停用是「暂时不卖这一类」，
+ * 移除是「这一类不再存在」，两者的二次确认文案、后果与能否撤销都不同，
+ * 合成一个接口就会出现「点错按钮直接把类目移除掉」这种不可撤销的后果。
+ *
+ * ⚠️ 都是 `POST` + 幂等键：重复点击不会产生第二条审计，也不会刷新移除时间。
+ */
+export function enableCategory(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCategoryWriteResult> {
+  return apiPost<AdminCategoryWriteResult>(
+    `/api/admin/categories/${encodeURIComponent(id)}/enable`,
+    { idempotencyKey },
+  );
+}
+
+export function disableCategory(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCategoryWriteResult> {
+  return apiPost<AdminCategoryWriteResult>(
+    `/api/admin/categories/${encodeURIComponent(id)}/disable`,
+    { idempotencyKey },
+  );
+}
+
+/** 移除类目（软删除）。类目下还有未移除的商品时服务端会 400 拒绝。 */
+export function removeCategory(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCategoryWriteResult> {
+  return apiPost<AdminCategoryWriteResult>(
+    `/api/admin/categories/${encodeURIComponent(id)}/remove`,
+    { idempotencyKey },
+  );
+}
+
+// ——————————————————————————— 商品管理 ———————————————————————————
+
+export type AdminProductListRequest = {
+  keyword?: string;
+  /** 空串表示全部游戏 */
+  gameId?: string;
+  /** 空串表示全部类目 */
+  categoryId?: string;
+  status?: AdminStatusFilter;
+  recommended?: AdminRecommendedFilter;
+  removal?: AdminCatalogRemovalFilter;
+  page?: number;
+  pageSize?: number;
+};
+
+/** 取一页商品（含已下架与已移除——后台要能回查自己改过什么）。 */
+export function fetchAdminProducts(
+  input: AdminProductListRequest = {},
+): Promise<AdminProductListData> {
+  const params = new URLSearchParams();
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.gameId) params.set("gameId", input.gameId);
+  if (input.categoryId) params.set("categoryId", input.categoryId);
+  if (input.status) params.set("status", input.status);
+  if (input.recommended) params.set("recommended", input.recommended);
+  if (input.removal) params.set("removal", input.removal);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_PRODUCT_PAGE_SIZE));
+
+  return apiGet<AdminProductListData>(`/api/admin/products?${params.toString()}`);
+}
+
+/** 取一条商品详情（含规格数组，**包含已停用与已移除的规格**）。 */
+export function fetchAdminProduct(id: string): Promise<AdminProductListItem> {
+  return apiGet<AdminProductListItem>(`/api/admin/products/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 新建 / 编辑商品与它的全部规格（服务端**一次原子写入**）。
+ *
+ * ⚠️ 价格在这一层仍然是「元」文本：`ProductProfilePatch` 里的规格行带的是
+ * `priceYuan`，转成整数分由服务端做（`toProductDraft()` → `parsePriceYuanToFen()`）。
+ * 客户端**没有任何机会**直接提交「分」——否则一个前端浮点误差就能把 0.1 元写成 9 分。
+ *
+ * 这一点由类型本身保证：`ProductProfilePatch.specs` 是 `ProductSpecInput[]`，
+ * 里面根本没有一个叫 `price` 的字段。服务端再按 `priceYuan` 读回同一份文本，
+ * 两边读写的键逐个对得上。
+ *
+ * ⚠️ 规格行的 `id`：已存在的规格必须原样带回（它承载身份），
+ * 新行传空串由服务端签发。**数组下标不是身份**，因此调换顺序只会改
+ * `sortOrder`，不会把别人的价格挪到另一行上。
+ */
+export function createProduct(
+  idempotencyKey: string,
+  patch: ProductProfilePatch,
+): Promise<AdminProductWriteResult> {
+  return apiPost<AdminProductWriteResult>("/api/admin/products", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function saveProductProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: ProductProfilePatch,
+): Promise<AdminProductWriteResult> {
+  return apiPatch<AdminProductWriteResult>(`/api/admin/products/${encodeURIComponent(id)}`, {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+/**
+ * 上架 / 下架 / 移除，三个**窄写入**接口。
+ *
+ * ⚠️ 与 `saveProductProfile()` 分开：列表上的上下架按钮只应当改状态，
+ * 而不是「读出整条商品、拼一个完整 patch 再写回去」——后者会在两位管理员同时操作时，
+ * 用后写的那次把另一位刚改好的价格覆盖回旧值。
+ *
+ * ⚠️ **下架不是移除**：下架后直链仍然可打开并显示「已下架」（`/product/p-off-1`），
+ * 只是不能结算；移除才是软删除（直链 404、不进首页与分类页）。
+ * 两个动作在界面上是两个按钮、两段不同的二次确认文案。
+ */
+export function publishProduct(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminProductWriteResult> {
+  return apiPost<AdminProductWriteResult>(`/api/admin/products/${encodeURIComponent(id)}/publish`, {
+    idempotencyKey,
+  });
+}
+
+export function unpublishProduct(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminProductWriteResult> {
+  return apiPost<AdminProductWriteResult>(
+    `/api/admin/products/${encodeURIComponent(id)}/unpublish`,
+    { idempotencyKey },
+  );
+}
+
+/** 移除商品（软删除）。历史订单与历史收藏都保留，只是用户端不再可见。 */
+export function removeProduct(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminProductWriteResult> {
+  return apiPost<AdminProductWriteResult>(`/api/admin/products/${encodeURIComponent(id)}/remove`, {
     idempotencyKey,
   });
 }

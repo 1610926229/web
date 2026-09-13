@@ -22,6 +22,14 @@ import { mockDataSource } from "./mockSource";
  *   Browser ─→ lib/api/client.ts ─→ Route Handler ──┘
  *
  * 接入真实后端时，只需把下面的 `getDataSource()` 指向真实实现。
+ *
+ * ⚠️ **本契约是只读的**（P8B 起）。商品 / 类目从本阶段开始可写，但写入是后台的独立动作，
+ * 塞不进一组 `get*` 里：写入走 `lib/services/adminCategories.ts` / `adminProducts.ts`
+ * 与 `lib/data/adminCatalogTransaction.ts`（原子写入 + 审计）。
+ *
+ * 读取侧则完全委派：`mockSource` 的 `getGames` / `queryProducts` / `getProductDetail` /
+ * `getGame` / `listAddons` 全部转发给 `catalogRepository`，本文件不持有任何商品数据。
+ * 因此后台改完价格，用户端下一个请求就是新价——不是「同步过去」，而是本来就同一条记录。
  */
 export type DataSource = {
   getHomeData(): Promise<HomeData>;

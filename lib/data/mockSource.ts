@@ -1,40 +1,68 @@
 import {
-  addonSeed,
-  gameSeed,
-  homeSeed,
-  productSeed,
-  toCard,
-  toDetail,
-} from "@/lib/mocks/fixtures/seed";
+  productMatchesKeyword,
+  toProductCard,
+  toProductDetail,
+  toPublicGame,
+} from "@/lib/constants/catalog";
+import { addonSeed, homeSectionSeed } from "@/lib/mocks/fixtures/catalogSeed";
+import { homeSeed } from "@/lib/mocks/fixtures/seed";
+import { getCatalogRepository } from "./catalogRepository";
 import { getCompanionRepository } from "./companionRepository";
 import type { DataSource } from "./source";
 import { getUserRepository, toSessionUser } from "./userRepository";
 
 /**
- * Mock 数据源：直接读取进程内的种子数据，不经过任何网络。
+ * Mock 数据源：直接读取进程内的数据，不经过任何网络。
  *
  * ⚠️ 仅服务端使用，仅供开发阶段；接入真实后端时整个文件删除。
  * 这里不做故障注入（那属于传输层，由 `lib/mocks/debug.ts` 统一处理），
  * 也不做数据加工——数据源只负责「把数据取出来」。
  *
- * ⚠️ **陪玩名单从这里开始委派给 `companionRepository`**（P8A）：
- * 名单自本阶段起可写（审核通过会加记录、后台会改资料），而 `DataSource` 是只读契约，
- * 写不进一个「取数」接口里。委派之后，用户端列表 / 详情 / 结算页与后台读的
- * **仍然是同一份 Map**——不是「同步过去」，而是本来就是同一条记录。
- * 公开列表的可见性口径（下架与已移除不出现）也随之下沉到仓储，
- * 数据源这一层只是转发，不再自己 `filter(enabled)`——两处各写一遍迟早会分叉。
+ * ⚠️ **本文件已经不再持有任何商品数据**（P8B）。游戏 / 类目 / 商品 / 规格 / 增值服务
+ * 全部委派给 `catalogRepository`，陪玩名单委派给 `companionRepository`（P8A）。
+ *
+ * 这不是重构偏好，而是本阶段的核心要求：后台能改商品之后，「数据源里那份种子」
+ * 和「后台在改的那份数据」会立刻变成两份。首页显示旧价、后台显示新价，
+ * 而两边都觉得自己是对的——这类 bug 只有在用户投诉时才会被发现。
+ *
+ * 委派之后，用户端首页、分类页、商品详情、结算页与后台读的是**同一份 Map**：
+ * 后台改完价格，用户端下一个请求就是新价，不需要任何同步动作。
+ * 公开口径（哪些类目可见、哪些商品上架）也随之下沉到仓储与 `lib/constants/catalog.ts`，
+ * 数据源这一层只负责转发与拼接，不再自己 `filter(enabled)`——两处各写一遍迟早会分叉。
  */
 
 const DEFAULT_PAGE_SIZE = 4;
 
-/** 名称匹配：去首尾空格、忽略大小写。商品名称与价格是两个独立字段，这里只按名称匹配。 */
-function matchesKeyword(title: string, keyword: string): boolean {
-  return title.toLowerCase().includes(keyword.toLowerCase());
-}
-
 export const mockDataSource: DataSource = {
+  /**
+   * 首页数据。
+   *
+   * ⚠️ 商品分组**每次请求现拼**：种子 `homeSectionSeed` 里存的是商品 id，
+   * 这里拿 id 去商品仓储取当下的记录。
+   *
+   * 为什么不把商品直接写进种子：写进去的话，首页拿到的是「种子被复制那一刻」的价格与封面，
+   * 后台改价之后首页还显示旧价。不这么做的话还有一个更糟的后果——后台把一件商品下架或
+   * 软删除之后，首页那天晚上还在推它，而这是用户一眼就能看到的。
+   *
+   * 取不到的商品（已下架 / 已移除 / 挂在不可见类目下）**直接跳过**，
+   * 不占位、不留空卡片：首页出现一张点不进去的图比少一张更糟。
+   */
   async getHomeData() {
-    return homeSeed;
+    const listed = await getCatalogRepository().listPublicProducts();
+    const byId = new Map(listed.map((record) => [record.id, record]));
+
+    return {
+      ...homeSeed,
+      sections: homeSectionSeed.map((section) => ({
+        id: section.id,
+        title: section.title,
+        moreHref: section.moreHref,
+        products: section.productIds
+          .map((id) => byId.get(id))
+          .filter((record) => record !== undefined)
+          .map(toProductCard),
+      })),
+    };
   },
 
   async findUserById(id) {
@@ -45,22 +73,30 @@ export const mockDataSource: DataSource = {
   },
 
   async getGames() {
-    return gameSeed;
+    // 用户端口径：只带**可见**类目（启用且未移除）。
+    // ⚠️ 全部游戏都会返回，即使某个游戏下一个可见类目都没有——游戏切换器是导航的一部分，
+    // 让一个游戏因为类目被停用而整个消失，会把正在浏览它的用户甩到一个不存在的位置上。
+    // 空类目由分类页自己渲染空态。
+    return getCatalogRepository().listPublicGames();
   },
 
+  /**
+   * 分类页的商品列表。
+   *
+   * 过滤与排序**全部在仓储里**（`listPublicProducts()`：上架、未移除、挂在可见类目下），
+   * 这里只补上「这一个游戏 / 这一个类目 / 这个关键词」，然后切页。
+   * 可见性判断不在这层重写一遍，否则「后台停用了一个类目，前台列表什么时候变空」
+   * 就会有两套答案。
+   */
   async queryProducts(query) {
     const { gameId, categoryId, keyword, page = 1, pageSize = DEFAULT_PAGE_SIZE } = query;
     const trimmed = keyword?.trim() ?? "";
 
-    const filtered = productSeed.filter((record) => {
+    const listed = await getCatalogRepository().listPublicProducts();
+    const filtered = listed.filter((record) => {
       if (record.gameId !== gameId) return false;
-      // 下架商品不出现在任何列表中，只能通过详情直链访问
-      if (record.status !== "on") return false;
-      // categoryId 为 null 的是调试专用商品，不进入任何类目列表
-      if (record.categoryId === null) return false;
       if (categoryId && record.categoryId !== categoryId) return false;
-      if (trimmed && !matchesKeyword(record.title, trimmed)) return false;
-      return true;
+      return productMatchesKeyword(record, trimmed);
     });
 
     const safePage = Number.isFinite(page) && page >= 1 ? Math.trunc(page) : 1;
@@ -68,7 +104,7 @@ export const mockDataSource: DataSource = {
       Number.isFinite(pageSize) && pageSize >= 1 ? Math.trunc(pageSize) : DEFAULT_PAGE_SIZE;
 
     const start = (safePage - 1) * safeSize;
-    const items = filtered.slice(start, start + safeSize).map(toCard);
+    const items = filtered.slice(start, start + safeSize).map(toProductCard);
 
     return {
       items,
@@ -80,17 +116,30 @@ export const mockDataSource: DataSource = {
     };
   },
 
+  /**
+   * 商品详情。
+   *
+   * ⚠️ 下架商品**取得到**（详情页要显示「已下架」而不是 404），软删除商品**取不到**
+   * ——它已经不在用户端了。这条分界写在仓储里（`findProductById()`），这里不重判。
+   */
   async getProductDetail(id) {
-    const record = productSeed.find((item) => item.id === id);
-    return record ? toDetail(record) : null;
+    const record = await getCatalogRepository().findProductById(id);
+    return record ? toProductDetail(record) : null;
   },
 
+  /** 单个游戏（含可见类目）。结算页据此校验大区取值。 */
   async getGame(id) {
-    return gameSeed.find((game) => game.id === id) ?? null;
+    const catalog = getCatalogRepository();
+    const [game, categories] = await Promise.all([
+      catalog.findGameById(id),
+      catalog.listCategories(),
+    ]);
+    // 不存在返回 null；存在但一个可见类目都没有时仍然返回这个游戏（regions 仍要能用）
+    return game ? toPublicGame(game, categories) : null;
   },
 
   async listAddons() {
-    return addonSeed;
+    return addonSeed.map((addon) => ({ ...addon }));
   },
 
   async listCompanions() {
@@ -132,6 +181,9 @@ export const mockDataSource: DataSource = {
     });
     const usedIds = new Set(listed.flatMap((companion) => companion.gameIds));
 
-    return gameSeed.filter((game) => usedIds.has(game.id));
+    // 游戏名单同样取自商品目录：护航与商品认的是同一份游戏表，
+    // 两处各存一份的话，新加一个游戏时会出现「陪玩筛选栏里没有它」这种半生效状态。
+    const games = await getCatalogRepository().listPublicGames();
+    return games.filter((game) => usedIds.has(game.id));
   },
 };

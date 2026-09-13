@@ -638,10 +638,19 @@ test("用户端不出现任何管理后台入口", () => {
   }
 });
 
-test("后台导航覆盖三个已开放模块，未开放模块没有入口", () => {
+test("后台导航覆盖五个已开放模块，未开放模块没有入口", () => {
+  // P8B 把「商品与类目」从 `ADMIN_UPCOMING_MODULES` 里搬进了导航：
+  // 它们的页面已经存在，侧栏再挂一条「后续开放」就会与真实入口并存，
+  // 运营点哪个都不对。这条断言守的是「导航与已建成的页面一一对应」。
   assert.deepEqual(
     ADMIN_NAV_ITEMS.map((item) => item.href),
-    ["/admin", "/admin/applications", "/admin/companions"],
+    [
+      "/admin",
+      "/admin/applications",
+      "/admin/companions",
+      "/admin/categories",
+      "/admin/products",
+    ],
   );
   for (const item of ADMIN_NAV_ITEMS) {
     assert.ok(item.label.length > 0);
@@ -668,7 +677,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件", () => {
+test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -679,6 +688,12 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "auth/logout/route.ts",
       "auth/mock-login/route.ts",
       "auth/session/route.ts",
+      // P8B：类目（列表 / 新建、详情 / 编辑、启用、停用、移除）
+      "categories/[id]/disable/route.ts",
+      "categories/[id]/enable/route.ts",
+      "categories/[id]/remove/route.ts",
+      "categories/[id]/route.ts",
+      "categories/route.ts",
       "companion-applications/[id]/approve/route.ts",
       "companion-applications/[id]/reject/route.ts",
       "companion-applications/[id]/route.ts",
@@ -691,6 +706,14 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "companions/[id]/resume/route.ts",
       "companions/[id]/route.ts",
       "companions/route.ts",
+      // P8B：商品（列表 / 新建、详情 / 编辑、上架、下架、移除）
+      // ⚠️ 这里没有「改价」「改规格」这类地址：价格与规格是商品资料的一部分，
+      // 它们随整体保存一起写入，单独开一个改价接口只会绕过「一次原子写入」
+      "products/[id]/publish/route.ts",
+      "products/[id]/remove/route.ts",
+      "products/[id]/route.ts",
+      "products/[id]/unpublish/route.ts",
+      "products/route.ts",
     ],
   );
 

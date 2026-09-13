@@ -5,8 +5,9 @@ import type {
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
 import type { EvidenceKind } from "@/lib/types/evidence";
-import { gameSeed, userSeed } from "./seed";
+import { gameSeed } from "./catalogSeed";
 import { getMockSeedNow } from "./mockClock";
+import { userSeed } from "./seed";
 
 /**
  * 预置的护航入驻申请种子。

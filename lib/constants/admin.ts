@@ -56,6 +56,8 @@ export const ADMIN_LOGIN_PAGE_TITLE = "管理后台登录";
 export const ADMIN_OVERVIEW_PAGE_TITLE = "后台概览";
 export const ADMIN_APPLICATIONS_PAGE_TITLE = "入驻审核";
 export const ADMIN_COMPANIONS_PAGE_TITLE = "护航管理";
+export const ADMIN_CATEGORIES_PAGE_TITLE = "类目管理";
+export const ADMIN_PRODUCTS_PAGE_TITLE = "商品管理";
 export const ADMIN_LOGOUT_LABEL = "退出登录";
 export const ADMIN_MOCK_LOGIN_LABEL = "模拟管理员登录";
 
@@ -116,6 +118,18 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     label: ADMIN_COMPANIONS_PAGE_TITLE,
     description: "护航资料、启用状态与移除",
   },
+  {
+    key: "categories",
+    href: "/admin/categories",
+    label: ADMIN_CATEGORIES_PAGE_TITLE,
+    description: "类目归属、排序、启用与移除",
+  },
+  {
+    key: "products",
+    href: "/admin/products",
+    label: ADMIN_PRODUCTS_PAGE_TITLE,
+    description: "商品图文、上下架与单组规格",
+  },
 ];
 
 /**
@@ -125,7 +139,6 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
  * 给一个能点进去的空壳页面，比什么都不显示更容易让人以为功能已经做好了。
  */
 export const ADMIN_UPCOMING_MODULES: readonly string[] = [
-  "商品与类目管理",
   "订单管理",
   "退款与投诉管理",
   "客服工作台与客服账号",

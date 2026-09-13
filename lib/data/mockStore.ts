@@ -44,6 +44,13 @@ export type MockStoreName =
   | "qualification"
   /** 管理操作审计记录（只由服务端写入）。见 `lib/data/adminAuditRepository.ts`。 */
   | "adminAudit"
+  /**
+   * 商品目录（游戏 / 类目 / 商品 / 规格）。P8B 起这份目录**可写**：
+   * 后台会改类目、改商品、改规格，因此它也从一个只读种子变成了真正的仓储——
+   * 但目录仍然只有这一份，首页 / 分类页 / 详情 / 结算 / 后台读的都是它。
+   * 见 `lib/data/mockCatalogRepository.ts`。
+   */
+  | "catalog"
   | "admin";
 
 const PREFIX = "__youmuMockStore__";

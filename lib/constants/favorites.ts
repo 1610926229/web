@@ -25,7 +25,14 @@ export const FAVORITE_MAX_PAGE = 1000;
 export const FAVORITE_STATE_LABELS: Record<FavoriteState, string> = {
   available: "",
   off_shelf: "已下架",
-  missing: "商品已不存在",
+  /**
+   * 商品在用户端已经查不到。
+   *
+   * ⚠️ 文案对用户说「已删除」，而**后台叫「已移除」**：同一件事在两个视角下的说法不同。
+   * 后台的「移除」是运营动作，用户不需要知道这个词——对他来说，这件商品就是没有了。
+   * 两种说法指的是同一个状态（`removedAt !== null`），没有第二套状态。
+   */
+  missing: "商品已删除",
 };
 
 /** 收藏列表为空时的文案。 */
@@ -35,8 +42,8 @@ export const FAVORITE_EMPTY_DESCRIPTION = "在商品详情页点「收藏」，�
 /** 已下架商品在收藏列表里的说明：能看，但不能买。 */
 export const FAVORITE_OFF_SHELF_NOTE = "该商品已下架，暂不可购买";
 
-/** 商品已不存在时的说明：收藏记录还在，可以移除。 */
-export const FAVORITE_MISSING_NOTE = "该商品已不存在，可以移除这条收藏";
+/** 商品已删除时的说明：收藏记录还在，可以移除。**历史订单不受影响**——它读的是下单快照。 */
+export const FAVORITE_MISSING_NOTE = "该商品已删除，可以移除这条收藏";
 
 export const FAVORITE_PRODUCT_REQUIRED_MESSAGE = "缺少商品";
 export const FAVORITE_PRODUCT_NOT_FOUND_MESSAGE = "商品不存在";

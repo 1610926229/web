@@ -10,13 +10,13 @@ import {
   adminCompanionActionFromPatch,
   isCompanionProfileUnchanged,
 } from "@/lib/constants/adminCompanions";
-import type { AdminAuditAction, AdminAuditEntry, AdminAuditSnapshot } from "@/lib/types/adminAudit";
+import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { AdminCompanionProfilePatch, Companion } from "@/lib/types/companion";
 import type {
   CompanionApplication,
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
-import { appendAuditEntry, findAuditEntryByOperationId } from "./mockAdminAuditRepository";
+import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import {
   applyApplicationReview,
   companionApplicationStore,
@@ -62,17 +62,14 @@ import type { UserQualificationRecord } from "./qualificationRepository";
  *
  * 接入真实数据库后，本文件整体替换为一个事务（`BEGIN … COMMIT`），
  * 上层的 service 与接口一行都不用改。
+ *
+ * ⚠️ 幂等重放判定与审计写入来自 `./adminWriteSupport`（与商品目录事务共用同一套实现），
+ * 理由见那个文件：两个模块各写一份的话，「同一个幂等键第二次到达会怎样」
+ * 迟早会有两种答案，而这类差异只在并发或重试时才会暴露。
  */
 
-/** 一次管理写操作的上下文。`operationId` 就是请求的幂等键（见 §九）。 */
-export type AdminWriteContext = {
-  /** 执行操作的管理者 id */
-  adminId: string;
-  /** 幂等键：同一次操作意图重复到达时用它认出「已经做过了」 */
-  operationId: string;
-  /** 服务端时间戳（ISO 字符串），业务写入与审计写入共用同一个 */
-  at: string;
-};
+/** 写上下文由 `./adminWriteSupport` 定义；这里再导出一次，调用方的既有引用不用改。 */
+export type { AdminWriteContext };
 
 /** 申请类写操作失败的三种情形。文案由服务层翻译，数据层不产生界面文案。 */
 export type AdminApplicationWriteFailure =
@@ -129,49 +126,6 @@ export type ApproveApplicationOutcome = {
 };
 
 // ——————————————————————————— 内部工具 ———————————————————————————
-
-/**
- * 幂等重放检查。
- *
- * 返回 `null` 表示这个幂等键没用过；返回 `replay` 表示用过且指向同一个对象；
- * 返回 `conflict` 表示用过但指向别的对象。
- *
- * ⚠️ 必须在**读写业务数据之前**调用，因此它自己也只做同步读。
- */
-function takeReplay(
-  operationId: string,
-  targetType: AdminAuditEntry["targetType"],
-  targetId: string,
-): { kind: "replay"; entry: AdminAuditEntry } | { kind: "conflict" } | null {
-  const entry = findAuditEntryByOperationId(operationId);
-  if (!entry) return null;
-
-  if (entry.targetType !== targetType || entry.targetId !== targetId) return { kind: "conflict" };
-  return { kind: "replay", entry };
-}
-
-/** 写一条审计。同步，且**必须**在调用方的原子区段内被调用。 */
-function writeAudit(input: {
-  ctx: AdminWriteContext;
-  action: AdminAuditAction;
-  targetType: AdminAuditEntry["targetType"];
-  targetId: string;
-  before: AdminAuditSnapshot | null;
-  after: AdminAuditSnapshot | null;
-}): AdminAuditEntry {
-  return appendAuditEntry({
-    id: `aud_${crypto.randomUUID()}`,
-    adminId: input.ctx.adminId,
-    action: input.action,
-    targetType: input.targetType,
-    targetId: input.targetId,
-    before: input.before,
-    after: input.after,
-    // operationId 直接就是幂等键：同一个键重复到达时，靠它认出「做过了」
-    operationId: input.ctx.operationId,
-    createdAt: input.ctx.at,
-  });
-}
 
 /** 「更新前 / 更新后」的两个快照一起写，避免某个操作只写了一半。 */
 function applicationSnapshots(

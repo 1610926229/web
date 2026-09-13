@@ -44,6 +44,9 @@ export type MockEmptyScope =
   | "rankings"
   | "companions"
   | "applications"
+  // 管理后台：类目与商品两组列表分别清空（P8B）
+  | "categories"
+  | "products"
   | "all";
 
 const SCOPE_VALUES: readonly MockEmptyScope[] = [
@@ -57,6 +60,8 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "companions",
   // 管理后台概览：把申请与护航两组数字分别清零，用来验证「全部为 0」时的安全降级
   "applications",
+  "categories",
+  "products",
   "all",
 ];
 

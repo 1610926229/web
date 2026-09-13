@@ -39,8 +39,8 @@ import type { ProductDetail } from "@/lib/types/product";
  * 商品只挑卡片需要的五项（与 `Product` 一致）：规格、月售这些详情页字段不进列表。
  * 商品状态通过 `state` 表达，不把 `status` 直接透出去，避免页面对两个字段各判断一次。
  *
- * 详情为 null 表示商品已被删除——此时 `product` 为 null、状态为 `missing`，
- * 页面据此渲染「商品已不存在」，而不是白屏。
+ * 详情为 null 表示商品已被删除（后台移除，或 id 本来就不存在）——此时 `product` 为 null、
+ * 状态为 `missing`，页面据此渲染「商品已删除」与一个「移除」按钮，而不是白屏。
  */
 export function toFavoriteListItem(
   favorite: Favorite,

@@ -28,10 +28,27 @@ export type AdminAuditAction =
   | "companion.resume"
   | "companion.enable"
   | "companion.disable"
-  | "companion.remove";
+  | "companion.remove"
+  // ————— 商品与类目（P8B）—————
+  // 「新建」与「编辑」分开记：新建的 before 是 null，事后从动作名就能看出
+  // 「这条记录是这次操作产生的」，不必再去比对 before 是否为 null。
+  | "category.create"
+  | "category.update"
+  | "category.enable"
+  | "category.disable"
+  | "category.remove"
+  | "product.create"
+  | "product.update"
+  | "product.publish"
+  | "product.unpublish"
+  | "product.remove";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
-export type AdminAuditTargetType = "companionApplication" | "companion";
+export type AdminAuditTargetType =
+  | "companionApplication"
+  | "companion"
+  | "category"
+  | "product";
 
 /**
  * 精简快照。

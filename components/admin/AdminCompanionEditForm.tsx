@@ -1,8 +1,12 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Mock 阶段使用 public/mock 下的本地 SVG 占位图，
+   不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
+
 import { useRef, useState } from "react";
 import AdminCharacterCounter from "@/components/admin/AdminCharacterCounter";
 import AdminConfirmDialog from "@/components/admin/AdminConfirmDialog";
+import { AdminField, AdminToggleButton } from "@/components/admin/AdminFormField";
 import { COMPANION_SERVICE_TAGS } from "@/lib/constants/companionApplications";
 import {
   ADMIN_COMPANION_CONFIRM_TEXTS,
@@ -206,7 +210,7 @@ export default function AdminCompanionEditForm({
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* 昵称 */}
-        <Field
+        <AdminField
           label={COMPANION_PROFILE_FIELD_LABELS.displayName}
           error={fieldProps("displayName").message}
           errorId="companion-displayName-error"
@@ -224,10 +228,10 @@ export default function AdminCompanionEditForm({
             aria-describedby={fieldProps("displayName")["aria-describedby"]}
             className={`h-9 w-full ${fieldProps("displayName").className}`}
           />
-        </Field>
+        </AdminField>
 
         {/* 介绍 */}
-        <Field
+        <AdminField
           label={COMPANION_PROFILE_FIELD_LABELS.intro}
           error={fieldProps("intro").message}
           errorId="companion-intro-error"
@@ -244,11 +248,11 @@ export default function AdminCompanionEditForm({
             aria-describedby={fieldProps("intro")["aria-describedby"]}
             className={`w-full resize-y py-2 ${fieldProps("intro").className}`}
           />
-        </Field>
+        </AdminField>
       </div>
 
       {/* 头像：白名单 Mock 占位图，不能填任意地址 */}
-      <Field
+      <AdminField
         label={COMPANION_PROFILE_FIELD_LABELS.avatarUrl}
         error={fieldProps("avatarUrl").message}
         errorId="companion-avatarUrl-error"
@@ -286,10 +290,10 @@ export default function AdminCompanionEditForm({
             );
           })}
         </div>
-      </Field>
+      </AdminField>
 
       {/* 游戏 */}
-      <Field
+      <AdminField
         label={COMPANION_PROFILE_FIELD_LABELS.gameIds}
         error={fieldProps("gameIds").message}
         errorId="companion-gameIds-error"
@@ -334,10 +338,10 @@ export default function AdminCompanionEditForm({
             );
           })}
         </div>
-      </Field>
+      </AdminField>
 
       {/* 大区：只能从所选游戏的大区里选 */}
-      <Field
+      <AdminField
         label={COMPANION_PROFILE_FIELD_LABELS.regions}
         error={fieldProps("regions").message}
         errorId="companion-regions-error"
@@ -386,10 +390,10 @@ export default function AdminCompanionEditForm({
             })
           )}
         </div>
-      </Field>
+      </AdminField>
 
       {/* 服务标签 */}
-      <Field
+      <AdminField
         label={COMPANION_PROFILE_FIELD_LABELS.serviceTags}
         error={fieldProps("serviceTags").message}
         errorId="companion-serviceTags-error"
@@ -426,11 +430,11 @@ export default function AdminCompanionEditForm({
             );
           })}
         </div>
-      </Field>
+      </AdminField>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         {/* 启用状态 */}
-        <Field label={COMPANION_PROFILE_FIELD_LABELS.enabled} hint="停用后用户端完全看不到这条资料">
+        <AdminField label={COMPANION_PROFILE_FIELD_LABELS.enabled} hint="停用后用户端完全看不到这条资料">
           <div
             role="radiogroup"
             tabIndex={-1}
@@ -438,8 +442,8 @@ export default function AdminCompanionEditForm({
             aria-label={COMPANION_PROFILE_FIELD_LABELS.enabled}
             className="flex gap-2"
           >
-            <ToggleButton active={enabled} onClick={() => setEnabled(true)} label="启用" />
-            <ToggleButton
+            <AdminToggleButton active={enabled} onClick={() => setEnabled(true)} label="启用" />
+            <AdminToggleButton
               active={!enabled}
               onClick={() => {
                 setEnabled(false);
@@ -448,10 +452,10 @@ export default function AdminCompanionEditForm({
               label="停用"
             />
           </div>
-        </Field>
+        </AdminField>
 
         {/* 可接单状态 */}
-        <Field
+        <AdminField
           label={COMPANION_PROFILE_FIELD_LABELS.available}
           hint={enabled ? "暂停接单仍会出现在名单里，只是结算时不可选" : "停用状态下强制不可接单"}
         >
@@ -462,23 +466,23 @@ export default function AdminCompanionEditForm({
             aria-label={COMPANION_PROFILE_FIELD_LABELS.available}
             className="flex gap-2"
           >
-            <ToggleButton
+            <AdminToggleButton
               active={availableChecked}
               disabled={!enabled}
               onClick={() => setAvailable(true)}
               label="可接单"
             />
-            <ToggleButton
+            <AdminToggleButton
               active={!availableChecked}
               disabled={!enabled}
               onClick={() => setAvailable(false)}
               label="暂停接单"
             />
           </div>
-        </Field>
+        </AdminField>
 
         {/* 展示排序 */}
-        <Field
+        <AdminField
           label={COMPANION_PROFILE_FIELD_LABELS.sortOrder}
           error={fieldProps("sortOrder").message}
           errorId="companion-sortOrder-error"
@@ -495,11 +499,11 @@ export default function AdminCompanionEditForm({
             aria-describedby={fieldProps("sortOrder")["aria-describedby"]}
             className={`h-9 w-full ${fieldProps("sortOrder").className}`}
           />
-        </Field>
+        </AdminField>
       </div>
 
       {/* 不可接单原因：只在「启用但不可接单」时必填 */}
-      <Field
+      <AdminField
         label={COMPANION_PROFILE_FIELD_LABELS.unavailableReason}
         error={fieldProps("unavailableReason").message}
         errorId="companion-unavailableReason-error"
@@ -520,7 +524,7 @@ export default function AdminCompanionEditForm({
           aria-describedby={fieldProps("unavailableReason")["aria-describedby"]}
           className={`h-9 w-full ${fieldProps("unavailableReason").className}`}
         />
-      </Field>
+      </AdminField>
 
       <div className="flex flex-wrap items-center gap-3 border-t border-admin-line pt-4">
         <button
@@ -567,75 +571,5 @@ export default function AdminCompanionEditForm({
         }}
       />
     </form>
-  );
-}
-
-/** 一个字段的容器：标签、说明、错误、字数统计。错误与说明都通过 id 关联到控件。 */
-function Field({
-  label,
-  hint,
-  error,
-  errorId,
-  counter,
-  htmlFor,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  error?: string | null;
-  errorId?: string;
-  counter?: React.ReactNode;
-  htmlFor?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between gap-2">
-        {htmlFor ? (
-          <label htmlFor={htmlFor} className="text-[13px] text-ink-2">
-            {label}
-          </label>
-        ) : (
-          // 勾选类字段的标签由内部的 role=group/radiogroup 承担，这里只是视觉标题
-          <span className="text-[13px] text-ink-2">{label}</span>
-        )}
-        {counter}
-      </div>
-      {children}
-      {hint ? <span className="text-[12px] leading-4 text-ink-3">{hint}</span> : null}
-      {error ? (
-        <span id={errorId} role="alert" className="text-[12px] leading-4 text-brand-red">
-          {error}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-/** 字数统计：超过上限变红并明确写出上限，不做静默截断。 */
-function ToggleButton({
-  active,
-  disabled,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  disabled?: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      disabled={disabled}
-      onClick={onClick}
-      className={`rounded-lg border px-4 py-1.5 text-[13px] disabled:opacity-40 ${
-        active ? "border-admin-accent bg-brand-blue-soft text-ink" : "border-admin-line text-ink-2"
-      }`}
-    >
-      {label}
-    </button>
   );
 }

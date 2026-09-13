@@ -3,9 +3,10 @@ import test, { beforeEach } from "node:test";
 import { FAVORITE_OFF_SHELF_MESSAGE } from "../lib/constants/favorites.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { getDataSource } from "../lib/data/source.ts";
-import { homeSeed, productSeed } from "../lib/mocks/fixtures/seed.ts";
+import { homeSectionSeed, productSeed } from "../lib/mocks/fixtures/catalogSeed.ts";
 import { getProductDetail, queryProducts } from "../lib/services/catalog.ts";
 import { previewCheckout } from "../lib/services/checkout.ts";
+import { getHomeData } from "../lib/services/home.ts";
 import {
   addFavoriteForUser,
   isFavoritedForUser,
@@ -95,14 +96,35 @@ test("已下架商品不出现在任何商品列表里，也不出现在搜索�
   // 4. 列表里永远只有在售商品
   assert.equal(inGame.items.every((item) => item.price > 0), true);
 
-  // 5. 首页各营销分组只引用在售商品
-  for (const section of homeSeed.sections) {
+  // 5. 首页各营销分组**现取**到的商品全部在售（P8B 起首页分组存的是 id，
+  //    商品在每次请求时从目录仓储取，因此这里读的是用户端真正会看到的那份数据）
+  const home = await getHomeData(undefined, "server");
+  const listedIds = new Set(inGame.items.map((item) => item.id));
+  for (const section of home.sections) {
     for (const product of section.products) {
       const source = productSeed.find((item) => item.id === product.id);
-      assert.ok(source, `首页分组「${section.title}」引用了不存在的商品 ${product.id}`);
-      assert.equal(source.status, "on", `首页分组「${section.title}」引用了下架商品 ${product.id}`);
+      assert.ok(source, `首页分组「${section.title}」出现了目录里没有的商品 ${product.id}`);
+      assert.equal(
+        source.status,
+        "on",
+        `首页分组「${section.title}」引用了下架商品 ${product.id}`,
+      );
+      // 现取的结果与分类页列表口径一致：能在首页看到，就一定能在列表里被逛到
+      assert.equal(
+        listedIds.has(product.id),
+        true,
+        `首页分组「${section.title}」推的商品 ${product.id} 不在用户端列表里`,
+      );
     }
   }
+
+  // 分组里引用的 id 一个都没丢：取不到的商品是被**跳过**的，不是被静默省略的
+  const referencedCount = homeSectionSeed.reduce(
+    (sum, section) => sum + section.productIds.length,
+    0,
+  );
+  const listedCount = home.sections.reduce((sum, section) => sum + section.products.length, 0);
+  assert.equal(listedCount, referencedCount);
 });
 
 test("完全不存在（或已被删除）的商品读不到详情：null，由页面转成 404", async () => {

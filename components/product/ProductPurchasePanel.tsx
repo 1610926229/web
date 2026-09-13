@@ -1,5 +1,8 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Mock 阶段使用 public/mock 下的本地 SVG 占位图，
+   不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
+
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import PriceText from "@/components/common/PriceText";
@@ -118,6 +121,21 @@ export default function ProductPurchasePanel({
 
         <p className="mt-2 text-[13px] text-ink-3">月售 {abbreviateNumber(product.monthlySales)}</p>
 
+        {/* 运营标签：与下面那一行的平台标签（gameTag）不是一回事——
+            这个由后台维护，改完刷新即可见，因此单独一行、另一种样式，避免两个「标签」被当成同一个东西 */}
+        {product.tags.length > 0 ? (
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {product.tags.map((tag) => (
+              <li
+                key={tag}
+                className="rounded-[6px] border border-brand-red px-2 py-[3px] text-[12px] leading-4 text-brand-red"
+              >
+                {tag}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
         <div className="mt-3 flex items-center gap-2">
           <span className="shrink-0 rounded-[6px] bg-ink px-2 py-[3px] text-[12px] text-white">
             {product.gameTag}
@@ -165,6 +183,36 @@ export default function ProductPurchasePanel({
               );
             })}
           </div>
+        </section>
+      ) : null}
+
+      {/*
+        图文详情：文字与图片都由后台维护，读的就是同一份数据，因此改完刷新立刻是新内容。
+        文字按 `whitespace-pre-line` 渲染换行，**不做 HTML 解析**——
+        后台填的是纯文本，任何标签都会原样显示成文字，不存在注入面。
+      */}
+      {product.detailText || product.detailImages.length > 0 ? (
+        <section className="mt-2 bg-surface px-4 py-4">
+          <h2 className="text-[15px] font-semibold text-ink">图文详情</h2>
+
+          {product.detailText ? (
+            <p className="mt-3 whitespace-pre-line text-[13px] leading-6 text-ink-2">
+              {product.detailText}
+            </p>
+          ) : null}
+
+          {product.detailImages.length > 0 ? (
+            <div className="mt-3 flex flex-col gap-2">
+              {product.detailImages.map((url, index) => (
+                <img
+                  key={url}
+                  src={url}
+                  alt={`${product.title} 详情图 ${index + 1}`}
+                  className="w-full rounded-[8px] border border-line"
+                />
+              ))}
+            </div>
+          ) : null}
         </section>
       ) : null}
 

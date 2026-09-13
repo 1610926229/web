@@ -1,4 +1,6 @@
+import type { AdminCategoryStatusKey } from "@/lib/constants/adminCategories";
 import type { AdminCompanionStatusKey } from "@/lib/constants/adminCompanions";
+import type { AdminProductStatusKey } from "@/lib/constants/adminProducts";
 import type { CompanionApplicationStatus } from "@/lib/types/companionApplication";
 
 /**
@@ -33,6 +35,26 @@ export const COMPANION_STATUS_TONE: Record<AdminCompanionStatusKey, AdminStatusT
   disabled: "danger",
   unavailable: "pending",
   available: "success",
+};
+
+/** 类目：已移除是终态（灰），已停用是「用户端看不到」的明确状态（红），已启用才是正常的（绿）。 */
+export const CATEGORY_STATUS_TONE: Record<AdminCategoryStatusKey, AdminStatusTone> = {
+  removed: "muted",
+  disabled: "danger",
+  enabled: "success",
+};
+
+/**
+ * 商品：已下架用 `pending` 而不是 `danger`。
+ *
+ * 下架是**正常的运营动作**（改价期间先下架、活动结束下架），不是出问题；
+ * 标成红色会让「一屏待处理的错误」这种错觉出现，真正需要抬头看的异常反而被淹没。
+ * 已移除才是终态。
+ */
+export const PRODUCT_STATUS_TONE: Record<AdminProductStatusKey, AdminStatusTone> = {
+  removed: "muted",
+  off: "pending",
+  on: "success",
 };
 
 const TONE_CLASS: Record<AdminStatusTone, string> = {

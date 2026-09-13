@@ -1,5 +1,8 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Mock 阶段使用 public/mock 下的本地 SVG 占位图，
+   不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
+
 import { useRef, useState } from "react";
 import Link from "next/link";
 import AdminCharacterCounter from "@/components/admin/AdminCharacterCounter";

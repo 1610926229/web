@@ -5,7 +5,8 @@ import {
   beijingWeekStart,
 } from "@/lib/constants/rankingPeriods";
 import type { Order, OrderStatus } from "@/lib/types/order";
-import { addonSeed, companionSeed } from "./seed";
+import { addonSeed } from "./catalogSeed";
+import { companionSeed } from "./seed";
 
 /**
  * 预置订单种子。
