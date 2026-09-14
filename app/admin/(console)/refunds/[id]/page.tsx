@@ -9,6 +9,7 @@ import AdminStatusBadge, {
   ORDER_STATUS_TONE,
   REFUND_STATUS_TONE,
 } from "@/components/admin/AdminStatusBadge";
+import { formatAuditActorLabel } from "@/lib/constants/adminAudit";
 import {
   ADMIN_REFUND_AMOUNT_NOTE,
   ADMIN_REFUND_CONSUMPTION_NOTICE,
@@ -184,6 +185,9 @@ function ContentSection({ refund }: { refund: AdminRefundDetail }) {
  * 四个时间点各自单独一行、缺哪个就显示「—」：**不推测、不补占位**。
  * 「开始审核」不记审核人（`reviewedBy` 只记结论的做出者），
  * 谁开始看的由审计回答——那一条不属于业务记录，也就不在这一页展示。
+ *
+ * ⚠️ P8D-2 起「审核人」那一行**必须带角色**：这个字段现在可能装着客服 id
+ * （客服能驳回，只是不能通过）。只显示 `staff-2` 的话，读的人会先去管理账号里找。
  */
 function ReviewSection({ refund }: { refund: AdminRefundDetail }) {
   return (
@@ -191,7 +195,14 @@ function ReviewSection({ refund }: { refund: AdminRefundDetail }) {
       <div className="flex flex-col gap-1">
         <DetailRow label="开始审核" value={refund.reviewingAt ? formatDateTime(refund.reviewingAt) : ""} />
         <DetailRow label="审核完成" value={refund.reviewedAt ? formatDateTime(refund.reviewedAt) : ""} />
-        <DetailRow label="审核人" value={refund.reviewedBy ?? ""} />
+        <DetailRow
+          label="审核人"
+          value={formatAuditActorLabel({
+            role: refund.reviewedByRole,
+            id: refund.reviewedBy,
+            name: refund.reviewedByName,
+          })}
+        />
         <DetailRow label="撤销时间" value={refund.cancelledAt ? formatDateTime(refund.cancelledAt) : ""} />
       </div>
 

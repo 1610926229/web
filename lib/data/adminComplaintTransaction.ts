@@ -1,7 +1,7 @@
 import { toComplaintAuditSnapshot } from "@/lib/constants/adminAudit";
 import { canTransitionComplaint } from "@/lib/constants/adminComplaints";
 import type { Complaint, ComplaintStatus } from "@/lib/types/complaint";
-import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
+import { takeReplayForAction, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import { applyComplaintStatus, complaintStore } from "./mockComplaintRepository";
 
 /**
@@ -94,7 +94,9 @@ export async function applyAdminComplaintIntent(
   const action = auditActionOf(intent);
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "complaint", complaintId);
+  // 用 takeReplayForAction 而不是 takeReplay：三个意图作用于同一条投诉，
+  // 同一个键先「开始处理」再「解决」若被判成重放，会安静地返回 200 而状态不变
+  const replay = takeReplayForAction(ctx, action, "complaint", complaintId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = complaints.complaints.get(complaintId);
@@ -112,7 +114,9 @@ export async function applyAdminComplaintIntent(
   const written = applyComplaintStatus(complaintId, to, {
     at: ctx.at,
     result,
-    adminId: ctx.adminId,
+    actorId: ctx.actorId,
+    actorRole: ctx.actorRole,
+    actorName: ctx.actorName,
   });
   // 上面刚确认过记录存在，这里为 null 属于不可能状态；当作失败返回，绝不继续写
   if (!written) return { kind: "not-found" };

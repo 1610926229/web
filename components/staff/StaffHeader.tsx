@@ -7,18 +7,28 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  STAFF_COMPLAINTS_PAGE_TITLE,
   STAFF_CONSOLE_NAME,
   STAFF_CONVERSATIONS_PAGE_TITLE,
   STAFF_LOGOUT_LABEL,
   STAFF_OVERVIEW_PAGE_TITLE,
+  STAFF_REFUNDS_PAGE_TITLE,
 } from "@/lib/constants/staff";
 import { logoutStaff } from "@/lib/services/staffHttp";
 import type { StaffSessionUser } from "@/lib/types/staff";
 
-/** 顶栏导航。两个入口，顺序即页面上从左到右的顺序。 */
+/**
+ * 顶栏导航。顺序即页面上从左到右的顺序。
+ *
+ * 退款与投诉是 P8D-2 新加的入口，与会话并排：三者都是客服工作台的「待办」，
+ * 会话是沟通，退款 / 投诉是处理。放在同一层而不是某个二级菜单里，
+ * 客服不用记「哪个模块藏在哪个角落」。
+ */
 const NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/staff", label: STAFF_OVERVIEW_PAGE_TITLE },
   { href: "/staff/conversations", label: STAFF_CONVERSATIONS_PAGE_TITLE },
+  { href: "/staff/refunds", label: STAFF_REFUNDS_PAGE_TITLE },
+  { href: "/staff/complaints", label: STAFF_COMPLAINTS_PAGE_TITLE },
 ];
 
 /**
@@ -26,11 +36,15 @@ const NAV_ITEMS: readonly { href: string; label: string }[] = [
  *
  * ⚠️ 这是**独立于用户端与管理端**的第三套壳层。它不用用户端的 `TabBar`
  * （工作台是桌面优先的，480px 的底部页签在这里既挤又不对），
- * 也不进管理端侧栏（客服看不到订单全量、退款审核与投诉处理）。
+ * 也不进管理端侧栏（客服看不到订单全量；退款与投诉在自己的独立入口里处理，
+ * 不与管理端的退款审核 / 投诉处理共用同一个页面）。
  *
- * ⚠️ 导航用 `/staff/conversations` 的**前缀匹配**判断选中：详情页
- * `/staff/conversations/[orderId]` 也应当把「会话列表」点亮——
- * 只做全等比较的话，从列表点进详情，导航会突然全部熄灭，像走进了死胡同。
+ * ⚠️ 除 `/staff` 外，导航都用**前缀匹配**判断选中：从列表点进
+ * `/staff/conversations/[orderId]`、`/staff/refunds/[id]` 或
+ * `/staff/complaints/[id]` 时，对应的列表入口仍应点亮——只做全等比较的话，
+ * 从列表点进详情，导航会突然全部熄灭，像走进了死胡同。
+ * `/staff` 是例外：它是其余所有 `/staff/...` 的前缀，必须全等比较，
+ * 否则概览会永远处于选中态。
  *
  * 退出只清客服端 Cookie：它**不会**顺带清掉用户端或管理端的会话
  * （三套 Cookie 互不相干，见 `lib/auth/staffSession.ts`）。

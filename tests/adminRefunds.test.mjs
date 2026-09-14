@@ -740,7 +740,8 @@ test("审计恰好一次，且不保存退款说明、凭证地址与联系方�
     entries.map((entry) => entry.action),
     ["refund.start-review", "refund.approve"],
   );
-  assert.equal(entries[0].adminId, ADMIN);
+  assert.equal(entries[0].actorId, ADMIN);
+  assert.equal(entries[0].actorRole, "admin");
   assert.ok(entries[0].before && entries[0].after, "每条审计都要有前后快照");
 
   const serialized = JSON.stringify(entries);
@@ -865,6 +866,8 @@ test("列表 DTO 只有摘要：没有原因、说明、凭证、审核意见与
     "reviewingAt",
     "reviewedAt",
     "reviewedBy",
+    "reviewedByRole",
+    "reviewedByName",
     "cancelledAt",
     "/mock/evidence-placeholder.svg",
     "openId",
@@ -956,6 +959,8 @@ test("审核之后详情与列表读到的是新状态：通过的那一单订�
   assert.equal(detail.status, "approved");
   assert.equal(detail.orderStatus, "refunded");
   assert.equal(detail.reviewedBy, ADMIN);
+  assert.equal(detail.reviewedByRole, "admin", "P8C 路径下来的审核人一定是管理员");
+  assert.equal(detail.reviewedByName, null, "管理端写入不带名称快照");
   assert.deepEqual(detail.allowedActions, {
     canStartReview: false,
     canApprove: false,
@@ -970,4 +975,80 @@ test("审核之后详情与列表读到的是新状态：通过的那一单订�
   const row = data.items.find((item) => item.id === PENDING_REFUND);
   assert.ok(row, "通过之后应当能在「已通过」里筛到");
   assert.equal(row.orderStatus, "refunded", "列表里的订单状态列也要是已退款");
+});
+
+// ——————————————————————————— 九、幂等键的意图绑定（P8D-2） ———————————————————————————
+
+/**
+ * 「同一个键只能指向同一个意图」。
+ *
+ * 幂等键原本只在「操作者 × 目标」两轴上收窄（见 `lib/data/adminWriteSupport.ts`）。
+ * 对退款这种**同一目标在同一状态下有多个合法意图**的记录，那还不够：
+ * 开始审核与驳回都能作用于一笔待审核的退款，于是
+ *
+ *   带键 K 开始审核 → 带同一个 K 驳回
+ *
+ * 的第二次请求会因为 target 与 actor 都匹配而被判成「重放」，服务端什么都不做却回 200，
+ * 退款停在「审核中」——调用方拿到的是一个与事实相反的成功。
+ *
+ * P8D-2 起客服也能写这批记录，两个意图分属客服与管理员两侧，这条路才真正走得通，
+ * 因此在这里把它钉死：**宁可回一个明确的 400，也不回一个没做事的 200**。
+ */
+test("幂等的意图绑定：同一个键先「开始审核」再「驳回」，第二次必须报冲突而不是静默成功", async () => {
+  const operationId = key();
+
+  const first = await startReviewAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: operationId });
+  assert.equal(first.status, "reviewing");
+  assert.equal(first.changed, true);
+  assert.equal(await auditCount(), 1);
+
+  // 同一个键、同一个目标、同一位管理员，但意图不同 → 冲突
+  await expectApiError(
+    rejectAdminRefund(PENDING_REFUND, ADMIN, {
+      idempotencyKey: operationId,
+      reviewNote: "换了个意图，但复用了同一个键",
+    }),
+    "BAD_REQUEST",
+  );
+
+  // 关键断言：退款**不能**因为这次请求而变成已拒绝，也不能被静默当成「已处理」
+  assert.equal((await refundOf(PENDING_REFUND)).status, "reviewing", "状态不该被这次请求改变");
+  assert.equal(await auditCount(), 1, "被拒的请求不写审计");
+  assert.equal((await auditsFor(PENDING_REFUND)).length, 1);
+});
+
+test("幂等的意图绑定：换一个键，同一笔退款的另一个意图就能正常执行", async () => {
+  const reviewKey = key();
+  await startReviewAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: reviewKey });
+
+  // 换键之后必须能正常驳回——上面那条约束不该把正常工作流一起挡掉
+  const rejected = await rejectAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: key(),
+    reviewNote: "核实后不同意退款。",
+  });
+  assert.equal(rejected.status, "rejected");
+  assert.equal(rejected.changed, true);
+
+  assert.equal(await auditCount(), 2, "两次不同意图各写一条审计");
+  const actions = (await auditsFor(PENDING_REFUND)).map((entry) => entry.action).sort();
+  assert.deepEqual(actions, ["refund.reject", "refund.start-review"]);
+});
+
+test("幂等的意图绑定不影响**同意图**重放：同一个键重复驳回仍然返回第一次的结果", async () => {
+  const operationId = key();
+
+  const first = await rejectAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: operationId,
+    reviewNote: "第一次驳回",
+  });
+  assert.equal(first.changed, true);
+
+  const replay = await rejectAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: operationId,
+    reviewNote: "第二次提交（同一意图，应当被判为重放）",
+  });
+  assert.equal(replay.changed, false, "同一意图的重复提交仍然是重放");
+  assert.equal(replay.status, "rejected");
+  assert.equal(await auditCount(), 1, "重放不写第二条审计");
+  assert.equal((await refundOf(PENDING_REFUND)).reviewNote, "第一次驳回", "重放不改写字段");
 });

@@ -86,9 +86,16 @@ export type StaffSessionUser = {
  * 「没登录」（401，去登录）与「登录了但不是客服」（403，换账号也没用）分开。
  */
 export type StaffSessionState =
-  /** 没有有效会话：未登录、Cookie 里的 id 查不到账号、已移除、或开关未开启 */
+  /**
+   * 没有有效会话：未登录、Cookie 里的 id 查不到账号、或开关未开启。
+   *
+   * ⚠️ **已移除与已停用不在这里**。那两种情形 Cookie 指向的记录**查得到**，
+   * 只是这条记录不能进工作台，因此落进下面的 `forbidden`（403）而不是 401。
+   * 这条区分是有意的：401 的意思是「换个身份再来」，而一个被移除的账号
+   * 换什么身份都没用——把它报成 401 会让人一直去重新登录。
+   */
   | { kind: "anonymous" }
-  /** 带着一个有效的客服账号，但这个账号不能进工作台（停用，或角色不是客服） */
+  /** 带着一个查得到的客服账号，但它不能进工作台（已停用、已移除，或角色不是客服） */
   | { kind: "forbidden" }
   | { kind: "granted"; staff: StaffSessionUser };
 
@@ -231,6 +238,28 @@ export type StaffConversationMessage = {
 };
 
 /**
+ * 客服工作台里的**用户摘要**（退款列表 / 投诉列表与详情共用）。
+ *
+ * ⚠️ **只有三个字段，而且每一个都是「客服要能对上话」所必需的**：
+ * `nickname` 用来称呼对方、`avatarUrl` 用来在列表里区分、`id` 是平台自己的展示标识
+ * （`StaffConversationDetail.user` 早就把它给了客服——工作台要靠它跟会话对上）。
+ *
+ * ⚠️ **与 `AdminUserSummary` 是两个类型**（同形，但不是同一个）：
+ * 复用管理端的类型，会让「管理端给用户摘要加一个字段」直接变成「客服也看得到它」，
+ * 而那个字段该不该给客服看本该是另一次判断。
+ *
+ * ⚠️ 这三样都**不是凭据**：没有 OpenID、没有 UnionID、没有手机号、没有会话标识，
+ * 也没有任何能用来登录或支付的字符串。用户仓储里确实存在的支付相关字段
+ * 一个都不在这张表上。
+ */
+export type StaffUserSummary = {
+  id: string;
+  nickname: string;
+  /** Mock 白名单头像；不是用户上传的任意地址 */
+  avatarUrl: string;
+};
+
+/**
  * 订单只读摘要（工作台右侧）。
  *
  * ⚠️ 边界由字段表本身保证：这里**没有**支付凭据、Cookie、OpenID / UnionID，
@@ -266,7 +295,14 @@ export type StaffConversationDetail = {
   staffLastReadAt: string | null;
 };
 
-/** 工作台首页的三个数。全部来自仓储实时聚合，不是写死的展示值。 */
+/**
+ * 工作台首页的五个数。全部来自仓储实时聚合，不是写死的展示值。
+ *
+ * ⚠️ 前三个（会话）来自消息仓储，后两个（退款 / 投诉）来自退款与投诉仓储。
+ * 这里**刻意没有把它们合并成一次聚合查询**：P8D-2 加的这两个数只要求
+ * 「实时、可解释」，把三份数据源塞进一个仓储方法换来的只是耦合。
+ * 页面各调各的，哪一个慢了或空了都不影响另外几个。
+ */
 export type StaffConversationMetrics = {
   /** 会话总数（有沟通记录的订单数，与当前筛选无关） */
   conversationCount: number;
@@ -274,6 +310,16 @@ export type StaffConversationMetrics = {
   unreadConversationCount: number;
   /** 今天（北京时间）新产生的消息条数 */
   todayMessageCount: number;
+  /**
+   * 待处理退款数：状态是 `pending`（待审核）或 `reviewing`（审核中）的退款申请。
+   *
+   * ⚠️ 口径是「**平台还没给出结论的**」，不是「待审核」——一笔被客服认领过
+   * （`reviewing`）的退款仍然是待办，把它排除掉会让「认领过的就没人管了」。
+   * 已通过 / 已拒绝 / 已撤销都不计入：那是已经结束的事。
+   */
+  pendingRefundCount: number;
+  /** 待处理投诉数。口径同上：`pending` 与 `processing` 都算，两个终态都不算。 */
+  pendingComplaintCount: number;
   generatedAt: string;
   notice: string;
 };

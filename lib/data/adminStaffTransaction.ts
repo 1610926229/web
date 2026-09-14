@@ -123,7 +123,7 @@ export async function createStaffAccount(
   const staff = staffStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeCreateReplay(ctx.operationId, "staff");
+  const replay = takeCreateReplay(ctx, "staff");
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   // 重放：这个键已经成功过一次，把当时建出来的那条找回来，**不再写任何东西**。
@@ -186,7 +186,7 @@ export async function updateStaffProfile(
   const staff = staffStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "staff", id);
+  const replay = takeReplay(ctx, "staff", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = staff.staff.get(id);
@@ -248,7 +248,7 @@ export async function setStaffEnabled(
   const staff = staffStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "staff", id);
+  const replay = takeReplay(ctx, "staff", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = staff.staff.get(id);
@@ -305,7 +305,7 @@ export async function removeStaffAccount(
   const staff = staffStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "staff", id);
+  const replay = takeReplay(ctx, "staff", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = staff.staff.get(id);

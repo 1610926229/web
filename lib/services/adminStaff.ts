@@ -211,7 +211,13 @@ function requireIdempotencyKey(body: Record<string, unknown>): string {
 
 /** 组装一次写操作的上下文。时间戳只取一次，业务写入与审计写入共用同一个。 */
 function writeContext(adminId: string, operationId: string): AdminWriteContext {
-  return { adminId, operationId, at: new Date().toISOString() };
+  return {
+    actorId: adminId,
+    actorRole: "admin",
+    actorName: null,
+    operationId,
+    at: new Date().toISOString(),
+  };
 }
 
 /** 五个动作共用的失败翻译。四种情形在所有动作里完全相同，写五遍只会写出五种口径。 */

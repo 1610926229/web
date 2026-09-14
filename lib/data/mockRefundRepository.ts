@@ -1,5 +1,6 @@
 import { compareRefundsForAdmin } from "@/lib/constants/adminRefunds";
 import { refundSeed } from "@/lib/mocks/fixtures/refundSeed";
+import type { ActorRole } from "@/lib/types/actor";
 import type { RefundRequest, RefundStatus } from "@/lib/types/refund";
 import { getMockStore } from "./mockStore";
 import type {
@@ -138,25 +139,37 @@ export const mockRefundRepository: RefundRepository = {
 };
 
 /**
- * 管理端审核动作的**同步写入器**（无 `await`）。
+ * 审核动作的**同步写入器**（无 `await`）。
  *
  * ⚠️ 与 `applyApplicationReview` / `applyOrderRefund` 同一套路：**只负责写**，
  * 不判断这次迁移合不合法——合法性由伪事务在调用它之前用状态机判定。
  *
+ * ⚠️ P8D-2 起管理端与客服端共用这一个写入器（调用方是 `adminRefundTransaction`
+ * 的原子区段）。因此「审核人」不再必然是管理员，而是由 `input` 带进来的
+ * `actorId` / `actorRole` / `actorName` 三样——三个字段必须一起写，
+ * 只写 id 会让读的人不知道去哪张表查这个名字。
+ *
  * 三个目标状态各写各的字段，`from` 一律从记录里现读（因此不存在「调用方记错了原状态」）：
  * - `reviewing`：只写 `reviewingAt`。**不写审核人与意见**——开始审核还没有结论；
- * - `approved` / `rejected`：写 `reviewedAt` 与 `reviewedBy`，意见用传入的那份
+ * - `approved` / `rejected`：写 `reviewedAt` 与审核人三件套，意见用传入的那份
  *   （拒绝对应的意见由服务层校验为非空；通过时传既有意见，通常是空串）。
  *
  * `amount`、`reasonKey`、`description`、`evidence`、`orderId`、`userId` **一个都不碰**：
- * 这张表里没有任何一个字段是管理端可改的，金额尤其——它是申请创建时的订单实付快照。
+ * 这张表里没有任何一个字段是平台侧可改的，金额尤其——它是申请创建时的订单实付快照。
+ * 客服身份的加入没有改变这一点：客服看得到金额，但同样改不了（没有写它的参数）。
  *
  * ⚠️ 又是**同步**的：它只在 `adminRefundTransaction` 的原子区段里被调用。
  */
 export function applyRefundReview(
   id: string,
   to: Extract<RefundStatus, "reviewing" | "approved" | "rejected">,
-  input: { at: string; reviewNote: string; adminId: string },
+  input: {
+    at: string;
+    reviewNote: string;
+    actorId: string;
+    actorRole: ActorRole;
+    actorName: string | null;
+  },
 ): { previous: RefundRequest; updated: RefundRequest } | null {
   const current = store();
   const refund = current.refunds.get(id);
@@ -175,7 +188,9 @@ export function applyRefundReview(
     reviewingAt: to === "reviewing" ? input.at : refund.reviewingAt,
     // 只有出了结果才写审核人与审核时间；开始审核只更新「审核中」这一格
     reviewedAt: settled ? input.at : refund.reviewedAt,
-    reviewedBy: settled ? input.adminId : refund.reviewedBy,
+    reviewedBy: settled ? input.actorId : refund.reviewedBy,
+    reviewedByRole: settled ? input.actorRole : refund.reviewedByRole,
+    reviewedByName: settled ? input.actorName : refund.reviewedByName,
     reviewNote: settled ? input.reviewNote : refund.reviewNote,
   };
   current.refunds.set(id, updated);

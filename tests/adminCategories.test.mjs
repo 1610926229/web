@@ -377,7 +377,7 @@ test("新建类目：字段落库、审计 before 为 null、id 用后台前缀"
   assert.equal(audits[0].action, "category.create");
   assert.equal(audits[0].before, null, "新建时还不存在「更新前」，before 就是 null");
   assert.equal(audits[0].after.name, "新类目甲");
-  assert.equal(audits[0].adminId, ADMIN_ID);
+  assert.equal(audits[0].actorId, ADMIN_ID);
 });
 
 test("DTO 边界：客户端伪造的 id / 时间 / 移除状态一律没有入口", async () => {
@@ -453,7 +453,7 @@ test("编辑类目：改名与改排序记 category.update，取消启用勾选�
   assert.equal(disable.before.name, "开业特惠（改）");
   assert.equal(disable.before.enabled, true);
   assert.equal(disable.after.enabled, false);
-  assert.equal(disable.adminId, ADMIN_ID);
+  assert.equal(disable.actorId, ADMIN_ID);
 });
 
 test("编辑可以改所属游戏：类目换游戏后，两边导航各自读到的就是新归属", async () => {

@@ -73,6 +73,7 @@ function build(input: PresetComplaintInput): Complaint {
     throw new Error(`预置投诉 ${input.id} 已完结，必须有完结时间`);
   }
 
+  const settled = input.status === "resolved" || input.status === "closed";
   const userId = input.userId;
 
   return {
@@ -100,10 +101,13 @@ function build(input: PresetComplaintInput): Complaint {
     processingAt: input.processingAt ?? null,
     handledAt: input.handledAt ?? null,
     // 预置数据里已出结果的记录，处理人一律记成模拟登录唯一的那个管理员账号：
-    // 后台的处理人是从服务端会话里读出来的，预置数据里编一个不存在的 id
+    // 平台侧的处理人是从服务端会话里读出来的，预置数据里编一个不存在的 id
     // 会让详情页显示出一个谁也找不到的人。
-    handledByAdminId:
-      input.status === "resolved" || input.status === "closed" ? MOCK_ADMIN_LOGIN_ID : null,
+    handledById: settled ? MOCK_ADMIN_LOGIN_ID : null,
+    // 预置数据里已出结果的是**管理员**处理的，所以角色写 "admin"；
+    // 客服处理的记录由 P8D-2 之后的操作产生，不预置（理由同退款预置数据）。
+    handledByRole: settled ? "admin" : null,
+    handledByName: null,
     result,
   };
 }

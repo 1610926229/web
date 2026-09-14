@@ -60,6 +60,33 @@ export default function StaffConversationTable({
 
   const ticketRef = useRef(0);
 
+  /**
+   * ⚠️ 服务端重新取数之后，这张表必须**采纳新的快照**。与
+   * `StaffComplaintTable` / `StaffRefundTable` 同因同解，完整理由见那里的注释：
+   * `useState` 的初值只在首次挂载时生效，而页头的「刷新」走的 `router.refresh()`
+   * **刻意保留客户端 state**（内置文档
+   * `01-app/03-api-reference/04-functions/use-router.md`：merge the updated RSC payload
+   * *without losing unaffected client-side React (e.g. `useState`)*），
+   * 于是服务端重新查到的会话到不了屏幕上——客服点「刷新」看不到对方刚发来的消息。
+   *
+   * 判据用**引用**：`initialResult` 由服务端每次渲染重新构造，只有服务端真的重新取过数
+   * 才会换引用；客服在本地筛选、翻页、输入关键词都不会动它，所以不会误伤本地状态。
+   * 筛选条件随之回到地址栏口径（`initialFilters`，「未读」那个入口也在地址栏上）。
+   *
+   * ⚠️ 这里**只**采纳快照，不碰任何会话业务：未读口径、排序与分页窗口仍然完全由服务端决定，
+   * 本组件一次都没有重排、没有改动已读位置。
+   */
+  const [serverResult, setServerResult] = useState(initialResult);
+  if (serverResult !== initialResult) {
+    setServerResult(initialResult);
+    setResult(initialResult);
+    setFilters(initialFilters);
+    setInput(initialFilters.keyword);
+    setLoadStatus("ready");
+    setError("");
+    setNote("");
+  }
+
   async function load(query: StaffConversationFilters) {
     const ticket = ++ticketRef.current;
     setLoadStatus("loading");

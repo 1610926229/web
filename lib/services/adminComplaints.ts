@@ -252,7 +252,13 @@ function assertIdempotencyKeyShape(key: string): void {
 
 /** 组装一次写操作的上下文。时间戳只取一次，业务写入与审计写入共用同一个。 */
 function writeContext(adminId: string, operationId: string): AdminWriteContext {
-  return { adminId, operationId, at: new Date().toISOString() };
+  return {
+    actorId: adminId,
+    actorRole: "admin",
+    actorName: null,
+    operationId,
+    at: new Date().toISOString(),
+  };
 }
 
 /** 三个动作共用的失败翻译。三种情形在三个动作里完全相同，写三遍只会写出三种口径。 */

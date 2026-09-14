@@ -11,11 +11,19 @@ import { getStaffSession } from "@/lib/services/staffAuth";
 /**
  * 工作台首页（`/staff`）。
  *
- * 三个数字都是**实时聚合**（会话总数、未读会话数、今日消息数），
- * 不是写死的展示值——验收时要能看着它变。
+ * 五个数字都是**实时聚合**（会话总数、未读会话数、今日消息数、
+ * 待处理退款数、待处理投诉数），不是写死的展示值——验收时要能看着它变。
  *
  * ⚠️ 未读数是**当前登录客服**的口径：换个客服登录，同一个数字会不一样。
  * 因此这里必须用会话里的 `staff.id`，不能从地址栏或查询串里取任何东西。
+ *
+ * ⚠️ 待处理退款 / 投诉是**平台口径**（本阶段不做工单派发，每位客服看到同一个数），
+ * 与会话未读数不同。两种口径的说明已写在 `STAFF_OVERVIEW_NOTICE` 里，页面原样展示，
+ * 不在这里重写——口径只有一份，改一处就都改。
+ *
+ * ⚠️ 待处理的两张卡片是**链接**，指向 `/staff/refunds` 与 `/staff/complaints`：
+ * 这两个数不是拿来「看一眼」的，而是催人「去处理」。那两个页面由 P8D-2 的
+ * 另外两条线并行落地，本页只给入口，不在概览里再实现一遍列表。
  *
  * ⚠️ 本页是服务端组件、取数在渲染时发生，因此「刷新」走 `router.refresh()`
  * （`StaffRefreshButton`），而不是客户端再请求一次接口。
@@ -59,6 +67,28 @@ export default async function StaffOverviewPage() {
           label="今日消息"
           value={metrics.todayMessageCount}
           hint="北京时间今天的消息条数，含你自己发的"
+        />
+      </dl>
+
+      {/*
+        待处理的两个数单独成一行：它们的口径是「平台还没给出结论」，
+        与会话那三个（按当前客服 / 按今天）不是一回事，混在一个网格里
+        会让人以为五张卡片是同一套统计。
+      */}
+      <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <MetricCard
+          label="待处理退款"
+          value={metrics.pendingRefundCount}
+          hint="待审核与审核中的退款申请"
+          href="/staff/refunds"
+          hrefLabel="去处理"
+        />
+        <MetricCard
+          label="待处理投诉"
+          value={metrics.pendingComplaintCount}
+          hint="待处理与处理中的投诉"
+          href="/staff/complaints"
+          hrefLabel="去处理"
         />
       </dl>
 

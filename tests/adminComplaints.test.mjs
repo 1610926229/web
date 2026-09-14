@@ -220,7 +220,8 @@ test("开始处理只改状态：不产生结论，也不写处理人与完成�
   assert.equal(complaint.status, "processing");
   assert.ok(complaint.processingAt);
   assert.equal(complaint.result, "", "开始处理一个字的结论都不写");
-  assert.equal(complaint.handledByAdminId, null, "开始处理不代表已经有人出了结论");
+  assert.equal(complaint.handledById, null, "开始处理不代表已经有人出了结论");
+  assert.equal(complaint.handledByRole, null, "开始处理不代表已经有人出了结论");
 
   // 订单与退款一条都没动
   assert.deepEqual(await orderFingerprint(), ordersBefore);
@@ -287,7 +288,8 @@ test("解决与关闭写的是同一个字段、两种问法：一条投诉只�
 
   const resolvedRecord = await complaintOf(PROCESSING_COMPLAINT);
   assert.equal(resolvedRecord.result, "客服已核对退款记录，未发现重复扣款。");
-  assert.equal(resolvedRecord.handledByAdminId, ADMIN);
+  assert.equal(resolvedRecord.handledById, ADMIN);
+  assert.equal(resolvedRecord.handledByRole, "admin", "P8C 路径写入的处理人一定是管理员");
   assert.equal(resolvedRecord.handledAt, resolved.handledAt);
 
   const closed = await closeAdminComplaint(PENDING_COMPLAINT, ADMIN, {
@@ -335,7 +337,9 @@ test("用户提交的正文、凭证与联系方式不可被覆盖：请求体�
     evidence: [{ id: "fake", kind: "image", name: "fake.png", url: "https://evil.example/x.png" }],
     complaintNo: "TS-FAKE",
     status: "closed",
-    handledByAdminId: "admin-999",
+    handledById: "admin-999",
+    handledByRole: "customer_service",
+    handledByName: "伪造的处理人",
     handledAt: "2000-01-01T00:00:00.000Z",
     orderId: "ord-nope",
     processingAt: "2000-01-01T00:00:00.000Z",
@@ -349,7 +353,9 @@ test("用户提交的正文、凭证与联系方式不可被覆盖：请求体�
   assert.equal(after.orderId, before.orderId, "关联订单不可被改动");
   assert.equal(after.processingAt, before.processingAt, "开始处理时间不可被改写");
   assert.equal(after.status, "resolved", "状态由状态机决定，不由请求体决定");
-  assert.equal(after.handledByAdminId, ADMIN, "处理人来自服务端会话");
+  assert.equal(after.handledById, ADMIN, "处理人来自服务端会话");
+  assert.equal(after.handledByRole, "admin", "处理人类型也来自服务端会话，不由请求体决定");
+  assert.equal(after.handledByName, null, "管理端写入不带名称快照，请求体里的名称不会被采纳");
   assert.notEqual(after.handledAt, "2000-01-01T00:00:00.000Z");
   assert.equal(after.result, "这里是平台侧的处理结果。");
 });
@@ -431,7 +437,7 @@ test("审计恰好一次，且不保存投诉正文、联系方式与凭证地�
     ["complaint.start-processing", "complaint.close"],
   );
   for (const entry of pendingEntries) {
-    assert.equal(entry.adminId, ADMIN);
+    assert.equal(entry.actorId, ADMIN);
     assert.equal(entry.targetType, "complaint");
   }
 
@@ -445,7 +451,8 @@ test("审计恰好一次，且不保存投诉正文、联系方式与凭证地�
   assert.equal(pendingEntries[1].before.status, "processing");
   assert.equal(pendingEntries[1].after.status, "closed");
   assert.ok(pendingEntries[1].after.result.startsWith("已核实"));
-  assert.equal(pendingEntries[1].after.handledByAdminId, ADMIN);
+  assert.equal(pendingEntries[1].after.handledById, ADMIN);
+  assert.equal(pendingEntries[1].after.handledByRole, "admin");
 
   const processingEntry = auditsFor(PROCESSING_COMPLAINT)[0];
   assert.equal(processingEntry.action, "complaint.resolve");
@@ -604,7 +611,9 @@ test("列表 DTO 只有摘要：没有正文、凭证、联系方式、处理结
     "evidence",
     "contact",
     "result",
-    "handledByAdminId",
+    "handledById",
+    "handledByRole",
+    "handledByName",
     "handledAt",
     "processingAt",
     "openId",
@@ -770,10 +779,13 @@ test("用户端同步看到处理结果，但看不到管理员的内部字段",
 
   // 管理员的内部字段不进用户 DTO
   assert.equal(
-    Object.hasOwn(mine, "handledByAdminId"),
+    Object.hasOwn(mine, "handledById"),
     false,
     "用户端 DTO 不该有「处理人是谁」这个字段",
   );
+  assert.equal(Object.hasOwn(mine, "handledByRole"), false);
+  assert.equal(Object.hasOwn(mine, "handledByName"), false);
+  assert.equal(Object.hasOwn(mine, "reviewedByRole"), false, "退款侧的同类字段也不该串进来");
   const serialized = JSON.stringify(mine);
   assert.equal(serialized.includes(ADMIN), false, "用户端看不到管理员 id");
   assert.equal(serialized.includes("openId"), false);
@@ -786,4 +798,74 @@ test("用户端同步看到处理结果，但看不到管理员的内部字段",
     "不能拿别人的投诉 id 试探",
   );
   assert.equal(await getComplaintDetailForUser(OTHER_COMPLAINT, USER_A, undefined, SURFACE), null);
+});
+
+// ——————————————————————————— 幂等键的意图绑定（P8D-2） ———————————————————————————
+
+/**
+ * 「同一个键只能指向同一个意图」。
+ *
+ * 三个处理动作作用于**同一条投诉**，因此「开始处理 / 解决 / 关闭」是同目标、
+ * 同操作者、不同意图。幂等键原本只在「操作者 × 目标」两轴上收窄
+ * （见 `lib/data/adminWriteSupport.ts`），于是
+ *
+ *   带键 K 开始处理 → 带同一个 K 解决
+ *
+ * 的第二次请求会被判成「重放」，服务端什么都不做却回 200，投诉停在「处理中」。
+ * P8D-2 起客服也能处理投诉，这条路才真正走得通，因此在这里把它钉死。
+ */
+test("幂等的意图绑定：同一个键先「开始处理」再「解决」，第二次必须报冲突而不是静默成功", async () => {
+  const operationId = key();
+
+  const first = await startProcessingAdminComplaint(PENDING_COMPLAINT, ADMIN, {
+    idempotencyKey: operationId,
+  });
+  assert.equal(first.status, "processing");
+  assert.equal(first.changed, true);
+  assert.equal(auditCount(), 1);
+
+  await expectApiError(
+    resolveAdminComplaint(PENDING_COMPLAINT, ADMIN, {
+      idempotencyKey: operationId,
+      result: "换了个意图，但复用了同一个键",
+    }),
+    "BAD_REQUEST",
+  );
+
+  assert.equal((await complaintOf(PENDING_COMPLAINT)).status, "processing", "状态不该被这次请求改变");
+  assert.equal(await auditCount(), 1, "被拒的请求不写审计");
+});
+
+test("幂等的意图绑定：换一个键，同一条投诉的另一个意图就能正常执行", async () => {
+  await startProcessingAdminComplaint(PENDING_COMPLAINT, ADMIN, { idempotencyKey: key() });
+
+  const resolved = await resolveAdminComplaint(PENDING_COMPLAINT, ADMIN, {
+    idempotencyKey: key(),
+    result: "已核实并给出结论。",
+  });
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.changed, true);
+
+  assert.equal(auditCount(), 2, "两次不同意图各写一条审计");
+  const actions = auditsFor(PENDING_COMPLAINT).map((entry) => entry.action).sort();
+  assert.deepEqual(actions, ["complaint.resolve", "complaint.start-processing"]);
+});
+
+test("幂等的意图绑定不影响**同意图**重放：同一个键重复解决仍然返回第一次的结果", async () => {
+  const operationId = key();
+
+  const first = await resolveAdminComplaint(PROCESSING_COMPLAINT, ADMIN, {
+    idempotencyKey: operationId,
+    result: "第一次结论",
+  });
+  assert.equal(first.changed, true);
+
+  const replay = await resolveAdminComplaint(PROCESSING_COMPLAINT, ADMIN, {
+    idempotencyKey: operationId,
+    result: "第二次提交（同一意图，应当被判为重放）",
+  });
+  assert.equal(replay.changed, false, "同一意图的重复提交仍然是重放");
+  assert.equal(replay.status, "resolved");
+  assert.equal(auditCount(), 1, "重放不写第二条审计");
+  assert.equal((await complaintOf(PROCESSING_COMPLAINT)).result, "第一次结论", "重放不改写字段");
 });

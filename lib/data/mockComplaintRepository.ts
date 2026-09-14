@@ -1,6 +1,7 @@
 import { compareComplaintsForAdmin } from "@/lib/constants/adminComplaints";
 import { compareComplaintsNewestFirst } from "@/lib/constants/complaints";
 import { complaintSeed } from "@/lib/mocks/fixtures/complaintSeed";
+import type { ActorRole } from "@/lib/types/actor";
 import type { Complaint, ComplaintStatus } from "@/lib/types/complaint";
 import type {
   AdminComplaintQueryFilter,
@@ -120,24 +121,36 @@ export const mockComplaintRepository: ComplaintRepository = {
 };
 
 /**
- * 管理端处理动作的**同步写入器**（无 `await`）。
+ * 处理动作的**同步写入器**（无 `await`）。
  *
  * ⚠️ 与 `applyRefundReview` 同一套路：**只负责写**，不判断这次迁移合不合法。
  *
+ * ⚠️ P8D-2 起管理端与客服端共用这一个写入器（调用方是
+ * `adminComplaintTransaction` 的原子区段）。因此「处理人」不再是「管理员」，
+ * 而是由 `input` 带进来的 `actorId` / `actorRole` / `actorName` 三样——
+ * 三个字段必须一起写，只写 id 会让读的人不知道去哪张表查这个名字。
+ *
  * 三个目标状态各写各的字段：
  * - `processing`：只写 `processingAt`。**不写处理人与结果**——「有人开始看了」还没有结论；
- * - `resolved` / `closed`：写 `handledAt`、`handledByAdminId` 与传入的结论文本。
+ * - `resolved` / `closed`：写 `handledAt`、处理人三件套与传入的结论文本。
  *
  * ⚠️ `description`、`evidence`、`contact`、`orderId`、`userId`、`complaintNo` **一个都不碰**：
- * 前三个是**用户提交的原始材料**，管理端不可覆盖（§投诉处理）。这不是「暂时没做」，
+ * 前三个是**用户提交的原始材料**，平台侧不可覆盖（§投诉处理）。这不是「暂时没做」，
  * 而是这个方法里根本没有写它们的语句——多传一个字段进来也不会生效。
+ * 客服身份的加入没有改变这一点：客服能看到正文，但同样改不了（没有写它的参数）。
  *
  * ⚠️ 又是**同步**的：它只在 `adminComplaintTransaction` 的原子区段里被调用。
  */
 export function applyComplaintStatus(
   id: string,
   to: Extract<ComplaintStatus, "processing" | "resolved" | "closed">,
-  input: { at: string; result: string; adminId: string },
+  input: {
+    at: string;
+    result: string;
+    actorId: string;
+    actorRole: ActorRole;
+    actorName: string | null;
+  },
 ): { previous: Complaint; updated: Complaint } | null {
   const current = store();
   const complaint = current.complaints.get(id);
@@ -152,7 +165,9 @@ export function applyComplaintStatus(
     updatedAt: input.at,
     processingAt: to === "processing" ? input.at : complaint.processingAt,
     handledAt: settled ? input.at : complaint.handledAt,
-    handledByAdminId: settled ? input.adminId : complaint.handledByAdminId,
+    handledById: settled ? input.actorId : complaint.handledById,
+    handledByRole: settled ? input.actorRole : complaint.handledByRole,
+    handledByName: settled ? input.actorName : complaint.handledByName,
     result: settled ? input.result : complaint.result,
   };
   current.complaints.set(id, updated);

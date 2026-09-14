@@ -3,7 +3,7 @@ import { canTransitionRefund } from "@/lib/constants/adminRefunds";
 import type { AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { Order } from "@/lib/types/order";
 import type { RefundRequest, RefundStatus } from "@/lib/types/refund";
-import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
+import { takeReplayForAction, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import { applyOrderRefund, paymentStore } from "./mockPaymentRepository";
 import { applyRefundReview, refundStore } from "./mockRefundRepository";
 
@@ -111,7 +111,7 @@ export async function startReviewRefund(
   const orders = paymentStore().orders;
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "refund", refundId);
+  const replay = takeReplayForAction(ctx, "refund.start-review", "refund", refundId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = refunds.refunds.get(refundId);
@@ -137,7 +137,9 @@ export async function startReviewRefund(
   const written = applyRefundReview(refundId, "reviewing", {
     at: ctx.at,
     reviewNote: existing.reviewNote,
-    adminId: ctx.adminId,
+    actorId: ctx.actorId,
+    actorRole: ctx.actorRole,
+    actorName: ctx.actorName,
   });
   // 上面刚确认过记录存在，这里为 null 属于不可能状态；当作失败返回，绝不继续写
   if (!written) return { kind: "not-found" };
@@ -189,7 +191,7 @@ export async function approveRefund(
   const orders = paymentStore().orders;
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "refund", refundId);
+  const replay = takeReplayForAction(ctx, "refund.approve", "refund", refundId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = refunds.refunds.get(refundId);
@@ -218,7 +220,9 @@ export async function approveRefund(
   const written = applyRefundReview(refundId, "approved", {
     at: ctx.at,
     reviewNote,
-    adminId: ctx.adminId,
+    actorId: ctx.actorId,
+    actorRole: ctx.actorRole,
+    actorName: ctx.actorName,
   });
   if (!written) return { kind: "not-found" };
 
@@ -275,7 +279,7 @@ export async function rejectRefund(
   const orders = paymentStore().orders;
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "refund", refundId);
+  const replay = takeReplayForAction(ctx, "refund.reject", "refund", refundId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = refunds.refunds.get(refundId);
@@ -300,7 +304,9 @@ export async function rejectRefund(
   const written = applyRefundReview(refundId, "rejected", {
     at: ctx.at,
     reviewNote,
-    adminId: ctx.adminId,
+    actorId: ctx.actorId,
+    actorRole: ctx.actorRole,
+    actorName: ctx.actorName,
   });
   if (!written) return { kind: "not-found" };
 

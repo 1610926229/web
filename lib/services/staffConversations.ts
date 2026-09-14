@@ -18,8 +18,10 @@ import {
   type StaffOrderStatusFilter,
 } from "@/lib/constants/staff";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
+import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
+import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getDataSource } from "@/lib/data/source";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { Order } from "@/lib/types/order";
@@ -138,14 +140,56 @@ function toListItem(row: StaffConversationRow): StaffConversationListItem {
 // ——————————————————————————— 工作台首页 ———————————————————————————
 
 /**
- * 工作台首页的三个数（§四：**真实聚合**，不是写死的展示值）。
+ * 待处理的退款 / 投诉数（P8D-2）。
+ *
+ * ⚠️ **只读现有仓储，不新建任何聚合层**：两个数各自来自退款与投诉的唯一数据源，
+ * 用的是管理端列表同一个 `query*ForAdmin()` 查询（`status: null` 取全部再在内存里数）。
+ * 之所以不写 `countPending()` 这类新仓储方法，是因为本阶段的数据量在内存里，
+ * 而多一个查询方法就多一处「口径写在哪里」的问题——`status: null` 的口径是现成的。
+ *
+ * ⚠️ **口径是「平台还没给出结论的」**，不是「待审核」：
+ * `pending`（还没人接手）与 `reviewing` / `processing`（有人接手但没结论）都算。
+ * 只数 `pending` 的话，一笔被客服认领过的退款会从待办里消失——
+ * 那正是「认领即遗忘」这个最容易被忽略的漏单形态。
+ *
+ * ⚠️ 这两个数**对每位客服相同**（本阶段不做工单派发），与会话未读数按当前客服统计
+ * 的口径不同。这一点写在 `STAFF_OVERVIEW_NOTICE` 里，页面会原样展示。
+ */
+async function countPendingPlatformWork(): Promise<{
+  pendingRefundCount: number;
+  pendingComplaintCount: number;
+}> {
+  const [refunds, complaints] = await Promise.all([
+    getRefundRepository().queryRefundsForAdmin({ status: null }),
+    getComplaintRepository().queryComplaintsForAdmin({ status: null, type: null }),
+  ]);
+
+  return {
+    pendingRefundCount: refunds.filter(
+      (refund) => refund.status === "pending" || refund.status === "reviewing",
+    ).length,
+    pendingComplaintCount: complaints.filter(
+      (complaint) => complaint.status === "pending" || complaint.status === "processing",
+    ).length,
+  };
+}
+
+/**
+ * 工作台首页的五个数（§四：**真实聚合**，不是写死的展示值）。
  *
  * - `conversationCount`：有会话的订单数。与列表筛选无关——它是「一共有多少单在沟通」；
  * - `unreadConversationCount`：**当前客服**还有未读的会话数，不是未读条数；
- * - `todayMessageCount`：今天（北京时间自然日）产生的消息条数，含客服自己发的。
+ * - `todayMessageCount`：今天（北京时间自然日）产生的消息条数，含客服自己发的；
+ * - `pendingRefundCount` / `pendingComplaintCount`：平台还没给出结论的退款与投诉（P8D-2）。
  *
- * 三个数每次都从仓储现算。缓存会让「刚发完消息回到首页，数字还是旧的」，
+ * 五个数每次都从仓储现算。缓存会让「刚发完消息回到首页，数字还是旧的」，
  * 而验收时看到的正是一个不动的数字。
+ *
+ * ⚠️ 待处理的两个数**排在会话统计之后**（先 await 会话行，再 await 两个计数）：
+ * 它们之间没有依赖，本来可以并行，但会话行那一段是 P8D-1 既有的、
+ * 带 `withMockDebug` 故障注入的路径，把它和另外两个 Promise 揉进一个 `Promise.all`
+ * 之后，「`?mockEmpty=staff` 到底清空了哪几个数」会变得难说清。串行少一点速度，
+ * 换来的是每个数字的来源一眼可辨。
  */
 export async function getStaffOverviewMetrics(
   staffId: string,
@@ -167,10 +211,14 @@ export async function getStaffOverviewMetrics(
     }
   }
 
+  const { pendingRefundCount, pendingComplaintCount } = await countPendingPlatformWork();
+
   return {
     conversationCount: rows.length,
     unreadConversationCount,
     todayMessageCount,
+    pendingRefundCount,
+    pendingComplaintCount,
     generatedAt: new Date().toISOString(),
     notice: STAFF_OVERVIEW_NOTICE,
   };

@@ -386,7 +386,7 @@ test("新增客服账号：角色由服务端写死，客户端伪造 admin/comp
   assert.equal(audits.length, 1);
   assert.equal(audits[0].action, "staff.create");
   assert.equal(audits[0].targetId, created.staff.id);
-  assert.equal(audits[0].adminId, ADMIN_ID);
+  assert.equal(audits[0].actorId, ADMIN_ID);
   assert.equal(audits[0].before, null, "新建的 before 是 null，事后一眼看得出这条记录是这次产生的");
   assert.equal(JSON.stringify(audits[0].after).includes("password"), false);
 });
@@ -1243,24 +1243,39 @@ test("客服账号不进用户名单，也不参与消费：它是独立的第�
 
 // ——————————————————————————— 六、源码门禁 ———————————————————————————
 
-test("客服接口清单固定：认证三件 + 会话四件", () => {
+test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + 投诉五件", () => {
   const routeFiles = collectFiles(STAFF_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
   // ⚠️ 这里没有「管理客服账号」的地址：那在 `/api/admin/staff/**`，
   // 两者的鉴权是两套（`requireAdmin()` 与 `requireStaff()`），不能合成一个地址段。
-  // ⚠️ 也没有「改订单」「处理退款」「处理投诉」的地址：客服做不到这些（P8D-2 再谈）。
+  // ⚠️ **仍然没有**「改订单」的地址：客服不能改订单状态、金额、商品（P8D-2 也没有放开）。
+  // ⚠️ 退款**只有四个**地址：列表、详情、开始审核、驳回。
+  //    **没有 `approve`**：通过会在同一次写入里把订单改成「已退款」，属于资金最终划拨，
+  //    留在管理员侧。这个「少一个地址」就是那条边界在代码里的样子——
+  //    接口不存在，因此谁也无法从客服端把它调出来。
+  // ⚠️ 投诉五个：列表、详情，加三个处理动作（开始处理 / 解决 / 关闭）——
+  //    投诉不写订单、不写退款、不动金额，因此三个动作都归客服。
   assert.deepEqual(
     routeFiles.map((file) => path.relative(STAFF_API_DIR, file).replace(/\\/g, "/")).sort(),
     [
       "auth/logout/route.ts",
       "auth/mock-login/route.ts",
       "auth/session/route.ts",
+      "complaints/[id]/close/route.ts",
+      "complaints/[id]/resolve/route.ts",
+      "complaints/[id]/route.ts",
+      "complaints/[id]/start-processing/route.ts",
+      "complaints/route.ts",
       // 详情与发送共用一个地址段（GET 读、POST 发），因此只有这一个 route.ts
       "conversations/[orderId]/messages/route.ts",
       "conversations/[orderId]/read/route.ts",
       "conversations/[orderId]/route.ts",
       "conversations/route.ts",
+      "refunds/[id]/reject/route.ts",
+      "refunds/[id]/route.ts",
+      "refunds/[id]/start-review/route.ts",
+      "refunds/route.ts",
     ],
   );
 

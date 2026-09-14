@@ -76,6 +76,8 @@ function build(input: PresetRefundInput): RefundRequest {
     throw new Error(`预置退款 ${input.id} 已审核完成，必须有开始审核的时间`);
   }
 
+  const settled = input.status === "approved" || input.status === "rejected";
+
   return {
     id: input.id,
     refundNo: input.refundNo,
@@ -104,8 +106,12 @@ function build(input: PresetRefundInput): RefundRequest {
     // 预置数据里已出结果的记录，审核人一律记成模拟登录唯一的那个管理员账号——
     // 后台的审核人是从服务端会话里读出来的，预置数据里编一个不存在的 id
     // 会让详情页显示出一个谁也找不到的人。
-    reviewedBy:
-      input.status === "approved" || input.status === "rejected" ? MOCK_ADMIN_LOGIN_ID : null,
+    reviewedBy: settled ? MOCK_ADMIN_LOGIN_ID : null,
+    // 预置数据里已出结果的是**管理员**批的，所以角色写 "admin"；
+    // 客服驳回的记录由 P8D-2 之后的操作产生，不预置（预置一条「客服处理过」的历史，
+    // 会让第一次打开工作台的人以为之前有人在这套系统里干过活）。
+    reviewedByRole: settled ? "admin" : null,
+    reviewedByName: null,
     reviewNote: input.reviewNote ?? "",
     cancelledAt: input.cancelledAt ?? null,
   };

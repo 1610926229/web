@@ -301,7 +301,13 @@ function requireIdempotencyKey(body: Record<string, unknown>): string {
 }
 
 function writeContext(adminId: string, operationId: string): AdminWriteContext {
-  return { adminId, operationId, at: new Date().toISOString() };
+  return {
+    actorId: adminId,
+    actorRole: "admin",
+    actorName: null,
+    operationId,
+    at: new Date().toISOString(),
+  };
 }
 
 /**

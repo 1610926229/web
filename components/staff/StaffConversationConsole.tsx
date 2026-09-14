@@ -4,6 +4,7 @@
    不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   STAFF_MESSAGE_SEND_HINT,
   STAFF_NOT_REALTIME_NOTICE,
@@ -55,6 +56,7 @@ export default function StaffConversationConsole({
   orderId: string;
   initialDetail: StaffConversationDetail;
 }) {
+  const router = useRouter();
   const [detail, setDetail] = useState(initialDetail);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -70,9 +72,16 @@ export default function StaffConversationConsole({
 
   // 进入会话即标记已读。放在 effect 里而不是渲染时：渲染期写入会被链接预取提前触发，
   // 会话还没被打开就被标成已读了。标记失败不影响阅读与发送——下次进来会再标一次。
+  //
+  // 标记成功后跟一次 `router.refresh()`，与用户侧同一条做法：不刷新的话，
+  // 客服按「返回」时 `/staff/conversations?unread=1` 会复用进入之前的服务端快照，
+  // 刚读过的会话仍然留在未读列表里。`refreshReducer` 里的 `invalidateBfCache()`
+  // 会把前进/后退缓存整体置为失效，正是为这个场景准备的。
   useEffect(() => {
-    void markStaffConversationRead(orderId).catch(() => {});
-  }, [orderId]);
+    void markStaffConversationRead(orderId)
+      .then(() => router.refresh())
+      .catch(() => {});
+  }, [orderId, router]);
 
   // 新消息进来后滚到底部
   useEffect(() => {

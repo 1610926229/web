@@ -7,6 +7,7 @@ import AdminComplaintConsole from "@/components/admin/AdminComplaintConsole";
 import AdminPageHeading from "@/components/admin/AdminPageHeading";
 import { DetailRow, FieldBlock, Section } from "@/components/admin/AdminDetailSection";
 import AdminStatusBadge, { COMPLAINT_STATUS_TONE, ORDER_STATUS_TONE } from "@/components/admin/AdminStatusBadge";
+import { formatAuditActorLabel } from "@/lib/constants/adminAudit";
 import {
   ADMIN_COMPLAINT_DETAIL_TITLE,
   ADMIN_COMPLAINT_IMMUTABLE_NOTICE,
@@ -224,14 +225,21 @@ function HandlingSection({ complaint }: { complaint: AdminComplaintDetail }) {
           label="处理完成"
           value={complaint.handledAt ? formatDateTime(complaint.handledAt) : ""}
         />
-        <DetailRow label="处理人" value={complaint.handledByAdminId ?? ""} />
+        <DetailRow
+          label="处理人"
+          value={formatAuditActorLabel({
+            role: complaint.handledByRole,
+            id: complaint.handledById,
+            name: complaint.handledByName,
+          })}
+        />
       </div>
 
       <div className="mt-3">
         <FieldBlock title="处理结果" content={complaint.result} />
       </div>
       <p className="mt-2 text-[12px] leading-4 text-ink-3">
-        「处理人」只记做出结论（解决或关闭）的管理者；开始处理只改状态、不产生结论。
+        「处理人」只记做出结论（解决或关闭）的账号；开始处理只改状态、不产生结论。
         处理结果与关闭说明共用同一个字段，会展示给提交投诉的用户。
       </p>
     </Section>

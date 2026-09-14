@@ -338,6 +338,9 @@ test("伪造审核人、状态与时间都无效：这三个值一律由服务�
     idempotencyKey: uniqueKey(),
     // 下面这些字段在入参里没有位置——服务层只读幂等键
     adminId: "admin-999",
+    actorId: "admin-999",
+    actorRole: "customer_service",
+    actorName: "伪造的操作者",
     reviewerId: "admin-999",
     status: "rejected",
     reviewedAt: "1999-01-01T00:00:00.000Z",
@@ -364,7 +367,7 @@ test("伪造审核人、状态与时间都无效：这三个值一律由服务�
     action: "application.approve",
     targetId: REVIEWING_APPLICATION,
   });
-  assert.equal(entry.adminId, ADMIN_ID, "审核人必须来自会话");
+  assert.equal(entry.actorId, ADMIN_ID, "审核人必须来自会话");
 
   // 新建的护航用的是自己的 id，不是请求体里塞的 cp-1
   assert.notEqual(result.companionId, "cp-1");
@@ -436,7 +439,7 @@ test("通过 = 四件事同时成立：改状态、发资格、建护航、写�
   const audits = await getAdminAuditRepository().listAudits({ targetId: PENDING_APPLICATION });
   assert.equal(audits.length, 1);
   assert.equal(audits[0].action, "application.approve");
-  assert.equal(audits[0].adminId, ADMIN_ID);
+  assert.equal(audits[0].actorId, ADMIN_ID);
   assert.equal(audits[0].targetType, "companionApplication");
   assert.equal(audits[0].before.status, "pending");
   assert.equal(audits[0].after.status, "approved");
@@ -1133,7 +1136,7 @@ test("每个写操作恰好一条审计，动作名与对象对得上", async ()
     const matched = audits.filter((entry) => entry.action === action);
     assert.equal(matched.length, 1, `${action} 应当有且只有一条审计`);
     assert.equal(matched[0].targetId, targetId);
-    assert.equal(matched[0].adminId, ADMIN_ID);
+    assert.equal(matched[0].actorId, ADMIN_ID);
     assert.equal(matched[0].targetType, action.startsWith("application.") ? "companionApplication" : "companion");
     assert.equal(matched[0].before !== null, true);
     assert.equal(matched[0].after !== null, true);
@@ -1160,7 +1163,9 @@ test("审计只记动作不记内容：没有 Cookie、没有凭据、没有凭�
   for (const entry of audits) {
     assert.deepEqual(Object.keys(entry).sort(), [
       "action",
-      "adminId",
+      "actorId",
+      "actorName",
+      "actorRole",
       "after",
       "before",
       "createdAt",

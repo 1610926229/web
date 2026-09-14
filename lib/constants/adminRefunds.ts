@@ -337,6 +337,8 @@ export function toAdminRefundDetail(
     reviewingAt: refund.reviewingAt,
     reviewedAt: refund.reviewedAt,
     reviewedBy: refund.reviewedBy,
+    reviewedByRole: refund.reviewedByRole,
+    reviewedByName: refund.reviewedByName,
     reviewNote: refund.reviewNote,
     cancelledAt: refund.cancelledAt,
     timeline: buildAdminRefundTimeline(refund),

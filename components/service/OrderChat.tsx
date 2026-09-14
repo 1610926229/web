@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import SafeAreaContainer from "@/components/common/SafeAreaContainer";
 import {
   MESSAGE_MAX_LENGTH,
@@ -41,6 +42,7 @@ export default function OrderChat({
   currentUserId: string;
   initialMessages: OrderMessage[];
 }) {
+  const router = useRouter();
   const [messages, setMessages] = useState(initialMessages);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -55,9 +57,22 @@ export default function OrderChat({
 
   // 进入会话即标记已读。放在 effect 里而不是渲染时：渲染期写入会被链接预取提前触发，
   // 会话还没被打开就被标成已读了。标记失败不影响阅读与发送——下次进来会再标一次。
+  //
+  // 标记成功后必须跟一次 `router.refresh()`。原因不在本页，而在**上一页**：
+  // Next 的前进/后退导航会复用进入会话之前那份 `/service` 的服务端快照，
+  // 而 `refreshReducer` 会调 `invalidateBfCache()` 递增全局版本号，
+  // 把包括上一页在内的所有前进/后退缓存条目判为失效（`isValueExpired` 里
+  // `value.version < currentCacheVersion`）。不刷新的话，用户按「返回」时
+  // 刚清掉的未读红点会原样回来，只有 F5 才消失。
+  //
+  // 副作用是本页也会重新取一次数，但 `router.refresh()` 只合并 RSC 载荷，
+  // 不丢 `useState`（输入框内容、已发消息都不受影响）。`useRouter()` 取自
+  // context，身份稳定，不会让这个 effect 反复触发。
   useEffect(() => {
-    void markConversationRead(orderId).catch(() => {});
-  }, [orderId]);
+    void markConversationRead(orderId)
+      .then(() => router.refresh())
+      .catch(() => {});
+  }, [orderId, router]);
 
   // 新消息进来后滚到底部。用 scrollIntoView 而不是给容器设 overflow，
   // 避免出现第二个滚动容器把 TabBar / 输入区的 sticky 弄失效。

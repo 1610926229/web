@@ -1,3 +1,4 @@
+import type { ActorRole } from "@/lib/types/actor";
 import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { CategoryRecord } from "@/lib/types/catalog";
 import type { Companion } from "@/lib/types/companion";
@@ -33,8 +34,12 @@ import { listEffectiveSpecs, productDisplayPrice } from "./catalog";
  *    不进商品快照。它们在 before/after 里永远相同，记下来只会留下一份必然过期的
  *    数字副本——而看审计的人无从知道它已经过期了。
  * 5. **不存用户提交的原始材料**（P8C）：退款说明、投诉正文、凭证地址与联系方式一律不进快照。
- *    它们不是这次操作的产物，而是用户说的话；审计回答的是「管理者做了什么」。
+ *    它们不是这次操作的产物，而是用户说的话；审计回答的是「平台侧做了什么」。
  *    联系方式连截断后的形式都不留，只留一个 `hasContact` 布尔。
+ *
+ * ⚠️ P8D-2 起客服写操作也走这一层（审计动作词表不变，靠 `actorRole` 区分是谁做的）。
+ * 五条边界对客服**一字不改**：客服看得到用户提交的正文与联系方式，
+ * 但那不等于审计里该留一份——审计记录的是「谁做了什么」，不是「他当时看到了什么」。
  */
 
 export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
@@ -75,6 +80,46 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
 
 export function adminAuditActionLabel(action: AdminAuditAction): string {
   return ADMIN_AUDIT_ACTION_LABELS[action];
+}
+
+// ——————————————————————————— 操作者 ———————————————————————————
+
+/**
+ * 操作者类型的文案。
+ *
+ * ⚠️ 与 `ADMIN_ROLE_LABELS` / `STAFF_ROLE_LABELS` **是三个表**，不要合并：
+ * 那两个描述的是「一个账号是什么角色」（同一个人在两种场景下可能叫法不同），
+ * 这个描述的是「一条记录是被哪一类后台身份改的」。合并之后，
+ * 客服账号的「客服」与管理端角色表里的「客服」会共享同一个字符串常量，
+ * 将来只改一处就会同时影响两个语义。
+ */
+export const AUDIT_ACTOR_ROLE_LABELS: Record<ActorRole, string> = {
+  admin: "管理员",
+  customer_service: "客服",
+};
+
+export function auditActorRoleLabel(role: ActorRole): string {
+  return AUDIT_ACTOR_ROLE_LABELS[role];
+}
+
+/**
+ * 退款 / 投诉详情页上「审核人」「处理人」那一行的文案。
+ *
+ * ⚠️ **必须连角色一起显示**。P8C 时这里只显示一个 id，看的人是后台管理员，
+ * 「admin-1」是谁不言自明；P8D-2 起同一个字段里可能装着客服，只显示 id 的话，
+ * 读到 `staff-2` 的人会先去找管理账号，找不到再来问。
+ *
+ * 优先用名称快照，没有名称就退回 id——**不是空字符串**：
+ * 一条「有人处理过、但显示为空」的记录比一个难看的 id 更糟。
+ */
+export function formatAuditActorLabel(input: {
+  role: ActorRole | null;
+  id: string | null;
+  name: string | null;
+}): string {
+  if (!input.id) return "";
+  const who = input.name?.trim() || input.id;
+  return input.role ? `${AUDIT_ACTOR_ROLE_LABELS[input.role]} ${who}` : who;
 }
 
 /** 快照里任何一段自由文本的截断长度。超过就截断加省略号。 */
@@ -233,6 +278,8 @@ export function toRefundAuditSnapshot(
     reasonKey: refund.reasonKey,
     evidenceCount: refund.evidence.length,
     reviewedBy: refund.reviewedBy,
+    // 审核人是谁**类型**也要记：只留一个 id 的话，事后无法判断该去客服表还是管理表查
+    reviewedByRole: refund.reviewedByRole,
     reviewedAt: refund.reviewedAt,
     reviewNote: truncateAuditText(refund.reviewNote, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
     updatedAt: refund.updatedAt,
@@ -261,7 +308,9 @@ export function toComplaintAuditSnapshot(complaint: Complaint): AdminAuditSnapsh
     evidenceCount: complaint.evidence.length,
     // 只记「有没有留联系方式」，不记内容本身
     hasContact: complaint.contact.trim().length > 0,
-    handledByAdminId: complaint.handledByAdminId,
+    handledById: complaint.handledById,
+    // 处理人是谁**类型**也要记（理由同退款快照的 reviewedByRole）
+    handledByRole: complaint.handledByRole,
     handledAt: complaint.handledAt,
     result: truncateAuditText(complaint.result, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
     updatedAt: complaint.updatedAt,

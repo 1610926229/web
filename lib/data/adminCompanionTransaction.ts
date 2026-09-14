@@ -153,7 +153,7 @@ export async function startReviewCompanionApplication(
   const applications = companionApplicationStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "companionApplication", applicationId);
+  const replay = takeReplay(ctx, "companionApplication", applicationId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = applications.applications.get(applicationId);
@@ -204,7 +204,7 @@ export async function rejectCompanionApplication(
   const applications = companionApplicationStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "companionApplication", applicationId);
+  const replay = takeReplay(ctx, "companionApplication", applicationId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = applications.applications.get(applicationId);
@@ -319,7 +319,7 @@ export async function approveCompanionApplication(
   const qualifications = qualificationStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "companionApplication", applicationId);
+  const replay = takeReplay(ctx, "companionApplication", applicationId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = applications.applications.get(applicationId);
@@ -381,7 +381,7 @@ export async function approveCompanionApplication(
     companionId: created.companion.id,
     applicationId: existing.id,
     grantedAt: ctx.at,
-    grantedByAdminId: ctx.adminId,
+    grantedByAdminId: ctx.actorId,
   };
   const granted = grantQualificationRecord(qualification);
 
@@ -451,7 +451,7 @@ export async function updateCompanionProfile(
   const companions = companionStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "companion", companionId);
+  const replay = takeReplay(ctx, "companion", companionId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = companions.companions.get(companionId);
@@ -509,7 +509,7 @@ export async function setCompanionFlags(
   const companions = companionStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "companion", companionId);
+  const replay = takeReplay(ctx, "companion", companionId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = companions.companions.get(companionId);
@@ -610,7 +610,7 @@ export async function removeCompanion(
   const companions = companionStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "companion", companionId);
+  const replay = takeReplay(ctx, "companion", companionId);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = companions.companions.get(companionId);

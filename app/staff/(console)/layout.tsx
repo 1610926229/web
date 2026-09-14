@@ -4,11 +4,18 @@ import StaffHeader from "@/components/staff/StaffHeader";
 import { getStaffSession } from "@/lib/services/staffAuth";
 
 /**
- * 客服工作台的壳层（`/staff`、`/staff/conversations`）。
+ * 客服工作台的壳层（`/staff`、`/staff/conversations`、`/staff/refunds`、`/staff/complaints`）。
  *
  * ⚠️ **不复用用户端或管理端的任何壳层**：这里没有 `MobileShell`（那是 480px 的居中列），
- * 没有用户端 `TabBar`（工作台是桌面优先的），也不进管理端侧栏
- * （客服看不到订单全量、退款审核与投诉处理）。三套壳层并列，谁也不罩住谁。
+ * 没有用户端 `TabBar`（工作台是桌面优先的），也不进管理端侧栏。
+ * 三套壳层并列，谁也不罩住谁。
+ *
+ * ⚠️ 「不进管理端侧栏」这句话**不等于「客服看不到退款与投诉」**：P8D-1 时这里写的是
+ * 「客服看不到订单全量、退款审核与投诉处理」，P8D-2 把后两样做出来了，
+ * 因此那句话必须跟着改——留着它会让下一个读这份注释的人以为工作台里没有那两个入口。
+ * 现在的边界是：客服**没有订单全量查询**（只看得见有会话的订单），
+ * 退款与投诉在**工作台自己的页面**里处理，而**管理端的侧栏与后台仍然进不去**。
+ * 这两件事同时成立，不矛盾。
  *
  * ⚠️ **鉴权在这一层执行，而且是服务端执行**。`getStaffSession()` 读的是客服端 Cookie
  * （`mock_staff_id`），与用户端、管理端都不是同一个；返回 null 就说明「没有客服权限」，

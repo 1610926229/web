@@ -461,7 +461,7 @@ test("新建商品：一次写入商品与全部规格，统计字段不由后�
   assert.equal(audits[0].before, null);
   assert.equal(audits[0].after.title, "新建商品甲");
   assert.equal(audits[0].after.effectiveSpecCount, 2);
-  assert.equal(audits[0].adminId, ADMIN_ID);
+  assert.equal(audits[0].actorId, ADMIN_ID);
   // 快照里没有销量与平台标签：它们不是这次编辑改的东西
   assert.equal("monthlySales" in audits[0].after, false);
   assert.equal("gameTag" in audits[0].after, false);

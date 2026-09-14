@@ -322,7 +322,7 @@ export async function createCategory(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeCreateReplay(ctx.operationId, "category");
+  const replay = takeCreateReplay(ctx, "category");
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   if (replay) {
@@ -388,7 +388,7 @@ export async function updateCategory(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "category", id);
+  const replay = takeReplay(ctx, "category", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = catalog.categories.get(id);
@@ -443,7 +443,7 @@ export async function setCategoryEnabled(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "category", id);
+  const replay = takeReplay(ctx, "category", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = catalog.categories.get(id);
@@ -498,7 +498,7 @@ export async function removeCategory(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "category", id);
+  const replay = takeReplay(ctx, "category", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = catalog.categories.get(id);
@@ -556,7 +556,7 @@ export async function createProduct(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeCreateReplay(ctx.operationId, "product");
+  const replay = takeCreateReplay(ctx, "product");
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   if (replay) {
@@ -643,7 +643,7 @@ export async function updateProduct(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "product", id);
+  const replay = takeReplay(ctx, "product", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = catalog.products.get(id);
@@ -714,7 +714,7 @@ export async function setProductStatus(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "product", id);
+  const replay = takeReplay(ctx, "product", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = catalog.products.get(id);
@@ -772,7 +772,7 @@ export async function removeProduct(
   const catalog = catalogStore();
 
   // —— 原子区段开始（无 await）——
-  const replay = takeReplay(ctx.operationId, "product", id);
+  const replay = takeReplay(ctx, "product", id);
   if (replay?.kind === "conflict") return { kind: "operation-conflict" };
 
   const existing = catalog.products.get(id);

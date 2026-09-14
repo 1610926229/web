@@ -227,7 +227,13 @@ function assertIdempotencyKeyShape(key: string): void {
 
 /** 组装一次写操作的上下文。时间戳只取一次，业务写入与审计写入共用同一个。 */
 function writeContext(adminId: string, operationId: string): AdminWriteContext {
-  return { adminId, operationId, at: new Date().toISOString() };
+  return {
+    actorId: adminId,
+    actorRole: "admin",
+    actorName: null,
+    operationId,
+    at: new Date().toISOString(),
+  };
 }
 
 /** 把伪事务的「不合法迁移」翻译成带当前状态的 400（文案取自常量层）。 */
