@@ -1,5 +1,18 @@
-import type { RefundRequest } from "@/lib/types/refund";
+import type { RefundRequest, RefundStatus } from "@/lib/types/refund";
 import { mockRefundRepository } from "./mockRefundRepository";
+
+/**
+ * 管理端退款查询条件。
+ *
+ * ⚠️ 与订单同理**没有关键词**：后台要按用户昵称与平台展示 ID 搜，而那两个字段在用户仓储里；
+ * 退款单号与订单号倒是在这条记录（及其订单）身上，但为了不让「一部分关键词在仓储筛、
+ * 一部分在服务层筛」这种半截规则出现，关键词**统一由服务层处理**
+ * （见 `lib/services/adminRefunds.ts`）。
+ */
+export type AdminRefundQueryFilter = {
+  /** null 表示「全部」 */
+  status: RefundStatus | null;
+};
 
 /**
  * 退款申请的可替换仓储。
@@ -59,6 +72,14 @@ export type RefundRepository = {
    * 不属于当前用户的申请一律按 `not_found` 处理，避免用它来试探别人退款申请的存在。
    */
   cancelRefund(id: string, userId: string, cancelledAt: string): Promise<CancelRefundOutcome>;
+
+  /**
+   * 管理端的**全量退款**查询（P8C）：跨用户、按状态筛选，按申请时间倒序返回**全部命中记录**。
+   *
+   * ⚠️ 不按 `userId` 收窄（调用方只可能是管理端接口，而它们第一步都走 `requireAdmin()`），
+   * 也不分页（关键词要跨用户仓储匹配，分页得在那之后做，否则总数与页数会对不上）。
+   */
+  queryRefundsForAdmin(filter: AdminRefundQueryFilter): Promise<RefundRequest[]>;
 };
 
 export function getRefundRepository(): RefundRepository {

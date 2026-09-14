@@ -284,7 +284,8 @@ export async function createComplaintForUser(
       updatedAt: now,
       processingAt: null,
       handledAt: null,
-      // 处理结果由客服给出，用户提交时一定是空的
+      // 处理结果由客服给出，用户提交时一定是空的——处理人也一样
+      handledByAdminId: null,
       result: "",
     },
     idempotencyKey,

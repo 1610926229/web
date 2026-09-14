@@ -1,4 +1,4 @@
-import type { OrderConversationRecord, OrderMessage } from "@/lib/types/message";
+import type { OrderConversationRecord, OrderMessage, StaffReadRecord } from "@/lib/types/message";
 import { mockMessageRepository } from "./mockMessageRepository";
 
 /**
@@ -54,6 +54,51 @@ export type MessageRepository = {
     orderId: string,
     readAt: string,
   ): Promise<OrderConversationRecord | null>;
+
+  // ————————————————————— 客服侧（P8D-1）—————————————————————
+  //
+  // ⚠️ **不是另建一份消息**：下面这些方法读的、写的是**同一个 store 里的同一批
+  // 会话与消息**（`createMessage` 也是同一个），客服发出去的消息与用户看到的是
+  // 同一条记录。用户端与客服端看到的差异来自「谁在读」，不是「读的是哪一份数据」。
+  //
+  // ⚠️ 客服侧的读取**不按 `userId` 过滤**，因此每个调用它的接口都必须先过
+  // `requireStaff()`。这不是「忘了过滤」，而是工作台的职责就是跨用户查看
+  // **有会话的**订单；把过滤放在仓储里会让「客服能看什么」变成一个说不清的问题。
+
+  /** 全部会话（工作台列表用）。排序交给服务层，仓储只负责取全量。 */
+  listConversationsForStaff(): Promise<OrderConversationRecord[]>;
+
+  /**
+   * 某一笔订单的会话。
+   *
+   * ⚠️ **没有会话就返回 null**，与订单不存在返回 null 是同一个结果：
+   * 客服只能访问存在会话的订单，随意猜测订单 ID 应当拿到与不存在完全一样的 404。
+   */
+  findConversationForStaff(orderId: string): Promise<OrderConversationRecord | null>;
+
+  /** 某一笔订单的全部消息，**按时间升序**。会话不存在时返回空数组。 */
+  listMessagesForStaff(orderId: string): Promise<OrderMessage[]>;
+
+  /** 全部会话的消息，按订单分组（工作台列表一次取完，避免逐个会话查）。 */
+  listMessagesGroupedForStaff(): Promise<Map<string, OrderMessage[]>>;
+
+  /** 这位客服在这个会话里读到哪里；没读过或没有这个会话时返回 null。 */
+  findStaffLastReadAt(orderId: string, staffId: string): Promise<string | null>;
+
+  /** 这位客服在**全部会话**里的已读位置（工作台列表算未读数用）。 */
+  listStaffReads(staffId: string): Promise<Map<string, string>>;
+
+  /**
+   * 记录客服的已读位置（只前进不后退）。会话不存在时返回 null。
+   *
+   * ⚠️ **不碰 `userLastReadAt`**：用户读客服的消息与客服读用户的消息是两个方向，
+   * 客服读完一个会话不该把用户那边的未读角标清零。
+   */
+  markConversationReadForStaff(
+    orderId: string,
+    staffId: string,
+    readAt: string,
+  ): Promise<StaffReadRecord | null>;
 };
 
 export function getMessageRepository(): MessageRepository {

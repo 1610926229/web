@@ -1,6 +1,7 @@
 import { COMPLAINT_TYPE_LABELS } from "@/lib/constants/complaints";
 import type { EvidenceKind } from "@/lib/types/evidence";
 import type { Complaint, ComplaintStatus, ComplaintTypeKey } from "@/lib/types/complaint";
+import { MOCK_ADMIN_LOGIN_ID } from "./adminSeed";
 import { orderSeed } from "./orderSeed";
 
 /**
@@ -98,6 +99,11 @@ function build(input: PresetComplaintInput): Complaint {
     updatedAt: input.handledAt ?? input.processingAt ?? input.createdAt,
     processingAt: input.processingAt ?? null,
     handledAt: input.handledAt ?? null,
+    // 预置数据里已出结果的记录，处理人一律记成模拟登录唯一的那个管理员账号：
+    // 后台的处理人是从服务端会话里读出来的，预置数据里编一个不存在的 id
+    // 会让详情页显示出一个谁也找不到的人。
+    handledByAdminId:
+      input.status === "resolved" || input.status === "closed" ? MOCK_ADMIN_LOGIN_ID : null,
     result,
   };
 }

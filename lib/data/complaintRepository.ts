@@ -1,6 +1,20 @@
 import type { PageResult } from "@/lib/types/common";
-import type { Complaint, ComplaintStatus } from "@/lib/types/complaint";
+import type { Complaint, ComplaintStatus, ComplaintTypeKey } from "@/lib/types/complaint";
 import { mockComplaintRepository } from "./mockComplaintRepository";
+
+/**
+ * 管理端投诉查询条件。
+ *
+ * ⚠️ 与订单、退款同理**没有关键词**：昵称与平台展示 ID 在用户仓储里，关键词统一由服务层处理
+ * （见 `lib/services/adminComplaints.ts`）。这让「谁负责筛哪一段」只有一条规则，
+ * 而不是「编号在仓储筛、昵称在服务层筛」这种读到一半才发现的分工。
+ */
+export type AdminComplaintQueryFilter = {
+  /** null 表示「全部」 */
+  status: ComplaintStatus | null;
+  /** null 表示「全部类型」 */
+  type: ComplaintTypeKey | null;
+};
 
 /**
  * 投诉的可替换仓储（读写）。
@@ -49,6 +63,15 @@ export type ComplaintRepository = {
 
   /** 某一笔订单的投诉统计（订单详情页用，避免为了一个角标把整页投诉都取回来）。 */
   summarizeComplaintsByOrder(orderId: string): Promise<ComplaintOrderStats>;
+
+  /**
+   * 管理端的**全量投诉**查询（P8C）：跨用户、按状态与类型筛选，按提交时间倒序返回全部命中记录。
+   *
+   * ⚠️ 与用户端的 `queryComplaints` 的关键区别：那个方法的 `userId` 是**查询条件**，
+   * 只可能返回该用户的投诉；这个方法刻意不收窄用户——调用方只可能是管理端接口，
+   * 而它们第一步都走 `requireAdmin()`（见 §权限）。它同样不分页，理由与另外两张管理列表一致。
+   */
+  queryComplaintsForAdmin(filter: AdminComplaintQueryFilter): Promise<Complaint[]>;
 };
 
 export function getComplaintRepository(): ComplaintRepository {

@@ -1,6 +1,7 @@
 import { REFUND_REASON_LABELS, isOrderRefundable } from "@/lib/constants/refunds";
 import type { EvidenceKind } from "@/lib/types/evidence";
 import type { RefundReasonKey, RefundRequest, RefundStatus } from "@/lib/types/refund";
+import { MOCK_ADMIN_LOGIN_ID } from "./adminSeed";
 import { orderSeed } from "./orderSeed";
 
 /**
@@ -14,7 +15,7 @@ import { orderSeed } from "./orderSeed";
  * 1. **已通过（approved）必须对应一笔已退款（refunded）的订单**——审核通过就是订单变
  *    已退款的原因，两者不能各说各话；
  * 2. **待审核 / 审核中（pending / reviewing）不得改变订单状态**——订单必须仍是可退款的
- *    业务状态（已付款 / 已接单 / 护航中），这正是「退款审核中」要证明的事；
+ *    业务状态（已付款 / 已接单 / 护航中 / 已完成），这正是「退款审核中」要证明的事；
  * 3. **已拒绝 / 已撤销（rejected / cancelled）同样不改变订单状态**，且订单绝不能是已退款。
  *
  * 金额一律取自**订单自己的实付金额**（`order.totalAmount`）并按分存储，
@@ -62,7 +63,7 @@ function build(input: PresetRefundInput): RefundRequest {
   }
   if ((input.status === "pending" || input.status === "reviewing") && !isOrderRefundable(order.status)) {
     throw new Error(
-      `预置退款 ${input.id} 处于审核中，对应订单 ${order.id} 必须是可退款的业务状态（已付款 / 已接单 / 护航中）`,
+      `预置退款 ${input.id} 处于审核中，对应订单 ${order.id} 必须是可退款的业务状态（已付款 / 已接单 / 护航中 / 已完成）`,
     );
   }
   if (input.createdAt < order.paidAt) {
@@ -100,6 +101,11 @@ function build(input: PresetRefundInput): RefundRequest {
     updatedAt: input.cancelledAt ?? input.reviewedAt ?? input.reviewingAt ?? input.createdAt,
     reviewingAt: input.reviewingAt ?? null,
     reviewedAt: input.reviewedAt ?? null,
+    // 预置数据里已出结果的记录，审核人一律记成模拟登录唯一的那个管理员账号——
+    // 后台的审核人是从服务端会话里读出来的，预置数据里编一个不存在的 id
+    // 会让详情页显示出一个谁也找不到的人。
+    reviewedBy:
+      input.status === "approved" || input.status === "rejected" ? MOCK_ADMIN_LOGIN_ID : null,
     reviewNote: input.reviewNote ?? "",
     cancelledAt: input.cancelledAt ?? null,
   };

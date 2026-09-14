@@ -210,7 +210,10 @@ export async function sendMessageForUser(
       // 发送者身份全部由服务端写入，客户端无从指定
       senderId: userId,
       senderRole: "user",
+      // 名称与头像都是**快照**：写进消息本身，不是渲染时回查账号。
+      // 头像取不到时留空串——渲染层要能接受「没有头像」而不是崩掉。
       senderName: user ? user.nickname : "我",
+      senderAvatarUrl: user ? user.avatarUrl : "",
       body: text.body,
       createdAt: now,
     },

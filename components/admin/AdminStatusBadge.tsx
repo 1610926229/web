@@ -1,7 +1,11 @@
 import type { AdminCategoryStatusKey } from "@/lib/constants/adminCategories";
 import type { AdminCompanionStatusKey } from "@/lib/constants/adminCompanions";
 import type { AdminProductStatusKey } from "@/lib/constants/adminProducts";
+import type { ComplaintStatus } from "@/lib/types/complaint";
 import type { CompanionApplicationStatus } from "@/lib/types/companionApplication";
+import type { OrderStatus } from "@/lib/types/order";
+import type { RefundStatus } from "@/lib/types/refund";
+import type { AdminStaffState } from "@/lib/types/staff";
 
 /**
  * 管理端状态标注。
@@ -55,6 +59,61 @@ export const PRODUCT_STATUS_TONE: Record<AdminProductStatusKey, AdminStatusTone>
   removed: "muted",
   off: "pending",
   on: "success",
+};
+
+/**
+ * 订单：**进行中的三个状态共用 `pending`**，只有「已完成」是绿的。
+ *
+ * 已付款 / 已接单 / 护航中之间没有「好坏」之分，它们是同一件事的三个阶段；
+ * 给它们三种颜色会让人以为颜色深的那个出了问题。已退款是灰的终态——
+ * 这一单不再计入累计有效消费，与「已完成」必须一眼分得开。
+ */
+export const ORDER_STATUS_TONE: Record<OrderStatus, AdminStatusTone> = {
+  paid: "pending",
+  accepted: "pending",
+  serving: "pending",
+  completed: "success",
+  refunded: "muted",
+};
+
+/**
+ * 退款申请：已通过是绿的（对申请人而言这是结论），已拒绝是红的（需要被看见），
+ * 已撤销是灰的（用户自己的动作，不是平台的结论）。
+ *
+ * ⚠️ 绿色**不代表钱已经退回去了**：这是 Mock 审核。页面必须同时展示
+ * `ADMIN_REFUND_MOCK_NOTICE`，颜色不能独自承担这句话。
+ */
+export const REFUND_STATUS_TONE: Record<RefundStatus, AdminStatusTone> = {
+  pending: "pending",
+  reviewing: "pending",
+  approved: "success",
+  rejected: "danger",
+  cancelled: "muted",
+};
+
+/**
+ * 投诉：已处理是绿的（给出了结论），已关闭是**灰的而不是红的**——
+ * 关闭是终态但不是失败：重复提交、联系不上、用户自己不再追问都会走到这里。
+ * 标红会让「一屏待处理的错误」这种错觉出现。
+ */
+export const COMPLAINT_STATUS_TONE: Record<ComplaintStatus, AdminStatusTone> = {
+  pending: "pending",
+  processing: "pending",
+  resolved: "success",
+  closed: "muted",
+};
+
+/**
+ * 客服账号：已移除是灰的终态，已停用是红的（**停用是有后果的**——
+ * 该账号当场失去工作台权限，已有会话 Cookie 也失效），启用中才是绿的。
+ *
+ * 与类目、商品同一套口径：**「停用」不是「预备」，是「现在用不了」**，
+ * 因此用 `danger` 而不是 `pending`。用 `pending` 会让人以为它在等什么。
+ */
+export const STAFF_STATE_TONE: Record<AdminStaffState, AdminStatusTone> = {
+  removed: "muted",
+  disabled: "danger",
+  enabled: "success",
 };
 
 const TONE_CLASS: Record<AdminStatusTone, string> = {

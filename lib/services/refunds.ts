@@ -308,6 +308,8 @@ export async function createRefundForOrder(
       updatedAt: now,
       reviewingAt: null,
       reviewedAt: null,
+      // 用户新提交的申请一定还没有审核结果，因此也一定还没有审核人
+      reviewedBy: null,
       reviewNote: "",
       cancelledAt: null,
     },

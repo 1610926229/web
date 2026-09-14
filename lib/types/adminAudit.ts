@@ -41,14 +41,39 @@ export type AdminAuditAction =
   | "product.update"
   | "product.publish"
   | "product.unpublish"
-  | "product.remove";
+  | "product.remove"
+  // ————— 退款审核与投诉处理（P8C）—————
+  // 六个动作，一个不多一个不少：正好是两条状态机上「到了终态的每一步」加一个
+  // 「开始看」。**没有 `refund.cancel`**：撤销是用户自己的动作，管理后台不能替用户撤销，
+  // 因此它既不在管理接口里，也不在审计动作里——审计记的是**管理者做过什么**。
+  | "refund.start-review"
+  | "refund.approve"
+  | "refund.reject"
+  | "complaint.start-processing"
+  | "complaint.resolve"
+  | "complaint.close"
+  // ————— 客服账号（P8D-1）—————
+  // 五个动作对应账号的完整生命周期：新增 / 编辑 / 启用 / 停用 / 移除。
+  // 「启用」与「停用」分开记而不是合并成一个 `staff.update`：这两件事的后果不同
+  // （停用会让已有 Cookie 立即失效），审计里必须一眼看得出发生的是哪一种。
+  // ⚠️ 没有 `staff.login`：登录不是对账号的改动，硬把每次登录塞进审计表
+  // 只会让「谁改过账号」淹没在登录记录里；最后登录时间在账号记录上单独有字段。
+  | "staff.create"
+  | "staff.update"
+  | "staff.enable"
+  | "staff.disable"
+  | "staff.remove";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
 export type AdminAuditTargetType =
   | "companionApplication"
   | "companion"
   | "category"
-  | "product";
+  | "product"
+  | "refund"
+  | "complaint"
+  /** 客服账号（P8D-1）。`targetId` 是 `StaffAccount.id`，不是用户名 */
+  | "staff";
 
 /**
  * 精简快照。

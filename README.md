@@ -38,7 +38,7 @@ pnpm build
 
 ## 环境变量
 
-Mock 能力由四个开关控制，取值必须**显式等于字符串 `true`** 才开启；留空、`false` 或删除该行都等同于关闭。
+Mock 能力由五个开关控制，取值必须**显式等于字符串 `true`** 才开启；留空、`false` 或删除该行都等同于关闭。
 
 | 变量 | 作用 |
 |---|---|
@@ -46,17 +46,19 @@ Mock 能力由四个开关控制，取值必须**显式等于字符串 `true`** 
 | `ENABLE_MOCK_DEBUG` | 调试查询参数：`mockError` / `mockEmpty` / `mockDelay` |
 | `ENABLE_MOCK_PAYMENT` | 模拟支付：`/api/payments/mock-confirm` 与支付结果页上的「模拟支付成功 / 失败 / 取消」三个按钮 |
 | `ENABLE_MOCK_ADMIN` | **管理端**模拟登录：`/api/admin/auth/*`、`mock_admin_id` 会话 Cookie、`/admin/login` 上的「模拟管理员登录」按钮 |
+| `ENABLE_MOCK_STAFF` | **客服端**模拟登录：`/api/staff/auth/*`、`mock_staff_id` 会话 Cookie、`/staff/login` 上的客服测试账号列表 |
 
 ```bash
 cp .env.example .env.local   # .env.local 已被 .gitignore 忽略
 ```
 
-**正式部署不要设置这四个变量**。关闭时无需改动任何代码：
+**正式部署不要设置这五个变量**。关闭时无需改动任何代码：
 
 - 未开启 `ENABLE_MOCK_AUTH`：两个认证接口返回 404；`mock_user_id` Cookie 不再产生登录身份（伪造该 Cookie 只会看到登录拦截页）；拦截页上不出现任何模拟登录控件。
 - 未开启 `ENABLE_MOCK_DEBUG`：三个调试查询参数被完全忽略，数据与延迟都不受影响，首页照常渲染。
 - 未开启 `ENABLE_MOCK_PAYMENT`：模拟支付确认接口返回 404，页面上不出现任何模拟支付控件；此时**创建支付请求仍然可用**（那是真实业务逻辑，不属于模拟渠道），只是待支付的请求无法在本地走到「已支付」。
 - 未开启 `ENABLE_MOCK_ADMIN`：管理端登录与退出接口返回 **404**；`/admin/login` 不出现「模拟管理员登录」按钮，只显示一行说明；伪造 `mock_admin_id` Cookie 拿不到任何权限（管理页面照常跳登录、管理接口 401）。**用户端的 `ENABLE_MOCK_AUTH` 不受影响**，两个开关各自独立。
+- 未开启 `ENABLE_MOCK_STAFF`：客服端登录与退出接口返回 **404**；`/staff/login` 不列出任何测试账号，只显示一行说明；伪造 `mock_staff_id` Cookie 拿不到任何权限（`/staff` 照常跳登录页、客服接口 401）。**另外两个开关都不受影响**，三个开关各自独立。
 
 开关在**服务端运行时**读取（`lib/config/env.ts` 用动态 key 访问 `process.env`，刻意避免被构建期内联成常量），因此「构建时开、运行时关」也能正确生效。
 
@@ -127,6 +129,37 @@ curl -i -X POST http://localhost:3000/api/admin/auth/logout
 - 会话 Cookie 为 HttpOnly / SameSite=Lax / Path=/，生产环境加 `Secure`，有效期 7 天，退出立即失效（`Max-Age=0`）。
 - 角色只有 `admin` 能进管理后台：`customer_service`、`companion`、以及被停用的管理员都拿不到权限（403）。判断集中在 `canEnterAdminConsole()`，页面、布局、接口守卫都调它，不各自写 `role === "admin"`。
 - 本地验证请在 `pnpm dev`（`http://localhost:3000`）下做：`pnpm start` 出的生产构建会给 Cookie 加 `Secure`，用明文 `http://` 非 localhost 地址访问时浏览器不会回传它。
+
+### Mock 客服端认证（需 `ENABLE_MOCK_STAFF=true`）
+
+**这是第三套身份**：Cookie 名 `mock_staff_id`，与用户端（`mock_user_id`）、管理端（`mock_admin_id`）三者取值域不相交，代码里也不存在「把用户或管理员换算成客服」的函数——隔离靠的是「那条路根本不存在」。用用户 Cookie 或管理 Cookie 调客服接口一律 401，用客服 Cookie 调用户接口（`/api/me`）与管理接口（`/api/admin/staff`）同样 401。
+
+**不保存任何真实密码，也没有密码输入框**：登录入口是 `/staff/login` 上的一份测试账号列表（只列**启用中、未移除、角色是客服**的账号），选中即登录。列表只在客服端出现，用户前台没有任何账号切换控件。
+
+```bash
+curl -i -X POST -H 'content-type: application/json' \
+  -d '{"staffId":"staff-1"}' http://localhost:3000/api/staff/auth/mock-login
+curl -i http://localhost:3000/api/staff/auth/session              # 未登录 401；护航 / 停用 / 已移除 403
+curl -i -X POST http://localhost:3000/api/staff/auth/logout
+```
+
+- 会话 Cookie 为 HttpOnly / SameSite=Lax / Path=/，生产环境加 `Secure`，退出立即失效（`Max-Age=0`）。
+- 请求体里的 `staffId` **不是身份来源**：服务端拿它去客服仓储查账号，查到的记录才决定这个人能做什么。提交别的 id 只会得到「查不到」或「这个账号不能登录」，不会得到「以这个身份登录」。
+- **每次请求都重新查一遍账号状态**：停用或移除之后，旧 Cookie 在**下一次请求**就失效——不是靠删除什么会话来保证的（本阶段没有会话表可删）。
+- 「查不到」「已停用」「已移除」「角色不是客服」给的是**同一句话同一个状态码（403）**：区分它们等于给出一个可以探测账号状态的接口，而使用者换账号也没用。
+- 账号由管理后台维护（`/admin/customer-service`）：新增、编辑资料、启用、停用、移除。**角色由服务端写死为 `customer_service`**，请求体里塞 `role: "admin"` 没有落脚的地方；删除是软删除，记录与历史消息都保留。
+
+### 客服工作台
+
+`/staff`、`/staff/conversations`、`/staff/conversations/[orderId]` 是**桌面优先**的独立布局：不套用户端 480px 移动壳层，也没有底部 TabBar；顶部只显示客服名称与退出入口。
+
+- 首页三个数字（会话总数 / 未读会话数 / 今日消息数）从仓储**实时聚合**，未读按**当前客服**的已读位置统计。
+- 会话列表支持订单号 / 用户昵称 / 商品名搜索、只看未读、订单状态筛选、分页，按最后消息时间倒序**稳定排序**（时间相同用订单号兜底，翻页不会漏行重行）。列表 DTO **不含**游戏 ID、订单备注与完整消息历史。
+- 订单沟通页展示用户 / 客服 / 护航三方历史消息（含发送角色与时间）、当前客服的已读状态，以及订单**只读**摘要（订单号、状态、商品、规格、数量、金额、用户昵称、护航摘要）。**客服不能改订单状态、金额、商品，也不能处理退款与投诉**（P8D-2 再谈）。
+- **只有存在会话的订单进得来**：没有会话的订单与不存在的订单给的是同一个 404，订单号无法被逐个试探。
+- 本阶段**没有 WebSocket**：消息靠刷新取数，页面上明确写了这一点；客服发出后用户端 `/service/chat/[orderId]` 刷新即可见（两边读写的是**同一个**消息仓储，没有客服专用副本）。
+- 客服发送时 `senderId` 取自卫守返回的会话、`senderRole` 恒为 `customer_service`，名称与头像写的是**发送时的快照**——客服之后被停用或软删除，历史消息仍显示得出当时的名字与头像。幂等键作用域是「订单 + 发送者」，连点、重试与并发都只产生一条消息。
+- 已读是**两个方向**：客服读用户的消息只推进这位客服自己的已读位置，不会把用户侧的未读角标清零，反之亦然。
 
 ### 模拟支付（需 `ENABLE_MOCK_PAYMENT=true`）
 
@@ -328,7 +361,7 @@ P2 已完成（含修订）：领域类型、统一取数边界、域服务、�
 
 - 首页主体为 Server Component，商品等首屏数据直接输出到 HTML；公告轮播单独为 Client Component。
 - 加载态由一级 Tab 段的 `loading.tsx` 兜底，错误态由同段 `error.tsx` 兜底，空态按模块独立判断。（这两个文件随用户端一起搬到了 `app/(mobile)/(tabs)/`。）
-- Mock 能力由环境开关隔离，默认关闭（当时是 `ENABLE_MOCK_AUTH` / `ENABLE_MOCK_DEBUG` 两个，现共四个，见「环境变量」）。
+- Mock 能力由环境开关隔离，默认关闭（当时是 `ENABLE_MOCK_AUTH` / `ENABLE_MOCK_DEBUG` 两个，现共五个，见「环境变量」）。
 - 「我的」已接入登录态；订单、客服仍为骨架。
 
 P3 已完成：分类页 `/category`、商品详情页 `/product/[id]`，以及首页 → 分类 → 详情之间的浏览链路。
@@ -366,6 +399,6 @@ P8A 已完成（当前阶段）：
 - 护航名单成为**唯一的可写 Mock 存储**，由 `lib/data/source.ts` 统一委派；用户端列表、详情、结算页与后台读的是同一份数据。
 - 管理操作审计（只记动作不记内容），与业务写入同区段；写接口全部要求幂等键。
 
-未开始：真实微信授权与支付、真实数据库（PostgreSQL / Prisma）、对象存储与 CDN；管理后台其余模块（商品与类目、订单、退款与投诉、客服工作台、公告与协议、等级与优惠券、鸡腿结算、数据统计图表、**审计查询页**）。
+未开始：真实微信授权与支付、真实数据库（PostgreSQL / Prisma）、对象存储与 CDN；管理后台的公告与协议配置、等级与优惠券配置、鸡腿结算、数据统计图表与**审计查询页**；客服工作台里的**退款与投诉处理**（P8D-2，客服当前只能沟通与查看订单摘要）。
 
 相关占位说明：`/activities`、`/help` 为统一占位页（`/placeholder?title=...`）。

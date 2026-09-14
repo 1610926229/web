@@ -549,6 +549,10 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/login/page.tsx",
     "admin/applications/page.tsx",
     "admin/companions/page.tsx",
+    // P8C：订单只读查询、退款审核与投诉处理，各自一个列表页
+    "admin/orders/page.tsx",
+    "admin/refunds/page.tsx",
+    "admin/complaints/page.tsx",
   ]) {
     const file = findAppFile(route);
     assert.ok(file.length > 0, `缺少 ${route}`);
@@ -579,11 +583,23 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
   // `(console)` 是后台壳层本身；`(list)` 与 `(overview)` 存在的唯一理由是**收住加载边界**：
   // `loading.tsx` 一旦罩到详情页上，外壳会先以 200 发出，迟到的 `notFound()` 只能改内容、
   // 改不了状态码。因此列表页各自把加载边界收在自己的路由组里，`[id]` 则一个都没有。
-  for (const route of ["admin/companions/page.tsx", "admin/applications/page.tsx"]) {
+  for (const route of [
+    "admin/companions/page.tsx",
+    "admin/applications/page.tsx",
+    "admin/orders/page.tsx",
+    "admin/refunds/page.tsx",
+    "admin/complaints/page.tsx",
+  ]) {
     const file = findAppFile(route);
     assert.ok(file.includes("(list)"), `${route} 应当待在 (list) 里，加载边界才收得住`);
   }
-  for (const route of ["admin/companions/[id]/page.tsx", "admin/applications/[id]/page.tsx"]) {
+  for (const route of [
+    "admin/companions/[id]/page.tsx",
+    "admin/applications/[id]/page.tsx",
+    "admin/orders/[id]/page.tsx",
+    "admin/refunds/[id]/page.tsx",
+    "admin/complaints/[id]/page.tsx",
+  ]) {
     const dir = path.dirname(findAppFile(route));
     assert.equal(
       readdirSync(dir).some((name) => /^loading\.(tsx|js)$/.test(name)),
@@ -638,10 +654,15 @@ test("用户端不出现任何管理后台入口", () => {
   }
 });
 
-test("后台导航覆盖五个已开放模块，未开放模块没有入口", () => {
-  // P8B 把「商品与类目」从 `ADMIN_UPCOMING_MODULES` 里搬进了导航：
-  // 它们的页面已经存在，侧栏再挂一条「后续开放」就会与真实入口并存，
-  // 运营点哪个都不对。这条断言守的是「导航与已建成的页面一一对应」。
+test("后台导航覆盖九个已开放模块，未开放模块没有入口", () => {
+  // P8B 把「商品与类目」从 `ADMIN_UPCOMING_MODULES` 里搬进了导航，
+  // P8C 又把「订单 / 退款 / 投诉」搬了进来，P8D-1 再搬进来「客服账号」：
+  // 它们的页面已经存在，侧栏再挂一条「后续开放」就会与真实入口并存，运营点哪个都不对。
+  // 这条断言守的是「导航与已建成的页面一一对应」。
+  //
+  // ⚠️ 退款与投诉是**两条**导航项，不是一个「售后」：一边会写订单，一边只写平台侧结论。
+  // ⚠️ 「客服账号」（地址 `/admin/customer-service`）管的是**谁能登录 /staff 工作台**，
+  // 与客服在工作台里能看什么是两件事；它也不与用户端名单、排行榜发生任何关系。
   assert.deepEqual(
     ADMIN_NAV_ITEMS.map((item) => item.href),
     [
@@ -650,6 +671,10 @@ test("后台导航覆盖五个已开放模块，未开放模块没有入口", ()
       "/admin/companions",
       "/admin/categories",
       "/admin/products",
+      "/admin/orders",
+      "/admin/refunds",
+      "/admin/complaints",
+      "/admin/customer-service",
     ],
   );
   for (const item of ADMIN_NAV_ITEMS) {
@@ -677,7 +702,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件", () => {
+test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -706,6 +731,19 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "companions/[id]/resume/route.ts",
       "companions/[id]/route.ts",
       "companions/route.ts",
+      // P8C：投诉（列表 / 详情 + 开始处理、解决、关闭）
+      // ⚠️ 这里没有退款或订单地址：投诉处理不改订单、不产生退款。
+      // ⚠️ 也没有「编辑正文」地址：用户提交的内容不可被覆盖。
+      "complaints/[id]/close/route.ts",
+      "complaints/[id]/resolve/route.ts",
+      "complaints/[id]/route.ts",
+      "complaints/[id]/start-processing/route.ts",
+      "complaints/route.ts",
+      // P8C：订单（全量查询，**只读**）
+      // ⚠️ 这里没有「改订单状态」「分配护航」「改金额」这类地址：本阶段的订单详情只读，
+      // 订单唯一会被改动的地方是「退款审核通过」，它的主语是退款申请，入口在退款模块
+      "orders/[id]/route.ts",
+      "orders/route.ts",
       // P8B：商品（列表 / 新建、详情 / 编辑、上架、下架、移除）
       // ⚠️ 这里没有「改价」「改规格」这类地址：价格与规格是商品资料的一部分，
       // 它们随整体保存一起写入，单独开一个改价接口只会绕过「一次原子写入」
@@ -714,6 +752,24 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "products/[id]/route.ts",
       "products/[id]/unpublish/route.ts",
       "products/route.ts",
+      // P8C：退款（列表 / 详情 + 开始审核、通过、拒绝）
+      // ⚠️ 这里没有「撤销」地址：撤销是用户自己的动作，管理后台不能替用户撤销。
+      // ⚠️ 也没有「改金额」地址：金额取申请创建时的订单实付快照，请求体里根本没有这个字段。
+      "refunds/[id]/approve/route.ts",
+      "refunds/[id]/reject/route.ts",
+      "refunds/[id]/route.ts",
+      "refunds/[id]/start-review/route.ts",
+      "refunds/route.ts",
+      // P8D-1：客服账号（列表 / 新建、详情 / 编辑、启用、停用、移除）
+      // ⚠️ 这里没有「重置密码」地址：本阶段是 Mock 认证，客服账号里根本没有密码字段。
+      // ⚠️ 也没有「登录 / 退出」地址：那是**客服端**的接口（`/api/staff/auth/**`），
+      // 管理员不能替客服登录，客服的会话也不能由管理端接口发放。
+      // ⚠️ 没有「删除」地址——移除是软删除，`remove` 就是它。
+      "staff/[id]/disable/route.ts",
+      "staff/[id]/enable/route.ts",
+      "staff/[id]/remove/route.ts",
+      "staff/[id]/route.ts",
+      "staff/route.ts",
     ],
   );
 
@@ -849,7 +905,17 @@ test("登录后 /admin/login 转到 /admin，且后台页面不含用户端壳�
 
   // 未开放的模块只列名字，不给入口
   assert.ok(overview.body.includes("后续开放"));
-  assert.ok(overview.body.includes("订单管理"));
+
+  // P8C 之后「订单管理」不再是「后续开放」里的一行名字，而是三个真实入口：
+  // 侧栏与概览页都要给出链接。这条同时守着「搬进导航」这个动作没有做一半。
+  for (const [label, href] of [
+    ["订单管理", "/admin/orders"],
+    ["退款审核", "/admin/refunds"],
+    ["投诉处理", "/admin/complaints"],
+  ]) {
+    assert.ok(overview.body.includes(label), `后台概览没有「${label}」入口`);
+    assert.ok(overview.body.includes(`href="${href}"`), `「${label}」应当是真实入口`);
+  }
 });
 
 test("列表页渲染真实数据，且**只有详情页**才有动作", { skip: SKIP_HTTP }, async () => {

@@ -176,9 +176,12 @@ test("发送者身份由服务端写入：请求体里的角色与发送者会�
     USER_A,
     UNREAD_ORDER,
     messageBody("这条消息试图伪装成客服", {
-      senderRole: "support",
-      senderId: "support-01",
-      senderName: "平台客服",
+      // 伪装的是**真实存在的那一类身份**：请求体里写的是当前唯一能发出客服消息的
+      // 角色与预置客服账号 id。写一个不存在的 `support` 只能证明「垃圾值被忽略」，
+      // 证明不了「伪造真客服身份无效」——后者才是这条规则要守的东西。
+      senderRole: "customer_service",
+      senderId: "staff-1",
+      senderName: "客服小雨（占位）",
       userId: USER_B,
     }),
     undefined,

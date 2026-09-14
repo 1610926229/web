@@ -94,8 +94,22 @@ export function isActiveRefundStatus(status: RefundStatus): boolean {
   return (ACTIVE_REFUND_STATUSES as readonly string[]).includes(status);
 }
 
-/** 允许申请退款的订单状态：已付款 / 已接单 / 护航中。 */
-export const REFUNDABLE_ORDER_STATUSES: readonly OrderStatus[] = ["paid", "accepted", "serving"];
+/**
+ * 允许申请退款的订单状态：已付款 / 已接单 / 护航中 / **已完成**。
+ *
+ * 已完成也在这个集合里，是因为它才是**唯一计入消费**的状态（见
+ * `lib/constants/levels.ts` 的 `CONSUMPTION_ORDER_STATUS`）：消费口径只认已完成，
+ * 如果已完成不能退，那笔已计入累计消费的钱就永远退不掉。
+ *
+ * 「已完成可退」不代表「完成后退款很容易」——退款仍然是一笔独立的状态机，
+ * 提交只产生一条待审核记录，订单状态和累计消费都**要到审核通过才变**。
+ */
+export const REFUNDABLE_ORDER_STATUSES: readonly OrderStatus[] = [
+  "paid",
+  "accepted",
+  "serving",
+  "completed",
+];
 
 export function isOrderRefundable(status: OrderStatus): boolean {
   return (REFUNDABLE_ORDER_STATUSES as readonly string[]).includes(status);
@@ -104,9 +118,17 @@ export function isOrderRefundable(status: OrderStatus): boolean {
 /**
  * 能否申请退款 = 订单状态可退，**且**这一单还没有任何退款申请记录。
  *
- * 第二条不是「没有进行中的申请」，而是「没有任何记录」：本阶段不开放重复申请，
- * 已经申请过（无论已通过、已拒绝还是已撤销）的订单不再出现入口。
- * 将来放开重复申请时，只需把这一条放宽成 `isActiveRefundStatus`。
+ * 反过来读，就是仍然不能申请的四种情况：
+ *
+ * 1. 订单状态本身不可退（已退款；以及未支付等根本不存在的状态）；
+ * 2. 已有**进行中**的退款申请（待审核 / 审核中）——不能同时对同一单开两条流程；
+ * 3. 已有**已通过**的退款——钱已经退过了；
+ * 4. 已有**已结束**的退款（已拒绝 / 已撤销）——本阶段仍然保持
+ *    「一笔订单一条退款记录」，不自行开放重复申请。
+ *
+ * 第 2、3、4 条都由第二条 `hasRefundRecord` 一并挡住：这一条不是「没有进行中的申请」，
+ * 而是「没有任何记录」。将来放开重复申请时，只需把这一条放宽成 `isActiveRefundStatus`，
+ * 并且届时才需要考虑「已通过的能不能再退」。
  */
 export function canRequestRefund(status: OrderStatus, hasRefundRecord: boolean): boolean {
   return isOrderRefundable(status) && !hasRefundRecord;

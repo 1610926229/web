@@ -1,3 +1,4 @@
+import { compareOrdersForAdmin, orderInDateRange } from "@/lib/constants/adminOrders";
 import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
@@ -9,7 +10,7 @@ import type {
   PaymentStatus,
 } from "@/lib/types/payment";
 import { getMockStore } from "./mockStore";
-import type { PaymentRepository } from "./paymentRepository";
+import type { AdminOrderQueryFilter, PaymentRepository } from "./paymentRepository";
 
 /**
  * 支付与订单的**进程内** Mock 存储。
@@ -56,6 +57,18 @@ function createStore(): MockStore {
 
 function store(): MockStore {
   return getMockStore("payment", createStore);
+}
+
+/**
+ * 把这份存储交给伪事务使用（**只读句柄，绝不在调用方缓存**）。
+ *
+ * `adminRefundTransaction` 的原子区段要在同一次同步执行里读订单、写订单，
+ * 走 `getPaymentRepository()` 的异步方法做不到——每个 `await` 都会让出执行权。
+ *
+ * ⚠️ 测试里的 `resetMockStore()` 会换掉整份存储，因此句柄必须**每次现取**。
+ */
+export function paymentStore(): MockStore {
+  return store();
 }
 
 function keyOf(userId: string, idempotencyKey: string): string {
@@ -175,4 +188,45 @@ export const mockPaymentRepository: PaymentRepository = {
     // 订单在 Map 里按 id 键控，因此每条订单只会出现一次——「同一订单只累计一次」的**数据侧**保证
     return [...store().orders.values()];
   },
+
+  async queryOrdersForAdmin(filter: AdminOrderQueryFilter) {
+    return [...store().orders.values()]
+      .filter((order) => filter.status === null || order.status === filter.status)
+      // 游戏按**下单时的名称快照**匹配：订单里没有游戏 id，而且改名不该让历史订单换个游戏
+      .filter((order) => !filter.gameName || order.gameName === filter.gameName)
+      .filter((order) => orderInDateRange(order, filter.from, filter.to))
+      .sort(compareOrdersForAdmin);
+  },
 };
+
+/**
+ * 把订单标记为「已退款」（**同步写入器**，无 `await`）。
+ *
+ * ⚠️ 与 `applyApplicationReview` 同一套路：它**只负责写**，不判断这次迁移合不合法
+ * ——合法性由伪事务在调用它之前用状态机判定（`lib/constants/adminRefunds.ts`）。
+ * 拆成两处是因为「谁能改订单」只有伪事务一处，而写入本身需要一个不让人拿到 `Map` 的入口。
+ *
+ * ⚠️ 又是**同步**的：它被 `adminRefundTransaction` 的原子区段调用，里面出现 `await`
+ * 就会让出执行权，原子性立刻消失。
+ *
+ * `refundedAt` 只在**第一次**进入 `refunded` 时写入：重复调用不会刷新时间戳
+ * （「这一单是什么时候退的」不该被第二次点击改掉）。
+ * 已经是 `refunded` 的订单再写一次返回 `changed: false`，由调用方决定这算不算异常。
+ */
+export function applyOrderRefund(
+  id: string,
+  at: string,
+): { previous: Order; updated: Order; changed: boolean } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  if (order.status === "refunded") {
+    return { previous, updated: previous, changed: false };
+  }
+
+  const updated: Order = { ...order, status: "refunded", refundedAt: order.refundedAt ?? at };
+  current.orders.set(id, updated);
+  return { previous, updated, changed: true };
+}

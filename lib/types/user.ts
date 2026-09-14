@@ -29,3 +29,22 @@ export type UserProfile = {
   avatarUrl: string;
   bio: string;
 };
+
+/**
+ * 管理端看到的用户摘要（**就这三个字段**）。
+ *
+ * 管理端要回答的是「这笔订单 / 这条退款 / 这条投诉是谁的」，因此需要平台内的用户标识、
+ * 昵称，以及用户自己也能看到的 `displayId`（客服页面报单号时用它对人）。
+ *
+ * ⚠️ 与 `UserProfile` 分开而不是复用它：头像与简介是**用户端展示用**的字段，
+ * 管理后台的列表与详情都用不到；将来资料页新增字段时，也不会自动跟着流进管理接口。
+ * 这正是「显式挑字段」的做法——只有写在这里的字段才会被后台看到。
+ *
+ * ⚠️ 刻意**不含** openid / unionid / 会话凭证 / 手机号：管理端的身份不等于微信身份，
+ * 后台也没有任何需要靠微信标识来认人的场景。
+ */
+export type AdminUserSummary = {
+  id: string;
+  nickname: string;
+  displayId: string;
+};

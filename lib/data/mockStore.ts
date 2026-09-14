@@ -51,7 +51,13 @@ export type MockStoreName =
    * 见 `lib/data/mockCatalogRepository.ts`。
    */
   | "catalog"
-  | "admin";
+  | "admin"
+  /**
+   * 客服账号（第三类身份）。P8D-1 起这份名单**可写**：管理后台会新增、编辑、
+   * 启用、停用与软删除客服账号，因此它是一个真正的仓储。
+   * 见 `lib/data/mockStaffRepository.ts`。
+   */
+  | "staff";
 
 const PREFIX = "__youmuMockStore__";
 

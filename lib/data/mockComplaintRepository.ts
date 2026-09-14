@@ -1,7 +1,12 @@
+import { compareComplaintsForAdmin } from "@/lib/constants/adminComplaints";
 import { compareComplaintsNewestFirst } from "@/lib/constants/complaints";
 import { complaintSeed } from "@/lib/mocks/fixtures/complaintSeed";
-import type { Complaint } from "@/lib/types/complaint";
-import type { ComplaintOrderStats, ComplaintRepository } from "./complaintRepository";
+import type { Complaint, ComplaintStatus } from "@/lib/types/complaint";
+import type {
+  AdminComplaintQueryFilter,
+  ComplaintOrderStats,
+  ComplaintRepository,
+} from "./complaintRepository";
 import { getMockStore } from "./mockStore";
 
 /**
@@ -33,6 +38,16 @@ function createStore(): MockComplaintStore {
 
 function store(): MockComplaintStore {
   return getMockStore("complaint", createStore);
+}
+
+/**
+ * 把这份存储交给伪事务使用（**只读句柄，绝不在调用方缓存**）。
+ *
+ * 与 `refundStore()` 同一个理由：管理端处理投诉的「读—判断—写」必须发生在
+ * 同一段没有 `await` 的同步代码里，走 `getComplaintRepository()` 的异步方法做不到。
+ */
+export function complaintStore(): MockComplaintStore {
+  return store();
 }
 
 function keyOf(userId: string, idempotencyKey: string): string {
@@ -95,4 +110,52 @@ export const mockComplaintRepository: ComplaintRepository = {
 
     return { count: related.length, latest: related[0] ?? null };
   },
+
+  async queryComplaintsForAdmin(filter: AdminComplaintQueryFilter) {
+    return [...store().complaints.values()]
+      .filter((complaint) => filter.status === null || complaint.status === filter.status)
+      .filter((complaint) => filter.type === null || complaint.typeKey === filter.type)
+      .sort(compareComplaintsForAdmin);
+  },
 };
+
+/**
+ * 管理端处理动作的**同步写入器**（无 `await`）。
+ *
+ * ⚠️ 与 `applyRefundReview` 同一套路：**只负责写**，不判断这次迁移合不合法。
+ *
+ * 三个目标状态各写各的字段：
+ * - `processing`：只写 `processingAt`。**不写处理人与结果**——「有人开始看了」还没有结论；
+ * - `resolved` / `closed`：写 `handledAt`、`handledByAdminId` 与传入的结论文本。
+ *
+ * ⚠️ `description`、`evidence`、`contact`、`orderId`、`userId`、`complaintNo` **一个都不碰**：
+ * 前三个是**用户提交的原始材料**，管理端不可覆盖（§投诉处理）。这不是「暂时没做」，
+ * 而是这个方法里根本没有写它们的语句——多传一个字段进来也不会生效。
+ *
+ * ⚠️ 又是**同步**的：它只在 `adminComplaintTransaction` 的原子区段里被调用。
+ */
+export function applyComplaintStatus(
+  id: string,
+  to: Extract<ComplaintStatus, "processing" | "resolved" | "closed">,
+  input: { at: string; result: string; adminId: string },
+): { previous: Complaint; updated: Complaint } | null {
+  const current = store();
+  const complaint = current.complaints.get(id);
+  if (!complaint) return null;
+
+  const previous = { ...complaint };
+  const settled = to === "resolved" || to === "closed";
+
+  const updated: Complaint = {
+    ...complaint,
+    status: to,
+    updatedAt: input.at,
+    processingAt: to === "processing" ? input.at : complaint.processingAt,
+    handledAt: settled ? input.at : complaint.handledAt,
+    handledByAdminId: settled ? input.adminId : complaint.handledByAdminId,
+    result: settled ? input.result : complaint.result,
+  };
+  current.complaints.set(id, updated);
+
+  return { previous, updated };
+}

@@ -37,6 +37,20 @@ export function isMockAdminEnabled(): boolean {
 }
 
 /**
+ * 模拟**客服端**登录是否启用（**独立于 `ENABLE_MOCK_AUTH` 与 `ENABLE_MOCK_ADMIN`**）。
+ *
+ * 关闭时 `/api/staff/auth/mock-login` 返回 404，客服登录页不渲染任何账号选择控件，
+ * 客服端 Cookie 也不再产生任何客服身份——伪造该 Cookie 只会被引导回登录页。
+ *
+ * ⚠️ 三个开关、三套会话、三套 Cookie，互不影响：关掉这一个，用户端与管理员端照常可用；
+ * 关掉另外两个也不会顺带关掉客服端。「用户 Cookie 不能进工作台」「管理 Cookie 不能进工作台」
+ * 「客服 Cookie 不能调用户或管理接口」由此在开关层面也不会串。
+ */
+export function isMockStaffEnabled(): boolean {
+  return readFlag("ENABLE_MOCK_STAFF");
+}
+
+/**
  * 模拟支付是否启用。
  *
  * 关闭时 `/api/payments/mock-confirm` 返回 404，支付结果页也不渲染「模拟支付成功/失败/取消」

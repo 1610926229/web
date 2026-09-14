@@ -40,11 +40,17 @@ export const MESSAGE_MAX_LENGTH = 200;
 export const MESSAGE_EMPTY_MESSAGE = "消息内容不能为空";
 export const MESSAGE_TOO_LONG_MESSAGE = `单条消息不能超过 ${MESSAGE_MAX_LENGTH} 个字`;
 
-/** 发送者角色显示名。用户端只能发 `user`，另外两种只出现在预置数据里。 */
+/**
+ * 发送者角色显示名（**用户端口径**）。
+ *
+ * ⚠️ 用户端把 `user` 显示成「我」。客服工作台里同一个角色显示成「用户」，
+ * 那张表在 `lib/constants/staff.ts` 的 `STAFF_MESSAGE_ROLE_LABELS`——
+ * 两边各写一份是有意的，不是重复。
+ */
 export const MESSAGE_ROLE_LABELS: Record<MessageSenderRole, string> = {
   user: "我",
   companion: "打手",
-  support: "客服",
+  customer_service: "客服",
 };
 
 /** 会话列表里「对方」的称呼：用户自己发的显示「我」。 */

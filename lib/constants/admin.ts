@@ -58,6 +58,17 @@ export const ADMIN_APPLICATIONS_PAGE_TITLE = "入驻审核";
 export const ADMIN_COMPANIONS_PAGE_TITLE = "护航管理";
 export const ADMIN_CATEGORIES_PAGE_TITLE = "类目管理";
 export const ADMIN_PRODUCTS_PAGE_TITLE = "商品管理";
+export const ADMIN_ORDERS_PAGE_TITLE = "订单管理";
+export const ADMIN_REFUNDS_PAGE_TITLE = "退款审核";
+export const ADMIN_COMPLAINTS_PAGE_TITLE = "投诉处理";
+/**
+ * 侧栏与页头的模块名。
+ *
+ * ⚠️ 页面地址是 `/admin/customer-service`，而模块名与侧栏标签是「客服账号」——
+ * 两者刻意不同：地址说的是「客服」，标签说的是「这一页管的是账号」。
+ * 客服本人在 `/staff` 工作，运营在这里管的是**谁能进那个工作台**。
+ */
+export const ADMIN_CUSTOMER_SERVICE_PAGE_TITLE = "客服账号";
 export const ADMIN_LOGOUT_LABEL = "退出登录";
 export const ADMIN_MOCK_LOGIN_LABEL = "模拟管理员登录";
 
@@ -84,9 +95,17 @@ export const ADMIN_FORBIDDEN_MESSAGE = "当前账号没有管理后台权限";
 /** 未登录（或会话失效）时的提示。与接口 401 的 message 同源。 */
 export const ADMIN_UNAUTHORIZED_MESSAGE = "请先登录管理后台";
 
-/** 概览页的数据口径说明。 */
+/**
+ * 概览页的数据口径说明。
+ *
+ * ⚠️ 订单、退款与投诉已经各有页面（订单管理 / 退款审核 / 投诉处理），
+ * 但**本页仍然只汇总入驻申请与护航规模**：那三块的数字按「状态 × 时间」切片才有意义，
+ * 塞进这两排卡片里会变成一堆看不出趋势的数字。这句话必须跟着事实改——
+ * 说「属于后续阶段」会让人以为侧栏里那三个入口是摆设。
+ */
 export const ADMIN_OVERVIEW_NOTICE =
-  "数字从本地 Mock 仓储实时聚合，不是写死的展示值；订单、退款与投诉模块属于后续阶段，未纳入本页。";
+  "数字从本地 Mock 仓储实时聚合，不是写死的展示值；本页只汇总入驻申请与护航规模，" +
+  "订单、退款与投诉在各自的页面里查看。";
 
 // ——————————————————————————— 导航 ———————————————————————————
 
@@ -130,6 +149,34 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     label: ADMIN_PRODUCTS_PAGE_TITLE,
     description: "商品图文、上下架与单组规格",
   },
+  // P8C：订单只读查询、退款审核与投诉处理。**退款与投诉是两个模块**，
+  // 不是一个「售后」模块——一边动订单与金额，一边只写平台侧结论，合成的入口会让人分不清。
+  {
+    key: "orders",
+    href: "/admin/orders",
+    label: ADMIN_ORDERS_PAGE_TITLE,
+    description: "全量订单只读查询与售后摘要",
+  },
+  {
+    key: "refunds",
+    href: "/admin/refunds",
+    label: ADMIN_REFUNDS_PAGE_TITLE,
+    description: "退款申请审核，通过会同步退款订单（Mock）",
+  },
+  {
+    key: "complaints",
+    href: "/admin/complaints",
+    label: ADMIN_COMPLAINTS_PAGE_TITLE,
+    description: "核实并记录平台侧处理结果",
+  },
+  // P8D-1：客服账号。**独立于用户与管理员**的第三类身份，
+  // 只管「谁可以登录 /staff 的客服工作台」，与用户端名单、排行榜没有交集。
+  {
+    key: "customer-service",
+    href: "/admin/customer-service",
+    label: ADMIN_CUSTOMER_SERVICE_PAGE_TITLE,
+    description: "客服账号的新增、启停与软删除",
+  },
 ];
 
 /**
@@ -139,9 +186,7 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
  * 给一个能点进去的空壳页面，比什么都不显示更容易让人以为功能已经做好了。
  */
 export const ADMIN_UPCOMING_MODULES: readonly string[] = [
-  "订单管理",
-  "退款与投诉管理",
-  "客服工作台与客服账号",
+  "客服处理退款与投诉",
   "公告与协议管理",
   "消费等级与优惠券配置",
   "鸡腿结算",

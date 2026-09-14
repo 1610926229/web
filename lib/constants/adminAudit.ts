@@ -2,7 +2,11 @@ import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudi
 import type { CategoryRecord } from "@/lib/types/catalog";
 import type { Companion } from "@/lib/types/companion";
 import type { CompanionApplication } from "@/lib/types/companionApplication";
+import type { Complaint } from "@/lib/types/complaint";
+import type { OrderStatus } from "@/lib/types/order";
 import type { CatalogProductRecord } from "@/lib/types/product";
+import type { RefundRequest } from "@/lib/types/refund";
+import type { StaffAccount } from "@/lib/types/staff";
 import { listEffectiveSpecs, productDisplayPrice } from "./catalog";
 
 /**
@@ -28,6 +32,9 @@ import { listEffectiveSpecs, productDisplayPrice } from "./catalog";
  * 4. **不存后台改不了的统计字段**：销量（`monthlySales`）与平台标签（`gameTag`）
  *    不进商品快照。它们在 before/after 里永远相同，记下来只会留下一份必然过期的
  *    数字副本——而看审计的人无从知道它已经过期了。
+ * 5. **不存用户提交的原始材料**（P8C）：退款说明、投诉正文、凭证地址与联系方式一律不进快照。
+ *    它们不是这次操作的产物，而是用户说的话；审计回答的是「管理者做了什么」。
+ *    联系方式连截断后的形式都不留，只留一个 `hasContact` 布尔。
  */
 
 export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
@@ -51,6 +58,19 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
   "product.publish": "上架商品",
   "product.unpublish": "下架商品",
   "product.remove": "移除商品",
+  // ————— 退款审核与投诉处理（P8C）—————
+  "refund.start-review": "开始审核退款",
+  "refund.approve": "通过退款申请",
+  "refund.reject": "拒绝退款申请",
+  "complaint.start-processing": "开始处理投诉",
+  "complaint.resolve": "解决投诉",
+  "complaint.close": "关闭投诉",
+  // ————— 客服账号（P8D-1）—————
+  "staff.create": "新增客服账号",
+  "staff.update": "编辑客服账号",
+  "staff.enable": "启用客服账号",
+  "staff.disable": "停用客服账号",
+  "staff.remove": "移除客服账号",
 };
 
 export function adminAuditActionLabel(action: AdminAuditAction): string {
@@ -182,5 +202,96 @@ export function toProductAuditSnapshot(record: CatalogProductRecord): AdminAudit
     priceFrom: productDisplayPrice(record),
     removedAt: record.removedAt,
     updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * 退款申请的精简快照。
+ *
+ * ⚠️ 刻意**没有** `description`（退款说明）与 `evidence`（凭证数组）：
+ * 那是用户提交的原始材料，与申请正文同理——只记「交了几份」（`evidenceCount`）。
+ * 审核意见**进快照**（截断后）：它是这次操作的结论，不留下来就说不清「当时为什么拒了」。
+ *
+ * `orderStatus` 进快照是刻意的：审核通过会**同时**把订单改成 `refunded`，
+ * 而这只有一条审计记录。before 里它是审核前的业务状态、after 里是 `refunded`，
+ * 于是「这一条审计同时对应两次写入」这件事在记录里是看得见的，
+ * 不必再去比对时间戳猜「订单是不是被这次操作改的」。
+ *
+ * `amount` 也进快照：它是这次操作的标的，而且**后台改不了**（见 `lib/constants/adminRefunds.ts`）。
+ * 留一份在这里，是为了让「当时退的是多少钱」在审计里有个可核对的数。
+ */
+export function toRefundAuditSnapshot(
+  refund: RefundRequest,
+  orderStatus: OrderStatus,
+): AdminAuditSnapshot {
+  return {
+    status: refund.status,
+    refundNo: refund.refundNo,
+    orderId: refund.orderId,
+    orderStatus,
+    amount: refund.amount,
+    reasonKey: refund.reasonKey,
+    evidenceCount: refund.evidence.length,
+    reviewedBy: refund.reviewedBy,
+    reviewedAt: refund.reviewedAt,
+    reviewNote: truncateAuditText(refund.reviewNote, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
+    updatedAt: refund.updatedAt,
+  };
+}
+
+/**
+ * 投诉的精简快照。
+ *
+ * ⚠️ 四条硬边界在这里的落点：
+ * - **不存投诉正文**（`description` 一个字符都不进）；
+ * - **不存联系方式**：`contact` 无论长短都不进快照，只留一个 `hasContact` 布尔——
+ *   「用户留了联系方式」这件事对审计够了，「留的是什么」不需要留档；
+ * - **不存凭证**：只记 `evidenceCount`；
+ * - **不存订单里的游戏 ID 与备注**：快照里的订单信息只有订单号。
+ *
+ * 处理结果（`result`）截断后进快照：它是管理者写的结论，与退款审核意见同理，
+ * 「当时怎么处理的」必须留下来，否则这条审计回答不了任何问题。
+ */
+export function toComplaintAuditSnapshot(complaint: Complaint): AdminAuditSnapshot {
+  return {
+    status: complaint.status,
+    complaintNo: complaint.complaintNo,
+    typeKey: complaint.typeKey,
+    orderNo: complaint.orderNo,
+    evidenceCount: complaint.evidence.length,
+    // 只记「有没有留联系方式」，不记内容本身
+    hasContact: complaint.contact.trim().length > 0,
+    handledByAdminId: complaint.handledByAdminId,
+    handledAt: complaint.handledAt,
+    result: truncateAuditText(complaint.result, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
+    updatedAt: complaint.updatedAt,
+  };
+}
+
+/**
+ * 客服账号的精简快照。
+ *
+ * ⚠️ **不存任何凭据**。本阶段的客服账号里本来就没有密码字段（见
+ * `lib/types/staff.ts`），这里的字段表再收紧一层：只有「这个账号是谁、还能不能用」。
+ * 登录名（`username`）进快照：它是账号的业务标识，与用户名同级的字段，
+ * 而且不含任何秘密——它本来就是管理员在列表里能看到的东西。
+ *
+ * ⚠️ **不存 `lastLoginAt`**。它每次登录都会变，记进 before/after 只会让
+ * 「这次改动改了什么」变得难读：停用一次账号，快照里却像是顺带改了登录时间。
+ * 它留在账号记录上，需要时去详情页看。
+ *
+ * `removedAt` 进快照：它是软删除的落点，也是「这条记录还在不在可用名单里」
+ * 的唯一依据（移除不会删数据）。
+ */
+export function toStaffAuditSnapshot(account: StaffAccount): AdminAuditSnapshot {
+  return {
+    username: account.username,
+    displayName: account.displayName,
+    avatarUrl: account.avatarUrl,
+    role: account.role,
+    enabled: account.enabled,
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+    removedAt: account.removedAt,
   };
 }

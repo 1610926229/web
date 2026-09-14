@@ -820,7 +820,28 @@ test("服务层：「我的排名」随周期变化——有消费给名次，�
   }
 
   assert.equal(byPeriod.today.me.effectiveSpendAmount, 12000);
-  assert.equal(byPeriod.today.me.rank, 1, "今日只有三笔订单，120 元是第一名");
+  // ⚠️ 这里刻意**不**断言「第一名」。那三笔「本周一 / 本月 1 日」的预置订单是相对
+  // 北京时间当周周一与当月 1 日构造的，而订单不可能完成于未来，因此它们会被夹进
+  // 「现在」之前——今天是周一（或本月 1 日）时，「今日」就多出这几笔，名次不再是 1。
+  // 按日历成立不成立的前提不能当断言用（种子自己也写了「不一定是今日」）；
+  // 可以断言的是名次规则本身：名次连续、且排在前面的人金额都不低于自己。
+  const todayBoard = await getConsumptionRanking(
+    null,
+    page({ period: "today", pageSize: 100 }),
+    "server",
+  );
+  const ahead = todayBoard.items.filter((item) => item.rank < byPeriod.today.me.rank);
+  assert.equal(
+    byPeriod.today.me.rank,
+    ahead.length + 1,
+    "名次必须与「排在前面的行数 + 1」一致：名次连续、没有空缺",
+  );
+  for (const item of ahead) {
+    assert.ok(
+      item.effectiveSpendAmount >= 12000,
+      `排在前面的人金额不能更低（${item.effectiveSpendAmount} < 12000）`,
+    );
+  }
   assert.equal(byPeriod.week.me.effectiveSpendAmount, 12000);
   assert.equal(byPeriod.month.me.effectiveSpendAmount, 12000);
   assert.equal(byPeriod.all.me.effectiveSpendAmount, 12000);

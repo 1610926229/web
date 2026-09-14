@@ -45,7 +45,15 @@ const TIMELINE_SOURCE: readonly { key: OrderStatus; at: (order: Order) => string
   { key: "refunded", at: (order) => order.refundedAt },
 ];
 
-function buildTimeline(order: Order): OrderTimelineEntry[] {
+/**
+ * 状态时间轴：只包含**已经发生**的节点，按时间先后排列。
+ *
+ * 导出给管理端的订单详情复用（P8C）：那一份 DTO 同样要展示时间轴，而
+ * 「哪个时间戳代表哪个状态」只应该有这一处定义——两份实现迟早会在新增状态时漏掉一处。
+ * ⚠️ 本模块依赖 `lib/data` 与 `lib/mocks`，因此**只能被服务端引用**：
+ * 管理端的浏览器取数走 `lib/services/adminHttp.ts`，不经这里。
+ */
+export function buildOrderTimeline(order: Order): OrderTimelineEntry[] {
   return TIMELINE_SOURCE.flatMap((node) => {
     const at = node.at(order);
     return at ? [{ key: node.key, label: ORDER_STATUS_LABELS[node.key], at }] : [];
@@ -95,7 +103,7 @@ export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDet
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
-    timeline: buildTimeline(order),
+    timeline: buildOrderTimeline(order),
     ...extras,
   };
 }

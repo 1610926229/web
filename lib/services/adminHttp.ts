@@ -11,6 +11,21 @@ import {
 } from "@/lib/constants/adminCatalog";
 import { ADMIN_CATEGORY_PAGE_SIZE } from "@/lib/constants/adminCategories";
 import {
+  ADMIN_COMPLAINT_PAGE_SIZE,
+  type AdminComplaintStatusFilter,
+  type AdminComplaintTypeFilter,
+} from "@/lib/constants/adminComplaints";
+import {
+  ADMIN_STAFF_PAGE_SIZE,
+  type AdminStaffProfileInput,
+  type AdminStaffStateFilter,
+} from "@/lib/constants/adminStaff";
+import { ADMIN_ORDER_PAGE_SIZE, type AdminOrderStatusFilter } from "@/lib/constants/adminOrders";
+import {
+  ADMIN_REFUND_PAGE_SIZE,
+  type AdminRefundStatusFilter,
+} from "@/lib/constants/adminRefunds";
+import {
   ADMIN_COMPANION_PAGE_SIZE,
   type AdminCompanionRemovalFilter,
   type AdminCompanionStateFilter,
@@ -40,6 +55,18 @@ import type {
   AdminApplicationReviewResult,
   AdminCompanionApplicationDetail,
 } from "@/lib/types/companionApplication";
+import type {
+  AdminComplaintDetail,
+  AdminComplaintListData,
+  AdminComplaintWriteResult,
+} from "@/lib/types/complaint";
+import type { AdminOrderDetail, AdminOrderListData } from "@/lib/types/order";
+import type {
+  AdminRefundDetail,
+  AdminRefundListData,
+  AdminRefundWriteResult,
+} from "@/lib/types/refund";
+import type { AdminStaffDetail, AdminStaffListData, AdminStaffWriteResult } from "@/lib/types/staff";
 
 /**
  * 管理端的**浏览器端**取数。
@@ -471,6 +498,305 @@ export function removeProduct(
   idempotencyKey: string,
 ): Promise<AdminProductWriteResult> {
   return apiPost<AdminProductWriteResult>(`/api/admin/products/${encodeURIComponent(id)}/remove`, {
+    idempotencyKey,
+  });
+}
+
+// ——————————————————————————— 全量订单（P8C） ———————————————————————————
+
+export type AdminOrderListRequest = {
+  status?: AdminOrderStatusFilter;
+  keyword?: string;
+  /** 游戏名快照；空串表示全部游戏 */
+  game?: string;
+  /** 起始日期 `YYYY-MM-DD`（含当天）；空串表示不限 */
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 取一页全量订单。
+ *
+ * 只有**筛选与分页**参数，没有任何用户标识：这些订单属于谁由服务端按订单记录给出，
+ * 访问资格由服务端会话决定。空值不写进地址栏（`?keyword=&game=` 只会让日志更难读）。
+ */
+export function fetchAdminOrders(
+  input: AdminOrderListRequest = {},
+): Promise<AdminOrderListData> {
+  const params = new URLSearchParams();
+  if (input.status) params.set("status", input.status);
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.game) params.set("game", input.game);
+  if (input.from) params.set("from", input.from);
+  if (input.to) params.set("to", input.to);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_ORDER_PAGE_SIZE));
+
+  return apiGet<AdminOrderListData>(`/api/admin/orders?${params.toString()}`);
+}
+
+/**
+ * 取一条订单详情（含游戏账号、备注、金额明细、时间轴与四份售后摘要）。
+ *
+ * ⚠️ **只有 GET**：本阶段订单详情是只读的，因此这里没有任何「改订单」的函数。
+ * 订单唯一会被后台改动的路径是退款审核通过，而那个动作属于退款申请。
+ */
+export function fetchAdminOrder(id: string): Promise<AdminOrderDetail> {
+  return apiGet<AdminOrderDetail>(`/api/admin/orders/${encodeURIComponent(id)}`);
+}
+
+// ——————————————————————————— 退款审核（P8C） ———————————————————————————
+
+export type AdminRefundListRequest = {
+  status?: AdminRefundStatusFilter;
+  keyword?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/** 取一页退款申请。 */
+export function fetchAdminRefunds(
+  input: AdminRefundListRequest = {},
+): Promise<AdminRefundListData> {
+  const params = new URLSearchParams();
+  if (input.status) params.set("status", input.status);
+  if (input.keyword) params.set("keyword", input.keyword);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_REFUND_PAGE_SIZE));
+
+  return apiGet<AdminRefundListData>(`/api/admin/refunds?${params.toString()}`);
+}
+
+/** 取一条退款申请详情（含原因、说明、凭证、审核信息与服务端判定的可执行动作）。 */
+export function fetchAdminRefund(id: string): Promise<AdminRefundDetail> {
+  return apiGet<AdminRefundDetail>(`/api/admin/refunds/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 三个审核动作。都是 POST，请求体只有幂等键（通过与被拒绝另加审核意见）。
+ *
+ * ⚠️ **请求体里没有金额**，类型上也加不进来：退款金额取申请创建时的服务端订单实付快照，
+ * 管理端不可修改（§退款审核）。
+ *
+ * ⚠️ 三个动作是**三个接口**，不是一个「把状态改成 X」的接口：通过会在同一次写入里
+ * 把订单也改成 `refunded`，与「开始审核」这种只改一个状态的动作用途完全不同，
+ * 合成一个接口就会出现「点错按钮直接把款退了」这种后果很重的错误。
+ *
+ * ⚠️ 通过是 **Mock 审核**：不调用真实微信退款、不生成微信退款单号、不代表款项已退回。
+ */
+export function startReviewRefund(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminRefundWriteResult> {
+  return apiPost<AdminRefundWriteResult>(
+    `/api/admin/refunds/${encodeURIComponent(id)}/start-review`,
+    { idempotencyKey },
+  );
+}
+
+/** 审核通过：退款与订单在同一次写入里改到位。`reviewNote` 选填。 */
+export function approveRefund(
+  id: string,
+  idempotencyKey: string,
+  reviewNote: string,
+): Promise<AdminRefundWriteResult> {
+  return apiPost<AdminRefundWriteResult>(`/api/admin/refunds/${encodeURIComponent(id)}/approve`, {
+    idempotencyKey,
+    reviewNote,
+  });
+}
+
+/** 审核拒绝：**必须填写审核意见**（服务端校验），订单状态与消费金额都不变。 */
+export function rejectRefund(
+  id: string,
+  idempotencyKey: string,
+  reviewNote: string,
+): Promise<AdminRefundWriteResult> {
+  return apiPost<AdminRefundWriteResult>(`/api/admin/refunds/${encodeURIComponent(id)}/reject`, {
+    idempotencyKey,
+    reviewNote,
+  });
+}
+
+// ——————————————————————————— 投诉处理（P8C） ———————————————————————————
+
+export type AdminComplaintListRequest = {
+  status?: AdminComplaintStatusFilter;
+  type?: AdminComplaintTypeFilter;
+  keyword?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/** 取一页投诉。列表**不含正文、凭证、联系方式与处理结果**。 */
+export function fetchAdminComplaints(
+  input: AdminComplaintListRequest = {},
+): Promise<AdminComplaintListData> {
+  const params = new URLSearchParams();
+  if (input.status) params.set("status", input.status);
+  if (input.type) params.set("type", input.type);
+  if (input.keyword) params.set("keyword", input.keyword);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_COMPLAINT_PAGE_SIZE));
+
+  return apiGet<AdminComplaintListData>(`/api/admin/complaints?${params.toString()}`);
+}
+
+/** 取一条投诉详情（含正文、凭证、联系方式、处理信息与服务端判定的可执行动作）。 */
+export function fetchAdminComplaint(id: string): Promise<AdminComplaintDetail> {
+  return apiGet<AdminComplaintDetail>(`/api/admin/complaints/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 三个处理动作。都是 POST，请求体只有幂等键（解决与关闭另加处理结果 / 关闭说明）。
+ *
+ * ⚠️ **请求体里没有任何订单或金额字段**：投诉处理不修改订单，也不产生退款（§投诉处理）。
+ * 用户提交的正文、凭证与联系方式同样没有可传的位置——它们不可被覆盖。
+ *
+ * ⚠️ 「开始处理」不传 `result`：它不产生结论，服务端也不会读这个字段。
+ */
+export function startProcessingComplaint(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminComplaintWriteResult> {
+  return apiPost<AdminComplaintWriteResult>(
+    `/api/admin/complaints/${encodeURIComponent(id)}/start-processing`,
+    { idempotencyKey },
+  );
+}
+
+/** 解决投诉：**必须填写处理结果**。处理结果会同步展示给提交投诉的用户。 */
+export function resolveComplaint(
+  id: string,
+  idempotencyKey: string,
+  result: string,
+): Promise<AdminComplaintWriteResult> {
+  return apiPost<AdminComplaintWriteResult>(
+    `/api/admin/complaints/${encodeURIComponent(id)}/resolve`,
+    { idempotencyKey, result },
+  );
+}
+
+/** 关闭投诉：**必须填写关闭说明**。`closed` 是终态，之后不能再改为已处理。 */
+export function closeComplaint(
+  id: string,
+  idempotencyKey: string,
+  result: string,
+): Promise<AdminComplaintWriteResult> {
+  return apiPost<AdminComplaintWriteResult>(
+    `/api/admin/complaints/${encodeURIComponent(id)}/close`,
+    { idempotencyKey, result },
+  );
+}
+
+// ——————————————————————————— 客服账号 ———————————————————————————
+
+export type AdminStaffListRequest = {
+  state?: AdminStaffStateFilter;
+  keyword?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 管理端客服账号列表。
+ *
+ * ⚠️ 返回项里**没有** Cookie、密码、会话标识或仓储内部索引——
+ * 前三样在这份数据里根本不存在（本阶段是 Mock 认证，账号没有密码字段）。
+ */
+export function fetchAdminStaffList(
+  input: AdminStaffListRequest = {},
+): Promise<AdminStaffListData> {
+  const params = new URLSearchParams();
+  if (input.state) params.set("state", input.state);
+  if (input.keyword) params.set("keyword", input.keyword);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_STAFF_PAGE_SIZE));
+
+  return apiGet<AdminStaffListData>(`/api/admin/staff?${params.toString()}`);
+}
+
+/** 取一个客服账号的详情。比列表多 `role` 与 `canEnterStaffConsole` 两个服务端结论。 */
+export function fetchAdminStaff(id: string): Promise<AdminStaffDetail> {
+  return apiGet<AdminStaffDetail>(`/api/admin/staff/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 新增客服账号。
+ *
+ * ⚠️ 请求体只有**三个资料字段**与幂等键：没有 `role`、没有 `enabled`、
+ * 没有密码。角色由服务端写死为客服（`customer_service`），新账号一律是启用、未移除的。
+ * 因此「提交 `role: "admin"` 就建出一个管理员」在请求体里没有落脚的地方。
+ */
+export function createAdminStaff(
+  idempotencyKey: string,
+  input: AdminStaffProfileInput,
+): Promise<AdminStaffWriteResult> {
+  return apiPost<AdminStaffWriteResult>("/api/admin/staff", {
+    idempotencyKey,
+    username: input.username,
+    displayName: input.displayName,
+    avatarUrl: input.avatarUrl,
+  });
+}
+
+/**
+ * 编辑客服账号资料（登录名 / 名称 / 头像）。
+ *
+ * ⚠️ 同样**不碰状态**：启用、停用、移除各有自己的接口。
+ * 编辑时顺手写状态，会在两位管理员同时操作时让后写的那次把刚停用的账号重新启用。
+ */
+export function saveAdminStaffProfile(
+  id: string,
+  idempotencyKey: string,
+  input: AdminStaffProfileInput,
+): Promise<AdminStaffWriteResult> {
+  return apiPatch<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}`, {
+    idempotencyKey,
+    username: input.username,
+    displayName: input.displayName,
+    avatarUrl: input.avatarUrl,
+  });
+}
+
+/** 启用客服账号。不重置任何资料；**已移除的账号不能被启用**。 */
+export function enableAdminStaff(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminStaffWriteResult> {
+  return apiPost<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}/enable`, {
+    idempotencyKey,
+  });
+}
+
+/**
+ * 停用客服账号。
+ *
+ * ⚠️ 停用后该账号**立即失去客服工作台权限**，现有客服端 Cookie 也失效——
+ * 靠的是客服端每个请求都重新查一次账号状态，不是靠这里删会话（本阶段没有会话表）。
+ */
+export function disableAdminStaff(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminStaffWriteResult> {
+  return apiPost<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}/disable`, {
+    idempotencyKey,
+  });
+}
+
+/**
+ * 移除客服账号（**软删除**）。
+ *
+ * ⚠️ 只写 `removedAt` 并同时停用：记录与历史消息都保留。
+ * 移除后不能登录、不能进工作台、也不能再启用，没有「撤销移除」这个动作。
+ */
+export function removeAdminStaff(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminStaffWriteResult> {
+  return apiPost<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}/remove`, {
     idempotencyKey,
   });
 }

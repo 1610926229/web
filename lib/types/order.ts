@@ -19,6 +19,7 @@ import type { OrderComplaintSummary } from "./complaint";
 import type { ConversationStats } from "./message";
 import type { RefundSummary } from "./refund";
 import type { ReviewSummary } from "./review";
+import type { AdminUserSummary } from "./user";
 
 /**
  * 用户端订单状态。
@@ -183,4 +184,84 @@ export type OrderDetail = OrderListItem & {
   /** 这一单的评价摘要；没有评价过为 null */
   reviewSummary: ReviewSummary | null;
   allowedActions: OrderAllowedActions;
+};
+
+/* ───────────────────────── 管理端订单 DTO（P8C） ───────────────────────── */
+
+/**
+ * 管理端订单列表项。
+ *
+ * **刻意不含**游戏账号、备注、增值服务明细、退款原因与投诉正文：列表一次返回多条，
+ * 这些内容只属于详情页。用户摘要只有三样（见 `AdminUserSummary`），
+ * 没有任何微信身份、会话标识或仓储内部索引。
+ *
+ * `gameName` 进列表是刻意的：后台要按游戏筛单，而订单里的游戏是**下单那一刻的名称快照**
+ * （见 `Order.gameName`），因此这个字段同时也是筛选依据（见 `lib/constants/adminOrders.ts`）。
+ */
+export type AdminOrderListItem = {
+  id: string;
+  orderNo: string;
+  status: OrderStatus;
+  statusLabel: string;
+  /** 下单（支付成功）时间。后台列表按它倒序——后台要回答「这段时间进来了哪些单」 */
+  createdAt: string;
+  paidAt: string;
+  gameName: string;
+  productTitle: string;
+  specName: string;
+  quantity: number;
+  /** 单位：分。订单实付金额快照 */
+  totalAmount: number;
+  user: AdminUserSummary;
+};
+
+/**
+ * 管理端订单详情：在列表项之上补齐订单自身的明细与四份售后摘要。
+ *
+ * ⚠️ **本阶段订单详情是只读的**，因此这里**没有** `allowedActions` 字段，
+ * 页面上也没有任何改状态、改金额、改商品或改用户的按钮。这不是「还没做」，
+ * 是刻意留白：订单的推进属于后续阶段（分配 / 改派护航），本阶段唯一会动订单的
+ * 写入是「退款审核通过」，而那条路径的主语是退款申请，不是订单。
+ *
+ * 游戏 ID 与备注属于用户订单信息，只在这里出现——管理端要能看到用户填错的大区/账号，
+ * 才能回答「这一单为什么打不了」。它们**不进任何列表 DTO**。
+ */
+export type AdminOrderDetail = AdminOrderListItem & {
+  region: string;
+  gameAccountId: string;
+  remark: string;
+  productCoverUrl: string;
+  /** 单位：分。单价 × 数量 = itemsAmount */
+  unitPrice: number;
+  itemsAmount: number;
+  addonsAmount: number;
+  addons: OrderAddonSnapshot[];
+  /** 已发生的状态节点，按时间先后排列 */
+  timeline: OrderTimelineEntry[];
+  companion: OrderCompanionSnapshot | null;
+
+  /** 这一单的退款申请摘要；没有申请过为 null。完整内容要去退款详情看 */
+  refundSummary: RefundSummary | null;
+  /** 这一单的投诉摘要；没有投诉过为 null。完整内容要去投诉详情看 */
+  complaintSummary: OrderComplaintSummary | null;
+  conversationSummary: ConversationStats | null;
+  reviewSummary: ReviewSummary | null;
+};
+
+/**
+ * 管理端订单列表接口一次返回的全部数据。
+ *
+ * `games` 是**游戏筛选项**，而且取自订单数据里出现过的游戏名快照，不是当前的商品目录：
+ * 目录里新增了一个游戏、但一单都还没有时，把它放进筛选栏只会得到一次必然为空的查询；
+ * 反过来，某个游戏被下架了，历史订单仍然要能按它筛出来。
+ */
+export type AdminOrderListData = {
+  items: AdminOrderListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  /** 订单里出现过的游戏名，已去重并排序 */
+  games: string[];
+  notice: string;
 };

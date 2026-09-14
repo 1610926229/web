@@ -47,6 +47,16 @@ export type MockEmptyScope =
   // 管理后台：类目与商品两组列表分别清空（P8B）
   | "categories"
   | "products"
+  // 管理后台：订单、退款、投诉三张列表分别清空（P8C）。
+  // 三者分开而不是合成一个 `admin`：验收时要看的是「这一张列表的空态」，
+  // 一次清空三张只会让人分不清是空态生效了还是页面坏了
+  | "orders"
+  | "refunds"
+  | "complaints"
+  // 管理后台：客服账号列表清空（P8D-1）。
+  // 单独一个范围而不是并进 `all` 之外的某个已有值：客服账号与订单、退款、投诉
+  // 不在同一张列表上，混在一起会让「空态是生效了还是页面坏了」变得说不清
+  | "staff"
   | "all";
 
 const SCOPE_VALUES: readonly MockEmptyScope[] = [
@@ -62,6 +72,10 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "applications",
   "categories",
   "products",
+  "orders",
+  "refunds",
+  "complaints",
+  "staff",
   "all",
 ];
 

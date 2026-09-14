@@ -1,5 +1,5 @@
-import { conversationSeed, messageSeed } from "@/lib/mocks/fixtures/messageSeed";
-import type { OrderConversationRecord, OrderMessage } from "@/lib/types/message";
+import { conversationSeed, messageSeed, staffReadSeed } from "@/lib/mocks/fixtures/messageSeed";
+import type { OrderConversationRecord, OrderMessage, StaffReadRecord } from "@/lib/types/message";
 import type { MessageRepository } from "./messageRepository";
 import { getMockStore } from "./mockStore";
 
@@ -24,6 +24,14 @@ type MockMessageStore = {
   messageIdsByOrder: Map<string, string[]>;
   /** `${orderId}:${senderId}:${idempotencyKey}` → 消息 id */
   messageIdByKey: Map<string, string>;
+  /**
+   * `${orderId}:${staffId}` → 客服侧的已读位置。
+   *
+   * 与 `conversations` 里的 `userLastReadAt` 是**两份独立的状态**，刻意不合并：
+   * 客服读完一个会话不能把用户的未读角标清零，反过来也一样。
+   * 键里带 `staffId` 是因为两位客服同时值班时，一位读过的会话不该从另一位的工作台上消失。
+   */
+  staffReads: Map<string, StaffReadRecord>;
 };
 
 function createStore(): MockMessageStore {
@@ -41,7 +49,16 @@ function createStore(): MockMessageStore {
     else messageIdsByOrder.set(message.orderId, [message.id]);
   }
 
-  return { conversations, messages, messageIdsByOrder, messageIdByKey: new Map() };
+  return {
+    conversations,
+    messages,
+    messageIdsByOrder,
+    messageIdByKey: new Map(),
+    // 预置的客服已读位置只有一条（见 `staffReadSeed`）：工作台上要能同时看到
+    // 「这个会话还有未读」与「这个会话已经处理过」两种样子，而不是清一色未读。
+    // 其余会话没有记录 = 从未读过，用户发来的消息全部算未读。
+    staffReads: new Map(staffReadSeed.map((item) => [staffReadKey(item.orderId, item.staffId), item])),
+  };
 }
 
 function store(): MockMessageStore {
@@ -50,6 +67,11 @@ function store(): MockMessageStore {
 
 function messageKey(orderId: string, senderId: string, idempotencyKey: string): string {
   return `${orderId}:${senderId}:${idempotencyKey}`;
+}
+
+/** 客服已读位置的键。订单号与客服 id 都不会含 `:`，因此不会串键。 */
+function staffReadKey(orderId: string, staffId: string): string {
+  return `${orderId}:${staffId}`;
 }
 
 /** 某条会话的消息，按时间升序。时间相同时用 id 兜底，保证顺序稳定。 */
@@ -150,6 +172,65 @@ export const mockMessageRepository: MessageRepository = {
 
     const updated: OrderConversationRecord = { ...conversation, userLastReadAt: nextReadAt };
     current.conversations.set(orderId, updated);
+    // —— 原子区段结束 ——
+
+    return updated;
+  },
+
+  // ————————————————————— 客服侧（P8D-1）—————————————————————
+
+  async listConversationsForStaff() {
+    // 不过滤用户：工作台本来就要跨用户看。返回包含 userId 的内部记录，
+    // 「客服只能看到有会话的订单」这件事由 `findConversationForStaff` 与
+    // 服务层的订单关联保证，仓储这一层只回答「有哪些会话」。
+    return [...store().conversations.values()];
+  },
+
+  async findConversationForStaff(orderId) {
+    return store().conversations.get(orderId) ?? null;
+  },
+
+  async listMessagesForStaff(orderId) {
+    if (!store().conversations.has(orderId)) return [];
+    return readMessages(store(), orderId);
+  },
+
+  async listMessagesGroupedForStaff() {
+    const current = store();
+    const grouped = new Map<string, OrderMessage[]>();
+    for (const conversation of current.conversations.values()) {
+      grouped.set(conversation.orderId, readMessages(current, conversation.orderId));
+    }
+    return grouped;
+  },
+
+  async findStaffLastReadAt(orderId, staffId) {
+    return store().staffReads.get(staffReadKey(orderId, staffId))?.lastReadAt ?? null;
+  },
+
+  async listStaffReads(staffId) {
+    const result = new Map<string, string>();
+    for (const record of store().staffReads.values()) {
+      if (record.staffId === staffId) result.set(record.orderId, record.lastReadAt);
+    }
+    return result;
+  },
+
+  async markConversationReadForStaff(orderId, staffId, readAt) {
+    const current = store();
+
+    // —— 原子区段开始（无 await）——
+    // 会话不存在就没有可标记的对象。**不去建会话**：客服不能凭空给一笔订单
+    // 造出一个会话，那是用户发起沟通时才会发生的事。
+    if (!current.conversations.has(orderId)) return null;
+
+    const key = staffReadKey(orderId, staffId);
+    const existing = current.staffReads.get(key);
+    // 只前进不后退：后到的旧请求不会把已读位置推回去（与用户侧同一条规则）
+    const nextReadAt = existing && existing.lastReadAt > readAt ? existing.lastReadAt : readAt;
+
+    const updated: StaffReadRecord = { orderId, staffId, lastReadAt: nextReadAt };
+    current.staffReads.set(key, updated);
     // —— 原子区段结束 ——
 
     return updated;

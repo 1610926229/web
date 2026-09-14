@@ -1,8 +1,43 @@
 import type { OrderListQuery } from "@/lib/constants/orders";
 import type { PageResult } from "@/lib/types/common";
-import type { Order } from "@/lib/types/order";
+import type { Order, OrderStatus } from "@/lib/types/order";
 import type { MockPaymentResult, PaymentRequest } from "@/lib/types/payment";
 import { mockPaymentRepository } from "./mockPaymentRepository";
+
+/**
+ * 管理端订单查询条件。
+ *
+ * ⚠️ **没有关键词**：后台要按用户昵称与平台展示 ID 搜单，而这两个字段在用户仓储里，
+ * 不在订单上。仓储只按订单**自己身上**的条件筛选（状态 / 游戏名快照 / 创建日期范围），
+ * 关键词那一段由服务层跨实体匹配（见 `lib/services/adminOrders.ts`）。
+ * 让仓储接一个「调用方传进来的判定函数」看起来更省事，但那样筛选规则就跑到仓储外面去了，
+ * 将来换成数据库查询时无处安放。
+ */
+export type AdminOrderQueryFilter = {
+  /** null 表示「全部」 */
+  status: OrderStatus | null;
+  /** 游戏名快照（`Order.gameName`）；空串表示全部游戏 */
+  gameName: string;
+  /** 起始日期 `YYYY-MM-DD`（含当天，北京时间）；空串表示不限 */
+  from: string;
+  /** 结束日期 `YYYY-MM-DD`（含当天，北京时间）；空串表示不限 */
+  to: string;
+};
+
+/**
+ * 「不限任何条件」的查询条件。
+ *
+ * 三个管理端服务都需要**取全部订单**，而且都不是为了展示：
+ * 订单列表要算游戏筛选项（`orderGameNames`）、退款列表要按订单号做关键词匹配、
+ * 投诉详情要拼关联订单摘要。与其在三处各写一份字面量，不如在这里给一个共享常量——
+ * 「不限」这件事属于查询条件本身，正是本模块的概念。
+ */
+export const ADMIN_ORDER_UNFILTERED_QUERY: AdminOrderQueryFilter = {
+  status: null,
+  gameName: "",
+  from: "",
+  to: "",
+};
 
 /**
  * 支付与订单的可替换实现：**写入侧**保证原子性与幂等，**读取侧**是订单列表与详情的唯一入口。
@@ -88,6 +123,22 @@ export type PaymentRepository = {
    * 排行榜对外只有公开 DTO（名次 / 昵称 / 头像 / 等级 / 金额）。
    */
   listAllOrders(): Promise<Order[]>;
+
+  /**
+   * 管理端的**全量订单**查询（P8C）：跨用户、按状态 / 游戏名 / 创建日期范围筛选，
+   * 按创建时间倒序返回**全部命中记录**（不分页）。
+   *
+   * ⚠️ 与 `queryOrders` 的两点不同，都是刻意的：
+   * 1. **不按 `userId` 收窄**——这个方法的调用方只可能是管理端接口，
+   *    而每个管理端接口的第一件事都是 `requireAdmin()`（见 §权限）。
+   *    这里不接 `userId` 参数，也就没有「某个调用方忘了传」这种可能。
+   * 2. **不分页**——关键词要跨用户仓储匹配，分页得在那之后做，
+   *    否则「第 1 页筛出 3 条、第 2 页又筛出 5 条」会让总数与页数对不上。
+   *    服务层在关键词过滤**之后**才切片，因此 `total` 与实际能翻到的条数始终一致。
+   *
+   * 返回值**只在服务端转成管理端 DTO**，任何情况下都不会原样作为响应体返回。
+   */
+  queryOrdersForAdmin(filter: AdminOrderQueryFilter): Promise<Order[]>;
 };
 
 export function getPaymentRepository(): PaymentRepository {
