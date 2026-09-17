@@ -1,5 +1,5 @@
 import type { MessageSenderRole } from "@/lib/types/message";
-import type { NotificationKind } from "@/lib/types/notification";
+import type { NotificationInput, NotificationKind } from "@/lib/types/notification";
 
 /**
  * 客服专区（订单沟通 / 联系客服 / 系统通知）的文案与规则，服务端与浏览器共用。
@@ -101,6 +101,7 @@ export const NOTIFICATION_KIND_LABELS: Record<NotificationKind, string> = {
   order: "订单",
   refund: "退款",
   complaint: "投诉",
+  dispatch: "派单",
   system: "系统",
 };
 
@@ -111,3 +112,54 @@ export const NOTIFICATION_EMPTY_DESCRIPTION = "订单、退款与投诉的进展
 export const NOTIFICATION_PAGE_SIZE = 20;
 
 export const NOTIFICATION_MAX_PAGE_SIZE = 50;
+
+/**
+ * 写入一条通知的校验文案（P0-2）。
+ *
+ * 通知在本阶段**没有用户入口**：它由平台侧的业务事件产生（订单退回公共池、
+ * 超时自动退款……）。因此这几条文案面向的是**调用方写错了**，不是用户填错了——
+ * 用户看到的只有通知本身。
+ */
+export const NOTIFICATION_USER_REQUIRED_MESSAGE = "通知必须指定接收人";
+export const NOTIFICATION_TITLE_REQUIRED_MESSAGE = "通知标题不能为空";
+export const NOTIFICATION_SUMMARY_REQUIRED_MESSAGE = "通知摘要不能为空";
+export const NOTIFICATION_BODY_REQUIRED_MESSAGE = "通知正文不能为空";
+export const NOTIFICATION_HREF_INVALID_MESSAGE = "通知跳转地址只能是站内路径，且不能带查询串";
+
+/**
+ * 校验一份通知输入。
+ *
+ * ⚠️ 这里守的是 `lib/types/notification.ts` 里**早就写下的内容边界**，不是新规则：
+ * 通知是只读的展示内容，需要看细节时通过 `href` 进到对应页面（那里会重新校验归属）。
+ * 因此在**唯一的写入口**上把两条边界落成断言：
+ *
+ * 1. 收件人与正文缺一不可——一条没有标题或没有正文的通知，用户在列表里看到的
+ *    是一个空白条目，比不通知更糟；
+ * 2. `href` 只允许站内路径且不带查询串。带上查询串就等于可以把说明、理由或消息正文
+ *    塞进地址里，通知会变成绕过订单页校验的旁路。
+ *
+ * 返回结果而不是抛错：抛什么错误码是**服务层**的事，这一层只管规则（与
+ * `parseComplaintStatus` 等解析函数同一套路）。
+ */
+export function parseNotificationInput(
+  input: NotificationInput,
+): { ok: true; value: NotificationInput } | { ok: false; message: string } {
+  const userId = input.userId?.trim() ?? "";
+  if (!userId) return { ok: false, message: NOTIFICATION_USER_REQUIRED_MESSAGE };
+
+  const title = input.title?.trim() ?? "";
+  if (!title) return { ok: false, message: NOTIFICATION_TITLE_REQUIRED_MESSAGE };
+
+  const summary = input.summary?.trim() ?? "";
+  if (!summary) return { ok: false, message: NOTIFICATION_SUMMARY_REQUIRED_MESSAGE };
+
+  const body = input.body?.trim() ?? "";
+  if (!body) return { ok: false, message: NOTIFICATION_BODY_REQUIRED_MESSAGE };
+
+  const href = input.href ?? null;
+  if (href !== null && (!href.startsWith("/") || href.includes("?"))) {
+    return { ok: false, message: NOTIFICATION_HREF_INVALID_MESSAGE };
+  }
+
+  return { ok: true, value: { userId, kind: input.kind, title, summary, body, href } };
+}
