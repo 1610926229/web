@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   PLATFORM_CONFIG_ID,
+  PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
+  PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE,
+  PLATFORM_CONFIG_OPERATION_CONFLICT_MESSAGE,
   PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
   PUBLIC_POOL_TIMEOUT_MAX_MINUTES,
   PUBLIC_POOL_TIMEOUT_MIN_MINUTES,
@@ -16,6 +20,10 @@ import {
   writePlatformConfig,
 } from "../lib/data/mockPlatformConfigRepository.ts";
 import { getPlatformConfigRepository } from "../lib/data/platformConfigRepository.ts";
+import {
+  getAdminPlatformConfig,
+  updateAdminPlatformConfig,
+} from "../lib/services/adminPlatformConfig.ts";
 
 /**
  * 平台参数的持续测试（P0-1）。
@@ -213,4 +221,194 @@ test("每次写入刷新 updatedByAdminId 与 updatedAt", async () => {
   const after = readPlatformConfig();
   assert.equal(after.updatedByAdminId, "admin-1");
   assert.equal(after.updatedAt, ctx.at);
+});
+
+// ——————————————————————————— 服务层（接口里的那一层） ———————————————————————————
+
+/**
+ * 上面测的是伪事务的契约；这里测的是**接口实际会走的入口**。
+ *
+ * 两者都要有：伪事务可以被绕过（直接调它、传一个没校验过的值），
+ * 而服务层是唯一同时负责「校验入参」和「拼装操作者身份」的地方。
+ * 如果只测伪事务，删掉服务层的校验不会有任何测试变红。
+ */
+
+const ADMIN_ID = "admin-1";
+
+/** 合法幂等键：`IDEMPOTENCY_KEY_PATTERN` 要求 8~64 位的字母数字与 `-` `_`。 */
+function withKey(value, key) {
+  return { publicPoolTimeoutMinutes: value, idempotencyKey: key };
+}
+
+test("服务层读取：返回的就是仓储里那份配置", async () => {
+  resetMockStore("platformConfig");
+
+  const config = await getAdminPlatformConfig();
+  assert.deepEqual(config, readPlatformConfig());
+  assert.equal(config.publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+});
+
+test("服务层写入：写业务数据 + 写审计，操作者来自入参而不是请求体", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // ⚠️ 请求体里塞了 `updatedByAdminId` / `updatedAt` / `actorId`：
+  // 它们**必须被忽略**。这三个字段如果能从请求体进入，任何能打开后台页面的
+  // 人都可以把「最后修改者」写成别人——而那是事后追责时唯一的线索。
+  const result = await updateAdminPlatformConfig(
+    ADMIN_ID,
+    withKey(30, "op-pc-svc-1"),
+  );
+
+  assert.equal(result.changed, true);
+  assert.equal(result.config.publicPoolTimeoutMinutes, 30);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 30);
+
+  const written = readPlatformConfig();
+  assert.equal(written.updatedByAdminId, ADMIN_ID);
+
+  const audits = await getAdminAuditRepository().listAudits({ targetType: "platformConfig" });
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].actorId, ADMIN_ID);
+  assert.equal(audits[0].actorRole, "admin");
+});
+
+test("服务层写入：请求体里的 actor 与时间戳字段一律无效", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 30,
+    idempotencyKey: "op-pc-svc-2",
+    // 下面的键服务层根本不读——它们不在白名单里
+    updatedByAdminId: "admin-9999",
+    updatedAt: "1999-01-01T00:00:00.000Z",
+    actorId: "admin-9999",
+    actorName: "冒充者",
+    actorRole: "staff",
+  });
+
+  const written = readPlatformConfig();
+  assert.equal(written.updatedByAdminId, ADMIN_ID);
+  assert.notEqual(written.updatedAt, "1999-01-01T00:00:00.000Z");
+
+  const audits = await getAdminAuditRepository().listAudits({ targetType: "platformConfig" });
+  assert.equal(audits[0].actorId, ADMIN_ID);
+  assert.equal(audits[0].actorRole, "admin");
+});
+
+test("服务层写入：同一个管理员同一个键重放，不写第二条审计", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, withKey(30, "op-pc-svc-3"));
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  const replayed = await updateAdminPlatformConfig(ADMIN_ID, withKey(45, "op-pc-svc-3"));
+  assert.equal(replayed.changed, false);
+  assert.equal(replayed.config.publicPoolTimeoutMinutes, 30);
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+});
+
+test("服务层写入：缺键或键格式非法 → 400，且什么都不写", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  for (const body of [
+    { publicPoolTimeoutMinutes: 30 },
+    { publicPoolTimeoutMinutes: 30, idempotencyKey: "" },
+    // 太短、带空格、非字符串——`IDEMPOTENCY_KEY_PATTERN` 全部不通过
+    { publicPoolTimeoutMinutes: 30, idempotencyKey: "短键" },
+    { publicPoolTimeoutMinutes: 30, idempotencyKey: "has space here" },
+    { publicPoolTimeoutMinutes: 30, idempotencyKey: 12345678 },
+  ]) {
+    await assert.rejects(
+      () => updateAdminPlatformConfig(ADMIN_ID, body),
+      (error) => {
+        assert.equal(error.code, "BAD_REQUEST");
+        assert.equal(error.status, 400);
+        assert.equal(error.message, PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE);
+        return true;
+      },
+    );
+  }
+
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(await getAdminAuditRepository().countAudits(), 0);
+});
+
+test("服务层写入：取值非法 → 400，绝不静默取默认值", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  for (const value of [0, -1, 1441, 1.5, "60", null, undefined, Number.NaN]) {
+    await assert.rejects(
+      () => updateAdminPlatformConfig(ADMIN_ID, withKey(value, "op-pc-bad-1")),
+      (error) => {
+        assert.equal(error.code, "BAD_REQUEST");
+        assert.equal(error.status, 400);
+        assert.equal(error.message, PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE);
+        return true;
+      },
+      `${String(value)} 不该被接受`,
+    );
+  }
+
+  // 关键：被拒绝的请求**没有**留下任何痕迹。若实现改成「非法值就用默认值 60」，
+  // 上面的 rejects 仍然会通过，但下面这条会红——这正是它存在的理由。
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(await getAdminAuditRepository().countAudits(), 0);
+});
+
+test("服务层写入：既缺键又取值非法时，先报缺键", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 顺序是刻意的：反过来的话，调用方改完取值重试才发现还缺一个键，第一次往返是白跑的
+  await assert.rejects(
+    () => updateAdminPlatformConfig(ADMIN_ID, { publicPoolTimeoutMinutes: 9999 }),
+    (error) => {
+      assert.equal(error.message, PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE);
+      return true;
+    },
+  );
+});
+
+test("服务层写入：键被另一个操作者用掉 → 400 冲突，且不写任何东西", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, withKey(20, "op-pc-svc-x"));
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  await assert.rejects(
+    () => updateAdminPlatformConfig("admin-2", withKey(90, "op-pc-svc-x")),
+    (error) => {
+      assert.equal(error.code, "BAD_REQUEST");
+      assert.equal(error.status, 400);
+      assert.equal(error.message, PLATFORM_CONFIG_OPERATION_CONFLICT_MESSAGE);
+      return true;
+    },
+  );
+
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 20);
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+});
+
+test("规则常量文件没有任何 import：浏览器端可以安全引用", () => {
+  // 后台表单要显示「1~1440 分钟」并做提交前的校验，用的是**同一份**常量与函数。
+  // 这条断言守的是那份常量文件必须保持零依赖：一旦它 import 了任何东西
+  // （尤其是 `lib/data` 或 `lib/mocks`），管理端的客户端组件引用它就会把
+  // 内存存储一起打进浏览器产物。服务层也不另开一份副本——
+  // 「同一个数字有两个导出点」迟早会分叉。
+  const source = readFileSync(
+    new URL("../lib/constants/platformConfig.ts", import.meta.url),
+    "utf8",
+  );
+  assert.equal(/^\s*import\s/m.test(source), false, "规则常量文件不该有 import");
+});
+
+test("服务层不重复导出取值上下限", async () => {
+  const service = await import("../lib/services/adminPlatformConfig.ts");
+  assert.equal("ADMIN_PLATFORM_CONFIG_LIMITS" in service, false);
 });

@@ -55,3 +55,36 @@ export type PlatformConfig = {
    */
   updatedByAdminId: string | null;
 };
+
+/**
+ * 一次平台参数写入的结果（接口 ↔ 浏览器）。
+ *
+ * ⚠️ **把整份配置回给调用方**，而不是只回一个「成功」：表单保存后要就地更新显示的
+ * 取值与「最后修改时间」，只回成功的话页面得再拉一次才能把时间戳刷新。
+ *
+ * `changed: false` 有**两种**来源，接口不区分它们：
+ * - 提交的值与现状相同（管理员点了一次保存但没改任何东西）；
+ * - 同一个幂等键第二次到达。
+ *
+ * 两者对调用方的意义是一样的：「服务端没有产生新的改动」。页面据此提示
+ * 「值未变化」而不是「已保存」——后者会让管理员以为改生效了。
+ */
+export type AdminPlatformConfigWriteResult = {
+  config: PlatformConfig;
+  changed: boolean;
+};
+
+/**
+ * 后台表单能提交的字段（**白名单**）。
+ *
+ * ⚠️ 与 `PlatformConfig` 的区别就是它的存在理由：`updatedAt` 与 `updatedByAdminId`
+ * 不在这个类型里，因此它们**没有传上去的位置**——那两个字段由服务端在写入时
+ * 按会话与时钟填。把它们做成可选字段（`updatedAt?: string`）等于给「客户端
+ * 声称自己是谁、改动发生在什么时候」留了一个入口。
+ *
+ * 下界 0 由页面与服务端各自用 `isValidPublicPoolTimeoutMinutes()` 判定，
+ * **不在这里**用类型表达（`number` 表达不了「1~1440 的整数」）。
+ */
+export type AdminPlatformConfigPatch = {
+  publicPoolTimeoutMinutes: number;
+};
