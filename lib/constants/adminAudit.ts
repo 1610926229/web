@@ -1,10 +1,17 @@
 import type { ActorRole } from "@/lib/types/actor";
 import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
+import type { Agreement } from "@/lib/types/agreement";
 import type { CategoryRecord } from "@/lib/types/catalog";
+import type {
+  ContentAnnouncementRecord,
+  ContentBannerRecord,
+  QuickEntryRecord,
+} from "@/lib/types/content";
 import type { Companion } from "@/lib/types/companion";
 import type { CompanionApplication } from "@/lib/types/companionApplication";
 import type { Complaint } from "@/lib/types/complaint";
 import type { OrderStatus } from "@/lib/types/order";
+import type { PlatformConfig } from "@/lib/types/platformConfig";
 import type { CatalogProductRecord } from "@/lib/types/product";
 import type { RefundRequest } from "@/lib/types/refund";
 import type { StaffAccount } from "@/lib/types/staff";
@@ -76,6 +83,26 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
   "staff.enable": "启用客服账号",
   "staff.disable": "停用客服账号",
   "staff.remove": "移除客服账号",
+  // ————— 运营内容与协议（P8E-1）—————
+  "announcement.create": "新增图片公告",
+  "announcement.update": "编辑图片公告",
+  "announcement.enable": "启用图片公告",
+  "announcement.disable": "停用图片公告",
+  "announcement.remove": "移除图片公告",
+  "banner.create": "新增活动 Banner",
+  "banner.update": "编辑活动 Banner",
+  "banner.enable": "启用活动 Banner",
+  "banner.disable": "停用活动 Banner",
+  "banner.remove": "移除活动 Banner",
+  "quickEntry.create": "新增快捷入口",
+  "quickEntry.update": "编辑快捷入口",
+  "quickEntry.enable": "启用快捷入口",
+  "quickEntry.disable": "停用快捷入口",
+  "quickEntry.remove": "移除快捷入口",
+  "agreement.update": "编辑协议正文",
+  "agreement.enable": "启用协议",
+  "agreement.disable": "停用协议",
+  "platformConfig.update": "修改平台参数",
 };
 
 export function adminAuditActionLabel(action: AdminAuditAction): string {
@@ -342,5 +369,106 @@ export function toStaffAuditSnapshot(account: StaffAccount): AdminAuditSnapshot 
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
     removedAt: account.removedAt,
+  };
+}
+
+/**
+ * 图片公告的精简快照。
+ *
+ * 六个可改字段就是这条记录**全部能被后台改动的东西**，因此 before/after 的差异
+ * 恰好说明了这次操作改了什么。`imageUrl` 进快照：它是一条站内路径
+ * （写入前过 `validateSafePath()`），不是外域地址，留档不会泄露任何东西，
+ * 而且「当时首页上挂的是哪张图」正是审计要回答的问题。
+ *
+ * `title` 截断后进：它是后台辨认素材用的说明，属于「这次操作改了什么」的一部分。
+ */
+export function toAnnouncementAuditSnapshot(
+  record: ContentAnnouncementRecord,
+): AdminAuditSnapshot {
+  return {
+    title: truncateAuditText(record.title),
+    imageUrl: record.imageUrl,
+    alt: truncateAuditText(record.alt),
+    enabled: record.enabled,
+    sortOrder: record.sortOrder,
+    removedAt: record.removedAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** 活动 Banner 的精简快照。字段与公告完全相同（两者都是「一张图 + 一个后台标题」）。 */
+export function toBannerAuditSnapshot(record: ContentBannerRecord): AdminAuditSnapshot {
+  return {
+    title: truncateAuditText(record.title),
+    imageUrl: record.imageUrl,
+    alt: truncateAuditText(record.alt),
+    enabled: record.enabled,
+    sortOrder: record.sortOrder,
+    removedAt: record.removedAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * 快捷入口的精简快照。
+ *
+ * `path` 进快照：它写入前过了 `validateSafePath()`，因此里面不可能有 `javascript:`
+ * 之类的串——**这一点由快照本身证明**（审计里留的是一条站内路径）。
+ *
+ * `label` 与 `icon` 一起进：用户端一个入口长什么样就是这两样加路径，
+ * 缺一个都说不清「当时首页第二个格子点下去是哪儿」。
+ */
+export function toQuickEntryAuditSnapshot(record: QuickEntryRecord): AdminAuditSnapshot {
+  return {
+    label: truncateAuditText(record.label),
+    icon: record.icon,
+    path: record.path,
+    enabled: record.enabled,
+    sortOrder: record.sortOrder,
+    removedAt: record.removedAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * 协议的精简快照。
+ *
+ * ⚠️ **协议正文一个字符都不进快照**，这是四条硬边界里最要紧的一条在这里的落点。
+ * `Agreement.sections` 是几十段法律文本，把它整个抄进 before/after，等于每编辑一次
+ * 就往审计表里存一份全文副本——审计表会以「正文的长度」而不是「操作的次数」增长。
+ * 需要正文时去协议记录本身取；审计回答的是「哪一份协议、什么时候、被谁改了」。
+ *
+ * 因此正文的**规模**用两个标量表达：`sectionCount`（几节）与`paragraphCount`（几段）。
+ * 它们足以回答「这次是改了个错别字还是重写了一份」——而这正是审计要回答的粒度。
+ *
+ * `version` 进快照：它由服务端在正文变化时递增，是「正文变过没有」的**权威证据**。
+ */
+export function toAgreementAuditSnapshot(agreement: Agreement): AdminAuditSnapshot {
+  return {
+    type: agreement.type,
+    title: truncateAuditText(agreement.title),
+    version: agreement.version,
+    enabled: agreement.enabled,
+    sectionCount: agreement.sections.length,
+    paragraphCount: agreement.sections.reduce(
+      (total, section) => total + section.paragraphs.length,
+      0,
+    ),
+    updatedAt: agreement.updatedAt,
+  };
+}
+
+/**
+ * 平台参数的精简快照。
+ *
+ * 配置只有几个标量字段，整条进快照即可——这里没有需要裁剪的正文或个人信息。
+ * `updatedByAdminId` 也进快照：审计的 `actorId` 回答「这一次是谁改的」，
+ * 而这个字段回答「改动前那份值是谁留下的」，两者不是一回事。
+ */
+export function toPlatformConfigAuditSnapshot(config: PlatformConfig): AdminAuditSnapshot {
+  return {
+    publicPoolTimeoutMinutes: config.publicPoolTimeoutMinutes,
+    updatedAt: config.updatedAt,
+    updatedByAdminId: config.updatedByAdminId,
   };
 }

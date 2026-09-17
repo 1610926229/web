@@ -1,5 +1,3 @@
-import type { PlatformConfig } from "@/lib/types/platformConfig";
-
 /**
  * 平台参数的取值规则与文案（P0-1）。
  *
@@ -52,19 +50,6 @@ export function isValidPublicPoolTimeoutMinutes(value: unknown): value is number
 }
 
 /**
- * 预置配置（建仓时的初始值）。
- *
- * `updatedAt` 用一个固定的过去时刻，而不是 `new Date()`：建仓必须**可重复且结果相同**，
- * 否则同一个测试跑两次会拿到两个不同的时间戳，而「预置数据」按定义就不是「刚刚被改过」。
- * `updatedByAdminId` 为 null——它由管理员改出来，不存在「系统管理员」这么一个账号。
- */
-export const PLATFORM_CONFIG_SEED: PlatformConfig = {
-  publicPoolTimeoutMinutes: PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
-  updatedAt: "2026-01-01T00:00:00.000Z",
-  updatedByAdminId: null,
-};
-
-/**
  * 后台「平台参数」页上的说明文案。
  *
  * ⚠️ **必须写明「只影响之后进入公共池的订单」**：这是这个页面最容易被误解的地方——
@@ -72,6 +57,15 @@ export const PLATFORM_CONFIG_SEED: PlatformConfig = {
  */
 export const PLATFORM_CONFIG_NOTICE =
   "公共订单池无人接单超时后，订单将停止被接取并自动全额退款。修改后只影响此后进入公共池的订单，已进入的订单沿用进入时的快照。";
+
+/**
+ * 平台参数这份**单例记录**在审计里的目标 id。
+ *
+ * ⚠️ 平台参数没有 id——它按定义只有一份。审计表却需要一个 `targetId` 才能
+ * 按对象查历史，因此这里给一个**固定常量**而不是每次现取：
+ * 一个「每次都不一样」的 id 会让「改过几次公共池超时」这件事查不出来。
+ */
+export const PLATFORM_CONFIG_ID = "platform-config";
 
 /** 缺少或格式非法的幂等键。与其它管理写接口同一句文案。 */
 export const PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE = "缺少幂等键，请重试";

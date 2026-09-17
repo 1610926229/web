@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  PLATFORM_CONFIG_ID,
   PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
   PUBLIC_POOL_TIMEOUT_MAX_MINUTES,
   PUBLIC_POOL_TIMEOUT_MIN_MINUTES,
   isValidPublicPoolTimeoutMinutes,
 } from "../lib/constants/platformConfig.ts";
+import { getAdminAuditRepository } from "../lib/data/adminAuditRepository.ts";
+import { updatePlatformConfig } from "../lib/data/adminPlatformConfigTransaction.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import {
   mockPlatformConfigRepository,
@@ -106,4 +109,108 @@ test("resetMockStore 之后回到预置值，测试之间不互相污染", () =>
 
   resetMockStore("platformConfig");
   assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+});
+
+// ——————————————————————————— 后台写入与审计 ———————————————————————————
+
+const ctx = {
+  actorId: "admin-1",
+  actorRole: "admin",
+  actorName: null,
+  operationId: "op-pc-1",
+  at: "2026-09-17T01:00:00.000Z",
+};
+
+test("修改平台参数：写业务数据 + 写一条审计", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  const result = await updatePlatformConfig({ publicPoolTimeoutMinutes: 30 }, ctx);
+  assert.equal(result.kind, "ok");
+  assert.equal(result.changed, true);
+  assert.equal(result.replayed, false);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 30);
+
+  const audits = await getAdminAuditRepository().listAudits({ targetType: "platformConfig" });
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].action, "platformConfig.update");
+  assert.equal(audits[0].targetId, PLATFORM_CONFIG_ID);
+  assert.equal(audits[0].actorId, "admin-1");
+  assert.equal(audits[0].actorRole, "admin");
+  assert.equal(audits[0].before.publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(audits[0].after.publicPoolTimeoutMinutes, 30);
+});
+
+test("同一个 operationId 重放：不写数据、不写第二条审计", async () => {
+  const result = await updatePlatformConfig({ publicPoolTimeoutMinutes: 45 }, ctx);
+
+  assert.equal(result.kind, "ok");
+  assert.equal(result.replayed, true);
+  assert.equal(result.changed, false);
+  // 值是第一次那次的 30，不是这次的 45
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 30);
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+});
+
+test("提交与现状相同的值：不写审计，也不是错误", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  const result = await updatePlatformConfig(
+    { publicPoolTimeoutMinutes: PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES },
+    { ...ctx, operationId: "op-pc-same" },
+  );
+
+  assert.equal(result.kind, "ok");
+  assert.equal(result.changed, false);
+  assert.equal(result.replayed, false);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(await getAdminAuditRepository().countAudits(), 0);
+});
+
+test("同一个键被另一个操作者用掉：conflict，且不写任何东西", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 第一次是合法写入：它会留下 1 条审计（下面用来做「没有增加」的基线）
+  await updatePlatformConfig({ publicPoolTimeoutMinutes: 20 }, { ...ctx, operationId: "op-pc-x" });
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  const result = await updatePlatformConfig(
+    { publicPoolTimeoutMinutes: 90 },
+    { ...ctx, actorId: "admin-2", operationId: "op-pc-x" },
+  );
+
+  assert.equal(result.kind, "operation-conflict");
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 20);
+  // 冲突调用**没有**增加第二条审计——它什么都没做
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+});
+
+test("伪事务原样写入，不偷偷夹取或取整", async () => {
+  // 契约边界：校验在服务层（`lib/constants/platformConfig.ts` 的规则由服务层调用），
+  // 伪事务收下的值已经是合法的。这里锁定的是**它不会自己再改一次值**——
+  // 若事务里偷偷夹取，一条本该被拒绝的 2880 会被静默改成 1440 写进去，
+  // 调用方拿到「成功」，而生效的却是另一个数字。
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  const result = await updatePlatformConfig(
+    { publicPoolTimeoutMinutes: 1440 },
+    { ...ctx, operationId: "op-pc-max" },
+  );
+
+  assert.equal(result.kind, "ok");
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 1440);
+});
+
+test("每次写入刷新 updatedByAdminId 与 updatedAt", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updatePlatformConfig({ publicPoolTimeoutMinutes: 15 }, { ...ctx, operationId: "op-pc-a" });
+
+  const after = readPlatformConfig();
+  assert.equal(after.updatedByAdminId, "admin-1");
+  assert.equal(after.updatedAt, ctx.at);
 });

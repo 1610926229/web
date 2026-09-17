@@ -77,7 +77,50 @@ export type AdminAuditAction =
   | "staff.update"
   | "staff.enable"
   | "staff.disable"
-  | "staff.remove";
+  | "staff.remove"
+  // ————— 运营内容与协议（P8E-1）—————
+  // 三组内容（图片公告 / 活动 Banner / 快捷入口）各五个动作，形状完全一致：
+  // 新增 / 编辑 / 启用 / 停用 / 移除。
+  //
+  // ⚠️ 「启用」与「停用」分开记，与客服账号同一个理由：这两件事的后果不同
+  // （停用会让用户端立刻看不到这条内容），审计里必须一眼看得出发生的是哪一种。
+  // ⚠️ 动作名带**内容类别前缀**而不是统一的 `content.*`：一张公告与一个快捷入口
+  // 是两种完全不同的东西，「新建了一条内容」这句话回答不了任何问题。
+  | "announcement.create"
+  | "announcement.update"
+  | "announcement.enable"
+  | "announcement.disable"
+  | "announcement.remove"
+  | "banner.create"
+  | "banner.update"
+  | "banner.enable"
+  | "banner.disable"
+  | "banner.remove"
+  | "quickEntry.create"
+  | "quickEntry.update"
+  | "quickEntry.enable"
+  | "quickEntry.disable"
+  | "quickEntry.remove"
+  // ————— 协议正文（P8E-1）—————
+  // 只有三个动作，因为协议的改动面比上面三组窄得多：
+  // **不能新增、不能移除**——协议类型是固定枚举（用户 / 隐私 / 护航 / 平台 / 版本），
+  // 每个类型有且只有一条记录，前台五个页签永远都在（没有正文时显示「内容暂未配置」）。
+  // 「新建一条协议」与「删掉一个协议页签」因此都不是本阶段的能力。
+  //
+  // ⚠️ **没有单独的 `agreement.version`**：版本号是正文改动的一部分，
+  // 由服务端在同一次写入里递增。把「改正文」与「改版本」记成两条审计，
+  // 会让一次编辑看起来像两次操作。
+  | "agreement.update"
+  | "agreement.enable"
+  | "agreement.disable"
+  // ————— 平台参数（P0-1）—————
+  // 只有一个动作，因为本阶段只有一项参数、且它只有「编辑」这一种变更。
+  // 「启用 / 停用平台参数」这件事不存在：参数没有上架下架，只有取值。
+  //
+  // ⚠️ 动作名带模块前缀（`platformConfig.`）而不是笼统的 `platform.update`：
+  // 将来若出现「平台级开关」这类**另一类**配置，它会是一张不同的表、
+  // 有不同的校验规则，共用一个前缀会让审计里两种东西长得一样。
+  | "platformConfig.update";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
 export type AdminAuditTargetType =
@@ -88,7 +131,26 @@ export type AdminAuditTargetType =
   | "refund"
   | "complaint"
   /** 客服账号（P8D-1）。`targetId` 是 `StaffAccount.id`，不是用户名 */
-  | "staff";
+  | "staff"
+  // ————— 运营内容与协议（P8E-1）—————
+  /** 图片公告。`targetId` 是 `ContentAnnouncementRecord.id` */
+  | "announcement"
+  /** 活动 Banner。`targetId` 是 `ContentBannerRecord.id` */
+  | "banner"
+  /** 首页快捷入口。`targetId` 是 `QuickEntryRecord.id` */
+  | "quickEntry"
+  /** 协议。`targetId` 是 `Agreement.id`（不是 `type`：类型将来若允许一型多条，id 仍然唯一） */
+  | "agreement"
+  // ————— 平台参数（P0-1）—————
+  /**
+   * 平台参数。**只有一条记录**，因此 `targetId` 是一个固定常量
+   * （`PLATFORM_CONFIG_ID`），不是某个 id。
+   *
+   * ⚠️ 不要因为「反正只有一条」就把 `targetId` 写成空串或 `null`：
+   * 审计查询按 `(targetType, targetId)` 取，空串会让「查平台参数的历史」
+   * 与「查一条 id 为空的记录」变成同一件事。
+   */
+  | "platformConfig";
 
 /**
  * 精简快照。
