@@ -35,7 +35,8 @@ export type NotificationRepository = {
    *
    * ⚠️ 真正需要与业务写入**同段完成**的调用方（原子区段里不允许 `await`）应当使用
    * `mockNotificationRepository` 导出的**同步**写入器 `appendNotification`，
-   * 而不是这个方法——理由见该文件的注释。
+   * 而不是这个方法——理由见该文件的注释。那种场景下记录必须**在进区段之前**构造、
+   * 校验并用 `newNotificationId()` 备好唯一 id，区段内只做不会失败的确定性 append。
    */
   createNotification(input: NotificationInput): Promise<Notification>;
 };

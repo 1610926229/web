@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { beforeEach } from "node:test";
 import { NOTIFICATION_KIND_LABELS } from "../lib/constants/service.ts";
-import { appendNotification, notificationStore } from "../lib/data/mockNotificationRepository.ts";
+import {
+  appendNotification,
+  newNotificationId,
+  notificationStore,
+} from "../lib/data/mockNotificationRepository.ts";
 import { getNotificationRepository } from "../lib/data/notificationRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { notificationSeed } from "../lib/mocks/fixtures/notificationSeed.ts";
@@ -104,6 +108,51 @@ test("appendNotification 是同步的：原子区段里调用它拿到的是记�
   assert.equal(record instanceof Promise, false);
   assert.equal(record.id, "nt-atomic-1");
   assert.equal(notificationStore().notifications.get("nt-atomic-1"), record);
+});
+
+test("已有通知不会被新记录顶掉：id 重复时 appendNotification 抛错，原记录原样保留", async () => {
+  const existing = notificationSeed[0];
+  const before = notificationStore().notifications.get(existing.id);
+
+  assert.throws(
+    () =>
+      appendNotification({
+        ...existing,
+        title: "顶掉它的标题",
+        summary: "顶掉它的摘要",
+      }),
+    /拒绝覆盖/,
+  );
+
+  // 一条已经写给用户的业务事实不能被静默替换
+  assert.deepEqual(notificationStore().notifications.get(existing.id), before);
+});
+
+test("newNotificationId 生成的 id 当前一定没被占用，且互不相同", () => {
+  const current = notificationStore().notifications;
+  const generated = new Set();
+
+  for (let index = 0; index < 200; index += 1) {
+    const id = newNotificationId();
+    assert.equal(current.has(id), false, `生成的 id 已被占用：${id}`);
+    assert.equal(generated.has(id), false, `本次生成了重复的 id：${id}`);
+    generated.add(id);
+  }
+
+  // 写下去之后，再生成的下一个 id 仍然不会与它冲突
+  const record = appendNotification({
+    id: newNotificationId(),
+    userId: USER_A,
+    kind: "dispatch",
+    title: "标题",
+    summary: "摘要",
+    body: "正文",
+    createdAt: "2026-09-17T00:00:00.000Z",
+    readAt: null,
+    href: null,
+  });
+  assert.equal(notificationStore().notifications.get(record.id), record);
+  assert.equal(current.has(newNotificationId()), false);
 });
 
 test("appendNotification 写进去的通知能被列表查到，且只属于接收人", async () => {

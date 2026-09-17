@@ -47,6 +47,27 @@ export function notificationStore(): MockNotificationStore {
 }
 
 /**
+ * 生成一个**当前尚未被占用**的通知 id。
+ *
+ * 存在的理由只有一个：让调用方能在**进入业务原子区段之前**把 id 准备好
+ * （裁决：先验证意图，再原子写入事实）。UUIDv4 撞车概率极低，但「极低」不是零，
+ * 而一条已有的通知是**业务事实**，不能被新记录顶掉。
+ *
+ * ⚠️ 判重读的是**当前存储**，因此拿到 id 与写下去之间不应该有 `await`；
+ * 真的隔了 `await` 再写，`appendNotification` 会在区段里以不变量断言拦住（见下）。
+ */
+export function newNotificationId(): string {
+  const current = store();
+
+  // —— 原子区段开始（无 await）——
+  let id = `nt_${crypto.randomUUID()}`;
+  while (current.notifications.has(id)) id = `nt_${crypto.randomUUID()}`;
+  // —— 原子区段结束 ——
+
+  return id;
+}
+
+/**
  * **同步**写入一条完整的通知记录，返回写进去的那一条。
  *
  * ⚠️ 必须是同步的（无 `await`）：订单超时退款、订单退回公共池这些业务写入发生在
@@ -61,13 +82,19 @@ export function notificationStore(): MockNotificationStore {
  * 在区段里抛错意味着「订单已经退了，但通知没写成，整个请求失败」——留下的是半完成的
  * 业务状态。内容规则统一由服务层的 `parseNotificationInput` 守（那里抛错时什么都还没写）。
  *
- * ⚠️ id 冲突时**覆盖**而不是报错：本方法的调用方都是「一条记录对应一次业务动作」，
- * 重复的 id 只可能来自调用方自己拼错了 id。
+ * ⚠️ **id 已存在时抛错，绝不覆盖**（裁决 5）。方法与它的调用方之间的不变量是：
+ * 记录在**进区段之前**就已构造、校验并拿到 `newNotificationId()`，区段内只做
+ * 「不会失败的确定性 append」。因此这个分支属于**不可能发生**的编程错误断言——
+ * 它不该在正常业务里触发；一旦触发，宁可整段失败把 bug 暴露出来，也不能把一条
+ * 已经写给用户的业务事实悄悄替换掉。
  */
 export function appendNotification(record: Notification): Notification {
   const current = store();
 
   // —— 原子区段开始（无 await）——
+  if (current.notifications.has(record.id)) {
+    throw new Error(`通知 id 已存在，拒绝覆盖已有记录：${record.id}`);
+  }
   current.notifications.set(record.id, record);
   // —— 原子区段结束 ——
 
@@ -79,10 +106,13 @@ export function appendNotification(record: Notification): Notification {
  *
  * ⚠️ 不做校验：内容边界的判定在 `lib/constants/service.ts` 的 `parseNotificationInput`
  * 里，仓储只负责存取。这里再判一次会变成第二套规则。
+ *
+ * ⚠️ id 走 `newNotificationId()` 而不是直接拼 UUID：唯一性由那一处统一保证，
+ * 将来接入真实数据库时也只需要换那一个实现。
  */
 function buildNotificationRecord(input: NotificationInput): Notification {
   return {
-    id: `nt_${crypto.randomUUID()}`,
+    id: newNotificationId(),
     userId: input.userId,
     kind: input.kind,
     title: input.title,
