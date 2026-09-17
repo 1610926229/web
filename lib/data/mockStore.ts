@@ -57,7 +57,21 @@ export type MockStoreName =
    * 启用、停用与软删除客服账号，因此它是一个真正的仓储。
    * 见 `lib/data/mockStaffRepository.ts`。
    */
-  | "staff";
+  | "staff"
+  /**
+   * 首页运营内容（图片公告 / 活动 Banner / 快捷入口）。P8E-1 起这份内容**可写**：
+   * 管理后台会新增、编辑、启用、停用与软移除它们，因此它是一个真正的仓储——
+   * 但全站仍然只有这一份，首页读的与管理后台改的是同一批记录。
+   * 见 `lib/data/mockContentRepository.ts`。
+   */
+  | "content"
+  /**
+   * 平台级参数（公共池超时等）。P0-1 起这份配置**可写**：后台能改，
+   * 而订单进入需要计时的环节时会把自己那一刻的参数值冻结成快照，
+   * 因此「改配置」不会动到已经生成的订单。
+   * 见 `lib/data/mockPlatformConfigRepository.ts`。
+   */
+  | "platformConfig";
 
 const PREFIX = "__youmuMockStore__";
 
