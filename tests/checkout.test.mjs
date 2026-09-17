@@ -313,9 +313,11 @@ test("支付成功时冻结金额域：原价 / 券 / 实付 / 比例快照 / �
   const order = confirmed.order;
   assert.ok(order);
 
-  // R3 未确认：参与分账的基数当前是「商品金额」，**不含增值服务**（见 orderAmount.ts）
-  assert.equal(order.originalAmount, order.itemsAmount);
-  assert.notEqual(order.originalAmount, order.totalAmount, "含增值服务时原价与订单合计不是同一个数");
+  // 原价 = 商品金额 + 全部增值服务金额（R3 已确认：增值服务参与分账，
+  // 但原价与分账基数是两个概念，这一点由 tests/orderAmountSplit.test.mjs 单独锁住）
+  assert.equal(order.originalAmount, order.itemsAmount + order.addonsAmount);
+  assert.ok(order.addonsAmount > 0, "这条用例必须带增值服务，否则区分不出原价含不含它");
+  assert.equal(order.originalAmount, order.totalAmount, "无券时原价与渠道实收是同一个数");
 
   // P0 没有优惠券：抵扣恒为 0，所以实付 = 原价
   assert.equal(order.couponDiscountAmount, 0);

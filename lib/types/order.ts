@@ -92,20 +92,29 @@ export type Order = {
   itemsAmount: number;
   /** 增值服务合计（按单计费，不随数量变化） */
   addonsAmount: number;
-  /** 商品金额 + 增值服务金额。**支付渠道实际收的钱**（退款也按它算） */
+  /**
+   * 商品金额 + 增值服务金额。**支付渠道实际收的钱**（退款也按它算）。
+   *
+   * ⚠️ 与金额域的 `originalAmount` 当前是同一个数（无券时渠道实收就等于优惠前应付），
+   * 但两者的定义不同：这一个说的是「渠道收了多少钱」，那一个说的是「优惠前的应付总额」。
+   * 优惠券接入（P1-6）会让它们分开——那时渠道实收会小于原价。
+   */
   totalAmount: number;
 
   // —— 金额域（P0-3，服务端计算，单位：分）——
-  // 这一组与上面三个是**两套口径**，各自有唯一用途，不要混用：
-  //   itemsAmount/addonsAmount/totalAmount = 这一单「卖了什么、收了多少钱」
-  //   originalAmount ~ refundedAmount     = 这一单「怎么分账、退过多少」
-  // 两者的差额来自 R3（增值服务是否参与分账）与券的承担方，详见 lib/constants/orderAmount.ts。
+  // 这一组回答「这一单的钱怎么分、退过多少」，与上面三个（卖了什么、收了多少）分开表达。
+  // 当前没有优惠券，因此 originalAmount === totalAmount、actualPaidAmount === originalAmount；
+  // 券接入（P1-6）之后两者才会分开。
   /**
-   * 商品原价，**参与分账的基数**。
+   * **用户这一单优惠前的原始应付总金额** = 商品金额 + 全部增值服务金额。
    *
-   * ⚠️ 它的构成是一个待确认的产品规则（R3）：当前口径为「商品金额，不含增值服务」，
-   * 由 `resolveCompanionRevenueBase()` 在下单那一刻算好并**存进订单**。
-   * 读取时不得用今日的规则或今日的商品价格重算——商品改价不影响历史订单。
+   * ⚠️ 它**不表达「哪些钱参与分账」**——那是 `resolveCompanionRevenueBase()` 的事。
+   * 当前两者数值相同（R3 已确认：由打手实际履约提供的增值服务参与分账），
+   * 但这个等式是**规则的结果**，不是 `originalAmount` 的定义；
+   * 将来出现平台自己履约的收费项时，它会进原价而不进分账基数。
+   *
+   * 下单那一刻算好并**存进订单**：读取时不得用今日的规则或今日的商品价格重算——
+   * 商品改价不影响历史订单。
    */
   originalAmount: number;
   /** 优惠券抵扣金额。P0 恒为 0，P1 接入优惠券后才有非 0 值 */
@@ -114,7 +123,7 @@ export type Order = {
   actualPaidAmount: number;
   /** 分账比例快照（基点，8000 = 80%），下单时从商品冻结 */
   companionRateSnapshot: number;
-  /** 护航收益 = floor(originalAmount × 比例 / 10000)。唯一的取整处 */
+  /** 护航收益 = floor(分账基数 × 比例 / 10000)。唯一的取整处 */
   companionBaseIncome: number;
   /** 平台净收入 = actualPaidAmount − companionBaseIncome。**允许为负**（券由平台承担时） */
   clubNetIncome: number;

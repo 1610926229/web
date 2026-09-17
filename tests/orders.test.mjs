@@ -280,10 +280,14 @@ test("预置订单的金额域由公式算出，而不是手写的常量", async
       detail.originalAmount - detail.couponDiscountAmount,
       `订单 ${detail.orderNo} 的实付应当等于原价减抵扣`,
     );
+    // ⚠️ 这里写的是「原价 × 比例」，成立的前提是 R3 确认的「分账基数 = 原价」。
+    // 原价与分账基数是两个概念（见 lib/constants/orderAmount.ts）——
+    // 将来出现「进原价但不进基数」的收费项时，这一条必须改成基数表达式，
+    // 而不是把期望值顺手调大。
     assert.equal(
       detail.companionBaseIncome,
       Math.floor((detail.originalAmount * detail.companionRateSnapshot) / 10000),
-      `订单 ${detail.orderNo} 的护航收益应当等于原价 × 比例（向下取整）`,
+      `订单 ${detail.orderNo} 的护航收益应当等于分账基数 × 比例（向下取整）`,
     );
     // 已退款的整单退，其余一笔都没退过
     assert.equal(

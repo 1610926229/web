@@ -8,7 +8,7 @@
 
 **Tech Stack:** Next.js 16.3.4（App Router / Turbopack / 异步 `params`）、React 19.2.8、TypeScript 5、Tailwind CSS v4（CSS-first `@theme inline`）、pnpm 12.3.4、Node 24 内置测试运行器（`node --test`）。
 
-**Spec:** 需求来源为 `陪玩护航交易平台订单生命周期需求确认文档_V1.7_含实例说明(1).docx`（正文标题仍写 V1.6）。该文档为**待确认稿**，其中 15 处歧义（C1–C15）已由产品方逐条裁定，裁定结果即本计划 §一 与 §二，**与文档原文冲突时以本计划为准**。**14 项已冻结，1 项（R3）明确保留为未确认**，见 §八。
+**Spec:** 需求来源为 `陪玩护航交易平台订单生命周期需求确认文档_V1.7_含实例说明(1).docx`（正文标题仍写 V1.6）。该文档为**待确认稿**，其中 15 处歧义（C1–C15）已由产品方逐条裁定，裁定结果即本计划 §一 与 §二，**与文档原文冲突时以本计划为准**。**15 项全部冻结**（最后一项 R3 已于 2026-09-18 确认：V1 全部增值服务参与打手分账），见 §八。
 
 ---
 
@@ -50,7 +50,7 @@
 | **C12** | §12「服务异常」未定义 | ⚠️ **残留**，不阻塞 P0，列入 §八 | P2 |
 | **C13** | §12「失去普通投诉权限」暗示非普通通道 | ⚠️ **残留**，不阻塞 P0，列入 §八 | P2 |
 | **C14** | §9「B/A/S 3/4/5」是固定还是可配 | ⚠️ **残留**。P0-5 先用单一常量上限，P1-5 接入等级时替换 | P1-5 |
-| **C15** | §14「打手收入 = 商品原价 × 分账比例」中「商品原价」的确切构成（是否含增值服务） | ⚠️ **残留（R3）**，需求文档无法唯一确定。**禁止自行假设**：P0-3 只实现一个可替换的决策点，当前取「单价 × 数量」，并用隔离测试锁住 | P0-3 |
+| **C15** | §14「打手收入 = 商品原价 × 分账比例」中「商品原价」的确切构成（是否含增值服务） | ✅ **已由产品确认（R3，2026-09-18）**：V1 全部增值服务**参与分账**，分账基数 = 商品金额 + 全部增值服务金额。由 `resolveCompanionRevenueBase()` 单独给出，与原价分开表达 | P0-3 |
 
 ---
 
@@ -66,11 +66,11 @@ export type OrderStatus = "paid" | "accepted" | "serving" | "completed" | "refun
 
 ```ts
 // —— 金额域（全部为「分」整数，服务端计算，下单时冻结）——
-originalAmount: number;          // 商品原价（参与分账的基数；其构成见 R3）
+originalAmount: number;          // 用户这一单**优惠前的原始应付总金额** = 商品金额 + 全部增值服务金额
 couponDiscountAmount: number;    // 优惠券抵扣；P0 恒 0，P1-6 接入
 actualPaidAmount: number;        // 用户实付 = originalAmount - couponDiscountAmount
 companionRateSnapshot: number;   // 分账比例快照，基点（1 bp = 0.01%），8000 = 80%
-companionBaseIncome: number;     // 打手理论收入 = floor(originalAmount × rate / 10000)
+companionBaseIncome: number;     // 打手理论收入 = floor(分账基数 × rate / 10000)；分账基数见 R3
 clubNetIncome: number;           // 俱乐部净收益 = actualPaidAmount - companionBaseIncome（**允许为负**）
 refundedAmount: number;          // 累计已退金额；全额退款后 = actualPaidAmount
 ```
@@ -173,12 +173,16 @@ export type Earning = {
 **四个基数**（下单那一刻全部冻结为快照，之后改商品配置不影响历史订单）
 
 ```
-originalAmount        商品原价（参与分账的基数；其构成见 R3）
+originalAmount        用户这一单**优惠前的原始应付总金额** = 商品金额 + 全部增值服务金额
 companionRateSnapshot 打手分账比例快照（基点）
 actualPaidAmount      用户实付 = originalAmount − couponDiscountAmount
-companionBaseIncome   = floor(originalAmount × companionRateSnapshot / 10000)
+companionBaseIncome   = floor(分账基数 × companionRateSnapshot / 10000)；分账基数见 R3（已确认）
 clubNetIncome         = actualPaidAmount − companionBaseIncome          ← 允许为负
 ```
+
+> **「原价」与「分账基数」是两个概念。** 原价回答「这一单该收多少钱」，基数回答「其中哪些钱按比例分给打手」。
+> R3 已确认（2026-09-18）当前 V1 两者数值相同，但那是 `resolveCompanionRevenueBase()` 给出的**结论**，不是原价的定义。
+> **禁止把两者合并成一个表达式**，也禁止让 `originalAmount` 承担「哪些金额参与分账」的配置语义。
 
 **优惠券规则**：成本**全部由俱乐部承担**，**不得**减少打手按商品原价算出的理论收入。
 
@@ -646,9 +650,12 @@ export async function PATCH(request: Request) {
 ```ts
 export const SHARE_RATIO_BP_MAX = 10000;   // 100.00%
 
-/** 打手理论收入 = floor(原价 × 比例快照 / 10000)。优惠券不降低本值（§2.6） */
-export function resolveCompanionBaseIncome(originalAmount: number, rateBp: number): number {
-  return Math.floor((originalAmount * rateBp) / SHARE_RATIO_BP_MAX);
+/**
+ * 打手理论收入 = floor(分账基数 × 比例快照 / 10000)。优惠券不降低本值（§2.6）
+ * ⚠️ 第一个参数是**分账基数**，不是订单原价——两者当前数值相同，但那是规则的结果。
+ */
+export function resolveCompanionBaseIncome(companionRevenueBaseAmount: number, rateBp: number): number {
+  return Math.floor((companionRevenueBaseAmount * rateBp) / SHARE_RATIO_BP_MAX);
 }
 
 /** 俱乐部净收益 = 用户实付 − 打手理论收入。**允许为负**（§2.6 第三行验算） */
@@ -657,34 +664,41 @@ export function resolveClubNetIncome(actualPaidAmount: number, companionBaseInco
 }
 ```
 
-**R3 未确认项的处理方式（重要）**
+**R3 已确认（2026-09-18）：全部增值服务参与打手分账**
 
-R3（`originalAmount` 的构成——是否含增值服务 `addonsAmount`）**尚未经产品确认**（§八）。本批次**不得**替产品做这个决定，做法是把它隔离成**一个可替换的决策点**：
+业务原则：**只要增值服务是由当前打手实际履约提供的，就属于该订单的服务收入**，应与商品主体一起按订单冻结的打手分账比例计算。V1 **不需要**「某些增值服务参与分账、某些不参与」的复杂配置；将来平台自己履约的收费项再单独扩展。
 
 1. 在 `lib/constants/orderAmount.ts` 里定义**唯一**的求解函数：
 
 ```ts
 /**
- * 参与分账的商品原价基数。
- * ⚠️ R3 未确认：当前实现为「商品单价 × 数量」，**未包含增值服务**。
- * 产品确认后，只改这一个函数体，其余代码不动。
+ * 参与分账的基数——与「订单原价」是两个概念。
+ * R3 已确认（2026-09-18）：V1 的全部增值服务参与分账，因此基数 = 商品金额 + 全部增值服务金额。
+ * 这条规则只写在这一处；产品若再次调整，改的是这个函数体与
+ * tests/orderAmountSplit.test.mjs 里那一条用例。
  */
 export function resolveCompanionRevenueBase(itemsAmount: number, addonsAmount: number): number {
-  return itemsAmount;
+  return itemsAmount + addonsAmount;
 }
 ```
 
-2. **`originalAmount` 必须是 `Order` 上真实存储的字段**，不得在读取时用 `resolveCompanionRevenueBase(...)` 现算。这样 R3 确认后：新订单沿用新规则，**历史订单的钱一分不变**。
-3. 把 R3 的影响面写成一条**基线为绿**的隔离测试，锁定**当前临时规则**（增值服务暂不计入分账基数）：
+2. **`originalAmount` 必须是 `Order` 上真实存储的字段**，不得在读取时用 `resolveCompanionRevenueBase(...)` 现算——商品改价不影响历史订单。
+3. **原价的构成独立于决策点**：`originalAmount = itemsAmount + addonsAmount` 是「优惠前应付总额」这条定义本身，**不得**写成 `resolveCompanionRevenueBase(...)` 的返回值。当前两者数值相同，但那是规则的结果；合并之后这个等式就变成代码事实，将来出现「进原价但不进基数」的收费项时改一处会同时改掉原价。
+4. 用一条**明确的业务后果用例**锁定，防止回退成「增值服务 100% 归俱乐部」：
 
 ```js
-// R3 未确认（§八 8.2）。此断言锁定的是**当前临时规则**，不是产品结论。
-test("R3 未确认：增值服务暂不计入分账基数", () => {
-  assert.equal(resolveCompanionRevenueBase(4000, 1000), 4000);
+test("R3 的业务后果：商品 3980 + 增值服务 1000、比例 80% → 护航 3984 / 平台 996", () => {
+  const domain = resolveOrderMoneyDomain({
+    itemsAmount: 3980, addonsAmount: 1000, companionRateBp: 8000, couponDiscountAmount: 0,
+  });
+  assert.equal(domain.originalAmount, 4980);
+  assert.equal(domain.actualPaidAmount, 4980);
+  assert.equal(domain.companionBaseIncome, 3984);   // 不是 3184
+  assert.equal(domain.clubNetIncome, 996);          // 不是 1796
 });
 ```
 
-> **不要**在正式测试套件里长期保留必失败的测试——基线必须保持全绿。R3 确认后：只改 `resolveCompanionRevenueBase` 的函数体**和这一条测试**，其余代码与测试不动。若有人绕过决策点直接改调用处，`tests/orderAmountSplit.test.mjs` 里的金额恒等式断言会红。
+> 若有人绕过决策点直接改调用处，`tests/orderAmountSplit.test.mjs` 里的金额恒等式断言与上面这条业务后果用例会红。
 
 **测试要点**
 - **恒等式**：对 `实付 ∈ {1, 50, 100, 9999, 2000}` × `bp ∈ {0, 3333, 8000, 10000}`，`companionBaseIncome + clubNetIncome === actualPaidAmount` 恒成立
@@ -1174,7 +1188,7 @@ export function sumEffectiveSpend(orders: readonly Order[]): number {
 
 | # | 问题 | 影响批次 | 本计划的处理方式 |
 |---|---|---|---|
-| **R3** | **增值服务是否参与分账**：`originalAmount` 的构成。文档只说「商品原价」 | P0-3（隔离） | **未确认，禁止自行假设。** P0-3 只实现一个可替换的决策点 `resolveCompanionRevenueBase(itemsAmount, addonsAmount)`，当前返回 `itemsAmount`（**不含增值服务**），并用一条隔离测试锁定当前行为。确认后只改函数体 |
+| **R3** | **增值服务是否参与分账**：分账基数的构成。文档只说「商品原价」 | P0-3 | ✅ **已确认（2026-09-18）**：**V1 的全部增值服务参与打手分账**——只要由当前打手实际履约提供，它就属于该订单的服务收入。决策点仍是唯一的 `resolveCompanionRevenueBase(itemsAmount, addonsAmount)`，现返回 `itemsAmount + addonsAmount`。**`originalAmount` 只表示「优惠前应付总额」，不承担分账配置语义**；两者当前数值相同是规则的结果，不是定义。将来平台自己履约的收费项进原价、不进基数 |
 | **R4** | **「服务异常」的定义**：谁触发、什么条件、如何进入售后区 | P1-2 / P2 | 本轮不实现 |
 | **R5** | **「非普通投诉通道」**：§12 暗示存在普通之外的通道 | P2 | 本轮不实现 |
 | **R6** | **B/A/S 的 3/4/5 是固定还是管理员可配** | P1-5 | 本轮不确认；P1-5 开工前必须定 |

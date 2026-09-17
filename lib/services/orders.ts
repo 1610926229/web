@@ -103,9 +103,11 @@ export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDet
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
-    // 金额域（P0-3）：详情页显示「原价 / 实付 / 护航收益」。
+    // 金额域（P0-3）：详情页显示「原价 / 实付 / 护航收益」三行。
     // `clubNetIncome`（平台净收入）**刻意不在这里**：它是平台自己的账，
     // 用户端没有展示位置，放进 DTO 只会顺着接口响应流到浏览器。
+    // 当前没有优惠券，所以实付等于原价；券接入后这里会天然变成两个数，
+    // 页面不需要改——它读的一直是这两个不同的字段。
     originalAmount: order.originalAmount,
     couponDiscountAmount: order.couponDiscountAmount,
     actualPaidAmount: order.actualPaidAmount,

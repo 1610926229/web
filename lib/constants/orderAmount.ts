@@ -6,14 +6,19 @@
  * 本文件把这三者的关系固定下来，其余模块**只允许调用这里的函数**，
  * 不得自己写 `× 比例` 或自己取整。
  *
- * 三条纪律（`tests/orderAmountSplit.test.mjs` 逐条锁住）：
+ * 四条纪律（`tests/orderAmountSplit.test.mjs` 逐条锁住）：
  *
- * 1. **取整只发生在护航收益这一处**，方向是**向下取整**（`Math.floor`）。
+ * 1. **「原价」与「分账基数」是两个概念**。原价是「这一单该收多少钱」，
+ *    基数是「其中哪些钱按比例分给打手」。当前两者数值相同（R3 已确认：
+ *    全部增值服务参与分账），但这个等式是 `resolveCompanionRevenueBase()`
+ *    给出来的**结论**，不是原价的定义——将来出现平台自己履约的收费项时，
+ *    它会进原价而不进基数。**禁止把两者合并成一个表达式。**
+ * 2. **取整只发生在护航收益这一处**，方向是**向下取整**（`Math.floor`）。
  *    平台净收入是差额而不是「实付 × 剩余比例」——后者会在两处各取一次整，
  *    两个数加起来不等于实付，账面上凭空少一分钱。
- * 2. **平台净收入允许为负**。券的成本由平台承担（见需求 §2.6），
+ * 3. **平台净收入允许为负**。券的成本由平台承担（见需求 §2.6），
  *    所以「实付 < 护航收益」是**正确结果**，不是异常：不抛错、不取绝对值、不夹到 0。
- * 3. 金额全程是**整数分**，函数只做整数运算，不出现浮点中间值。
+ * 4. 金额全程是**整数分**，函数只做整数运算，不出现浮点中间值。
  *
  * ⚠️ 本文件只提供**纯函数**：不读仓储、不取时间、不抛业务错误。
  * 比例是否合法由 `lib/constants/shareRatio.ts` 判定，金额是否与订单一致由
@@ -31,17 +36,24 @@
 export const SHARE_RATIO_BP_MAX = 10000;
 
 /**
- * 护航收益 = 原价 × 分账比例（基点），**向下取整**。
+ * 护航收益 = **分账基数** × 分账比例（基点），**向下取整**。
  *
  * 取整方向是向下而不是四舍五入：平台不能因为「多出半厘」而按整分付给打手，
  * 少付的那一分留在平台净收入里，账面对得上（见本文件顶部的恒等式）。
  *
- * ⚠️ 调用方传进来的 `originalAmount` 必须是**已经被冻结在订单上的那个数**
- * （`Order.originalAmount`），而不是读取时用今天的商品价格现算——
- * 商品改价不能影响历史订单。
+ * ⚠️ 第一个参数是**分账基数**（`companionRevenueBaseAmount`），不是订单原价——
+ * 两者当前数值相同，但那是一个规则的结果，不是一个定义（见
+ * `resolveCompanionRevenueBase()`）。参数名刻意写成基数，免得调用方
+ * 顺手把「原价」传进来，将来出现不参与分账的收费项时无从察觉。
+ *
+ * ⚠️ 传进来的基数必须是**已经被冻结在订单上的那份钱**算出来的，
+ * 而不是读取时用今天的商品价格现算——商品改价不能影响历史订单。
  */
-export function resolveCompanionBaseIncome(originalAmount: number, rateBp: number): number {
-  return Math.floor((originalAmount * rateBp) / SHARE_RATIO_BP_MAX);
+export function resolveCompanionBaseIncome(
+  companionRevenueBaseAmount: number,
+  rateBp: number,
+): number {
+  return Math.floor((companionRevenueBaseAmount * rateBp) / SHARE_RATIO_BP_MAX);
 }
 
 /**
@@ -60,25 +72,27 @@ export function resolveClubNetIncome(
 }
 
 /**
- * **参与分账的基数**——订单「原价」的构成。
+ * **参与分账的基数**——与「订单原价」是两个概念。
  *
- * ⚠️ **R3 未确认**：需求文档只写了「商品原价」，而增值服务（加急、指定等）
- * 是否参与分账尚未得到产品确认。当前实现取**商品金额**（`itemsAmount`），
- * 即增值服务不进分账基数。
+ * 原价回答「用户这一单优惠前该付多少钱」；本函数回答「其中哪些钱要按比例分给打手」。
+ * 当前两者数值相同，但**方向是反的**：原价的定义里没有分账这回事，
+ * 是这条规则决定了「全部原价都参与分账」。将来出现平台自己履约的收费项时，
+ * 它会进原价而不进这里，等式自然分开。
  *
- * 这个函数的存在意义就是让上面那句话**只写一次**：产品确认之后，
- * 改的是这一个函数体与 `tests/orderAmountSplit.test.mjs` 里唯一那条 R3 用例，
- * 而不是满仓库找 `itemsAmount + addonsAmount`。
+ * **R3 已确认（2026-09-18）**：V1 的全部增值服务**参与打手分账**。
+ * 业务原则是「只要这项服务由当前打手实际履约提供，它就属于该订单的服务收入，
+ * 与商品主体一起按订单冻结的比例分账」，因此基数 = 商品金额 + 全部增值服务金额。
  *
- * ⚠️ 它只在**下单那一刻**被调用一次，结果存进订单的 `originalAmount`。
+ * 这条规则**只写在这一处**：产品若再次调整，改的是这个函数体与
+ * `tests/orderAmountSplit.test.mjs` 里那一条用例，而不是满仓库找
+ * `itemsAmount + addonsAmount`。若有人绕过它直接改调用处，
+ * 金额恒等式断言（护航收益 + 平台净收入 = 实付）会红。
+ *
+ * ⚠️ 它只在**下单那一刻**被调用一次，结果并入订单的 `originalAmount` 一并冻结。
  * 读取订单时不得用它现算——那等于用今天的规则重算历史账。
  */
 export function resolveCompanionRevenueBase(itemsAmount: number, addonsAmount: number): number {
-  // 当前口径：只有商品金额参与分账。addonsAmount 保留在签名里，
-  // 是为了让「当时考虑过增值服务、并决定不计入」这件事留在代码里，
-  // 而不是看起来压根没想过这个问题。
-  void addonsAmount;
-  return itemsAmount;
+  return itemsAmount + addonsAmount;
 }
 
 /**
@@ -90,7 +104,7 @@ export function resolveCompanionRevenueBase(itemsAmount: number, addonsAmount: n
 export type OrderMoneyDomainInput = {
   /** 商品金额（单价 × 数量） */
   itemsAmount: number;
-  /** 增值服务合计（按单计费） */
+  /** 增值服务合计（按单计费）。**参与分账**（R3 已确认） */
   addonsAmount: number;
   /** 商品此刻的分账比例（基点） */
   companionRateBp: number;
@@ -98,7 +112,14 @@ export type OrderMoneyDomainInput = {
   couponDiscountAmount: number;
 };
 
-/** 订单上的金额域字段（不含 `refundedAmount`：那是退款累计，不属于下单时的快照）。 */
+/**
+ * 订单上的金额域字段（不含 `refundedAmount`：那是退款累计，不属于下单时的快照）。
+ *
+ * ⚠️ 刻意**没有** `companionRevenueBaseAmount`：当前规则下它恒等于 `originalAmount`，
+ * 多存一个永远相同的数只会得到两个真值来源，改的时候先改哪一个都可能对不上。
+ * 它是 `resolveOrderMoneyDomain()` 内部的一个局部量，概念留在那里。
+ * 等到出现「进原价但不进基数」的收费项时，再把它提升为订单字段。
+ */
 export type OrderMoneyDomain = {
   originalAmount: number;
   couponDiscountAmount: number;
@@ -116,14 +137,35 @@ export type OrderMoneyDomain = {
  * 是因为手写的常量与公式一旦不一致，验收时看到的「护航收益」就只是种子里的一个巧合，
  * 而不是规则算出来的结果——那种不一致只能靠人偶然比对发现。
  *
- * 顺序不是随意的：先由「参与分账的基数」得到原价，再扣券得到实付，
- * 然后按比例算出护航收益，最后**用实付减掉它**得到平台净收入（因此恒等式成立）。
+ * 顺序不是随意的，四步各有各的输入：
+ *
+ * 1. **原价**：商品 + 增值服务。它的定义里没有分账这回事；
+ * 2. **实付**：原价扣掉券。当前没有券，所以它与原价相等；
+ * 3. **分账基数**：由 `resolveCompanionRevenueBase()` 决定，**独立于第 1 步**。
+ *    当前规则下它与原价相等，但这是规则的结果，不是原价的定义；
+ * 4. **护航收益**：基数 × 比例（唯一下取整处），然后**用实付减掉它**得到平台净收入
+ *    （因此恒等式成立）。
+ *
+ * ⚠️ 第 1 步与第 3 步**不能合并成一个表达式**：合并之后「原价 = 分账基数」就从一个
+ * 规则结论变成了代码事实，将来出现平台自己履约的收费项时，改一处会同时改掉原价。
  */
 export function resolveOrderMoneyDomain(input: OrderMoneyDomainInput): OrderMoneyDomain {
-  const originalAmount = resolveCompanionRevenueBase(input.itemsAmount, input.addonsAmount);
+  // 1. 原价：用户这一单优惠前的应付总额
+  const originalAmount = input.itemsAmount + input.addonsAmount;
   const couponDiscountAmount = input.couponDiscountAmount;
+  // 2. 实付：原价 − 券
   const actualPaidAmount = originalAmount - couponDiscountAmount;
-  const companionBaseIncome = resolveCompanionBaseIncome(originalAmount, input.companionRateBp);
+
+  // 3. 分账基数：另一个概念，只由这一个决策点给出
+  const companionRevenueBaseAmount = resolveCompanionRevenueBase(
+    input.itemsAmount,
+    input.addonsAmount,
+  );
+  // 4. 护航收益：基数 × 比例
+  const companionBaseIncome = resolveCompanionBaseIncome(
+    companionRevenueBaseAmount,
+    input.companionRateBp,
+  );
 
   return {
     originalAmount,
