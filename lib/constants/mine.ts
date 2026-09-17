@@ -43,7 +43,7 @@ export const MINE_PRIMARY_ENTRIES: readonly MineEntry[] = [
  */
 export const EXTERNAL_LINK_NOT_CONFIGURED_MESSAGE = "链接暂未配置";
 
-/** 小宫格入口：顺序与原型一致（4 / 4 / 3）。 */
+/** 小宫格入口：顺序与原型一致（4 / 4 / 3），末尾另有 P0-4 新增的打手工作台。 */
 export const MINE_GRID_ENTRIES: readonly MineEntry[] = [
   { id: "rank", label: "消费排行榜", kind: "link", href: "/rank", notice: "", icon: "rank", tile: "" },
   { id: "coupon", label: "我的优惠券", kind: "link", href: "/coupons", notice: "", icon: "coupon", tile: "" },
@@ -51,6 +51,19 @@ export const MINE_GRID_ENTRIES: readonly MineEntry[] = [
   { id: "agreement", label: "相关协议", kind: "link", href: "/agreements", notice: "", icon: "agreement", tile: "" },
   // 陪玩列表的正式路由是**复数** /companions（不是单数 /companion）
   { id: "companion", label: "寻找陪玩", kind: "link", href: "/companions", notice: "", icon: "companion", tile: "" },
+  /*
+   * 打手工作台（P0-4）。
+   *
+   * ⚠️ 这一条**不在原型里**（原型抓的是一个普通用户账号，宫格是 4 / 4 / 3）。
+   * 加它的理由是：打手没有第二个账号，工作台也就没有第二个入口——不加这一条，
+   * 一位已是打手的用户在自己的小程序里根本走不到 `/companion`。
+   *
+   * ⚠️ 只有**一条链接**：不带任何参数、不判断身份、不加登录入口。不是打手的人点进去
+   * 会看到「你还不是护航」的提示页（见 `app/companion/(console)/layout.tsx`），
+   * 那是**有意为之**——「成为护航」与「工作台」是同一个身份的两端，
+   * 把入口藏起来只会让申请过的人找不到自己通过没有。
+   */
+  { id: "companion-console", label: "打手工作台", kind: "link", href: "/companion", notice: "", icon: "console", tile: "" },
   { id: "tips", label: "鸡腿记录", kind: "link", href: "/tips", notice: "", icon: "tips", tile: "" },
   { id: "suggestion", label: "功能建议", kind: "link", href: "/suggestions", notice: "", icon: "suggestion", tile: "" },
   { id: "activity", label: "福利活动", kind: "link", href: "/activities", notice: "", icon: "gift", tile: "" },

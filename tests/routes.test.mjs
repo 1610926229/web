@@ -95,23 +95,45 @@ test("扫描器本身正确：能找到已知路由、并排除动态段与不�
   assert.equal(ROUTES.has("/definitely-not-a-route"), false);
 });
 
-test("陪玩列表用复数 /companions，单数 /companion 不再是页面路由", () => {
+/**
+ * 单数 `/companion` 与复数 `/companions` 的区分。
+ *
+ * ⚠️ 这条断言在 P0-4 时被**改写**过，方向与原意相反，因此把历史写在这里：
+ * 原先 `/companion` **不是**页面路由（它是被废弃的单数写法，谁指向它谁 404）；
+ * P0-4 起 `/companion` 是**打手工作台**——另一个东西，而不是名单的第二种写法。
+ *
+ * 名单只有一个地址这件事仍然必须被钉住：只要「寻找陪玩」的地址还是 `/companions`，
+ * 就没有人能靠改一个字母把用户带到工作台上去。因此原来那条
+ * 「入口不能指向 /companion」的断言没有被删掉，而是换成了下面
+ * 「入口地址恰好等于 /companions」这一条更精确的写法。
+ */
+test("陪玩列表是 /companions；单数 /companion 现在是打手工作台，不是名单的第二种写法", () => {
   assert.equal(ROUTES.has("/companions"), true, "缺少 /companions 页面");
-  assert.equal(ROUTES.has("/companion"), false, "/companion（单数）不应再是页面路由");
-  // hasAppFile 忽略路由组：页面搬进 `(mobile)` 之后，写死 `app/companion` 这种检查
-  // 会因为「目录压根不在这儿」而永远通过，变成一条不起作用的断言。
-  assert.equal(hasAppFile("companion/page.tsx"), false, "残留了单数路由目录");
+  assert.equal(ROUTES.has("/companion"), true, "缺少 /companion（打手工作台）页面");
+  // hasAppFile 忽略路由组：页面搬进 `(mobile)` / `(console)` 之后，写死 `app/companion`
+  // 这种检查会因为「目录压根不在这儿」而永远通过，变成一条不起作用的断言。
+  assert.equal(hasAppFile("companion/page.tsx"), true, "打手工作台的页面应当在 companion 这一段下");
 });
 
 test("「我的」页每个入口地址都真实存在，且寻找陪玩指向 /companions", () => {
   const entries = [...MINE_PRIMARY_ENTRIES, ...MINE_GRID_ENTRIES];
   const companion = entries.find((entry) => entry.id === "companion");
   const join = entries.find((entry) => entry.id === "join");
+  const consoleEntry = entries.find((entry) => entry.id === "companion-console");
 
   assert.ok(companion, "缺少寻找陪玩入口");
   assert.equal(companion.label, "寻找陪玩");
   assert.equal(companion.kind, "link");
   assert.equal(companion.href, "/companions");
+  // 名单入口与工作台入口是**两个地址**：单数 /companion 曾经是漏出去的那个错地址，
+  // P0-4 之后它成了一个真页面，因此这一条不能再靠「它不是路由」来保证
+  assert.notEqual(companion.href, "/companion", "「寻找陪玩」不能指向打手工作台");
+
+  // 打手工作台（P0-4 新增，原型里没有这个入口）：只有一条链接，不带参数、不带身份判断
+  assert.ok(consoleEntry, "缺打手工作台入口");
+  assert.equal(consoleEntry.label, "打手工作台");
+  assert.equal(consoleEntry.kind, "link");
+  assert.equal(consoleEntry.href, "/companion");
 
   // 「我的」页「成为护航」与首页「考核入驻」是同一个页面的两个入口，地址必须一致
   assert.ok(join, "缺成为护航入口");
@@ -126,8 +148,6 @@ test("「我的」页每个入口地址都真实存在，且寻找陪玩指向 /
       true,
       `「我的」页入口「${entry.label}」指向了不存在的路由：${entry.href}`,
     );
-    // 单数 /companion 曾经就是在这里漏出去的
-    assert.notEqual(pathnameOf(entry.href), "/companion");
   }
 });
 
@@ -757,9 +777,13 @@ test("陪玩组件不引用 Mock / 数据层，且客户端只引用 *Http 取�
 });
 
 test("陪玩与入驻的路由地址没有第二种写法", () => {
-  // 单数 /companion 不是页面路由，也没有残留目录
-  assert.equal(ROUTES.has("/companion"), false);
-  assert.equal(hasAppFile("companion/page.tsx"), false, "残留了单数路由目录");
+  // 名单是 /companions，工作台是 /companion（P0-4 起）：两者都存在，但各只有一个地址。
+  // 这里不再断言「/companion 不是路由」——它现在是打手工作台，
+  // 「入口不许指向它」那条规则由上面「我的」页入口的用例负责。
+  assert.equal(ROUTES.has("/companions"), true);
+  assert.equal(ROUTES.has("/companion"), true);
+  assert.equal(ROUTES.has("/companions/console"), false);
+  assert.equal(ROUTES.has("/companion/list"), false);
 
   // 入驻进度是 /join/status，不是 /joinStatus 之类的第二种写法
   assert.equal(ROUTES.has("/join/status"), true);
