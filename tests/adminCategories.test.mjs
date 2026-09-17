@@ -149,6 +149,8 @@ function productInput(categoryId, overrides = {}) {
     detailText: "",
     detailImages: [],
     sortOrder: 10,
+    // 分账比例在接口上是百分比文本（与 priceYuan 同一条规则），必填
+    companionRatePercent: "80",
     recommended: false,
     status: "off",
     specs: [

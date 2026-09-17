@@ -108,8 +108,24 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
           ) : null}
         </div>
 
+        {/*
+          金额域（P0-3）：下单那一刻冻结在订单上的账。
+          「原价」是参与分账的基数，「实付」是分账的起点，「护航收益」是这一单分给打手的钱。
+          三者与上面的明细是**两套口径**：上面回答「卖了什么、收了多少」（订单合计），
+          这里回答「怎么分账」。增值服务是否进入分账基数尚未确认（R3），
+          因此含增值服务的订单上「实付」会小于「订单合计」——这是待确认规则的直接结果，
+          不是算错了（见 lib/constants/orderAmount.ts）。
+        */}
+        <div className="mt-2 border-t border-line pt-1">
+          <MoneyRow label="原价" cents={detail.originalAmount} />
+          <MoneyRow label="实付" cents={detail.actualPaidAmount} />
+          <MoneyRow label="护航收益" cents={detail.companionBaseIncome} />
+        </div>
+
         <div className="mt-2 flex items-baseline justify-end gap-2 border-t border-line pt-2">
-          <span className="text-[13px] text-ink-2">实付金额</span>
+          {/* 这一行是**支付渠道实际收的钱**（商品 + 增值服务）。
+              它不叫「实付」：本页的「实付」属于金额域，两者在含增值服务的订单上不是同一个数 */}
+          <span className="text-[13px] text-ink-2">订单合计</span>
           <PriceText cents={detail.totalAmount} className="text-[18px] text-brand-red" />
         </div>
       </section>

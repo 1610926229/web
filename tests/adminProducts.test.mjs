@@ -40,6 +40,7 @@ import {
   productSpecErrors,
   productTitleContainsPrice,
 } from "../lib/constants/adminProducts.ts";
+import { SHARE_RATIO_INVALID_MESSAGE, formatShareRatioBpForInput } from "../lib/constants/shareRatio.ts";
 import { getAdminAuditRepository } from "../lib/data/adminAuditRepository.ts";
 import { getCatalogRepository } from "../lib/data/catalogRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
@@ -165,6 +166,8 @@ function productInput(overrides = {}) {
     detailText: "",
     detailImages: [],
     sortOrder: 10,
+    // 分账比例在接口上是**百分比文本**（与 priceYuan 同一条规则）
+    companionRatePercent: "80",
     recommended: false,
     status: "off",
     specs: [spec()],
@@ -204,6 +207,8 @@ async function productBodyFrom(id, overrides = {}) {
     detailText: detail.detailText,
     detailImages: [...detail.detailImages],
     sortOrder: detail.sortOrder,
+    // 基点 → 百分比文本：编辑时把当前值原样带回，改一个字段不会顺手改掉比例
+    companionRatePercent: formatShareRatioBpForInput(detail.companionRateBp),
     recommended: detail.recommended,
     status: detail.status,
     specs: detail.specs.map(toSpecInput),
@@ -525,6 +530,96 @@ test("DTO 边界：客户端伪造的 id / 销量 / 平台标签 / 时间 / 移�
   // 只会让人以为它已经在生效
   assert.equal("stock" in detail, false);
   assert.equal("limitPerUser" in detail, false);
+});
+
+// ——————————————————————— 分账比例（P0-3）———————————————————————
+
+test("分账比例：接口收百分比文本，存的是整数基点", async () => {
+  const result = await createProduct({ companionRatePercent: "80" });
+  const detail = await getAdminProductDetail(result.productId, undefined, "server");
+
+  // 界面填的数与账上存的比例是同一个数，只是单位不同
+  assert.equal(detail.companionRateBp, 8000);
+  assert.equal(Number.isInteger(detail.companionRateBp), true);
+
+  // 两位小数也是精确的：不做浮点乘法，`80.5` 必须是 8050 而不是 8049
+  const decimal = await createProduct({ companionRatePercent: "80.5" });
+  assert.equal(
+    (await getAdminProductDetail(decimal.productId, undefined, "server")).companionRateBp,
+    8050,
+  );
+
+  // 两个端点都是合法值：0 表示全额归平台，100 表示全额归打手
+  const zero = await createProduct({ companionRatePercent: "0" });
+  assert.equal((await getAdminProductDetail(zero.productId, undefined, "server")).companionRateBp, 0);
+  const full = await createProduct({ companionRatePercent: "100" });
+  assert.equal(
+    (await getAdminProductDetail(full.productId, undefined, "server")).companionRateBp,
+    10000,
+  );
+});
+
+test("分账比例：缺失与非法一律拒绝，不做静默默认值", async () => {
+  // 缺字段（新建表单留空时发的就是空串）→ 字段级错误，**不是**悄悄按 80% 建出来
+  await expectApiError(
+    createProduct({ companionRatePercent: "" }),
+    "BAD_REQUEST",
+    SHARE_RATIO_INVALID_MESSAGE,
+  );
+
+  for (const bad of ["101", "-1", "80.001", "80.", "abc", "80%"]) {
+    await expectApiError(
+      createProduct({ companionRatePercent: bad }),
+      "BAD_REQUEST",
+      SHARE_RATIO_INVALID_MESSAGE,
+    );
+  }
+
+  // 一个都不该被建出来
+  assert.equal((await getAdminAuditRepository().listAudits()).length, 0);
+});
+
+test("分账比例：改比例是一次真实的改变，审计里必须看得见", async () => {
+  const created = await createProduct({ companionRatePercent: "80" });
+
+  // 只改比例、其余字段原样带回——这是最容易变成「什么都没变」的一条路径
+  const body = await productBodyFrom(created.productId, { companionRatePercent: "70" });
+  const saved = await updateAdminProduct(created.productId, ADMIN_ID, {
+    idempotencyKey: uniqueKey(),
+    ...body,
+  });
+  assert.equal(saved.changed, true, "只改比例也必须算作一次改动");
+
+  assert.equal(
+    (await getAdminProductDetail(created.productId, undefined, "server")).companionRateBp,
+    7000,
+  );
+
+  const audits = await auditsFor(created.productId);
+  const update = audits.find((entry) => entry.action === "product.update");
+  assert.ok(update, "改比例要留下一条 product.update");
+  // before/after 都有这个字段，差异才读得出来；只放一边等于记了个孤零零的数字
+  assert.equal(update.before.companionRateBp, 8000);
+  assert.equal(update.after.companionRateBp, 7000);
+});
+
+test("分账比例：合法比例带前导零与空格也能存，回填的文本能被再次提交", async () => {
+  const created = await createProduct({ companionRatePercent: "  080  " });
+  const detail = await getAdminProductDetail(created.productId, undefined, "server");
+  assert.equal(detail.companionRateBp, 8000);
+
+  // 表单回填 → 原样再提交一次：这条往返不能把比例改掉，否则「打开表单点保存」就是一次改动
+  const body = await productBodyFrom(created.productId);
+  assert.equal(body.companionRatePercent, "80");
+  const again = await updateAdminProduct(created.productId, ADMIN_ID, {
+    idempotencyKey: uniqueKey(),
+    ...body,
+  });
+  assert.equal(again.changed, false, "原样提交不应产生改动");
+  assert.equal(
+    (await getAdminProductDetail(created.productId, undefined, "server")).companionRateBp,
+    8000,
+  );
 });
 
 // ——————————————————————— 游戏与类目归属 ———————————————————————
@@ -1784,6 +1879,7 @@ async function httpProductBodyFrom(id, cookie, overrides = {}) {
     detailText: detail.detailText,
     detailImages: [...detail.detailImages],
     sortOrder: detail.sortOrder,
+    companionRatePercent: formatShareRatioBpForInput(detail.companionRateBp),
     recommended: detail.recommended,
     status: detail.status,
     specs: detail.specs.map(toSpecInput),

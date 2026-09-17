@@ -1,9 +1,11 @@
+import { resolveOrderMoneyDomain } from "@/lib/constants/orderAmount";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import {
   beijingDayStart,
   beijingMonthStart,
   beijingWeekStart,
 } from "@/lib/constants/rankingPeriods";
+import { DEFAULT_COMPANION_RATE_BP } from "@/lib/constants/shareRatio";
 import type { Order, OrderStatus } from "@/lib/types/order";
 import { addonSeed } from "./catalogSeed";
 import { companionSeed } from "./seed";
@@ -127,6 +129,17 @@ function build(input: PresetOrderInput): Order {
   // 金额全程「分」为单位的整数运算
   const itemsAmount = input.unitPrice * input.quantity;
   const addonsAmount = addons.reduce((sum, addon) => sum + addon.price, 0);
+  // 金额域（P0-3）：预置订单与真实订单走**同一套公式**，不在这里手写数字——
+  // 手写的常量一旦与公式不一致，验收时看到的「护航收益」就只是种子里的一个巧合，
+  // 而那种不一致只能靠人偶然比对才能发现。
+  // 预置订单的分账比例统一取默认 80%（`DEFAULT_COMPANION_RATE_BP`）
+  const money = resolveOrderMoneyDomain({
+    itemsAmount,
+    addonsAmount,
+    companionRateBp: DEFAULT_COMPANION_RATE_BP,
+    // 预置订单没有用过券
+    couponDiscountAmount: 0,
+  });
   const times = timeline({
     status: input.status,
     paidAt: input.paidAt,
@@ -162,6 +175,13 @@ function build(input: PresetOrderInput): Order {
     itemsAmount,
     addonsAmount,
     totalAmount: itemsAmount + addonsAmount,
+
+    // —— 金额域（P0-3）——
+    ...money,
+    // 预置的已退款订单是**全额退款**，因此累计已退等于这一单的实付；
+    // 其余状态一笔没退。这一条与「全额退款后 refundedAmount === actualPaidAmount」
+    // 的规则一致（见 lib/types/order.ts）。
+    refundedAmount: input.status === "refunded" ? money.actualPaidAmount : 0,
 
     companionId: companion ? companion.id : null,
     companion: companion

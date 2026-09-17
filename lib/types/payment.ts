@@ -91,6 +91,16 @@ export type PaymentRequest = CheckoutSelection & {
   addonsAmount: number;
   totalAmount: number;
 
+  /**
+   * 商品的分账比例快照（基点，8000 = 80%），**创建支付请求时就冻结**（P0-3）。
+   *
+   * ⚠️ 它必须存在这条记录上，不能等到建单时再去取商品：支付成功后的建单
+   * （`buildOrderFromRequest`）跑在支付仓储的**原子区段**里，是同步的，
+   * 那里没有任何 `await` 可以取商品。冻结在这里还有第二个好处——
+   * 用户看到的试算与最终分账用的是同一个比例，中途改商品不影响这一单。
+   */
+  companionRateSnapshot: number;
+
   /** 支付成功生成的订单；未成功时为 null */
   orderId: string | null;
 

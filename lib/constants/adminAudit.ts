@@ -252,6 +252,9 @@ export function toCategoryAuditSnapshot(record: CategoryRecord): AdminAuditSnaps
  * 因此永远不会出现在 before/after 的差异里。把一份统计数字抄进审计，只会得到
  * 一个当时正确、之后必然过期的副本——而且看的人无从知道它已经过期了。
  *
+ * `companionRateBp`（分账比例，P0-3）**进快照**：它与销量相反——后台改得动，
+ * 而且改它等于改一条资金规则，正是审计最该留下的那类改动。
+ *
  * 规格不进完整的 before/after 明细，只留三个标量：`specCount`（全部）、
  * `effectiveSpecCount`（有效）与 `specNames`（截断后的名字串）。审计要回答的是
  * 「这次改价动了哪几条规格」，不是把整份规格表留档——真需要精确明细时，
@@ -272,6 +275,11 @@ export function toProductAuditSnapshot(record: CatalogProductRecord): AdminAudit
     effectiveSpecCount: listEffectiveSpecs(record).length,
     specNames: truncateAuditText(record.specs.map((spec) => spec.name).join("、")),
     priceFrom: productDisplayPrice(record),
+    // 分账比例（P0-3）：它是**可被后台改动**的资金规则（§十：商品分账比例修改要进审计），
+    // 而且「只改了比例」的一次保存必须留下一条看得见差异的记录——
+    // 少了这个字段，改比例这件事在审计里会变成一条「什么都没变」的空记录。
+    // 记的是基点（存储值）：审计要能回答「当时存的是哪个数」，与界面的百分比是两回事
+    companionRateBp: record.companionRateBp,
     removedAt: record.removedAt,
     updatedAt: record.updatedAt,
   };

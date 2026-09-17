@@ -235,6 +235,65 @@ test("详情 DTO 含游戏 ID 与备注，金额以「分」为单位且算术�
   }
 });
 
+test("详情 DTO 带上金额域的三行展示值，但不带平台净收入", async () => {
+  const [item] = (await list(USER_A)).items;
+  const detail = await getOrderDetailForUser(item.id, USER_A, undefined, "server");
+
+  // 页面上「原价 / 实付 / 护航收益」三行读的就是这几个字段
+  for (const field of [
+    "originalAmount",
+    "couponDiscountAmount",
+    "actualPaidAmount",
+    "companionRateSnapshot",
+    "companionBaseIncome",
+    "refundedAmount",
+  ]) {
+    assert.equal(typeof detail[field], "number", `详情应当带上 ${field}`);
+  }
+
+  // 平台净收入是平台自己的账：用户端没有展示位置，
+  // 放进 DTO 只会顺着接口响应流到浏览器
+  assert.equal("clubNetIncome" in detail, false);
+
+  // 列表仍然是摘要：金额域整块都不该出现在列表项里
+  for (const field of [
+    "originalAmount",
+    "couponDiscountAmount",
+    "actualPaidAmount",
+    "companionRateSnapshot",
+    "companionBaseIncome",
+    "clubNetIncome",
+    "refundedAmount",
+  ]) {
+    assert.equal(field in item, false, `列表项不应包含 ${field}`);
+  }
+});
+
+test("预置订单的金额域由公式算出，而不是手写的常量", async () => {
+  // 种子调用的是 `lib/constants/orderAmount.ts` 里那组函数本身（不是抄一份数字），
+  // 因此只要有人在种子里写死一个对不上的数，下面两条关系立刻就红
+  for (const item of await listAll(USER_A)) {
+    const detail = await getOrderDetailForUser(item.id, USER_A, undefined, "server");
+
+    assert.equal(
+      detail.actualPaidAmount,
+      detail.originalAmount - detail.couponDiscountAmount,
+      `订单 ${detail.orderNo} 的实付应当等于原价减抵扣`,
+    );
+    assert.equal(
+      detail.companionBaseIncome,
+      Math.floor((detail.originalAmount * detail.companionRateSnapshot) / 10000),
+      `订单 ${detail.orderNo} 的护航收益应当等于原价 × 比例（向下取整）`,
+    );
+    // 已退款的整单退，其余一笔都没退过
+    assert.equal(
+      detail.refundedAmount,
+      detail.status === "refunded" ? detail.actualPaidAmount : 0,
+      `订单 ${detail.orderNo} 的累计已退不对`,
+    );
+  }
+});
+
 test("详情：未绑定打手的已付款订单显示为空，已接单之后必须有打手", async () => {
   const orders = await listAll(USER_A);
   const waiting = orders.filter((order) => order.status === "paid" && order.companion === null);

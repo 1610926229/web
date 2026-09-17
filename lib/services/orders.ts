@@ -103,6 +103,15 @@ export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDet
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
+    // 金额域（P0-3）：详情页显示「原价 / 实付 / 护航收益」。
+    // `clubNetIncome`（平台净收入）**刻意不在这里**：它是平台自己的账，
+    // 用户端没有展示位置，放进 DTO 只会顺着接口响应流到浏览器。
+    originalAmount: order.originalAmount,
+    couponDiscountAmount: order.couponDiscountAmount,
+    actualPaidAmount: order.actualPaidAmount,
+    companionRateSnapshot: order.companionRateSnapshot,
+    companionBaseIncome: order.companionBaseIncome,
+    refundedAmount: order.refundedAmount,
     timeline: buildOrderTimeline(order),
     ...extras,
   };

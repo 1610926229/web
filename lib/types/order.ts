@@ -87,12 +87,39 @@ export type Order = {
   remark: string;
   addons: OrderAddonSnapshot[];
 
-  // —— 金额（服务端计算，单位：分）——
+  // —— 下单内容金额（服务端计算，单位：分）——
   /** 单价 × 数量 */
   itemsAmount: number;
   /** 增值服务合计（按单计费，不随数量变化） */
   addonsAmount: number;
+  /** 商品金额 + 增值服务金额。**支付渠道实际收的钱**（退款也按它算） */
   totalAmount: number;
+
+  // —— 金额域（P0-3，服务端计算，单位：分）——
+  // 这一组与上面三个是**两套口径**，各自有唯一用途，不要混用：
+  //   itemsAmount/addonsAmount/totalAmount = 这一单「卖了什么、收了多少钱」
+  //   originalAmount ~ refundedAmount     = 这一单「怎么分账、退过多少」
+  // 两者的差额来自 R3（增值服务是否参与分账）与券的承担方，详见 lib/constants/orderAmount.ts。
+  /**
+   * 商品原价，**参与分账的基数**。
+   *
+   * ⚠️ 它的构成是一个待确认的产品规则（R3）：当前口径为「商品金额，不含增值服务」，
+   * 由 `resolveCompanionRevenueBase()` 在下单那一刻算好并**存进订单**。
+   * 读取时不得用今日的规则或今日的商品价格重算——商品改价不影响历史订单。
+   */
+  originalAmount: number;
+  /** 优惠券抵扣金额。P0 恒为 0，P1 接入优惠券后才有非 0 值 */
+  couponDiscountAmount: number;
+  /** 用户实付 = originalAmount − couponDiscountAmount。**分账的起点** */
+  actualPaidAmount: number;
+  /** 分账比例快照（基点，8000 = 80%），下单时从商品冻结 */
+  companionRateSnapshot: number;
+  /** 护航收益 = floor(originalAmount × 比例 / 10000)。唯一的取整处 */
+  companionBaseIncome: number;
+  /** 平台净收入 = actualPaidAmount − companionBaseIncome。**允许为负**（券由平台承担时） */
+  clubNetIncome: number;
+  /** 累计已退。全额退款后等于 actualPaidAmount（P1 接入退款金额公式时维护） */
+  refundedAmount: number;
 
   /**
    * 陪玩快照；未绑定时为 null。
@@ -172,6 +199,20 @@ export type OrderDetail = OrderListItem & {
   itemsAmount: number;
   addonsAmount: number;
   addons: OrderAddonSnapshot[];
+
+  /**
+   * 金额域（P0-3）：详情页用它显示「原价 / 实付 / 护航收益」三行。
+   *
+   * ⚠️ **不含 `clubNetIncome`**：平台净收入是平台自己的账，用户端没有任何展示位置，
+   * 放进 DTO 只会让它顺着接口响应流到浏览器。管理端的订单详情另有 DTO。
+   */
+  originalAmount: number;
+  couponDiscountAmount: number;
+  actualPaidAmount: number;
+  companionRateSnapshot: number;
+  /** 护航收益：这一单分给打手的钱（用户可见，用于「护航收益 ¥40」这一行） */
+  companionBaseIncome: number;
+  refundedAmount: number;
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
 

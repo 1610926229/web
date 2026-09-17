@@ -1,3 +1,4 @@
+import { DEFAULT_COMPANION_RATE_BP } from "@/lib/constants/shareRatio";
 import type { Addon, CategoryRecord, GameRecord } from "@/lib/types/catalog";
 import type { HomeSectionSeed } from "@/lib/types/content";
 import type {
@@ -132,6 +133,14 @@ type ProductSeed = {
   detailText: string;
   /** 缺省为「本商品封面 + 活动图」 */
   detailImages?: string[];
+  /**
+   * 分账比例（基点，8000 = 80%）。
+   *
+   * 缺省为 `DEFAULT_COMPANION_RATE_BP`（80%）：预置商品全部用同一个比例，
+   * 「按商品分别配置」这件事由后台改价那一刻起才真正开始（P0-3 的商品管理表单）。
+   * 单位是基点而不是百分比，与实体一致——种子写的是**存储值**，不是界面值。
+   */
+  companionRateBp?: number;
   specs: SpecSeed[];
 };
 
@@ -545,6 +554,9 @@ function buildProducts(seeds: readonly ProductSeed[]): CatalogProductRecord[] {
     status: seed.status ?? "on",
     monthlySales: seed.monthlySales,
     gameTag: seed.gameTag,
+    // 分账比例：缺省 80%。**这一处是唯一的默认值落点**——
+    // 不在别处再写一遍 `?? 8000`，也不让任何商品缺字段
+    companionRateBp: seed.companionRateBp ?? DEFAULT_COMPANION_RATE_BP,
     // 建表时间按数组下标往前错开，后台列表的「更新时间」因此有先后可看
     createdAt: SEED_CREATED_AT,
     updatedAt: seedDaysAgo(index % 30),

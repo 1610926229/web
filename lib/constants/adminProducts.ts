@@ -24,6 +24,11 @@ import {
   readAdminCatalogPaging,
   type AdminCatalogRemovalFilter,
 } from "./adminCatalog";
+import {
+  SHARE_RATIO_INVALID_MESSAGE,
+  SHARE_RATIO_LABEL,
+  parseShareRatioPercentToBp,
+} from "./shareRatio";
 
 /**
  * 管理端「商品管理」的字段规则、金额转换、状态口径与 DTO 转换（服务端与浏览器共用）。
@@ -224,6 +229,7 @@ export const PRODUCT_FIELD_LABELS = {
   detailText: "图文详情",
   detailImages: "详情图片",
   sortOrder: "展示排序",
+  companionRatePercent: SHARE_RATIO_LABEL,
   recommended: "推荐状态",
   status: "上下架状态",
   specs: "商品规格",
@@ -251,6 +257,7 @@ const NO_ERRORS: ProductProfileFieldErrors = {
   detailText: null,
   detailImages: null,
   sortOrder: null,
+  companionRatePercent: null,
   recommended: null,
   status: null,
   specs: null,
@@ -282,6 +289,8 @@ export type ProductProfileInput = {
   detailText: string;
   detailImages: readonly string[];
   sortOrder: number;
+  /** 分账比例：界面单位是**百分比文本**（`"80"`、`"80.5"`），不是基点 */
+  companionRatePercent: string;
   recommended: boolean;
   status: ProductStatus;
   specs: readonly ProductSpecInput[];
@@ -482,6 +491,14 @@ export function productProfileFieldErrors(
       : null
     : PRODUCT_SORT_ORDER_INVALID_MESSAGE;
 
+  // 分账比例：判定与换算共用 `parseShareRatioPercentToBp()`，因此「校验通过」与
+  // 「转换得出一个数」是同一件事——不会出现「校验说没问题，转换却得到 null」的缝。
+  // 转换本身在 `toProductDraft()` 里做，这一层只回答「能不能转」。
+  const companionRateError =
+    parseShareRatioPercentToBp(input.companionRatePercent) === null
+      ? SHARE_RATIO_INVALID_MESSAGE
+      : null;
+
   const spec = productSpecErrors(input.specs);
   const noEffectiveSpec =
     input.status === "on" && effectiveSpecCountFromInput(input.specs) === 0
@@ -513,6 +530,7 @@ export function productProfileFieldErrors(
     detailText: detailText.ok ? null : detailText.message,
     detailImages: detailImageError,
     sortOrder: sortOrderError,
+    companionRatePercent: companionRateError,
     // 优先报「在架却买不了」：它比「某一行名字超长」严重得多，而且往往正是
     // 那行改动导致的后果，先说后果，人才知道为什么要改
     specs: noEffectiveSpec ?? spec.group ?? specRowError,
@@ -581,6 +599,9 @@ export function normalizeProductProfilePatch(
     detailText: input.detailText.trim(),
     detailImages: input.detailImages.map((url) => url.trim()).filter(Boolean),
     sortOrder: input.sortOrder,
+    // 与 `priceYuan` 同样只去空白、不换算：产物里的比例仍是百分比文本，
+    // 客户端因此没有「传基点」的通道（换算只在服务端的 `toProductDraft()`）
+    companionRatePercent: input.companionRatePercent.trim(),
     recommended: input.recommended,
     status: input.status,
     specs,
@@ -616,7 +637,19 @@ export function toProductDraft(patch: ProductProfilePatch): ProductProfileDraft 
     };
   });
 
-  return { ...patch, specs };
+  // 百分比 → 基点：与金额一样，**唯一**一次把界面单位变成存储单位的地方。
+  const { companionRatePercent, ...profile } = patch;
+  const rateBp = parseShareRatioPercentToBp(companionRatePercent);
+  if (rateBp === null) {
+    // ⚠️ 与规格金额不同，这里**没有兜底值**。金额兜底成 0 会被数据层以
+    // 「单价必须为正整数」整次拒绝，而比例兜底成 0 是一个**合法值**
+    // （0% 表示全额归平台）：它会安安静静地按「平台拿走全部」结算，
+    // 等到有人对账才可能发现。因此这一条走不变量断言——真发生了就整次失败，
+    // 让 bug 当场暴露。走到这里说明校验与换算对同一个字符串给出了不同结论。
+    throw new Error(`分账比例已通过校验却无法换算成基点：${JSON.stringify(companionRatePercent)}`);
+  }
+
+  return { ...profile, companionRateBp: rateBp, specs };
 }
 
 /**
@@ -635,10 +668,17 @@ export function adminProductActionFromPatch(
   return "product.update";
 }
 
-/** 这次编辑是否什么都没改。没改就不写数据、也不写审计。 */
+/**
+ * 这次编辑是否什么都没改。没改就不写数据、也不写审计。
+ *
+ * ⚠️ 收的是**草稿形状**（`ProductProfileDraft`）而不是线上入参形状：
+ * 这一层比较的是「记录会被写成什么样」，金额与比例都已经是存储单位。
+ * 少比一个字段的后果不是「多写一次」，而是**那次修改被静默丢弃**——
+ * 页面提示保存成功，记录里还是旧值。
+ */
 export function isProductProfileUnchanged(
   previous: CatalogProductRecord,
-  patch: Omit<ProductProfilePatch, "specs"> & { specs: readonly ProductSpecRecord[] },
+  patch: Omit<ProductProfileDraft, "specs"> & { specs: readonly ProductSpecRecord[] },
 ): boolean {
   return (
     previous.gameId === patch.gameId &&
@@ -650,6 +690,7 @@ export function isProductProfileUnchanged(
     previous.detailText === patch.detailText &&
     sameList(previous.detailImages, patch.detailImages) &&
     previous.sortOrder === patch.sortOrder &&
+    previous.companionRateBp === patch.companionRateBp &&
     previous.recommended === patch.recommended &&
     previous.status === patch.status &&
     sameSpecs(previous.specs, patch.specs)
@@ -904,6 +945,8 @@ export function toAdminProductListItem(
     sortOrder: record.sortOrder,
     recommended: record.recommended,
     status: record.status,
+    // 分账比例给的是**基点**；表单用 `formatShareRatioBpForInput()` 显示成百分比
+    companionRateBp: record.companionRateBp,
     removedAt: record.removedAt,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,

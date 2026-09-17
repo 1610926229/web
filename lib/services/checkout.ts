@@ -5,6 +5,7 @@ import {
   REMARK_MAX_LENGTH,
   validateGameAccount,
 } from "@/lib/constants/checkout";
+import { resolveOrderMoneyDomain, type OrderMoneyDomain } from "@/lib/constants/orderAmount";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getDataSource } from "@/lib/data/source";
@@ -172,6 +173,8 @@ async function resolveSelection(selection: CheckoutSelection): Promise<{
   itemsAmount: number;
   addonsAmount: number;
   totalAmount: number;
+  /** 商品此刻的分账比例（基点）。它随支付请求冻结，之后改商品不影响已下单的订单 */
+  companionRateSnapshot: number;
 }> {
   const source = getDataSource();
 
@@ -211,7 +214,30 @@ async function resolveSelection(selection: CheckoutSelection): Promise<{
     itemsAmount,
     addonsAmount,
     totalAmount: itemsAmount + addonsAmount,
+    // 比例在**同一份商品读取**里拿到，与上面算钱用的价格同源
+    companionRateSnapshot: product.companionRateBp,
   };
+}
+
+/**
+ * 这一单的金额域：**下单那一刻**由商品与价格算出（P0-3）。
+ *
+ * 公式在 `lib/constants/orderAmount.ts`（`resolveOrderMoneyDomain`），本函数只把
+ * 「下单这一刻」的输入凑齐并说明券的处理。优惠券那一行显式写出来，是为了让
+ * 「实付 = 原价 − 券」这条关系在有券之前就已经是代码的一部分。
+ */
+function resolveMoneyDomainForSelection(resolved: {
+  itemsAmount: number;
+  addonsAmount: number;
+  companionRateBp: number;
+}): OrderMoneyDomain {
+  return resolveOrderMoneyDomain({
+    itemsAmount: resolved.itemsAmount,
+    addonsAmount: resolved.addonsAmount,
+    companionRateBp: resolved.companionRateBp,
+    // P0 没有优惠券：抵扣恒为 0（P1 接入时，券的金额由服务端算，不从请求里读）
+    couponDiscountAmount: 0,
+  });
 }
 
 // ——————————————————————————— 试算 ———————————————————————————
@@ -257,6 +283,15 @@ function makeOrderNo(now: Date): string {
 
 function buildOrderFromRequest(request: PaymentRequest): Order {
   const now = new Date();
+  // 金额域在这里**从支付请求上冻结的那份数据**算出来：本函数跑在支付仓储的原子区段里，
+  // 只能读请求上已有的字段（含下单那一刻冻住的分账比例），不能去取商品
+  const money = resolveMoneyDomainForSelection({
+    itemsAmount: request.itemsAmount,
+    addonsAmount: request.addonsAmount,
+    // 支付请求上冻住的比例就是这一单的比例（建单时不再看商品）
+    companionRateBp: request.companionRateSnapshot,
+  });
+
   return {
     id: `ord_${crypto.randomUUID()}`,
     orderNo: makeOrderNo(now),
@@ -287,6 +322,11 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     itemsAmount: request.itemsAmount,
     addonsAmount: request.addonsAmount,
     totalAmount: request.totalAmount,
+
+    // —— 金额域（P0-3）：由支付请求上冻结的金额与比例算出 ——
+    ...money,
+    // 刚创建的订单一笔都没退过。累计已退由退款的写入路径维护（P1 接入退款金额公式）
+    refundedAmount: 0,
 
     companionId: request.snapshot.companion ? request.snapshot.companion.id : null,
     companion: request.snapshot.companion,
@@ -366,6 +406,9 @@ export async function createPaymentRequest(
     itemsAmount: resolved.itemsAmount,
     addonsAmount: resolved.addonsAmount,
     totalAmount: resolved.totalAmount,
+
+    // 分账比例在这一刻冻结进支付请求：此后商品改比例，这一单不受影响（幂等重放也一样）
+    companionRateSnapshot: resolved.companionRateSnapshot,
 
     orderId: null,
     snapshot,
