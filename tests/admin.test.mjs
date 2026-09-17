@@ -654,16 +654,19 @@ test("用户端不出现任何管理后台入口", () => {
   }
 });
 
-test("后台导航覆盖十个已开放模块，未开放模块没有入口", () => {
+test("后台导航覆盖十一个已开放模块，未开放模块没有入口", () => {
   // P8B 把「商品与类目」从 `ADMIN_UPCOMING_MODULES` 里搬进了导航，
   // P8C 又把「订单 / 退款 / 投诉」搬了进来，P8D-1 再搬进来「客服账号」，
-  // P0-1 再搬进来「平台参数」：
+  // P8E-1 再搬进来「运营内容」，P0-1 再搬进来「平台参数」：
   // 它们的页面已经存在，侧栏再挂一条「后续开放」就会与真实入口并存，运营点哪个都不对。
   // 这条断言守的是「导航与已建成的页面一一对应」。
   //
   // ⚠️ 退款与投诉是**两条**导航项，不是一个「售后」：一边会写订单，一边只写平台侧结论。
   // ⚠️ 「客服账号」（地址 `/admin/customer-service`）管的是**谁能登录 /staff 工作台**，
   // 与客服在工作台里能看什么是两件事；它也不与用户端名单、排行榜发生任何关系。
+  // ⚠️ 「运营内容」（地址 `/admin/content`）是**一条**导航项而不是四类内容各一条：
+  // 图片公告 / 活动 Banner / 协议 / 首页快捷入口共用同一套「保存即影响用户端」的规则，
+  // 拆成四条只会让侧栏变长而运营仍然要在它们之间来回切换。
   // ⚠️ 「平台参数」（地址 `/admin/platform-config`）排在**最后**：上面每一条都是
   // 「业务对象与账号」，它是**全局规则**本身——改它不动任何一条已有记录，
   // 只决定此后新发生的业务按什么走。插在中间会让人以为它属于相邻那个模块。
@@ -675,6 +678,7 @@ test("后台导航覆盖十个已开放模块，未开放模块没有入口", ()
       "/admin/companions",
       "/admin/categories",
       "/admin/products",
+      "/admin/content",
       "/admin/orders",
       "/admin/refunds",
       "/admin/complaints",
@@ -707,7 +711,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件 + 平台参数一件", () => {
+test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件 + 运营内容十九件 + 平台参数一件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -744,6 +748,33 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "complaints/[id]/route.ts",
       "complaints/[id]/start-processing/route.ts",
       "complaints/route.ts",
+      // P8E-1：运营内容（协议四件 + 图片公告五件 + 活动 Banner 五件 + 快捷入口五件）
+      // ⚠️ 协议**没有**「移除」地址，公告 / Banner / 快捷入口都有。这不是漏写：
+      // 协议是五类固定内容（用户 / 隐私 / 陪玩 / 平台 / 版本），每类永远只有一份当前生效的
+      // 正文——「移除了用户协议」这件事在业务上不存在，只有「停用」。
+      // 素材类内容则是可以下架不要的，因此它们的 `remove` 是软删除（记录留档）。
+      // ⚠️ 没有「排序」地址：排序是 `PATCH` 里的一个字段，单独开一个改排序接口
+      // 会绕过「一次原子写入」，让「改排序 + 改文案」变成一个可以被拆开的两步。
+      // ⚠️ 没有「上传图片」地址：本阶段不做真实上传（见 §三），图片地址是手填的站内路径。
+      "content/agreements/[id]/disable/route.ts",
+      "content/agreements/[id]/enable/route.ts",
+      "content/agreements/[id]/route.ts",
+      "content/agreements/route.ts",
+      "content/announcements/[id]/disable/route.ts",
+      "content/announcements/[id]/enable/route.ts",
+      "content/announcements/[id]/remove/route.ts",
+      "content/announcements/[id]/route.ts",
+      "content/announcements/route.ts",
+      "content/banners/[id]/disable/route.ts",
+      "content/banners/[id]/enable/route.ts",
+      "content/banners/[id]/remove/route.ts",
+      "content/banners/[id]/route.ts",
+      "content/banners/route.ts",
+      "content/quick-entries/[id]/disable/route.ts",
+      "content/quick-entries/[id]/enable/route.ts",
+      "content/quick-entries/[id]/remove/route.ts",
+      "content/quick-entries/[id]/route.ts",
+      "content/quick-entries/route.ts",
       // P8C：订单（全量查询，**只读**）
       // ⚠️ 这里没有「改订单状态」「分配护航」「改金额」这类地址：本阶段的订单详情只读，
       // 订单唯一会被改动的地方是「退款审核通过」，它的主语是退款申请，入口在退款模块

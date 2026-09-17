@@ -15,6 +15,7 @@ import {
   type AdminComplaintStatusFilter,
   type AdminComplaintTypeFilter,
 } from "@/lib/constants/adminComplaints";
+import type { ContentRemovalFilter } from "@/lib/constants/adminContent";
 import {
   ADMIN_STAFF_PAGE_SIZE,
   type AdminStaffProfileInput,
@@ -72,6 +73,21 @@ import type {
   AdminRefundWriteResult,
 } from "@/lib/types/refund";
 import type { AdminStaffDetail, AdminStaffListData, AdminStaffWriteResult } from "@/lib/types/staff";
+import type {
+  AdminAgreementDetail,
+  AdminAgreementListData,
+  AdminAgreementProfilePatch,
+  AdminAgreementWriteResult,
+} from "@/lib/types/agreement";
+import type {
+  AdminAnnouncementItem,
+  AdminAnnouncementProfilePatch,
+  AdminBannerItem,
+  AdminBannerProfilePatch,
+  AdminContentList,
+  AdminQuickEntryItem,
+  AdminQuickEntryProfilePatch,
+} from "@/lib/types/content";
 
 /**
  * 管理端的**浏览器端**取数。
@@ -804,6 +820,312 @@ export function removeAdminStaff(
   return apiPost<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}/remove`, {
     idempotencyKey,
   });
+}
+
+// ——————————————————————————— 运营内容（P8E-1） ———————————————————————————
+
+/**
+ * 三张内容列表共用的查询参数。
+ *
+ * ⚠️ **没有分页参数**，而且不是「这一版先不做」：这类运营内容在任何现实运营里
+ * 都是个位数到几十条（见 `AdminContentList` 的注释），加分页会带来
+ * 「改完第 3 页的排序、第 1 页没变」这类纯粹由分页制造的问题。
+ * 接口同样读不到 `page` / `pageSize`，传了也不会有任何效果。
+ */
+export type AdminContentListRequest = {
+  /** `active`（默认）看未移除的；`removed` 只看被软移除的 */
+  removal?: ContentRemovalFilter;
+};
+
+/**
+ * 拼一张内容列表的地址。
+ *
+ * ⚠️ 默认值也**显式写进地址栏**（`removal=active`）：这一页的筛选状态在 URL 里
+ * 看得见，复制给同事的链接打开的是同一个视图，而不是「我以为是默认值」的另一份数据。
+ */
+function contentListPath(segment: string, input: AdminContentListRequest): string {
+  const params = new URLSearchParams();
+  params.set("removal", input.removal ?? "active");
+  return `/api/admin/content/${segment}?${params.toString()}`;
+}
+
+/**
+ * 三组内容的写操作形状完全相同，只有路径段不同。
+ *
+ * ⚠️ 走的是**窄写入**接口而不是「把整条记录写回去」：列表上的「停用」只应当改
+ * `enabled` 一个字段，不该顺带把标题、图片、排序覆盖成按钮渲染时的旧值——
+ * 两位管理员同时操作时，后写的那次会把另一位刚改好的标题改回旧值（§九）。
+ * 「移除」同理：它是一条独立的状态迁移，不是一次普通保存。
+ */
+function contentWritePath(segment: string, id: string, action?: string): string {
+  const base = `/api/admin/content/${segment}/${encodeURIComponent(id)}`;
+  return action ? `${base}/${action}` : base;
+}
+
+/**
+ * 三组内容写操作的返回（界面真正读得懂的那两个字段）。
+ *
+ * ⚠️ 服务端返回的是一个**信封**而不是记录本身，理由在
+ * `lib/services/adminAnnouncements.ts` 的 `AdminAnnouncementWriteResult`：
+ * 一次写请求有三种「没写」的可能，客户端必须能分清——
+ *
+ * - `changed: false`：提交的内容与现状一模一样（点了一次保存却没改任何东西）。
+ *   界面**不能**显示成「已保存」，那会让人以为自己刚才的改动生效了（§九）。
+ * - `replayed: true`：这个幂等键早就做过了，服务端没有第二次写入。
+ *   这是重试命中了第一次的结果，与「本次写成功」不是同一件事。
+ *
+ * 这里只声明这两个字段：接口还返回 `action`（事务层算好的审计动作名）与确认后的记录
+ * （公告/活动图放在 `updated` 里，快捷入口直接展开在顶层），但**界面不用它们**——
+ * 写成功之后页面显示的那一行由「重新取一份列表」决定，读响应的几个字段自己拼一行出来
+ * 会和真实记录分叉。声明成响应体的**子集**，因此服务端多返回一个字段也不会让它报错。
+ */
+export type AdminContentWriteAck = {
+  changed: boolean;
+  replayed: boolean;
+};
+
+// —— 图片公告 ——
+
+/** 取一页图片公告（**不分页**，含停用的；`removal=removed` 时是已移除的那批）。 */
+export function fetchAdminAnnouncements(
+  input: AdminContentListRequest = {},
+): Promise<AdminContentList<AdminAnnouncementItem>> {
+  return apiGet<AdminContentList<AdminAnnouncementItem>>(contentListPath("announcements", input));
+}
+
+/** 新建一条公告。启用状态由服务端按 `enabled` 写入，客户端无法自己成为「已启用」以外的东西。 */
+export function createAdminAnnouncement(
+  idempotencyKey: string,
+  patch: AdminAnnouncementProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>("/api/admin/content/announcements", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+/** 编辑公告（整份资料的覆盖写：名称 / 图片地址 / 图片说明 / 排序 / 启用状态）。 */
+export function saveAnnouncementProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminAnnouncementProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPatch<AdminContentWriteAck>(contentWritePath("announcements", id), {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function enableAnnouncement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("announcements", id, "enable"), {
+    idempotencyKey,
+  });
+}
+
+export function disableAnnouncement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("announcements", id, "disable"), {
+    idempotencyKey,
+  });
+}
+
+/** 移除公告（软删除）。**记录不删**：用户当时看到的是哪张图，事后要能回答。 */
+export function removeAnnouncement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("announcements", id, "remove"), {
+    idempotencyKey,
+  });
+}
+
+// —— 活动 Banner ——
+
+/**
+ * 取一页活动 Banner（**不分页**）。
+ *
+ * ⚠️ 后台可以预置多张 Banner，但用户端首页**只展示排序最前的那一张启用图**
+ * （`selectActivityImageUrl()`）。因此这里的 `sortOrder` 与 `enabled` 不是
+ * 「一堆图里的偏好」，而是「现在前台看到的是哪一张」这个唯一答案的输入。
+ */
+export function fetchAdminBanners(
+  input: AdminContentListRequest = {},
+): Promise<AdminContentList<AdminBannerItem>> {
+  return apiGet<AdminContentList<AdminBannerItem>>(contentListPath("banners", input));
+}
+
+export function createAdminBanner(
+  idempotencyKey: string,
+  patch: AdminBannerProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>("/api/admin/content/banners", { idempotencyKey, ...patch });
+}
+
+export function saveBannerProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminBannerProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPatch<AdminContentWriteAck>(contentWritePath("banners", id), {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function enableBanner(id: string, idempotencyKey: string): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("banners", id, "enable"), {
+    idempotencyKey,
+  });
+}
+
+export function disableBanner(id: string, idempotencyKey: string): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("banners", id, "disable"), {
+    idempotencyKey,
+  });
+}
+
+export function removeBanner(id: string, idempotencyKey: string): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("banners", id, "remove"), {
+    idempotencyKey,
+  });
+}
+
+// —— 快捷入口 ——
+
+/**
+ * 取一页快捷入口（**不分页**）。
+ *
+ * ⚠️ 用户端是**四宫格**：多于四条时后面的会被挤到下一行、布局不再是设计稿里的样子。
+ * 后台因此不限制数量，但页面必须把这件事说出来（`sortOrder` 决定谁在前四个位置）。
+ */
+export function fetchAdminQuickEntries(
+  input: AdminContentListRequest = {},
+): Promise<AdminContentList<AdminQuickEntryItem>> {
+  return apiGet<AdminContentList<AdminQuickEntryItem>>(contentListPath("quick-entries", input));
+}
+
+export function createAdminQuickEntry(
+  idempotencyKey: string,
+  patch: AdminQuickEntryProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>("/api/admin/content/quick-entries", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function saveQuickEntryProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminQuickEntryProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPatch<AdminContentWriteAck>(contentWritePath("quick-entries", id), {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function enableQuickEntry(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("quick-entries", id, "enable"), {
+    idempotencyKey,
+  });
+}
+
+export function disableQuickEntry(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("quick-entries", id, "disable"), {
+    idempotencyKey,
+  });
+}
+
+export function removeQuickEntry(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("quick-entries", id, "remove"), {
+    idempotencyKey,
+  });
+}
+
+// —— 协议与版本介绍 ——
+
+/**
+ * 取协议列表。
+ *
+ * ⚠️ **没有新建、没有移除，也没有分页**：协议是五类固定的内容
+ * （`AGREEMENT_TYPES`），同一个类型可以有多个版本，但「哪一版是当前版本」
+ * 由版本号与启用状态决定，不是靠删掉旧版本做到的。
+ */
+export function fetchAdminAgreements(): Promise<AdminAgreementListData> {
+  return apiGet<AdminAgreementListData>("/api/admin/content/agreements");
+}
+
+/**
+ * 取一份协议的**正文**（列表行 + `sections`）。
+ *
+ * ⚠️ 编辑表单必须走它：列表行刻意不带正文（`AdminAgreementListItem` 里没有 `sections`），
+ * 拿列表去拼编辑表单只能拼出一个空正文，一保存就把用户看到的协议清空了。
+ */
+export function fetchAdminAgreementDetail(id: string): Promise<AdminAgreementDetail> {
+  return apiGet<AdminAgreementDetail>(`/api/admin/content/agreements/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 编辑一份协议（标题 / 正文段落 / 启用状态）。
+ *
+ * ⚠️ 正文是**结构化段落**，不是 HTML 字符串：`sections` 里每个元素是
+ * `{ heading, paragraphs }`，页面按段落渲染。因此这里传不出
+ * `<script>` 这类东西——客户端根本没有一个「把 HTML 发上去」的字段。
+ *
+ * ⚠️ 版本号不在请求体里：正文变化时由服务端**自动递增**
+ * （`bumpAgreementVersion()`），客户端伪造一个版本号没有可传的位置。
+ *
+ * ⚠️ 返回的是**写入结果**（`AdminAgreementWriteResult`）而不是详情：它不带正文，
+ * 但带一个 `changed`。界面靠它区分「真的写进去了」与「提交的内容与现状完全一致」
+ * ——后者**不是错误**，却绝不能显示成「保存成功」（§九）。写入后的新正文
+ * 由服务端在写入时算出来，要看得重新取一次详情，不能拿本地那份拼。
+ */
+export function saveAgreementProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminAgreementProfilePatch,
+): Promise<AdminAgreementWriteResult> {
+  return apiPatch<AdminAgreementWriteResult>(
+    `/api/admin/content/agreements/${encodeURIComponent(id)}`,
+    { idempotencyKey, ...patch },
+  );
+}
+
+/** 启用一份协议。重复启用是幂等的：服务端返回 `changed: false`，不产生第二次写入。 */
+export function enableAgreement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminAgreementWriteResult> {
+  return apiPost<AdminAgreementWriteResult>(
+    `/api/admin/content/agreements/${encodeURIComponent(id)}/enable`,
+    { idempotencyKey },
+  );
+}
+
+/** 停用一份协议。停用后用户端看到的是同类型里版本号最高的那份**启用**内容。 */
+export function disableAgreement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminAgreementWriteResult> {
+  return apiPost<AdminAgreementWriteResult>(
+    `/api/admin/content/agreements/${encodeURIComponent(id)}/disable`,
+    { idempotencyKey },
+  );
 }
 
 // ——————————————————————————— 平台参数 ———————————————————————————

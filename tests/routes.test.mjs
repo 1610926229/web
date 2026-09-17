@@ -4,7 +4,8 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MINE_GRID_ENTRIES, MINE_PRIMARY_ENTRIES } from "../lib/constants/mine.ts";
-import { homeSeed } from "../lib/mocks/fixtures/seed.ts";
+import { validateSafePath } from "../lib/constants/safePath.ts";
+import { quickEntrySeed } from "../lib/mocks/fixtures/contentSeed.ts";
 import { findAppFile, hasAppFile } from "./app-path.mjs";
 
 /**
@@ -130,21 +131,72 @@ test("「我的」页每个入口地址都真实存在，且寻找陪玩指向 /
   }
 });
 
+/**
+ * 首页快捷入口的预置数据。
+ *
+ * ⚠️ P8E-1 起首页入口**由后台管理**，因此它不再是一份写在首页里的常量，
+ * 而是 `contentSeed.ts` 里的**仓储初始记录**（`QuickEntryRecord[]`，字段叫 `path`
+ * 不叫 `href`）。这份测试因此改成从种子读——而这一条**必须留着**：
+ * 后台可以改入口地址，但**预置数据里那两个地址仍然必须是真实存在的路由**，
+ * 否则用户第一次打开首页就会看到一个 404 的格子。
+ *
+ * 对**运行期由后台新建**的入口，源码级扫描当然管不到（路由表只有构建期知道）。
+ * 那部分由写入侧的 `validateSafePath()` 与 `tests/safePath.test.mjs` 保证
+ * 「不会指向站外、不会执行脚本」，最坏情况是 404 —— 这是刻意的取舍：
+ * **宁可 404，不可执行**。
+ */
+const seededShortcuts = quickEntrySeed;
+
 test("首页每个快捷入口都真实存在：考核入驻统一指向 /join", () => {
-  const join = homeSeed.shortcuts.find((shortcut) => shortcut.id === "join");
+  const join = seededShortcuts.find((shortcut) => shortcut.id === "join");
 
   assert.ok(join, "缺少考核入驻入口");
   assert.equal(join.label, "考核入驻");
-  assert.equal(join.href, "/join");
-  assert.notEqual(join.href, "/placeholder?title=考核入驻");
+  assert.equal(join.path, "/join");
+  assert.notEqual(join.path, "/placeholder?title=考核入驻");
 
-  for (const shortcut of homeSeed.shortcuts) {
+  for (const shortcut of seededShortcuts) {
     assert.equal(
-      ROUTES.has(pathnameOf(shortcut.href)),
+      ROUTES.has(pathnameOf(shortcut.path)),
       true,
-      `首页入口「${shortcut.label}」指向了不存在的路由：${shortcut.href}`,
+      `首页入口「${shortcut.label}」指向了不存在的路由：${shortcut.path}`,
     );
   }
+});
+
+test("首页快捷入口的预置地址全部通过安全校验（站内路径）", () => {
+  for (const shortcut of seededShortcuts) {
+    const result = validateSafePath(shortcut.path);
+
+    assert.equal(
+      result.ok,
+      true,
+      `首页入口「${shortcut.label}」的地址没通过安全校验：${shortcut.path}（${result.ok ? "" : result.message}）`,
+    );
+    // 显式钉住两条最要紧的：协议相对地址与脚本协议
+    assert.notEqual(shortcut.path.startsWith("//"), true, `${shortcut.path} 是协议相对地址`);
+    assert.equal(
+      shortcut.path.toLowerCase().startsWith("javascript:"),
+      false,
+      `${shortcut.path} 是脚本协议`,
+    );
+  }
+
+  // 预置入口必须都是**用户端可见**的：一条默认停用的预置入口等于首页少一个格子，
+  // 而那不是任何人做过的决定
+  for (const shortcut of seededShortcuts) {
+    assert.equal(shortcut.enabled, true, `预置入口「${shortcut.label}」默认就是停用的`);
+    assert.equal(shortcut.removedAt, null, `预置入口「${shortcut.label}」默认就是已移除的`);
+  }
+
+  // 用户端四宫格：预置数据必须是四条，且排序值互不相同
+  // （相同的排序值会让顺序退化成按 id 排，运营改顺序时会发现「怎么改都不动」）
+  assert.equal(seededShortcuts.length, 4, "首页四宫格应当是四条预置入口");
+  assert.equal(
+    new Set(seededShortcuts.map((shortcut) => shortcut.sortOrder)).size,
+    4,
+    "预置入口的排序值有重复：按 sortOrder 排顺序会退化",
+  );
 });
 
 test("/join 需要登录：套用统一 RequireAuth，导航留在鉴权之外", () => {
@@ -416,8 +468,8 @@ test("不存在指向 /placeholder?title=考核入驻 的入口", () => {
   for (const entry of entries) {
     assert.notEqual(entry.href, "/placeholder?title=考核入驻");
   }
-  for (const shortcut of homeSeed.shortcuts) {
-    assert.notEqual(shortcut.href, "/placeholder?title=考核入驻");
+  for (const shortcut of seededShortcuts) {
+    assert.notEqual(shortcut.path, "/placeholder?title=考核入驻");
   }
 
   // 源码里也不该再出现这个地址（注释里写一句也算「还有入口」的隐患）

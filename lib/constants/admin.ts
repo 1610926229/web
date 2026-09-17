@@ -58,6 +58,15 @@ export const ADMIN_APPLICATIONS_PAGE_TITLE = "入驻审核";
 export const ADMIN_COMPANIONS_PAGE_TITLE = "护航管理";
 export const ADMIN_CATEGORIES_PAGE_TITLE = "类目管理";
 export const ADMIN_PRODUCTS_PAGE_TITLE = "商品管理";
+/**
+ * 运营内容（首页素材）。
+ *
+ * ⚠️ 这是一个**模块**而不是四个：图片公告 / 活动 Banner / 快捷入口 / 协议
+ * 都是「首页与协议页上用户看到的那点内容」，四个扁平入口会让侧栏长出一截
+ * 彼此看不出关系的菜单项。四个子模块做成 `/admin/content/*` 下的子页签
+ * （见 `components/admin/AdminContentTabs.tsx`）。
+ */
+export const ADMIN_CONTENT_PAGE_TITLE = "运营内容";
 export const ADMIN_ORDERS_PAGE_TITLE = "订单管理";
 export const ADMIN_REFUNDS_PAGE_TITLE = "退款审核";
 export const ADMIN_COMPLAINTS_PAGE_TITLE = "投诉处理";
@@ -158,6 +167,15 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     label: ADMIN_PRODUCTS_PAGE_TITLE,
     description: "商品图文、上下架与单组规格",
   },
+  // P8E-1：首页运营内容。放在商品管理之后，因为两者是同一类东西——
+  // 都是「用户端看得到的素材」，改完刷新前台就会变；而它下面的订单 / 退款 / 投诉
+  // 是交易与售后，与素材不是一回事。
+  {
+    key: "content",
+    href: "/admin/content",
+    label: ADMIN_CONTENT_PAGE_TITLE,
+    description: "首页公告、活动图、快捷入口与协议正文",
+  },
   // P8C：订单只读查询、退款审核与投诉处理。**退款与投诉是两个模块**，
   // 不是一个「售后」模块——一边动订单与金额，一边只写平台侧结论，合成的入口会让人分不清。
   {
@@ -208,7 +226,8 @@ export const ADMIN_UPCOMING_MODULES: readonly string[] = [
   // ⚠️ P8D-1 时这里的第一项是「客服处理退款与投诉」，P8D-2 把它做出来了，因此删掉。
   // 这张表的每一项都是「点了会失望」的东西，做完一项就必须删一项——
   // 留着会让这份清单慢慢变成一份历史记录，而它唯一的作用是回答「现在还没有什么」。
-  "公告与协议管理",
+  // P8E-1 因此删掉了「公告与协议管理」：公告、活动图、快捷入口与协议正文
+  // 现在都在 `/admin/content` 里，留着它等于在侧栏上写一句已经不成立的话。
   "消费等级与优惠券配置",
   "鸡腿结算",
   "数据统计图表",

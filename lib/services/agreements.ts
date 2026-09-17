@@ -20,7 +20,7 @@ import type { AgreementsDto } from "@/lib/types/agreement";
 /**
  * 取全部协议页签内容。
  *
- * 四类固定都返回：某一类没有可用内容时该页签的 `agreement` 为 null，
+ * 五类固定都返回：某一类没有可用内容时该页签的 `agreement` 为 null，
  * 由页面显示「内容暂未配置」。**不会因为缺一类就让整个接口失败**——
  * 那会把「一类没配置」放大成「整个协议页打不开」。
  */
@@ -28,7 +28,7 @@ export async function listAgreements(
   params: URLSearchParams | undefined,
   surface: MockSurface,
 ): Promise<AgreementsDto> {
-  // `?mockEmpty=agreements` 用于验收「某一类未配置」：预置数据里四类齐全，
+  // `?mockEmpty=agreements` 用于验收「某一类未配置」：预置数据里五类齐全，
   // 不注入就没有「内容暂未配置」可看。
   const records = await withMockEmptyDebug(params, surface, "agreements", () =>
     getAgreementRepository().listAgreements(),

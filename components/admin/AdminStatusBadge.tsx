@@ -1,4 +1,5 @@
 import type { AdminCategoryStatusKey } from "@/lib/constants/adminCategories";
+import type { AdminContentStatusKey } from "@/lib/constants/adminContent";
 import type { AdminCompanionStatusKey } from "@/lib/constants/adminCompanions";
 import type { AdminProductStatusKey } from "@/lib/constants/adminProducts";
 import type { ComplaintStatus } from "@/lib/types/complaint";
@@ -111,6 +112,20 @@ export const COMPLAINT_STATUS_TONE: Record<ComplaintStatus, AdminStatusTone> = {
  * 因此用 `danger` 而不是 `pending`。用 `pending` 会让人以为它在等什么。
  */
 export const STAFF_STATE_TONE: Record<AdminStaffState, AdminStatusTone> = {
+  removed: "muted",
+  disabled: "danger",
+  enabled: "success",
+};
+
+/**
+ * 运营内容（图片公告 / 活动 Banner / 快捷入口）：与类目、客服账号**同一套口径**。
+ *
+ * ⚠️ 这里没有复用 `CATEGORY_STATUS_TONE` 的常量名，但三个取值与语气完全一致——
+ * 两处都来自「已移除是终态（灰）、已停用是现在用不了（红）、已启用才是正常的（绿）」，
+ * 运营在侧栏里切换模块时看到的颜色不该变。协议与版本介绍只有启用 / 停用两档
+ * （协议没有软删除），用的是同一张表里的两个键。
+ */
+export const CONTENT_STATUS_TONE: Record<AdminContentStatusKey, AdminStatusTone> = {
   removed: "muted",
   disabled: "danger",
   enabled: "success",

@@ -776,12 +776,13 @@ test("排行榜接口不接受客户端提交的名次或金额", { skip: SKIP }
   assert.ok(data.items.every((item) => item.effectiveSpendAmount < 99999999));
 });
 
-test("游客可以打开 /agreements：四类内容齐全，正文不是条款占位", { skip: SKIP }, async () => {
+test("游客可以打开 /agreements：五类内容齐全，正文不是条款占位", { skip: SKIP }, async () => {
   const { status, html } = await get("/agreements");
 
   assert.equal(status, 200, "/agreements 不该 404");
   assert.equal(html.includes(LOGIN_GATE_TEXT), false, "/agreements 不该要求登录");
-  for (const label of ["用户协议", "陪玩协议", "平台协议", "版本介绍"]) {
+  // P8E-1 起页签是五类（新增「隐私协议」，插在用户协议之后）
+  for (const label of ["用户协议", "隐私协议", "陪玩协议", "平台协议", "版本介绍"]) {
     assert.ok(html.includes(label), `缺少页签「${label}」`);
   }
   // 示例性质与占位主体必须在页面上明确写出
@@ -797,10 +798,20 @@ test("协议接口游客可访问，且不返回 enabled 与历史版本", { ski
   assert.equal(response.status, 200);
 
   const { data } = await response.json();
-  assert.equal(data.tabs.length, 4);
+  // 五类页签：顺序即页签顺序，隐私协议插在用户协议之后
+  assert.equal(data.tabs.length, 5);
+  assert.deepEqual(
+    data.tabs.map((tab) => tab.type),
+    ["user", "privacy", "companion", "platform", "version"],
+    "页签类型或顺序变了——AGREEMENT_TYPES 是页签顺序的唯一来源",
+  );
   for (const tab of data.tabs) {
     assert.ok(tab.agreement, `${tab.type} 应当有内容`);
     assert.equal("enabled" in tab.agreement, false);
+    // 公开 DTO 不带后台字段：正文可被后台编辑之后，这一条**一个字都不许放宽**
+    for (const internal of ["enabled", "removedAt", "createdAt"]) {
+      assert.equal(internal in tab.agreement, false, `公开协议 DTO 里出现了 ${internal}`);
+    }
   }
 
   // 较早版本与被停用的版本都不出现

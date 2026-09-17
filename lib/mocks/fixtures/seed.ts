@@ -1,21 +1,22 @@
 import type { UserRecord } from "@/lib/data/userRepository";
 import type { Companion } from "@/lib/types/companion";
-import type { HomeContentSeed } from "@/lib/types/content";
 import { getMockSeedNow } from "./mockClock";
 
 /**
- * 首页静态内容、Mock 用户与陪玩名单的种子。
+ * Mock 用户与陪玩名单的种子。
  *
  * ⚠️ 全部为 Mock 数据，仅用于打通取数链路与版式验证：
  * - 图片均为 public/mock 下的本地占位图，待管理端与对象存储就绪后替换；
- * - 公告图片内容待管理端上传，此处仅为占位；
  * - 用户为虚构的 Mock 身份，不含 openid 等任何真实微信标识。
  *
- * ⚠️ **目录数据（游戏 / 类目 / 增值服务 / 商品 / 首页分组）在
- * `./catalogSeed.ts`**（P8B 起）：它从这一阶段开始可写，单独一份文件能让
- * 「哪些东西后台改得动」一眼看出来。本文件剩下的三样都不可写：
- * 用户由登录流程产生、陪玩名单由审核与后台管理产生（自有仓储）、
- * 首页的公告与快捷入口本阶段没有管理界面。
+ * ⚠️ **两份数据在 P8B / P8E-1 搬走了**，各自单独一份文件——
+ * 「哪些东西后台改得动」因此一眼看得出来：
+ * - 目录数据（游戏 / 类目 / 增值服务 / 商品 / 首页商品分组）在 `./catalogSeed.ts`；
+ * - 首页运营内容（图片公告 / 活动 Banner / 快捷入口）在 `./contentSeed.ts`。
+ *
+ * 两者都是**仓储的初始记录**，后台能改、用户端读的是改过之后的那份。
+ * 本文件剩下的两样都不由后台直接编辑：用户由登录流程产生、
+ * 陪玩名单由审核与后台管理产生（走各自的仓储与事务）。
  *
  * 接入真实后端后，本目录随 lib/mocks 一并移除。
  */
@@ -554,27 +555,3 @@ export const companionSeed: Companion[] = [
     ],
   },
 ];
-
-/**
- * 首页里**不随商品变化**的部分：公告、活动图、快捷入口。
- *
- * ⚠️ 商品分组**不在这里**（`./catalogSeed.ts` 的 `homeSectionSeed`）：
- * 它必须在每次请求时从目录仓储现取，否则后台下架一件商品之后，
- * 首页当晚还在推荐它。本文件剩下的这三样本阶段没有管理界面，照旧静态。
- */
-export const homeSeed: HomeContentSeed = {
-  // 公告区：仅图片滚动展示，无跳转字段
-  announcements: [
-    { id: "a1", imageUrl: "/mock/announcement-1.svg", alt: "公告图片占位 1" },
-    { id: "a2", imageUrl: "/mock/announcement-2.svg", alt: "公告图片占位 2" },
-  ],
-
-  activityImageUrl: "/mock/promo-activity.svg",
-
-  shortcuts: [
-    { id: "service", label: "联系客服", href: "/service" },
-    { id: "benefits", label: "点单权益", href: "/placeholder?title=点单权益" },
-    { id: "join", label: "考核入驻", href: "/join" },
-    { id: "complaint", label: "投诉客服专区", href: "/complaints" },
-  ],
-};
