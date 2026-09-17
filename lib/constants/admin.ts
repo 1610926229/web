@@ -69,6 +69,15 @@ export const ADMIN_COMPLAINTS_PAGE_TITLE = "投诉处理";
  * 客服本人在 `/staff` 工作，运营在这里管的是**谁能进那个工作台**。
  */
 export const ADMIN_CUSTOMER_SERVICE_PAGE_TITLE = "客服账号";
+/**
+ * 平台参数（公共订单池超时等）。
+ *
+ * ⚠️ 这里是**规则**不是**数据**：这一页改的是「此后新发生的业务按什么走」。
+ * 已经进入公共池的订单不受影响——它们在进入那一刻就把当时的参数值冻结成了快照。
+ * 页面文案（`PLATFORM_CONFIG_NOTICE`）必须把这一点说出来，否则管理员改完
+ * 看到在途订单没变化，会以为没保存成功然后再改一次。
+ */
+export const ADMIN_PLATFORM_CONFIG_PAGE_TITLE = "平台参数";
 export const ADMIN_LOGOUT_LABEL = "退出登录";
 export const ADMIN_MOCK_LOGIN_LABEL = "模拟管理员登录";
 
@@ -176,6 +185,16 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     href: "/admin/customer-service",
     label: ADMIN_CUSTOMER_SERVICE_PAGE_TITLE,
     description: "客服账号的新增、启停与软删除",
+  },
+  // P0-1：平台参数。**放在最后**，因为它与上面每一条都不是一类东西——
+  // 上面那些是「业务对象与账号」，这一条是**全局规则本身**：
+  // 改它不动任何一条已有记录，只改变此后新发生的业务按什么规则走。
+  // 放在中间会让人以为它属于相邻那个模块。
+  {
+    key: "platform-config",
+    href: "/admin/platform-config",
+    label: ADMIN_PLATFORM_CONFIG_PAGE_TITLE,
+    description: "公共订单池超时等平台级规则",
   },
 ];
 

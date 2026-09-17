@@ -62,6 +62,11 @@ import type {
 } from "@/lib/types/complaint";
 import type { AdminOrderDetail, AdminOrderListData } from "@/lib/types/order";
 import type {
+  AdminPlatformConfigPatch,
+  AdminPlatformConfigWriteResult,
+  PlatformConfig,
+} from "@/lib/types/platformConfig";
+import type {
   AdminRefundDetail,
   AdminRefundListData,
   AdminRefundWriteResult,
@@ -798,5 +803,39 @@ export function removeAdminStaff(
 ): Promise<AdminStaffWriteResult> {
   return apiPost<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}/remove`, {
     idempotencyKey,
+  });
+}
+
+// ——————————————————————————— 平台参数 ———————————————————————————
+
+/**
+ * 取当前平台参数。
+ *
+ * ⚠️ 地址里**没有 id**：平台参数是单例，全局只有这一份配置。用
+ * `/api/admin/platform-config` 而不是 `/api/admin/platform-configs/1`，
+ * 是为了让「参数只有一份」这件事在地址上就成立。
+ */
+export function fetchAdminPlatformConfig(): Promise<PlatformConfig> {
+  return apiGet<PlatformConfig>("/api/admin/platform-config");
+}
+
+/**
+ * 修改平台参数。
+ *
+ * 只提交要改的字段（PATCH）：`updatedAt` / `updatedByAdminId` 不在
+ * `AdminPlatformConfigPatch` 里，它们由服务端按会话与时钟填。
+ *
+ * ⚠️ 返回的是**写入结果**而不是「成功」：它带回整份配置与服务端的 `changed`。
+ * 界面用 `changed === false` 区分「服务端没有产生新的改动」（提交的值与现状相同，
+ * 或同一个幂等键第二次到达）。那种情况**不是错误**，但绝不能显示成「已保存」——
+ * 管理员会以为值变了，而实际上 `updatedAt` 与配置都没动。
+ */
+export function saveAdminPlatformConfig(
+  idempotencyKey: string,
+  patch: AdminPlatformConfigPatch,
+): Promise<AdminPlatformConfigWriteResult> {
+  return apiPatch<AdminPlatformConfigWriteResult>("/api/admin/platform-config", {
+    idempotencyKey,
+    ...patch,
   });
 }
