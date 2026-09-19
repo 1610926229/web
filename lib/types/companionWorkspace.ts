@@ -49,21 +49,19 @@ export type CompanionSessionUser = {
  * 本来就是「有效护航（已移除的不算）」。再写一次 `removedAt === null` 就会有两个
  * 真值来源，而分叉的那一天，「被移除的护航」会以「资格已下架」出现在页面上——
  * 看起来像是等管理员点一下就能恢复。
+ *
+ * ⚠️ **`granted` 同时带着工作台要展示的数据**（`rankLabel`），这不是把两件事混在一起，
+ * 而是**故意只留一份结果**：判定与展示若各查一次仓储，两次 `await` 之间资格可能刚好变化，
+ * 于是页面出现「布局按旧记录渲染了工作台壳、内容却取不到资料」的中间态。
+ * 只有一份结果，就不存在两份结果不一致的可能。
+ * 反过来，`disabled` 与 `not-a-companion` 只够渲染一句提示，**不带**任何展示字段。
  */
 export type CompanionAccessState =
   | { kind: "not-a-companion" }
   | { kind: "disabled"; companion: CompanionSessionUser }
-  | { kind: "granted"; companion: CompanionSessionUser };
-
-/**
- * 打手工作台概览的数据。
- *
- * ⚠️ P0-4 **只做身份接入**，因此这里只有「你是谁」：护航资料实体上确实还有
- * 接单状态、统计、评价等字段，但它们对应的功能（订单池、接单、收益）尚未实现，
- * 不在这里预支。将来加字段时一并加在这里，页面不直接读仓储。
- */
-export type CompanionWorkspaceView = {
-  companion: CompanionSessionUser;
-  /** 护航资料里的段位标签（如「钻石打手」），展示用 */
-  rankLabel: string;
-};
+  | {
+      kind: "granted";
+      companion: CompanionSessionUser;
+      /** 护航资料里的段位标签（如「钻石打手」），展示用；与 `companion` 同一次读取 */
+      rankLabel: string;
+    };

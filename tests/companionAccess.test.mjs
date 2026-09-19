@@ -4,10 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { getCompanionRepository } from "../lib/data/companionRepository.ts";
-import {
-  getCompanionWorkspaceView,
-  resolveCompanionAccess,
-} from "../lib/services/companionAccess.ts";
+import { resolveCompanionAccess } from "../lib/services/companionAccess.ts";
 import { hasAppFile } from "./app-path.mjs";
 
 /**
@@ -19,6 +16,12 @@ import { hasAppFile } from "./app-path.mjs";
  * 1. **访问规则只有一处**（`resolveCompanionAccess`）：无护航资料 / 已下架 / 正常，
  *    三种结论由同一段代码给出，页面与接口守卫都读它。软移除**不是**一个额外的判断——
  *    它由 `findCompanionByUser` 的「有效护航」口径覆盖（下面有专门的回归断言）。
+ *
+ *    而且**一次调用只有一次仓储读取**，判定与展示数据（段位）来自同一份结果。
+ *    这条不是性能偏好：布局与页面若各查一次，两次 `await` 之间资格可能刚好被下架，
+ *    于是「布局按旧记录渲染了工作台壳、页面按新记录取不到资料」——页面停在
+ *    「顶栏 + 空白」。P0-5 的打手业务全部挂在这份判定上，因此这里既有用例级的
+ *    读取计数断言，也有源码级的结构约束（工作台目录里只允许一处调用点）。
  * 2. **没有第二套身份**：负向门禁扫描全仓，确认不存在独立的打手会话模块、Cookie、
  *    环境开关、登录页与认证接口。这条门禁**刻意扫描注释**——一句「这里没有 X」的注释
  *    同样是后来者重新引入 X 的起点。
@@ -106,6 +109,14 @@ test("有护航资料且启用 → granted，DTO 恰好是工作台要用的四�
     ["avatarUrl", "companionId", "displayName", "userId"],
     "工作台 DTO 的字段表就是边界，多一个字段多一条泄漏路径",
   );
+
+  // 展示用的段位**随判定一起返回**：调用方不需要（也不允许）为了它再查一次仓储
+  assert.equal(state.rankLabel, created.rankLabel);
+  assert.deepEqual(
+    Object.keys(state).sort(),
+    ["companion", "kind", "rankLabel"],
+    "granted 就是工作台需要的全部：判定 + 身份 + 展示字段",
+  );
 });
 
 test("护航资料被下架（enabled = false）→ disabled，既不是 granted 也不是 not-a-companion", async () => {
@@ -115,6 +126,8 @@ test("护航资料被下架（enabled = false）→ disabled，既不是 granted
   const state = await resolveCompanionAccess(userId);
   assert.equal(state.kind, "disabled", "下架与「不是护航」是两件事：页面提示与后续处置都不同");
   assert.equal(state.companion.companionId, created.id);
+  // 下架态只够渲染一句提示，因此**不带**展示字段：段位只发给真的进得去的人
+  assert.deepEqual(Object.keys(state).sort(), ["companion", "kind"]);
 });
 
 test("用户隔离：别人是护航，不代表我是护航", async () => {
@@ -170,25 +183,122 @@ test("移除之后重新审核通过：又能进入工作台（移除会释放�
   assert.equal(state.companion.companionId, second.id, "工作台应当指向新的那条资料");
 });
 
-// ——————————————————————— 三、工作台视图 ———————————————————————
+// ——————————————————————— 三、单次解析（P0-4 修订）———————————————————————
 
-test("getCompanionWorkspaceView：只有 granted 才有工作台数据，其余一律 null", async () => {
+/**
+ * 一次判定 = 一次仓储读取。
+ *
+ * 这条用例用**读取计数**钉住它：如果以后有谁在服务层里再加一次
+ * `findCompanionByUser`（比如为了取段位、或者为了「再确认一下还是护航」），
+ * 计数会变成 2，用例立刻红。
+ *
+ * ⚠️ 计数是**在仓储对象上临时替换方法**得到的。Mock 仓储是本进程共享的单例，
+ * 因此替换必须在 `finally` 里还原；本文件内的用例是顺序执行的，不会互相看见中间态。
+ */
+test("一次判定只读一次仓储：判定与展示数据出自同一份结果", async () => {
+  const userId = uniqueUser();
+  const created = await grantCompanion(userId);
+
+  const repo = getCompanionRepository();
+  const original = repo.findCompanionByUser;
+  let reads = 0;
+  repo.findCompanionByUser = async (id) => {
+    reads += 1;
+    return original.call(repo, id);
+  };
+
+  try {
+    const state = await resolveCompanionAccess(userId);
+
+    assert.equal(reads, 1, "一次判定只允许读一次仓储；多读一次就会多一个 TOCTOU 窗口");
+    assert.equal(state.kind, "granted");
+    assert.equal(state.rankLabel, created.rankLabel, "段位必须来自这次读取的记录");
+  } finally {
+    repo.findCompanionByUser = original;
+  }
+});
+
+test("不是护航 / 已下架时不读第二次：一次判定同样只读一次仓储", async () => {
   const normal = uniqueUser();
   const disabled = uniqueUser();
-  const companion = uniqueUser();
   await grantCompanion(disabled, { enabled: false });
-  const created = await grantCompanion(companion);
 
-  assert.equal(await getCompanionWorkspaceView(normal), null, "不是护航的人没有工作台数据");
-  assert.equal(await getCompanionWorkspaceView(disabled), null, "资格已下架的人同样没有");
+  const repo = getCompanionRepository();
+  const original = repo.findCompanionByUser;
+  let reads = 0;
+  repo.findCompanionByUser = async (id) => {
+    reads += 1;
+    return original.call(repo, id);
+  };
 
-  const view = await getCompanionWorkspaceView(companion);
-  assert.ok(view, "护航应当拿得到工作台数据");
-  assert.equal(view.companion.companionId, created.id);
-  assert.equal(view.companion.displayName, created.displayName);
-  assert.equal(view.rankLabel, created.rankLabel);
-  // 工作台视图只给「你是谁」：订单、收益、接单相关字段一个都没有
-  assert.deepEqual(Object.keys(view).sort(), ["companion", "rankLabel"]);
+  try {
+    assert.deepEqual(await resolveCompanionAccess(normal), { kind: "not-a-companion" });
+    assert.equal(reads, 1, "「不是护航」也只需要一次读取");
+
+    assert.equal((await resolveCompanionAccess(disabled)).kind, "disabled");
+    assert.equal(reads, 2, "第二条判定同样只多读一次");
+  } finally {
+    repo.findCompanionByUser = original;
+  }
+});
+
+/**
+ * 结构约束：**一次页面请求只有一份资格结果**。
+ *
+ * 用例级的读取计数只能证明「这一个函数读了一次」，证明不了「页面只调用了它一次」。
+ * 因此这里再加一条源码级约束，把「第二处调用点」挡在代码评审之前：
+ *
+ * - 工作台路由目录下，`resolveCompanionAccess` 只允许有**一处**调用点，且在布局层；
+ * - 页面（`page.tsx`）与身份卡组件都是**纯展示**：不许出现任何读取入口。
+ *
+ * 为什么值得单独立一条结构约束：布局与页面在 React 里是**并行渲染**的，两者各查一次
+ * 时，中间那个窗口足以让布局按旧记录渲染出工作台壳、页面按新记录取不到资料，
+ * 最终停在「顶栏 + 空白」。这种中间态在测试里极难复现，只能靠结构上不可能发生。
+ */
+test("结构约束：工作台只有一处资格调用点，页面与身份卡不许自己读数据", () => {
+  const consoleDir = path.join(ROOT, "app", "companion");
+  const callSites = [...walk(consoleDir)]
+    .filter((file) => file.endsWith(".tsx") || file.endsWith(".ts"))
+    .filter((file) => stripComments(readFileSync(file, "utf8")).includes("resolveCompanionAccess("))
+    .map((file) => path.relative(ROOT, file).replace(/\\/g, "/"))
+    .sort();
+
+  assert.deepEqual(
+    callSites,
+    ["app/companion/(console)/layout.tsx"],
+    "工作台只允许布局层调用一次资格判定；页面再调一次就会出现「顶栏 + 空白」的中间态",
+  );
+
+  // 读取入口的黑名单：出现任何一个，都意味着展示数据可能来自另一次查询
+  const READERS = [
+    "getSessionUser",
+    "requireUser",
+    "resolveCompanionAccess",
+    "getCompanionRepository",
+    "findCompanionByUser",
+  ];
+
+  const page = stripComments(
+    readFileSync(path.join(consoleDir, "(console)", "page.tsx"), "utf8"),
+  );
+  for (const reader of READERS) {
+    assert.equal(
+      page.includes(reader),
+      false,
+      `工作台页面只放不需要资格判定的静态内容；出现 ${reader} 说明它又读了一次`,
+    );
+  }
+
+  const card = stripComments(
+    readFileSync(path.join(ROOT, "components", "companion", "CompanionIdentityCard.tsx"), "utf8"),
+  );
+  for (const reader of READERS) {
+    assert.equal(
+      card.includes(reader),
+      false,
+      `身份卡只能渲染传进来的那份结果；出现 ${reader} 说明它自己又查了一次`,
+    );
+  }
 });
 
 // ——————————————————————— 四、负向门禁 ———————————————————————
@@ -273,6 +383,26 @@ test("负向门禁：不存在打手独立登录页，也不存在打手认证�
     if (route.startsWith("api/companion/auth/")) offenders.push(route);
   }
   assert.deepEqual(offenders, [], "打手不该有独立的认证接口");
+});
+
+test("结构约束：服务层只有一个读取点，不存在第二个「按 userId 查工作台数据」的入口", () => {
+  const code = stripComments(
+    readFileSync(path.join(ROOT, "lib", "services", "companionAccess.ts"), "utf8"),
+  );
+
+  const reads = code.match(/findCompanionByUser\(/g) ?? [];
+  assert.equal(
+    reads.length,
+    1,
+    "服务层只允许一处仓储读取：多一处，判定与展示就可能来自两条不同的记录",
+  );
+
+  // 第二个入口哪怕「只是给页面用的」，也是下一次分叉的起点
+  assert.equal(
+    code.includes("getCompanionWorkspaceView"),
+    false,
+    "不存在第二个按 userId 取工作台数据的函数；展示数据随判定一起返回",
+  );
 });
 
 test("隔离断言：打手守卫走用户会话，且访问规则只有一处", () => {

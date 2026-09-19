@@ -1,9 +1,5 @@
 import { getCompanionRepository } from "@/lib/data/companionRepository";
-import type {
-  CompanionAccessState,
-  CompanionSessionUser,
-  CompanionWorkspaceView,
-} from "@/lib/types/companionWorkspace";
+import type { CompanionAccessState, CompanionSessionUser } from "@/lib/types/companionWorkspace";
 import type { Companion } from "@/lib/types/companion";
 
 /**
@@ -43,20 +39,18 @@ export function toCompanionSessionUser(
 }
 
 /**
- * 一次查询同时给出「访问态」与「实体本身」。
+ * 一个用户的打手访问态 —— 打手工作台的**唯一**读取点。
  *
- * ⚠️ 之所以只查一次：工作台概览还要读一个**展示字段**（段位）。如果
- * `getCompanionWorkspaceView()` 自己再查一遍仓储，两次 `await` 之间记录可能刚好被下架，
- * 于是「资格判定用旧记录、展示用新记录」——这类分叉平时看不见，出问题时无法复现。
- * 判定与展示必须来自**同一次读取**。
- */
-type CompanionAccessLookup =
-  | { kind: "not-a-companion" }
-  | { kind: "disabled"; companion: CompanionSessionUser }
-  | { kind: "granted"; companion: CompanionSessionUser; record: Companion };
-
-/**
- * 判定某个用户与打手能力的关系。
+ * ⚠️ **一次调用 = 一次仓储读取**，而且这次读取同时给出判定与展示所需的字段
+ * （`granted` 里的 `rankLabel` 就来自同一条记录）。调用方拿到结果后**不得**
+ * 为了补一个字段再查一次：两次 `await` 之间记录可能刚好被下架，于是
+ * 「布局按旧记录渲染了工作台壳、内容却取不到资料」——页面停在「顶栏 + 空白」。
+ * 这类中间态在测试里极难复现，所以只能靠结构上不可能发生：
+ * 本文件只有这一处 `findCompanionByUser`，且工作台路由目录里只有一处调用点
+ * （两条都由 `tests/companionAccess.test.mjs` 钉住）。
+ *
+ * ⚠️ 本函数**不选人**：没有「查谁的资料」这种参数，`userId` 由调用方从会话里取。
+ * 因此工作台里不可能出现别人的资料。
  *
  * ⚠️ 两种「不能进」**刻意分开表达**：
  * - `not-a-companion`：没有有效护航资料（含已软移除）；
@@ -66,43 +60,18 @@ type CompanionAccessLookup =
  * 与客服端「两种拒绝用同一句话」的取舍不同，是因为两者要说清的事情不同：
  * 客服账号是否启用属于平台内部信息，而「你是不是护航、你的资料在不在架」
  * 这位用户本来就知道。
+ *
+ * ⚠️ 接口守卫（`lib/api/companionRoute.ts`）与工作台壳层读的是**同一个函数**：
+ * 一条规则，一个真值源。守卫只用得上 `companion`，段位对它没有意义，多出来的字段
+ * 不会让它多做任何事。
  */
-async function lookupCompanionAccess(userId: string): Promise<CompanionAccessLookup> {
+export async function resolveCompanionAccess(userId: string): Promise<CompanionAccessState> {
   const companion = await getCompanionRepository().findCompanionByUser(userId);
   if (!companion) return { kind: "not-a-companion" };
 
   const session = toCompanionSessionUser(companion, userId);
   if (!companion.enabled) return { kind: "disabled", companion: session };
 
-  return { kind: "granted", companion: session, record: companion };
-}
-
-/**
- * 一个用户的打手访问态。
- *
- * ⚠️ 本函数**不选人**：没有「查谁的资料」这种参数，`userId` 由调用方从会话里取。
- * 因此工作台里不可能出现别人的资料。
- */
-export async function resolveCompanionAccess(userId: string): Promise<CompanionAccessState> {
-  const result = await lookupCompanionAccess(userId);
-  if (result.kind === "granted") return { kind: "granted", companion: result.companion };
-  if (result.kind === "disabled") return { kind: "disabled", companion: result.companion };
-  return { kind: "not-a-companion" };
-}
-
-/**
- * 工作台概览的数据（页面侧使用）。
- *
- * 只有 `granted` 才有值，其余两种一律 `null`。页面据此渲染工作台；
- * 而「为什么不能进」由访问态单独渲染成两种提示页
- * （见 `app/companion/(console)/layout.tsx`）。
- */
-export async function getCompanionWorkspaceView(
-  userId: string,
-): Promise<CompanionWorkspaceView | null> {
-  const result = await lookupCompanionAccess(userId);
-  if (result.kind !== "granted") return null;
-
   // 段位是**展示用**的资料字段；工作台不因此获得任何接单 / 收益能力
-  return { companion: result.companion, rankLabel: result.record.rankLabel };
+  return { kind: "granted", companion: session, rankLabel: companion.rankLabel };
 }
