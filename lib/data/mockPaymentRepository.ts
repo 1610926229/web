@@ -2,7 +2,7 @@ import { compareOrdersForAdmin, orderInDateRange } from "@/lib/constants/adminOr
 import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
-import type { Order } from "@/lib/types/order";
+import type { Order, OrderCompanionSnapshot } from "@/lib/types/order";
 import type {
   MockPaymentResult,
   Payment,
@@ -200,6 +200,40 @@ export const mockPaymentRepository: PaymentRepository = {
 };
 
 /**
+ * 打手接单 → 订单进入「已接单」（**同步写入器**，无 `await`）。
+ *
+ * ⚠️ 与下面的 `applyOrderRefund` 同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （能不能接、有没有超时、是不是指定给这位打手）。合法性由伪事务在调用它之前判定
+ * （`lib/data/companionDispatchTransaction.ts` 的 `acceptDispatch`），
+ * 而订单那一侧**必须与派单那一侧在同一段无 `await` 的代码里写完**。
+ *
+ * `input.companion` 是**接单那一刻**的打手公开信息快照（昵称 / 头像），
+ * 与其它快照字段一样：之后改昵称换头像，这一单的展示不受影响。
+ */
+export function applyOrderAccepted(
+  id: string,
+  input: { companionId: string; companion: OrderCompanionSnapshot; at: string },
+): { previous: Order; updated: Order } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  const updated: Order = {
+    ...order,
+    status: "accepted",
+    acceptedAt: input.at,
+    // ⚠️ 这里写的是**实际接单的人**，与用户当初指定的人（`Dispatch.exclusiveCompanionId`）
+    // 是两个字段。它也**只**由这里写：与派单的 `acceptedByCompanionId` 同段写下去，
+    // 因此「派单说被 A 接了、订单说没人接」这种状态在结构上产生不出来
+    actualCompanionId: input.companionId,
+    companion: input.companion,
+  };
+  current.orders.set(id, updated);
+  return { previous, updated };
+}
+
+/**
  * 把订单标记为「已退款」（**同步写入器**，无 `await`）。
  *
  * ⚠️ 与 `applyApplicationReview` 同一套路：它**只负责写**，不判断这次迁移合不合法
@@ -207,15 +241,25 @@ export const mockPaymentRepository: PaymentRepository = {
  * 拆成两处是因为「谁能改订单」只有伪事务一处，而写入本身需要一个不让人拿到 `Map` 的入口。
  *
  * ⚠️ 又是**同步**的：它被 `adminRefundTransaction` 的原子区段调用，里面出现 `await`
- * 就会让出执行权，原子性立刻消失。
+ * 就会让出执行权，原子性立刻消失。P0-5 的超时自动退款同样在原子区段里调用它。
  *
  * `refundedAt` 只在**第一次**进入 `refunded` 时写入：重复调用不会刷新时间戳
  * （「这一单是什么时候退的」不该被第二次点击改掉）。
- * 已经是 `refunded` 的订单再写一次返回 `changed: false`，由调用方决定这算不算异常。
+ * 已经是 `refunded` 的订单再写一次返回 `changed: false`，由调用方决定这算不算异常——
+ * P0-5 的超时清扫据此做到「重复执行不重复退款」。
  */
 export function applyOrderRefund(
   id: string,
   at: string,
+  /**
+   * 这一次退掉的钱（分）。**不传表示「不改动累计已退」**——管理端的退款裁决当前
+   * 走的就是这条路：它按退款规则决定退多少，那条公式属于 P1-1，本批次不碰。
+   *
+   * 传了就一并写进 `refundedAmount`：**全额退款**的调用方（P0-5 公共池超时自动退款）
+   * 传 `actualPaidAmount`，因为订单类型上写着「全额退款后 refundedAmount === actualPaidAmount」。
+   * 少了这一步，用户会看到「已退款」但「累计已退 0 元」。
+   */
+  refundedAmount?: number,
 ): { previous: Order; updated: Order; changed: boolean } | null {
   const current = store();
   const order = current.orders.get(id);
@@ -226,7 +270,12 @@ export function applyOrderRefund(
     return { previous, updated: previous, changed: false };
   }
 
-  const updated: Order = { ...order, status: "refunded", refundedAt: order.refundedAt ?? at };
+  const updated: Order = {
+    ...order,
+    status: "refunded",
+    refundedAt: order.refundedAt ?? at,
+    refundedAmount: refundedAmount ?? order.refundedAmount,
+  };
   current.orders.set(id, updated);
   return { previous, updated, changed: true };
 }

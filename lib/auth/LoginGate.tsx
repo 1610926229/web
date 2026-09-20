@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import EmptyState from "@/components/common/EmptyState";
 import { authAdapter } from "./MockAuthAdapter";
+import MockUserPicker from "./MockUserPicker";
 
 /**
  * 统一的登录拦截界面。
@@ -18,6 +19,12 @@ import { authAdapter } from "./MockAuthAdapter";
  *
  * `mockAuthEnabled` 由服务端传入：未开启模拟登录时，界面上不出现任何模拟登录入口，
  * 只如实说明「登录功能尚未开放」。
+ *
+ * ⚠️ **Mock 环境下的登录入口是「测试账号选择器」，不是单个按钮**（`MockUserPicker`）。
+ * 手工验收 P0-5 要同时扮演老板、打手 B、打手 C，固定登录同一个账号走不通。
+ * `userId` 只在这条分支里有意义：真实微信授权下身份由 code 换取的会话决定，
+ * 不由调用方声明——因此 `authAdapter.login()` 的参数**只有 Mock 实现会读**，
+ * 见 `lib/auth/AuthAdapter.ts` 的说明。
  */
 export default function LoginGate({
   mockAuthEnabled,
@@ -31,20 +38,21 @@ export default function LoginGate({
   onSuccess?: () => void;
 }) {
   const router = useRouter();
-  const [pending, setPending] = useState(false);
+  /** 正在登录的那个账号 id（不是布尔值：选择器要指出是哪一行在转圈） */
+  const [pendingId, setPendingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const handleLogin = async () => {
-    if (pending) return;
-    setPending(true);
+  const handleLogin = async (userId: string) => {
+    if (pendingId) return;
+    setPendingId(userId);
     setError(null);
     try {
-      await authAdapter.login();
+      await authAdapter.login(userId);
       router.refresh();
       onSuccess?.();
     } catch {
       setError("登录失败，请重试");
-      setPending(false);
+      setPendingId(null);
     }
   };
 
@@ -61,14 +69,7 @@ export default function LoginGate({
       />
 
       {mockAuthEnabled ? (
-        <button
-          type="button"
-          onClick={handleLogin}
-          disabled={pending}
-          className="rounded-full bg-ink px-8 py-3 text-[15px] font-medium text-white disabled:opacity-60"
-        >
-          {pending ? "登录中…" : "模拟微信登录"}
-        </button>
+        <MockUserPicker busyId={pendingId} onPick={(userId) => void handleLogin(userId)} />
       ) : null}
 
       {error ? <p className="text-[13px] text-brand-red">{error}</p> : null}

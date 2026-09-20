@@ -70,6 +70,23 @@ function store(): MockCompanionStore {
   return companionStore();
 }
 
+/**
+ * 按 id **同步**读取一条护航资料（只读，返回副本）。
+ *
+ * ⚠️ 存在的理由只有一个：**伪事务的原子区段里不能有 `await`**，走不了本仓储的
+ * 异步方法。接单事务要在「写下去之前」的最后一步确认这位打手的资料还在架
+ * （`lib/data/companionDispatchTransaction.ts`）——少了这一步，一位刚好被管理员
+ * 下架的打手仍能把单接走，而他随后既看不到订单也提交不了材料。
+ *
+ * ⚠️ 因此本函数**不对外提供 store 本身**：调用方只能取走一条记录的副本，
+ * 拿不到 `Map` 就没有「顺手改一下」的位置。写入仍然只有审核通过与后台管理
+ * 那两处伪事务。
+ */
+export function readCompanionRecord(id: string): Companion | null {
+  const record = store().companions.get(id);
+  return record ? { ...record, reviews: [...record.reviews] } : null;
+}
+
 export const mockCompanionRepository: CompanionRepository = {
   async listCompanions() {
     // 复制一层再返回：调用方拿到的是快照，后续的后台编辑不会影响正在聚合的这一次

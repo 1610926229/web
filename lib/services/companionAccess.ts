@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { getCompanionRepository } from "@/lib/data/companionRepository";
 import type { CompanionAccessState, CompanionSessionUser } from "@/lib/types/companionWorkspace";
 import type { Companion } from "@/lib/types/companion";
@@ -64,8 +65,26 @@ export function toCompanionSessionUser(
  * ⚠️ 接口守卫（`lib/api/companionRoute.ts`）与工作台壳层读的是**同一个函数**：
  * 一条规则，一个真值源。守卫只用得上 `companion`，段位对它没有意义，多出来的字段
  * 不会让它多做任何事。
+ *
+ * ## 为什么用 `React.cache` 包起来（P0-5）
+ *
+ * P0-5 之后工作台有多个页面（工作台 / 专属池 / 公共池），而布局与页面在 React 里
+ * 是**并行渲染**的：布局要拿资格决定「让不让进」，页面要拿资格决定「用谁的身份取数」。
+ * 两边各查一次仓储，就会出现两次读取之间的 TOCTOU 窗口——布局按旧记录渲染出工作台壳、
+ * 页面按新记录取不到资料，用户停在「顶栏 + 空白」。
+ *
+ * `cache()` 把它变成**一次请求内只算一次**：同一个 `userId` 无论被调用几次，
+ * 都返回同一份结果（Next 的官方做法，见 docs `01-app/01-getting-started/06-fetching-data.md`
+ * 的「Reusing data with `React.cache`」）。因此「一次页面渲染只有一份资格结果」
+ * 这条 P0-4 的约束**仍然成立**，只是实现从「只允许一处调用点」换成了「多处调用点共享同一份结果」。
+ *
+ * ⚠️ 前端（浏览器）与 node 测试里拿到的是 React 的**直通版本**（`cache` 在客户端构建里
+ * 就是一个透传包装），因此本函数在那些环境下每次都真的执行——测试仍然能观察到
+ * 每一次仓储读取，不会因为缓存而看到过期数据。
  */
-export async function resolveCompanionAccess(userId: string): Promise<CompanionAccessState> {
+export const resolveCompanionAccess = cache(async function resolveCompanionAccess(
+  userId: string,
+): Promise<CompanionAccessState> {
   const companion = await getCompanionRepository().findCompanionByUser(userId);
   if (!companion) return { kind: "not-a-companion" };
 
@@ -74,4 +93,4 @@ export async function resolveCompanionAccess(userId: string): Promise<CompanionA
 
   // 段位是**展示用**的资料字段；工作台不因此获得任何接单 / 收益能力
   return { kind: "granted", companion: session, rankLabel: companion.rankLabel };
-}
+});

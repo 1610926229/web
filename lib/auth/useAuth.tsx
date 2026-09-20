@@ -16,7 +16,8 @@ import type { User } from "@/lib/types/user";
  */
 type AuthContextValue = {
   user: User | null;
-  login: () => Promise<void>;
+  /** `userId` 只对 Mock 实现有意义（测试账号名单），见 `AuthAdapter` */
+  login: (userId?: string) => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -46,7 +47,7 @@ export default function AuthProvider({
 
     return {
       user,
-      login: () => run(() => authAdapter.login()),
+      login: (userId?: string) => run(() => authAdapter.login(userId)),
       logout: () => run(() => authAdapter.logout()),
     };
   }, [user, pending, router]);

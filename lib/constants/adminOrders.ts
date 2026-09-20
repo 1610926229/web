@@ -331,12 +331,17 @@ export function toAdminOrderListItem(order: Order, user: AdminUserSummary): Admi
 }
 
 /**
- * 详情所需的四份售后摘要与时间轴，由服务层查好传进来（与用户端 `OrderDetailExtras` 同理：
- * 「订单本身长什么样」与「这一单做过什么」分开）。
+ * 详情所需的四份售后摘要、时间轴与「用户指定了谁」，由服务层查好传进来
+ * （与用户端 `OrderDetailExtras` 同理：「订单本身长什么样」与「这一单做过什么」分开）。
+ *
+ * ⚠️ `exclusiveCompanion` 在 extras 里而 `actualCompanion` 不在，是因为前者**不在订单上**：
+ * 它要从派单记录里取 `exclusiveCompanionId`，再用护航 id 换一份公开信息快照——
+ * 那是仓储查询，而本文件只做纯转换（它同时被浏览器端引用，不能碰 `lib/data`）。
  */
 export type AdminOrderDetailExtras = Pick<
   AdminOrderDetail,
   | "timeline"
+  | "exclusiveCompanion"
   | "refundSummary"
   | "complaintSummary"
   | "conversationSummary"
@@ -359,7 +364,8 @@ export function toAdminOrderDetail(
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
-    companion: order.companion,
+    // 订单上只记着「谁在履约」；「用户当初指定了谁」在 extras 里（来自派单记录）
+    actualCompanion: order.companion,
     ...extras,
   };
 }

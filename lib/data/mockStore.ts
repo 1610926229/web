@@ -36,6 +36,12 @@ export type MockStoreName =
   | "agreement"
   | "companionApplication"
   /**
+   * 派单记录（订单在哪个池里等谁、等到什么时候）。P0-5 起这份记录**可写**：
+   * 订单支付成功会建一条、专属池到点会转公共池、被打手接走会关掉它。
+   * 见 `lib/data/mockDispatchRepository.ts`。
+   */
+  | "dispatch"
+  /**
    * 护航（陪玩）名单。P8A 起这份名单**可写**（审核通过会往里加记录、后台会改资料），
    * 因此它从「只读种子」变成了一个真正的仓储——但名单仍然只有这一份。
    */

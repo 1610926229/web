@@ -16,17 +16,21 @@ import {
   toAdminOrderListItem,
   type AdminOrderListQuery,
 } from "@/lib/constants/adminOrders";
+import { sweepExpiredDispatches } from "@/lib/data/companionDispatchTransaction";
+import { getDispatchRepository } from "@/lib/data/dispatchRepository";
+import { toOrderCompanionSnapshot } from "@/lib/constants/companions";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import {
   ADMIN_ORDER_UNFILTERED_QUERY,
   getPaymentRepository,
 } from "@/lib/data/paymentRepository";
+import { getCompanionRepository } from "@/lib/data/companionRepository";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getReviewRepository } from "@/lib/data/reviewRepository";
 import { getUserRepository } from "@/lib/data/userRepository";
 import { mockEmptyApplies, withMockDebug, type MockSurface } from "@/lib/mocks/debug";
-import type { AdminOrderDetail, AdminOrderListData } from "@/lib/types/order";
+import type { AdminOrderDetail, AdminOrderListData, OrderCompanionSnapshot } from "@/lib/types/order";
 import type { AdminUserSummary } from "@/lib/types/user";
 import { toOrderComplaintSummary } from "./complaints";
 import { buildConversationStats } from "./conversations";
@@ -75,6 +79,32 @@ async function adminUserIndex(): Promise<Map<string, AdminUserSummary>> {
   return new Map(
     users.map((user) => [user.id, { id: user.id, displayId: user.displayId, nickname: user.nickname }]),
   );
+}
+
+/**
+ * 用户**指定**的那位护航（P0-5）——后台订单详情里「指定」那一行。
+ *
+ * 三件事都与「实际接单的人」不同：
+ *
+ * 1. 来源不同：它取自**派单记录**的 `exclusiveCompanionId`，不在订单上；
+ * 2. 可能为空：用户没指定时订单直接进公共池，这里就是 null，
+ *    而实际接单的人可能已经有一位；
+ * 3. **它不会因为别人接单而改变**：用户指定 A、A 没接、B 从公共池接走，
+ *    这里仍然是 A，实际接单那一行是 B。两个事实都要留得住——
+ *    只留一个，「我明明指定了 A，怎么是 B 在打」在后台就查不出来。
+ *
+ * ⚠️ **软移除的护航照样显示**。用户当初指定的是他，这件事不因为他后来被下架而没发生过；
+ * 这里用 `findCompanionById` 而不是任何「有效护航」口径的查询。
+ *
+ * 查不到记录（订单已退款、管理员手动退款、护航记录被彻底删除）时返回 null：
+ * 不编造一个名字，也不让整页报错。
+ */
+async function resolveExclusiveCompanion(orderId: string): Promise<OrderCompanionSnapshot | null> {
+  const dispatch = await getDispatchRepository().findDispatchByOrderId(orderId);
+  if (!dispatch?.exclusiveCompanionId) return null;
+
+  const companion = await getCompanionRepository().findCompanionById(dispatch.exclusiveCompanionId);
+  return companion ? toOrderCompanionSnapshot(companion) : null;
 }
 
 /**
@@ -144,6 +174,10 @@ export async function queryAdminOrderList(
   params: URLSearchParams | undefined,
   surface: MockSurface,
 ): Promise<AdminOrderListData> {
+  // 超时事实的惰性物化（幂等）：后台列表里的状态必须与业务事实一致，
+  // 否则客服会对着一条「等待接单」的单去催一个已经不存在的接单
+  sweepExpiredDispatches(new Date().toISOString());
+
   return withMockDebug(params, surface, async () => {
     const games = orderGameNames(await allOrdersForAdmin());
 
@@ -216,15 +250,20 @@ export async function getAdminOrderDetail(
 ): Promise<AdminOrderDetail | null> {
   if (!id) return null;
 
+  // 超时事实的惰性物化（幂等）：后台看到的订单状态必须与业务事实一致——
+  // 一张在公共池里等到超时的单不该在后台还显示成「等待接单」
+  sweepExpiredDispatches(new Date().toISOString());
+
   return withMockDebug(params, surface, async () => {
     const order = await getPaymentRepository().findOrderById(id);
     if (!order) return null;
 
-    const [users, refund, complaintStats, conversation] = await Promise.all([
+    const [users, refund, complaintStats, conversation, exclusiveCompanion] = await Promise.all([
       adminUserIndex(),
       getRefundRepository().findRefundByOrderId(order.id),
       getComplaintRepository().summarizeComplaintsByOrder(order.id),
       getMessageRepository().findConversation(order.userId, order.id),
+      resolveExclusiveCompanion(order.id),
     ]);
 
     // 未读数与用户端同一个口径；会话不存在时摘要为 null
@@ -240,6 +279,7 @@ export async function getAdminOrderDetail(
 
     return toAdminOrderDetail(order, users.get(order.userId) ?? missingUser(order.userId), {
       timeline: buildOrderTimeline(order),
+      exclusiveCompanion,
       refundSummary: refund ? toRefundSummary(refund) : null,
       complaintSummary: toOrderComplaintSummary(complaintStats),
       conversationSummary,

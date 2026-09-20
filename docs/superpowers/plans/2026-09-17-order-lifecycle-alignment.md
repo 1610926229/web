@@ -37,19 +37,19 @@
 | # | 原冲突 | 裁定 | 落点 |
 |---|---|---|---|
 | **C1** | §4 正文「1 小时无人接 → 自动退款」／§4 场景「1 小时 → 售后区」／§12 与 §20.3「5 小时 → 售后区」三处互斥 | **旧值全部作废。** 新规则：自**进入公共订单池**时刻起算，达到管理员配置时长仍无人接单 → 停止接取 → **自动全额退款**。**不生成售后案件** | P0-1 + P0-5 |
-| **C2** | §6「只能放弃专属订单池中的订单」与 §3 的 10 分钟时间驱动退出并存 | **存在主动「不接/放弃」动作。** 专属池 → **立即**转公共池，不必等满 10 分钟。不处罚、不扣积分、不影响等级、**不可撤回**。记审计日志，但记录本身不代表处罚 | P0-5 |
+| **C2** | §6「只能放弃专属订单池中的订单」与 §3 的 10 分钟时间驱动退出并存 | **旧裁定作废（2026-09-19 产品重新确认）。** **不存在主动「不接 / 放弃」动作**：不设拒绝按钮、不设对应接口、不记拒绝字段。打手不想接就什么都不做，**专属池 10 分钟到点**系统自动转公共池。「不接」本身就是拒绝 | P0-5 |
 | **C3** | §18「订单继续」与「禁止提交完成材料」自相矛盾 | **进入售后处理。** 被禁打手失去聊天 / 提交材料 / 操作订单的一切能力；**不提供**客服「替打手提交材料」入口；最终资金权限仍在管理员 | P1-4 |
-| **C4** | §18 封禁后订单回公共池，计时是否沿用 | **重新计时**（否决原推荐）：`publicEnteredAt = 当前时刻`，按该订单**保存的超时快照**算新的 `publicDeadlineAt`。原因：专属池 → accepted → 封禁的订单可能从未进过公共池，不存在可沿用的截止时间。同时**通知老板** | P1-4 |
+| **C4** | §18 封禁后订单回公共池，计时是否沿用 | **重新计时**（否决原推荐）：`publicPoolEnteredAt = 当前时刻`，按该订单**保存的超时快照**算新的 `publicDeadlineAt`。原因：专属池 → accepted → 封禁的订单可能从未进过公共池，不存在可沿用的截止时间。同时**通知老板** | P1-4 |
 | **C5** | §13「服务中的订单允许退款」与 §12「任意状态 → 售后区」 | **仅 `serving` 提供普通退款入口。** `paid` 走超时自动退款；`accepted` 走投诉；`completed` 走 48h 投诉期。四种状态各有出口，互不重叠 | P1-1 |
 | **C6** | §19 把 4 个阶段都列为订单状态 | **领域拆分。** 不扩张 `OrderStatus` | P0-3…P0-8 |
 | **C7** | `waiting_accept` 与 `paid` 的关系 | 由 **`Order.paid` + `Dispatch`** 表达，不新增状态 | P0-5 |
 | **C8** | §10 删除聊天与投诉/退款保留的竞态 | **物理删除。** 48h 到期时检查是否存在投诉 / 退款 / 售后记录；完全无异常才删除。47:59 发起的投诉或退款**立即进入保留范围**，48h 任务不得删除。更换打手：新会话，旧聊天作为证据保留，新打手不可见 | P1-3 |
 | **C9** | §17 消费累计时点未定义 | **支付成功时按实付累计**；退款按**实际退款金额**扣减；等级是派生值，**允许自然下降**，不做「曾经升级永不降级」 | P0-3 + P0-9 |
 | **C10** | §13 任意比例退款的资金分摊未定义 | **已完全冻结**（公式、取整、命名、副本额度见 §二.6）。取整方式**已确认**：仅退款与打手冲正向下取整，俱乐部调整额由减法得出 | P1-1 |
-| **C11** | §16「罚款金额」无任何规则 | **预留恒为 0**，本轮**无任何扣款操作**。专属池主动不接不罚款 | P0-8 |
+| **C11** | §16「罚款金额」无任何规则 | **预留恒为 0**，本轮**无任何扣款操作**。「不接专属单」不是违规动作，自然不涉及罚款 | P0-8 |
 | **C12** | §12「服务异常」未定义 | ⚠️ **残留**，不阻塞 P0，列入 §八 | P2 |
 | **C13** | §12「失去普通投诉权限」暗示非普通通道 | ⚠️ **残留**，不阻塞 P0，列入 §八 | P2 |
-| **C14** | §9「B/A/S 3/4/5」是固定还是可配 | ⚠️ **残留**。P0-5 先用单一常量上限，P1-5 接入等级时替换 | P1-5 |
+| **C14** | §9「B/A/S 3/4/5」是固定还是可配 | ⚠️ **残留**。**P0-5 完全不实现并发上限**（不设常量、不计数），整个并发约束留给 P1-5 接入等级时一次做对 | P1-5 |
 | **C15** | §14「打手收入 = 商品原价 × 分账比例」中「商品原价」的确切构成（是否含增值服务） | ✅ **已由产品确认（R3，2026-09-18）**：V1 全部增值服务**参与分账**，分账基数 = 商品金额 + 全部增值服务金额。由 `resolveCompanionRevenueBase()` 单独给出，与原价分开表达 | P0-3 |
 
 ---
@@ -89,27 +89,36 @@ refundedAmount: number;          // 累计已退金额；全额退款后 = actua
 ### 2.2 Dispatch —— 派单
 
 ```ts
-export type DispatchPoolState = "exclusive" | "public" | "accepted" | "timed_out";
+export type DispatchState = "exclusive" | "public" | "accepted" | "timed_out";
 
 export type DispatchRecord = {
   id: string;
   orderId: string;
-  state: DispatchPoolState;
+  /**
+   * 订单当前所在的位置。四种取值互斥，「在哪个池」与「有没有被接 / 有没有超时」
+   * 是同一个事实，因此**只有一个字段**——再设一个 `poolType` 就会出现两个真值源，
+   * 而它们分叉的那一天，页面会显示一个订单既在公共池又可被接单。
+   *
+   * 需求口径里的 `poolType ∈ {exclusive, public}` 就是这个字段在**未结束时**的两个取值。
+   */
+  state: DispatchState;
 
-  /** 指定打手；不指定时为 null，订单直接进公共池 */
+  /** 用户**指定**的打手；不指定时为 null，订单直接进公共池。历史事实，永不清空 */
   exclusiveCompanionId: string | null;
 
+  /** 专属池的进入时刻（未指定打手时为 null） */
   exclusiveEnteredAt: string | null;
-  exclusiveDeadlineAt: string | null;   // 进入时刻 + 专属池固定等待时长
+  /** 进入专属池时刻 + 专属池固定等待时长（10 分钟） */
+  exclusiveDeadlineAt: string | null;
 
-  publicEnteredAt: string | null;       // 每次进入公共池都刷新（含封禁重派）
+  /**
+   * 公共池的进入时刻。**每次进入公共池都重写**：未指定打手是首次进入，
+   * 专属池超时是第二次进入——两次都要用**那一刻**的平台配置重新冻结快照。
+   */
+  publicPoolEnteredAt: string | null;
   publicDeadlineAt: string | null;
   /** 进入公共池时冻结的配置快照（分钟）；改配置不影响已入池订单 */
   publicTimeoutMinutesSnapshot: number | null;
-
-  /** 主动放弃过该单的打手；放弃不处罚，但不可撤回 */
-  declinedByCompanionIds: string[];
-  declinedAt: string | null;
 
   acceptedByCompanionId: string | null;
   acceptedAt: string | null;
@@ -119,6 +128,10 @@ export type DispatchRecord = {
   updatedAt: string;
 };
 ```
+
+⚠️ **本轮没有「拒绝 / 放弃 / 不接」这条业务能力**：打手不想接，**什么都不做**即可——
+专属池 10 分钟到点自动转公共池。因此类型里**没有** `declinedByCompanionIds` / `declinedAt`，
+接口里没有 decline 路由，服务层没有放弃方法。「不接」本身就是拒绝。
 
 `waiting_accept` 的两种形态：`Order.paid` + `Dispatch.state === "exclusive"`（专属池等待）／`"public"`（公共池等待）。
 
@@ -289,7 +302,7 @@ requireUser() → User Session → userId
 | 类别 | 例子 | 落点 |
 |---|---|---|
 | **管理员 / 客服主动的管理行为** → **进** Admin Audit | 封禁 / 解封打手、等级 B/A/S 调整、并发上限调整、平台参数（公共池超时）修改、商品分账比例修改、完成材料审核（通过 / 驳回）、售后处理、管理员退款裁决、管理员主动执行的资源管理动作（含物理删除） | `AdminAuditLog` |
-| **打手自身业务动作** | 接单、放弃、开始服务、提交完成材料 | 各领域实体字段（`Dispatch` / `CompletionSubmission`），见 D4 |
+| **打手自身业务动作** | 接单、开始服务、提交完成材料 | 各领域实体字段（`Dispatch` / `CompletionSubmission`），见 D4 |
 | **系统自动生命周期动作** | **普通订单完成 48h 后聊天物理删除**、公共池超时自动退款、48h 冻结自动解冻 | **对应实体字段与业务记录**（如订单 `refundedAt` / `refundedAmount`、Earning 的 `availableAt` / 状态流转） |
 
 > ⚠️ **不要为自动聊天清理写管理员审计记录。** 它没有 actor，不是管理行为；写进去会污染「谁做了什么」这条审计语义。可追溯性由会话记录本身的删除时间字段与订单/投诉/退款记录保证。
@@ -807,7 +820,11 @@ export async function requireCompanion(): Promise<CompanionSessionUser> {
 
 ### P0-5 派单域（核心批次）
 
-**目标**：订单支付后进入派单；指定打手走专属池（10 分钟），否则直接进公共池；公共池达配置超时 → 自动全额退款；打手可接单、可在专属池主动放弃；接单有并发上限且必须防并发抢单。
+**目标**：订单支付后进入派单；指定打手走专属池（固定 10 分钟），否则直接进公共池；专属池到点无人接 → **自动转公共池**（不是退款、不是售后、不是订单失败）；公共池达配置超时仍无人接 → **自动全额退款**；打手可接单，接单必须原子、必须防并发抢单、必须防过期抢单。
+
+**⚠️ 本批次不做「拒绝 / 放弃 / 不接」**：打手不想接专属单时**什么都不做**，10 分钟到点系统自动转公共池。**没有** decline 接口、**没有**放弃按钮、**没有** `declinedByCompanionIds`。
+
+**⚠️ 本批次不做并发上限**：`DEFAULT_MAX_CONCURRENT_ORDERS` 属于 **P1-5**（打手等级 B/A/S + 并发上限），本批次**不得提前实现**——不做常量、不做计数、不做 `concurrency-limit` 结果。
 
 **⚠️ 本批次有一处破坏性语义变更**：订单创建时**不再**绑定打手。原「结算页选的陪玩」改存 `Dispatch.exclusiveCompanionId`。这会改动 `lib/services/checkout.ts`、订单 DTO、订单列表 UI 文案与多个既有测试。
 
@@ -827,21 +844,20 @@ export async function requireCompanion(): Promise<CompanionSessionUser> {
 | 路径 | 职责 |
 |---|---|
 | `lib/types/dispatch.ts` | §2.2 类型 + 打手端 DTO（`CompanionPoolItem` / `CompanionPoolDetail`） |
-| `lib/constants/dispatch.ts` | `EXCLUSIVE_WAIT_MINUTES = 10`、`DEFAULT_MAX_CONCURRENT_ORDERS = 5`、状态标签、筛选解析 |
+| `lib/constants/dispatch.ts` | `EXCLUSIVE_WAIT_MINUTES = 10`、状态标签、筛选解析 |
 | `lib/data/dispatchRepository.ts` | 接口 + `getDispatchRepository()` |
-| `lib/data/mockDispatchRepository.ts` | `dispatchStore()` + 同步原语（`createDispatchRecord` / `applyDispatchAccepted` / `applyDispatchDeclined` / `applyDispatchToPublic` / `applyDispatchTimedOut`） |
+| `lib/data/mockDispatchRepository.ts` | `dispatchStore()` + 同步原语（`createDispatchRecord` / `applyDispatchAccepted` / `applyDispatchToPublic` / `applyDispatchTimedOut`） |
 | `lib/mocks/fixtures/dispatchSeed.ts` | 为既有历史订单补派单记录（见下「Seed 迁移」） |
-| `lib/data/companionDispatchTransaction.ts` | **原子写入**：`acceptDispatch` / `declineExclusiveDispatch` / `sweepExpiredDispatches` |
-| `lib/services/companionDispatch.ts` | 池列表 / 池详情 / 接单 / 放弃（含打手端 DTO 转换，**池内 DTO 不含 `gameAccountId` 与 `remark`**） |
+| `lib/data/companionDispatchTransaction.ts` | **原子写入**：`acceptDispatch` / `sweepExpiredDispatches` |
+| `lib/services/companionDispatch.ts` | 池列表 / 池详情 / 接单（含打手端 DTO 转换，**池内 DTO 不含 `gameAccountId` 与 `remark`**） |
 | `lib/services/companionHttp.ts` | 浏览器端取数（`apiGet` / `apiPost`） |
 | `app/api/companion/dispatches/route.ts` | `GET` 公共池 + 专属池列表 |
 | `app/api/companion/dispatches/[id]/route.ts` | `GET` 池内详情 |
 | `app/api/companion/dispatches/[id]/accept/route.ts` | `POST` 接单 |
-| `app/api/companion/dispatches/[id]/decline/route.ts` | `POST` 专属池放弃 |
 | `app/companion/(console)/pool/page.tsx` | 公共池页 |
 | `app/companion/(console)/exclusive/page.tsx` | 专属池页 |
 | `components/companion/CompanionDispatchTable.tsx` | 池列表 |
-| `components/companion/CompanionDispatchCard.tsx` | 池卡片 + 接单/放弃按钮 |
+| `components/companion/CompanionDispatchCard.tsx` | 池卡片 + 接单按钮（**没有放弃按钮**） |
 | `tests/dispatch.test.mjs` | 状态机与原子性 |
 | `tests/dispatchConcurrency.test.mjs` | 并发抢单 |
 
@@ -871,42 +887,70 @@ export async function acceptDispatch(
   dispatchId: string, companionId: string, ctx: CompanionWriteContext,
 ): Promise<DispatchAcceptResult>;
 
-export async function declineExclusiveDispatch(
-  dispatchId: string, companionId: string, ctx: CompanionWriteContext,
-): Promise<DispatchDeclineResult>;
-
-/** 同步、无 await；由各读取路径在取数前调用 */
+/**
+ * 同步、无 await；由各读取路径在取数前调用。
+ *
+ * 一次调用处理**两类到点**，两者结果完全不同：
+ * - 专属池到点 → **转公共池**（重记 `publicPoolEnteredAt` / 快照 / `publicDeadlineAt`），订单**不退款**；
+ * - 公共池到点 → 置 `timed_out` + **自动全额退款**。
+ */
 export function sweepExpiredDispatches(
   at: string,
-): { timedOutDispatchIds: string[]; refundedOrderIds: string[] };
+): { movedToPublicDispatchIds: string[]; refundedOrderIds: string[] };
 ```
+
+⚠️ **本轮没有 `declineExclusiveDispatch`**：需求明确「不接本身就是拒绝」，因此不提供任何
+拒绝 / 放弃 / 退回公共池的接口与动作。
 
 **原子接单（`acceptDispatch`）区段顺序**
 
 ```
 取 store 句柄（区段外）
 // —— 原子区段开始（无 await）——
-1. takeReplayForAction(ctx, "dispatch.accept") → conflict 短路
+1. takeReplayForAction(ctx, "dispatch.accept", "dispatch", dispatchId) → conflict 短路
 2. 读 dispatch → 不存在 → { kind: "not-found" }
 3. replay 分支 → 原样返回，不写
 4. state 必须是 exclusive 或 public → 否则 { kind: "not-open", state }
-5. 专属池：companionId 必须等于 exclusiveCompanionId → 否则 { kind: "not-eligible" }
-6. 已过期（deadlineAt <= ctx.at）→ { kind: "expired" }
+5. 当前池的 deadline <= ctx.at → { kind: "expired" }  ← **不依赖 sweep 有没有跑**
+6. 专属池：companionId 必须等于 exclusiveCompanionId → 否则 { kind: "not-eligible" }
 7. 读 companion → enabled && removedAt === null → 否则 { kind: "companion-unavailable" }
-8. 遍历 orders 统计该打手 status ∈ {accepted, serving} 的单数 → 达到上限 → { kind: "concurrency-limit", limit, active }
-9. 写 dispatch：state="accepted", acceptedByCompanionId, acceptedAt
-10. 写 order：status="accepted", **actualCompanionId**, companion 快照, acceptedAt
-11. 写通知给用户（appendNotification，同步）
+8. 写 dispatch：state="accepted", acceptedByCompanionId, acceptedAt
+9. 写 order：status="accepted", **actualCompanionId**, companion 快照, acceptedAt
+10. 写通知给用户（appendNotification，同步）
 // —— 原子区段结束 ——
 ```
 
-第 8 步用 `Math.trunc` 无关，纯粹计数；上限来自 `DEFAULT_MAX_CONCURRENT_ORDERS`（P1-5 替换为等级映射）。
+第 5 步**必须在第 8 步之前**，而且判的是 `deadline`、不是 `state`：数据库里 `state` 还是
+`public` 只是因为 sweep 还没跑，**这不代表还能抢**。业务事实由 deadline 决定。
+
+**没有并发上限这一步**：`concurrency-limit` 属于 P1-5，本批次不实现。
+
+**`actualCompanionId` 与 `acceptedByCompanionId` 只在第 8、9 步这一处同时写入**，
+且两处都在同一个无 `await` 区段里——结构上不可能只写一边。
 
 **并发抢单的验证方式**：Node 单线程 + 区段内无 `await` ⇒ 两个并发 `acceptDispatch` 必然串行执行，第二个进入时 `state` 已是 `"accepted"`，在第 4 步被拒。测试用 `Promise.all([accept(a), accept(b)])` 断言**恰好一个** `kind === "ok"`，另一个是 `{ kind: "not-open", state: "accepted" }`。
 
 **超时清扫（`sweepExpiredDispatches`，同步、无 await）**
 
-遍历 `state ∈ {exclusive, public}` 且 `deadlineAt <= at` 的记录 → 置 `timed_out` + 订单全额退款（`status="refunded"`, `refundedAt`, `refundedAmount = actualPaidAmount`）+ 给用户写通知。返回被处理的订单 id 列表。
+遍历 `state ∈ {exclusive, public}` 且**当前池的** deadline `<= at` 的记录，按池分流：
+
+| 到点时所在池 | 处理 | 订单 |
+|---|---|---|
+| `exclusive` | `state = "public"`，**重记** `publicPoolEnteredAt = at`、`publicTimeoutMinutesSnapshot = 当时的平台配置`、`publicDeadlineAt = at + 快照`；`exclusiveCompanionId` / `exclusiveEnteredAt` / `exclusiveDeadlineAt` **原样保留** | **不动**，仍是 `paid`。**不退款** |
+| `public` | `state = "timed_out"`，写 `timedOutAt` | `status = "refunded"`, `refundedAt`, `refundedAmount = actualPaidAmount` |
+
+两种到点各写一条用户通知。返回 `{ movedToPublicDispatchIds, refundedOrderIds }`。
+
+⚠️ **幂等**：函数只处理「当前池的 deadline 已到且 state 仍是那个池」的记录。
+第二次调用时专属单已经是 `public`、公共单已经是 `timed_out`，因此**不会**重复转池、
+重复退款、重复发通知。**连跑 20 次与跑 1 次结果完全相同**，而且与「上一次什么时候查」无关。
+
+⚠️ **专属池到点不退款**：那只是「A 没接」，订单还在等人接，退钱就等于把一张还能成交的
+订单作废。只有公共池到点（平台已给足时间、仍无人接）才退款。
+
+⚠️ **通知幂等不靠随机 id**：通知写在**同一次状态迁移的原子区段内**，
+而这条迁移每单至多发生一次（`exclusive→public`、`public→refunded`、`→accepted`），
+因此「同一订单 + 同一业务事件」天然只写一条。重复 sweep 连迁移都不会发生，更不会写通知。
 
 **调用点（惰性推进，见决策 D1）**：用户端订单列表/详情读取前、打手端池列表读取前、管理端订单列表读取前各调用一次。每次调用都在 `await` 之前同步完成。
 
@@ -920,28 +964,31 @@ export function sweepExpiredDispatches(
 > 历史数据的 `exclusiveCompanionId === actualCompanionId` 是**存量事实**（这些单当初就直接绑定了人），不是规则。**不要**把这条写进任何生产逻辑或断言成不变量。
 
 **测试要点**
-- 状态机：`exclusive` 超 10 分钟 → `public`；`public` 达配置 → `timed_out` + 订单 `refunded` + `refundedAmount === actualPaidAmount`
-- 主动放弃：`exclusive` → `public` 且 `publicEnteredAt` 为当前时刻、`declinedByCompanionIds` 含该打手
-- **accepted 后无放弃入口**：断言 `/api/companion/dispatches/[id]/decline` 对 `state === "accepted"` 返回 `BAD_REQUEST`
+- 状态机：`exclusive` 超 10 分钟 → `public`（**订单仍 `paid`、不退款**）；`public` 达配置 → `timed_out` + 订单 `refunded` + `refundedAmount === actualPaidAmount`
+- **没有 decline**：仓库里不存在 `declineExclusiveDispatch` / decline 路由 / `declinedByCompanionIds`（负向扫描）
 - 快照冻结：订单入公共池后改配置，其 `publicDeadlineAt` 不变；之后新入池的订单用新值
+- **转池重新冻结**：专属超时转公共时，用的是**转池那一刻**的配置，不是专属阶段或更早的配置
 - 专属池资格：非指定打手接单 → `{ kind: "not-eligible" }`
-- 并发上限：打手已有 N 单时接新单 → `{ kind: "concurrency-limit" }`
 - 并发抢单：`Promise.all` 两个接单 → 恰好一个成功
+- **过期不可抢**：deadline 已到但**尚未 sweep** 时接单 → `{ kind: "expired" }`（不依赖 sweep 是否跑过）
+- **sweep 幂等**：连跑 20 次，退款只发生一次、通知只有一条、订单只变一次
 - 池内 DTO **不含** `gameAccountId` / `remark`（键名断言）
 - **无需改动即通过的语义**：订单进公共池、被 B 接单后，`Dispatch.exclusiveCompanionId` **仍是 A**（断言未被清空）
-- **`actualCompanionId` 与 `acceptedByCompanionId` **永不漂移**：任何一次 `acceptDispatch` 之后，`order.actualCompanionId === dispatch.acceptedByCompanionId`（对 A 未接 → B 接 的完整路径断言）
+- **`actualCompanionId` 与 `acceptedByCompanionId` 永不漂移**：任何一次 `acceptDispatch` 之后，`order.actualCompanionId === dispatch.acceptedByCompanionId`（对 A 未接 → B 接 的完整路径断言）
 - **不得复制**：指定 A 且 A 接单时，两者相等；指定 A 而 B 接单时，`exclusiveCompanionId !== actualCompanionId`——**断言这条路径下二者不相等**（如果有人图省事把指定值抄进实际值，这条会红）
 - **管理端 DTO 两个字段都在**：`exclusiveCompanion` 与 `actualCompanion` 同时存在；在「指定 A、实际 B」的订单上分别断言为 A 与 B
+- **自动退款不产生售后**：公共池超时退款后，售后 / 投诉记录数不变
 
 **手工验收**
 1. 把公共池超时配成 `1` 分钟
 2. 不下单指定打手 → 支付 → 打手工作台「公共池」立刻看到该单，**看不到游戏账号与备注**
 3. 另一个打手点接单 → 该单从池中消失；下单用户订单详情变「已接单」
-3b. **指定打手未接的场景**：结算页指定 A → 等 10 分钟（或直接把 `EXCLUSIVE_WAIT_MINUTES` 临时改小）→ 订单进公共池 → B 接单 → 后台订单详情同时显示「指定：A」与「实际：B」
+3b. **指定打手未接的场景**：结算页指定 A → 等 10 分钟（或直接把 `EXCLUSIVE_WAIT_MINUTES` 临时改小）→ 订单**不退款**、自动进公共池 → B 接单 → 后台订单详情同时显示「指定：A」与「实际：B」
 4. 再接一次 → 被拒（已被抢）
 5. 重新下单，等 1 分钟刷新用户订单页 → 订单变「已退款」，且**没有**产生售后案件
 6. 结算页指定打手 → 支付 → 只有该打手在「专属池」看到
-7. 该打手点「不接」→ 订单立刻进公共池，**不用等满 10 分钟**；再想撤回 → 无入口
+7. 该打手**什么都不做**，等满 10 分钟 → 订单自动进公共池，进入公共池时按**当时的**配置重新计时；
+   **确认页面上没有「不接 / 放弃 / 拒绝」按钮，接口里也没有对应路由**
 
 ---
 
@@ -1118,13 +1165,13 @@ export function sumEffectiveSpend(orders: readonly Order[]): number {
 
 **硬约束**：**不得**给客服「替打手提交完成材料」的入口；`serving` 订单在被禁后不得由该打手产生任何写入。
 
-**测试**：禁用时 `accepted` 订单 → `Dispatch.state` 回 `public`、`publicEnteredAt` 等于封禁时刻、`publicDeadlineAt` 按订单快照重算；禁用时 `serving` 订单 → 生成售后案件且订单状态不变；被禁打手对原订单调用接单 / 开始服务 / 提交材料 → 全部被拒；封禁写入审计。
+**测试**：禁用时 `accepted` 订单 → `Dispatch.state` 回 `public`、`publicPoolEnteredAt` 等于封禁时刻、`publicDeadlineAt` 按订单快照重算；禁用时 `serving` 订单 → 生成售后案件且订单状态不变；被禁打手对原订单调用接单 / 开始服务 / 提交材料 → 全部被拒；封禁写入审计。
 
 **手工验收**：给打手接一单（未开始服务）→ 后台禁用该打手 → 订单立刻回到公共池且**重新开始计时**（不是沿用旧截止时间）、用户收到通知；再走一遍已开始服务的场景 → 订单进入售后，该打手的「提交完成材料」按钮消失且接口拒绝。
 
 #### P1-5 打手等级 B/A/S + 并发上限
 
-**改动**：`Companion` 增 `level: "B" | "A" | "S"`；`DEFAULT_MAX_CONCURRENT_ORDERS` 常量**被替换**为等级映射（默认 B=3 / A=4 / S=5，见 R6）；管理端护航详情可设等级。
+**改动**：`Companion` 增 `level: "B" | "A" | "S"`；**首次引入**并发上限（P0-5 刻意不做，见 C14），按等级映射（默认 B=3 / A=4 / S=5，见 R6）；管理端护航详情可设等级。
 
 **修改文件**：`lib/types/companion.ts`、`lib/constants/companion.ts`、`lib/data/companionDispatchTransaction.ts`、`lib/services/adminCompanions.ts`、`components/admin/AdminCompanionForm.tsx`、`lib/mocks/fixtures/seed.ts`、`tests/adminCompanions.test.mjs`。
 

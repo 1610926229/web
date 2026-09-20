@@ -24,7 +24,7 @@ import type { AdminUserSummary } from "./user";
 /**
  * 用户端订单状态。
  *
- * - `paid`      已付款（下单即此状态；此时允许还没有陪玩）
+ * - `paid`      已付款（下单即此状态；此时允许还没有打手）
  * - `accepted`  已接单（必须有陪玩）
  * - `serving`   护航中（必须有陪玩）
  * - `completed` 已完成（必须有陪玩）
@@ -131,12 +131,31 @@ export type Order = {
   refundedAmount: number;
 
   /**
-   * 陪玩快照；未绑定时为 null。
+   * **实际接到这单**的打手 id；还没有人接时为 null（P0-5 改名，原名 `companionId`）。
    *
-   * 「未绑定」只允许出现在 `paid`：已接单 / 护航中 / 已完成必须有陪玩，
+   * ⚠️ 它回答的是「**谁在履约**」，不是「用户想要谁」。两件事现在是两个字段：
+   *
+   * | 问题 | 字段 | 写入时机 |
+   * |---|---|---|
+   * | 用户**指定**过谁 | `Dispatch.exclusiveCompanionId` | 下单那一刻（结算页选的人） |
+   * | 实际**接到**的是谁 | 本字段 | 接单那一刻 |
+   *
+   * 一条真实路径：用户指定 A → A 十分钟内没接 → 自动进公共池 → B 接单。
+   * 此时 `Dispatch.exclusiveCompanionId` 是 A、本字段是 B，两个事实都留得住。
+   *
+   * 旧名字同时表达这两件事，是 P0-5 之前「下单即绑定」那套模型的遗留：那时
+   * 「选的人」与「接的人」必然是同一个。现在它们可以是两个人，一个字段就再也
+   * 表达不了——这也正是改名的理由。
+   *
+   * ⚠️ 它**只由接单事务写**（`lib/data/companionDispatchTransaction.ts`），
+   * 而且与 `Dispatch.acceptedByCompanionId` 在同一段无 `await` 的代码里一起写：
+   * 两处永远一致，结构上不可能只写一边。
+   *
+   * 「还没有人接」只允许出现在 `paid`：已接单 / 护航中 / 已完成必须有打手，
    * 否则页面会显示成「等待接单」，与真实进度矛盾。
    */
-  companionId: string | null;
+  actualCompanionId: string | null;
+  /** 实际接单打手的公开信息快照；还没有人接时为 null */
   companion: OrderCompanionSnapshot | null;
 };
 
@@ -159,6 +178,31 @@ export type OrderListItem = {
   totalAmount: number;
   /** 未绑定时为 null，页面显示「等待接单」 */
   companion: OrderCompanionSnapshot | null;
+};
+
+/**
+ * 派单进度摘要（P0-5）：这一单现在在哪个池子里等人接、等到什么时候。
+ *
+ * ⚠️ 只有**还在等人接**的订单有这一项（`paid` 且未被人接走），其余为 null：
+ * 已接单 / 已退款时订单自己的状态已经说明了一切，再显示一行池子进度只会和状态栏打架。
+ *
+ * ⚠️ 这里**不说「用户当初指定了谁」**。那是用户自己做的选择，但把他人的昵称与头像
+ * 搬进订单详情属于另一件事（谁有权看到某位护航的资料），本批次不做。
+ * 「指定」与「实际」两个事实的对照在**管理端**订单详情上（见 `AdminOrderDetail`）。
+ */
+export type OrderDispatchProgress = {
+  /** 当前所在的池 */
+  pool: "exclusive" | "public";
+  /** 池子的显示名（文案集中在 `lib/constants/dispatch.ts`） */
+  poolLabel: string;
+  /** 当前池子的截止时间 */
+  deadlineAt: string;
+  /**
+   * 服务端算好的剩余秒数。**只用于显示**，不参与任何判定——
+   * 能不能接、要不要退款一律由服务端的 `deadline <= now` 决定，
+   * 客户端算出来的时间不可信。
+   */
+  remainingSeconds: number;
 };
 
 /** 详情页的状态时间轴节点：只包含**已经发生**的节点。 */
@@ -225,6 +269,14 @@ export type OrderDetail = OrderListItem & {
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
 
+  /**
+   * 派单进度：还在等人接时给出当前池与截止时间，其余为 null（P0-5）。
+   *
+   * 它回答的是「我的单现在在哪等人接」，与「等的是谁」是两件事：
+   * 用户当初指定的人记在派单上，被谁接走则体现在 `companion` 与订单状态里。
+   */
+  dispatchProgress: OrderDispatchProgress | null;
+
   /** 这一单的退款申请摘要；没有申请过为 null */
   refundSummary: RefundSummary | null;
   /** 这一单的投诉摘要；没有投诉过为 null */
@@ -288,7 +340,19 @@ export type AdminOrderDetail = AdminOrderListItem & {
   addons: OrderAddonSnapshot[];
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
-  companion: OrderCompanionSnapshot | null;
+
+  /**
+   * 用户**指定**的护航；没指定为 null（P0-5，原字段名 `companion`）。
+   *
+   * 来自派单的 `exclusiveCompanionId`，**不是**订单上的字段：订单只记得「谁在履约」。
+   * 它与实际接单的人可以**同时有值且不相同**——用户指定 A、A 十分钟没接、
+   * B 从公共池接走，这一单在后台就该显示成「指定：A / 实际：B」。
+   * 只给一个字段的话，「用户要的人没接」这件事在后台完全不可见，
+   * 客服也就回答不了「我明明指定了 A，怎么是 B 在打」。
+   */
+  exclusiveCompanion: OrderCompanionSnapshot | null;
+  /** **实际接到**这一单的护航；还没有人接为 null（来自 `Order.companion`） */
+  actualCompanion: OrderCompanionSnapshot | null;
 
   /** 这一单的退款申请摘要；没有申请过为 null。完整内容要去退款详情看 */
   refundSummary: RefundSummary | null;

@@ -14,7 +14,7 @@ import {
 import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
 import { COMPLAINT_STATUS_LABELS } from "@/lib/constants/complaints";
 import { getAdminOrderDetail } from "@/lib/services/adminOrders";
-import type { AdminOrderDetail } from "@/lib/types/order";
+import type { AdminOrderDetail, OrderCompanionSnapshot } from "@/lib/types/order";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
 import { toSearchParams } from "@/lib/utils/query";
 
@@ -173,31 +173,63 @@ function AmountSection({ order }: { order: AdminOrderDetail }) {
   );
 }
 
-/** 陪玩快照。未绑定时说明「尚未接单」——`paid` 之外的订单一定有陪玩。 */
+/**
+ * 护航：**指定**的人与**实际接单**的人分两行写（P0-5）。
+ *
+ * 这两件事可以是两个人：用户指定 A、A 十分钟内没接、订单自动进公共池、B 接走。
+ * 合成一行的话，「我明明指定了 A，怎么是 B 在打」在后台就查不出来——
+ * 而那正是客服最需要回答的问题。
+ *
+ * 「实际接单」为空只可能出现在还在等人接的订单上（`paid`）：
+ * 已接单及之后的状态一定有护航，这是订单自身的约束。
+ */
 function CompanionSection({ order }: { order: AdminOrderDetail }) {
   return (
     <Section title="护航">
-      {order.companion ? (
-        <div className="flex items-center gap-3">
+      <CompanionRow label="用户指定" companion={order.exclusiveCompanion} emptyHint="用户未指定护航" />
+      <CompanionRow
+        label="实际接单"
+        companion={order.actualCompanion}
+        emptyHint="还没有人接单"
+      />
+    </Section>
+  );
+}
+
+/** 一行护航快照：头像 + 昵称 + 资料入口。没有这个人时如实说明，不补占位。 */
+function CompanionRow({
+  label,
+  companion,
+  emptyHint,
+}: {
+  label: string;
+  companion: OrderCompanionSnapshot | null;
+  emptyHint: string;
+}) {
+  return (
+    <div className="flex items-center gap-3 py-1.5">
+      <span className="w-16 shrink-0 text-[12px] text-ink-3">{label}</span>
+      {companion ? (
+        <>
           <img
-            src={order.companion.avatarUrl}
+            src={companion.avatarUrl}
             alt=""
             className="h-10 w-10 shrink-0 rounded-full border border-admin-line object-cover"
           />
           <div className="min-w-0">
-            <p className="text-[13px] text-ink">{order.companion.name}</p>
+            <p className="text-[13px] text-ink">{companion.name}</p>
             <Link
-              href={`/admin/companions/${order.companion.id}`}
+              href={`/admin/companions/${companion.id}`}
               className="text-[12px] text-admin-accent underline-offset-2 hover:underline"
             >
               查看护航资料
             </Link>
           </div>
-        </div>
+        </>
       ) : (
-        <p className="text-[13px] text-ink-3">尚未绑定护航（已接单及之后的订单一定会有）。</p>
+        <p className="text-[13px] text-ink-3">{emptyHint}</p>
       )}
-    </Section>
+    </div>
   );
 }
 

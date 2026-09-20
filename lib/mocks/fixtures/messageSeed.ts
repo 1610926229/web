@@ -110,11 +110,11 @@ function buildConversation(input: PresetConversationInput): {
         ? { id: order.userId, name: userName(order.userId), avatarUrl: userAvatar(order.userId) }
         : message.role === "customer_service"
           ? { id: staff.id, name: staff.displayName, avatarUrl: staff.avatarUrl }
-          : order.companionId
+          : order.actualCompanionId
             ? {
-                id: order.companionId,
-                name: companionOf(order.companionId).displayName,
-                avatarUrl: companionOf(order.companionId).avatarUrl,
+                id: order.actualCompanionId,
+                name: companionOf(order.actualCompanionId).displayName,
+                avatarUrl: companionOf(order.actualCompanionId).avatarUrl,
               }
             : null;
 

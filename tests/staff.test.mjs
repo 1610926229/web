@@ -1225,7 +1225,8 @@ test("客服发消息不改订单：状态、金额、商品与消费等级、�
 test("客服账号不进用户名单，也不参与消费：它是独立的第三类身份", async () => {
   const accounts = await getStaffRepository().listStaff();
   const userIds = new Set(userSeed.map((user) => user.id));
-  const companionIds = new Set(orderSeed.map((order) => order.companionId).filter(Boolean));
+  // P0-5 起订单上只剩「实际接单的人」这一个护航字段（用户指定的人记在派单上）
+  const companionIds = new Set(orderSeed.map((order) => order.actualCompanionId).filter(Boolean));
 
   for (const account of accounts) {
     assert.equal(userIds.has(account.id), false, "客服账号不能混成普通用户");

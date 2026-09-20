@@ -1,0 +1,190 @@
+import { plusMinutes } from "@/lib/constants/dispatch";
+import { buildDispatchSeed } from "@/lib/mocks/fixtures/dispatchSeed";
+import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
+import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
+import type { DispatchRecord } from "@/lib/types/dispatch";
+import { getMockStore } from "./mockStore";
+import type { DispatchRepository } from "./dispatchRepository";
+
+/**
+ * 派单记录的**进程内** Mock 存储（P0-5）。
+ *
+ * ⚠️ 仅用于本地开发：数据只在内存里，开发服务器重启后回到预置值；
+ * 不写 localStorage、不写文件、不写数据库。将来由真实数据库替换
+ * （唯一索引 + 事务），本文件的删除不影响上层接口。
+ *
+ * store 的挂载与建仓语义见 `lib/data/mockStore.ts`：`createStore` 只执行一次。
+ *
+ * ## 写入为什么全在这里，而不是在仓储接口上
+ *
+ * 接单、转公共池、超时关闭这三件事都发生在**原子区段**里：区段内出现 `await`
+ * 就是 bug（会让出执行权，别的请求就能插进来）。因此它们不能走
+ * `getDispatchRepository()` 的异步方法，只能用本文件导出的**同步写原语**。
+ *
+ * 与 `mockPaymentRepository` 的 `applyOrderRefund` 同一个套路：**这些原语只负责写，
+ * 不判断这次迁移合不合法**——合法性（能不能接、有没有到点、是不是同一个人）
+ * 由伪事务在调用它们之前判定（`lib/data/companionDispatchTransaction.ts`）。
+ * 拆成两处是因为「谁能改派单」只应该有伪事务一处，而写入本身需要一个
+ * 不让人拿到 `Map` 的入口。
+ *
+ * 并发安全的前提：Node 是单线程的，而下面每个函数的「读—判断—写」里**没有 await**，
+ * 因此各自是一个原子动作；它们的**组合**（读订单 + 读打手 + 写派单 + 写订单 + 写通知）
+ * 的原子性由伪事务保证。
+ */
+
+type MockDispatchStore = {
+  /** 派单 id → 记录。一个订单同时只可能有一条（见 `createDispatchRecord`） */
+  dispatches: Map<string, DispatchRecord>;
+  /** `orderId` → 派单 id。保证「一个订单只有一条派单记录」这个不变量 */
+  dispatchIdByOrder: Map<string, string>;
+};
+
+/**
+ * 建仓时把预置派单放进**同一个** `dispatches` Map。
+ *
+ * 预置订单与支付成功新生成的订单走的是同一条查询路径（与订单 store 一致）：
+ * 这里不提供任何「预置派单列表」的旁路，否则「新订单立刻出现在池子里」验证不了。
+ */
+function createStore(): MockDispatchStore {
+  const seedNow = getMockSeedNow();
+  const orders = [...orderSeed, ...buildRankingPeriodOrders(seedNow)];
+  const seeded = buildDispatchSeed(orders, seedNow);
+
+  return {
+    dispatches: new Map(seeded.map((record) => [record.id, record])),
+    dispatchIdByOrder: new Map(seeded.map((record) => [record.orderId, record.id])),
+  };
+}
+
+function store(): MockDispatchStore {
+  return getMockStore("dispatch", createStore);
+}
+
+/**
+ * 把这份存储交给伪事务使用（**只读句柄，绝不在调用方缓存**）。
+ *
+ * ⚠️ 测试里的 `resetMockStore()` 会换掉整份存储，因此句柄必须**每次现取**。
+ */
+export function dispatchStore(): MockDispatchStore {
+  return store();
+}
+
+/**
+ * 新建一条派单记录（**同步**）。
+ *
+ * ⚠️ 一个订单只允许有一条派单记录，因此这里**不覆盖**已有记录，而是原样返回它：
+ * 覆盖等于把「这一单在等谁、等到什么时候」悄悄换掉，而那条记录可能已经被
+ * 别的请求读过、甚至已经决定了别人的接单结果。
+ *
+ * 调用方是 `createDispatchForOrder`，它在支付仓储的原子区段内被调用——
+ * 订单与派单必须**同时**诞生，否则中间那一刻的订单既没有截止时间、也没有人能看到它。
+ */
+export function createDispatchRecord(record: DispatchRecord): DispatchRecord {
+  const current = store();
+
+  const existingId = current.dispatchIdByOrder.get(record.orderId);
+  if (existingId) {
+    const existing = current.dispatches.get(existingId);
+    if (existing) return existing;
+    // 索引命中但记录已不存在属于不可能状态；真出现时补写，保证订单不会卡在「无派单」
+    current.dispatchIdByOrder.delete(record.orderId);
+  }
+
+  current.dispatches.set(record.id, record);
+  current.dispatchIdByOrder.set(record.orderId, record.id);
+  return record;
+}
+
+/**
+ * 接单（**同步写入器**，无 `await`）。
+ *
+ * 写派单的 `acceptedByCompanionId` / `acceptedAt` / 状态。
+ *
+ * ⚠️ 订单那一侧（`status = accepted`、`actualCompanionId`）**不在本函数里**：
+ * 它由伪事务在**同一个**无 `await` 区段里紧跟着写。两处必须在同一区段，
+ * 否则会出现「派单说被 A 接了、订单说没人接」这种自相矛盾的状态。
+ */
+export function applyDispatchAccepted(
+  id: string,
+  companionId: string,
+  at: string,
+): DispatchRecord | null {
+  const current = store();
+  const record = current.dispatches.get(id);
+  if (!record) return null;
+
+  const updated: DispatchRecord = {
+    ...record,
+    state: "accepted",
+    acceptedByCompanionId: companionId,
+    acceptedAt: at,
+    updatedAt: at,
+  };
+  current.dispatches.set(id, updated);
+  return updated;
+}
+
+/**
+ * 专属池到点 → 转公共池（**同步写入器**，无 `await`）。
+ *
+ * 三件事同时发生，缺一不可：
+ * 1. 状态回到 `public`；
+ * 2. **重记**公共池的进入时刻与截止时间——不是沿用上一次，专属池从来没有过公共池截止时间；
+ * 3. **按此刻的配置重新冻结快照**：用户被承诺的是「进入池子那一刻的规则」。
+ *
+ * ⚠️ `exclusiveCompanionId` / `exclusiveEnteredAt` / `exclusiveDeadlineAt`
+ * **一个都不清空**：它们是历史事实，管理端与客服以后要能回答
+ * 「用户当初指定的是谁」。
+ */
+export function applyDispatchToPublic(
+  id: string,
+  enteredAt: string,
+  timeoutMinutes: number,
+): DispatchRecord | null {
+  const current = store();
+  const record = current.dispatches.get(id);
+  if (!record) return null;
+
+  const updated: DispatchRecord = {
+    ...record,
+    state: "public",
+    publicPoolEnteredAt: enteredAt,
+    publicDeadlineAt: plusMinutes(enteredAt, timeoutMinutes),
+    publicTimeoutMinutesSnapshot: timeoutMinutes,
+    updatedAt: enteredAt,
+  };
+  current.dispatches.set(id, updated);
+  return updated;
+}
+
+/** 公共池到点仍无人接 → 关闭（**同步写入器**，无 `await`）。订单退款不在这里。 */
+export function applyDispatchTimedOut(id: string, timedOutAt: string): DispatchRecord | null {
+  const current = store();
+  const record = current.dispatches.get(id);
+  if (!record) return null;
+
+  const updated: DispatchRecord = {
+    ...record,
+    state: "timed_out",
+    timedOutAt,
+    updatedAt: timedOutAt,
+  };
+  current.dispatches.set(id, updated);
+  return updated;
+}
+
+export const mockDispatchRepository: DispatchRepository = {
+  async listOpenDispatches() {
+    // 两种「还在等人接」的池子。已接 / 已关闭的不进池子列表——
+    // 「能被接的单」只有这两类，多带一类就会有人对着一张已接的单再点一次接单
+    return [...store().dispatches.values()].filter(
+      (record) => record.state === "exclusive" || record.state === "public",
+    );
+  },
+
+  async findDispatchByOrderId(orderId) {
+    const current = store();
+    const id = current.dispatchIdByOrder.get(orderId);
+    return id ? (current.dispatches.get(id) ?? null) : null;
+  },
+};

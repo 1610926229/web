@@ -6,9 +6,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Greenfield. `app/` is still the untouched `create-next-app` scaffold — one route, `/`. The product spec lives in `docs/prototype/` as 17 phone-screen prototypes (1260×2750 JPEGs, Chinese UI copy), captured in the WeChat in-app browser. They are the source of truth for the UI and **none of them is implemented yet**. Read the relevant prototype before building a screen; there is no existing code to match against.
+**Not greenfield.** `app/` is a working application, not the `create-next-app` scaffold. The layered architecture (`app/` → `lib/services/` → `lib/data/` → mock store) is established and enforced across the whole repo.
 
-The product ("有目电竞") is a mobile-first H5 storefront for esports companion/boosting services (陪玩 / 护航 / 打手), opened inside WeChat. The prototypes establish a five-tab bottom nav — 首页 / 分类 / 订单 / 客服 / 我的 — and flows for product packages (机密单), orders, payment, coupons, spending leaderboard, tips (鸡腿记录), complaints, spending tiers, and agreements. Design mobile-first; do not build desktop-first layouts and shrink them.
+| Fact | Value |
+|---|---|
+| Ends | **Four** — 用户端 `app/(mobile)/` · 管理后台 `app/admin/` · 客服工作台 `app/staff/` · 打手工作台 `app/companion/` |
+| Pages | 73 `page.tsx`, 8 `layout.tsx` |
+| API routes | 115 `route.ts` (`admin` 62 · `staff` 16 · rest user-facing) |
+| Repositories | 23 (interface + mock impl + `globalThis` store) |
+| Tests | 51 files, 1011 cases — `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm build` all green |
+| Product name | **超哥电竞** — `lib/constants/site.ts:11` `PLATFORM_NAME`. The name "有目电竞" is **wrong** |
+
+The product is a mobile-first H5 storefront for esports companion/boosting services (陪玩 / 护航 / 打手), opened inside WeChat. Five-tab bottom nav — 首页 / 分类 / 订单 / 客服 / 我的. Design mobile-first; do not build desktop-first layouts and shrink them.
+
+**Prototypes:** `docs/ui-reference/prototype/` — 18 JPEGs (1260×2750, Chinese UI copy) captured in the WeChat in-app browser.
+⚠️ **`docs/prototype/` no longer exists** (the old path in this file was stale).
+
+⚠️ **The prototypes are the source of truth for UI only.** "The page shows it" is **not** evidence that the feature is implemented. There is no database and no real payment channel; much of the app runs on `globalThis` mock stores that reset when the dev server restarts.
+
+## 开发前必读
+
+开发业务前必须阅读（按顺序）：
+
+```
+docs/03-dev/development-workflow.md            ← 开发轮次记录协议（先读：本轮该怎么走）
+docs/03-dev/总需求进度表.md                     ← 全局项目进度唯一真值源
+docs/01-requirements/                          ← 业务流程 / 用户权限 / 特殊情况与异常处理（权威需求）
+docs/02-tech-design/architecture-rules.md      ← 分层职责、唯一真值源、金额规则、Observed Current vs 规范
+docs/02-tech-design/tech-stack.md              ← 技术选型与技术引入规则
+docs/02-tech-design/directory-structure.md     ← 每个目录的职责与「新功能放置规则」
+docs/02-tech-design/api-contract.md            ← 现有 115 个接口、约定、TARGET 与 TBD
+docs/02-tech-design/database-schema.md         ← 逻辑数据模型、TARGET 领域、未来 DB 迁移约束
+```
+
+若上述文档中出现 **TBD**：**禁止自行决定**，先问产品负责人。
+文档里的 **TARGET** 一律标注 `NOT IMPLEMENTED` 的一律是**尚未实现**，不得当作已有能力使用。
+
+**所有正式业务开发批次必须创建对应 `docs/03-dev/rounds/<ROUND_ID>/`，遵循 Development Round Protocol。若 Round 存在 OPEN decision，禁止开始业务编码。**
 
 ## Commands
 
@@ -49,8 +83,9 @@ The changes most likely to bite in this repo:
 
 ## Stack notes
 
-- **Tailwind CSS v4, configured CSS-first.** There is no `tailwind.config.js`; theme tokens live in `app/globals.css` under `@theme inline` (currently `--color-background`, `--color-foreground`, `--font-sans`, `--font-mono`). Add design tokens there, not in a JS config. The PostCSS plugin is `@tailwindcss/postcss`.
-- Fonts are wired through `next/font` in `app/layout.tsx` (Geist / Geist Mono) as CSS variables that the `@theme` block consumes.
+- **Tailwind CSS v4, configured CSS-first.** There is no `tailwind.config.js`; theme tokens live in `app/globals.css` (233 lines) under `@theme { … }` — **not `@theme inline`**. The block holds the neutral palette (`--color-page` / `surface` / `ink` / `ink-2` / `ink-3` / `line`), the brand palette (`--color-brand-*`), the order status colours (`--color-status-*`), the order-tab gradient pair (`--color-tab-*`), and the font stacks. **Add design tokens there, not in a JS config.** The PostCSS plugin is `@tailwindcss/postcss`.
+- **No `next/font`.** The scaffold's Geist wiring was removed. `--font-sans` is a **Chinese system font stack** (PingFang SC / Microsoft YaHei / …), declared directly in `@theme` precisely to avoid a build-time network dependency — so `next/font/google` should not be reintroduced without a reason.
+- Order status colours are referenced **only** through `ORDER_STATUS_CLASS` in `lib/constants/orders.ts`; pages and cards must not hardcode them.
 - Import alias `@/*` maps to the repo root — there is no `src/` directory.
 - `pnpm-workspace.yaml` pins `allowBuilds` (e.g. `sharp: false`); a native dependency whose build script must run has to be allowed there.
 

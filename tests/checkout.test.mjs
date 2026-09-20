@@ -279,7 +279,9 @@ test("支付成功生成订单，金额与请求一致且状态为「已付款�
   assert.equal(confirmed.order.refundedAt, null);
   // 未选择陪玩时如实为 null，页面据此显示「等待接单」
   assert.equal(confirmed.order.companion, null);
-  assert.equal(confirmed.order.companionId, null);
+  // P0-5：下单**只是进了订单池**，还没有人接单——「实际接单的人」必须为空。
+  // 用户当初有没有指定人，记在派单的 exclusiveCompanionId 上，不写进这个字段。
+  assert.equal(confirmed.order.actualCompanionId, null);
 });
 
 // ——————————————————————————— 金额域（P0-3）———————————————————————————

@@ -154,6 +154,20 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
         ) : (
           <p className="mt-2 text-[13px] text-ink-3">等待接单</p>
         )}
+
+        {/*
+          派单进度（P0-5）：还在等人接的时候，说清「这一单现在在哪个池子里等人接、还剩多久」。
+          没有这一行，用户在下单后到接单前这段时间里看到的只是一句「等待接单」——
+          指定了人也一样，看不出平台到底有没有在推进。
+
+          ⚠️ 剩余时间是**服务端在这一刻算好的一个数**，不是页面上的倒计时：
+          到没到点由服务端判定，页面上的数字不参与任何决定。
+        */}
+        {detail.dispatchProgress ? (
+          <p className="mt-2 rounded-lg bg-page px-3 py-2 text-[12px] leading-5 text-ink-3">
+            {detail.dispatchProgress.poolLabel} · 剩余 {formatRemaining(detail.dispatchProgress.remainingSeconds)}
+          </p>
+        ) : null}
       </section>
 
       {/* 状态时间轴：只列出已经发生的节点 */}
@@ -279,6 +293,20 @@ function ActionRow({
       </span>
     </Link>
   );
+}
+
+/**
+ * 剩余时间：只在这个页面上格式化，不引入「倒计时」这种会自己走的组件。
+ *
+ * 秒数已经由服务端算好（`remainingSeconds`），这里只做单位换算：
+ * 超过一分钟说「X 分」，不足一分钟说「不到 1 分钟」——
+ * 「剩余 0 分 12 秒」这种写法看着像在倒数，而它其实不会再变。
+ * 已过点时为 0（服务端保证不为负），显示成「即将结束」而不是「剩余 -3 分钟」。
+ */
+function formatRemaining(seconds: number): string {
+  if (seconds <= 0) return "即将结束";
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes} 分钟` : "不到 1 分钟";
 }
 
 /** 明细行：左标签右内容，长内容换行而不是把卡片撑宽。 */

@@ -14,6 +14,11 @@ import test from "node:test";
  * `routes.test.mjs` 检查路由表与入口地址，数据层测试检查业务规则，三者互补。
  *
  * 不设 `APP_BASE_URL` 时整组跳过，因此 `pnpm test` 在没有任何服务时依然全绿。
+ *
+ * ⚠️ **这组用例假定服务端的预置数据没被外部改过**。用例自身可以重复跑，但如果你先在
+ * 后台通过 / 驳回了某条**预置**的入驻申请（手工验收时很容易发生），入驻那一组会因为
+ * 找不到「待查看 / 审核中」的申请而失败——那是数据被改过，不是回归。
+ * 要跑门禁请**重启服务**（Mock 存储在内存里，重启即回到预置状态）。
  */
 
 const BASE = process.env.APP_BASE_URL;
@@ -49,8 +54,10 @@ const SKIP_SESSION = SKIP || (SESSION ? false : "服务端未开启 ENABLE_MOCK_
 /**
  * P7B 用的额外 Mock 身份。
  *
- * 账号切换只发生在接口层（`/api/auth/mock-login` 的请求体里），**用户端页面没有任何
- * 切换入口**；这里用它来覆盖「预置里有申请」的几种状态，以及一条不与其他用例争抢的
+ * 账号切换只发生在接口层（`/api/auth/mock-login` 的请求体里）。**用户端页面上唯一的
+ * 切换途径是「退出登录 → 在登录界面选下一个账号」**（P0-5 起，登录界面在 Mock 环境下
+ * 提供测试账号名单）；已登录的页面里没有任何「换个身份」的开关。
+ * 这里用它来覆盖「预置里有申请」的几种状态，以及一条不与其他用例争抢的
  * 申请人身份（`u-1008`：预置里没有申请、也没有任何有效消费，写进去不会影响排行榜）。
  */
 const SESSION_JOIN_PENDING = BASE ? await loginAs("u-1002") : null; // 预置「待查看」
@@ -103,9 +110,41 @@ test("游客可以打开 /rank 与 /agreements：本次改动不牵连它们", {
   }
 });
 
-test("/companion（单数）不再是正式页面", { skip: SKIP }, async () => {
-  const { status } = await get("/companion");
-  assert.equal(status, 404);
+/**
+ * ⚠️ 这条断言在 P0-4 被**反转**过，反转本身是有意的。
+ *
+ * 原先断言 `/companion`（单数）不是正式页面，理由是当时它只是一个未被采用的占位路由。
+ * P0-4 把 `/companion` 定为**打手工作台**之后，这条断言就变成了一条「钉住旧结论」的
+ * 谎言：它会要求一个已经上线的东西继续 404。这里改成断言它现在的真实契约——
+ * 游客拿到的是**统一登录引导**（与 `/join` 同一条守卫），而不是 404，也不是工作台内容。
+ *
+ * ⚠️ 未登录时**不断言**工作台的任何内容：`.includes()` 扫的是整份 HTML，
+ * 而登录引导页与工作台共用同一套文案常量，断言「不该出现」很容易扫到同名片段而假红。
+ * 「登录后不是打手会被挡下」由 `companionAccess.test.mjs` 与页面结构约束覆盖。
+ */
+test("游客打开 /companion 命中统一登录引导，而不是 404", { skip: SKIP }, async () => {
+  const { status, html } = await get("/companion");
+
+  assert.equal(status, 200, "/companion 不该 404：它是打手工作台（P0-4）");
+  assert.ok(html.includes(LOGIN_GATE_TEXT), "未登录时应显示统一登录引导");
+});
+
+/**
+ * P0-5 手工验收要靠「换个身份登录」跑完整链路，因此这里断言**名单真的渲染出来了**。
+ *
+ * 只在开了 `ENABLE_MOCK_AUTH` 时才有这份名单（`skip` 条件正是「模拟登录没开」），
+ * 所以这条断言同时也是「开关关闭时不出现测试账号」的反面证据：
+ * 关闭时整组跳过，而不是断言它不存在——那种「不存在」的断言在本地永远绿，
+ * 什么也证明不了。真正钉住开关的断言是源码结构约束（见 `tests/mockUsers.test.mjs`）。
+ */
+test("游客打开受保护页面：登录界面提供测试账号名单（仅 Mock 环境）", { skip: SKIP_SESSION }, async () => {
+  const { status, html } = await get("/settings");
+
+  assert.equal(status, 200);
+  assert.ok(html.includes(LOGIN_GATE_TEXT), "未登录应停在统一登录引导");
+  assert.ok(html.includes("老板A（占位）"), "缺少测试账号名单");
+  assert.ok(html.includes("u-1001"), "名单应显示 userId，便于与 Seed 对照");
+  assert.ok(html.includes("小满（占位）"), "缺少「需要先提交入驻申请」的候选账号");
 });
 
 test("游客打开 /join 命中统一登录引导（不是 404，也不是占位内容）", { skip: SKIP }, async () => {

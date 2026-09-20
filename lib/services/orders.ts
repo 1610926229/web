@@ -1,6 +1,9 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { DISPATCH_POOL_LABELS } from "@/lib/constants/dispatch";
 import { ORDER_STATUS_LABELS, parseOrderListQuery } from "@/lib/constants/orders";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
+import { sweepExpiredDispatches, toDispatchProgress } from "@/lib/data/companionDispatchTransaction";
+import { getDispatchRepository } from "@/lib/data/dispatchRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
@@ -11,6 +14,7 @@ import type {
   Order,
   OrderAllowedActions,
   OrderDetail,
+  OrderDispatchProgress,
   OrderListItem,
   OrderStatus,
   OrderTimelineEntry,
@@ -90,8 +94,16 @@ export type OrderDetailExtras = {
   allowedActions: OrderAllowedActions;
 };
 
-/** 订单 → 详情。游戏 ID 与备注只在这里出现，且只返回给订单所属用户。 */
-export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDetail {
+/**
+ * 订单 → 详情。游戏 ID 与备注只在这里出现，且只返回给订单所属用户。
+ *
+ * `dispatchProgress` 与四份售后摘要一样由服务层查好传进来：它不在订单上，
+ * 而在派单记录里（见 `OrderDispatchProgress`）。
+ */
+export function toOrderDetail(
+  order: Order,
+  extras: OrderDetailExtras & { dispatchProgress: OrderDispatchProgress | null },
+): OrderDetail {
   return {
     ...toOrderListItem(order),
     createdAt: order.createdAt,
@@ -134,11 +146,31 @@ export async function queryOrdersForUser(
   const parsed = parseOrderListQuery(params);
   if (!parsed.ok) throw new ApiError("BAD_REQUEST", parsed.message);
 
+  // 惰性物化超时事实（幂等）：一张在公共池里等到超时的订单，用户点开订单列表
+  // 就该看到它已经退款，而不是「等待接单」——那会让人以为还有希望。
+  // 放在查询**之前**，而且是不带 await 的同步调用（见全局约束 13）
+  materializeDispatchTimeouts();
+
   const page = await withMockDebug(params, surface, () =>
     getPaymentRepository().queryOrders({ ...parsed.query, userId }),
   );
 
   return { ...page, items: page.items.map(toOrderListItem) };
+}
+
+/**
+ * 把已经到点的派单写成事实。
+ *
+ * ⚠️ 这是**临时**的推进方式（决策 D1「deadline driven + lazy materialization」）：
+ * 超时不是被定时触发的，而是**到点就已经成立**，读取路径只是恰好把它写下来。
+ * 真实支付上线前必须换成后台调度器调用**同一个** `sweepExpiredDispatches()`
+ * （见整改计划 TD-1）——**不是**另写一套超时退款逻辑。
+ *
+ * ⚠️ 用 `new Date()` 而不是进程基准时间：超时是**真实时间**的事，
+ * 与「Mock 种子基准时间」无关（后者只用于让预置数据看起来新鲜）。
+ */
+function materializeDispatchTimeouts(): void {
+  sweepExpiredDispatches(new Date().toISOString());
 }
 
 /**
@@ -159,6 +191,8 @@ export async function getOrderDetailForUser(
 ): Promise<OrderDetail | null> {
   if (!orderId) return null;
 
+  materializeDispatchTimeouts();
+
   const order = await withMockDebug(params, surface, () =>
     getPaymentRepository().findOrderById(orderId),
   );
@@ -178,7 +212,15 @@ export async function getOrderDetailForUser(
       )
     : null;
 
+  // 派单进度：还在等人接就带上「现在在哪个池、还剩多久」，其余为 null。
+  // 退款订单在种子里没有派单记录，管理员手动退款也不动派单记录，因此必须容忍查不到
+  const dispatch = await getDispatchRepository().findDispatchByOrderId(order.id);
+  const progress = dispatch ? toDispatchProgress(dispatch, new Date().toISOString()) : null;
+
   return toOrderDetail(order, {
+    dispatchProgress: progress
+      ? { ...progress, poolLabel: DISPATCH_POOL_LABELS[progress.pool] }
+      : null,
     refundSummary: refund ? toRefundSummary(refund) : null,
     complaintSummary: toOrderComplaintSummary(complaintStats),
     conversationSummary,

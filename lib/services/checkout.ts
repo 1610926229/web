@@ -7,6 +7,7 @@ import {
 } from "@/lib/constants/checkout";
 import { resolveOrderMoneyDomain, type OrderMoneyDomain } from "@/lib/constants/orderAmount";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
+import { createDispatchForOrder } from "@/lib/data/companionDispatchTransaction";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getDataSource } from "@/lib/data/source";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
@@ -281,8 +282,24 @@ function makeOrderNo(now: Date): string {
   return `YM${stamp}${tail}`;
 }
 
+/**
+ * 由支付请求生成订单 —— **并且在这里同时建立派单记录**（P0-5）。
+ *
+ * ⚠️ 本函数跑在支付仓储的**原子区段**里（`confirmPaymentRequest` 的 `buildOrder` 回调），
+ * 因此它里面不能有任何 `await`：金额只能从支付请求上冻结的那份数据算，
+ * 派单也必须用**同步**的 `createDispatchForOrder()` 建立。
+ *
+ * ⚠️ **订单与派单必须同时诞生**。分成两步（先建订单、再建派单）会留下一个真实的窗口：
+ * 那一刻的订单既没有截止时间、也不会被任何池子看到、更不会超时退款——
+ * 一旦第二步失败，这张单就永远卡在「已付款、没人能接」。
+ *
+ * ⚠️ 订单创建时**不带打手**：`actualCompanionId` 与 `companion` 都是 null。
+ * 用户在结算页选的那位进的是 `Dispatch.exclusiveCompanionId`——「用户指定的人」
+ * 与「实际接单的人」是两个事实，订单上只写后者，而此刻还没有人接。
+ */
 function buildOrderFromRequest(request: PaymentRequest): Order {
   const now = new Date();
+  const at = now.toISOString();
   // 金额域在这里**从支付请求上冻结的那份数据**算出来：本函数跑在支付仓储的原子区段里，
   // 只能读请求上已有的字段（含下单那一刻冻住的分账比例），不能去取商品
   const money = resolveMoneyDomainForSelection({
@@ -292,13 +309,13 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     companionRateBp: request.companionRateSnapshot,
   });
 
-  return {
+  const order: Order = {
     id: `ord_${crypto.randomUUID()}`,
     orderNo: makeOrderNo(now),
     userId: request.userId,
     status: "paid",
-    createdAt: now.toISOString(),
-    paidAt: now.toISOString(),
+    createdAt: at,
+    paidAt: at,
     // 新订单只有「已付款」一个时间节点，其余状态由后续阶段推进时写入
     acceptedAt: null,
     servingAt: null,
@@ -328,9 +345,20 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     // 刚创建的订单一笔都没退过。累计已退由退款的写入路径维护（P1 接入退款金额公式）
     refundedAmount: 0,
 
-    companionId: request.snapshot.companion ? request.snapshot.companion.id : null,
-    companion: request.snapshot.companion,
+    // 还没有人接单。用户在下单时选的那位写在下面的派单记录里，不写在这里
+    actualCompanionId: null,
+    companion: null,
   };
+
+  // 与订单同一段、无 `await`：订单存在的那一刻，派单记录就必须已经存在
+  createDispatchForOrder({
+    orderId: order.id,
+    // 结算页选了人 → 专属池；没选 → 直接进公共池
+    exclusiveCompanionId: request.snapshot.companion ? request.snapshot.companion.id : null,
+    at,
+  });
+
+  return order;
 }
 
 /**

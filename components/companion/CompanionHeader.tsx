@@ -19,8 +19,9 @@ import type { CompanionSessionUser } from "@/lib/types/companionWorkspace";
  * **这里没有退出登录**。打手用的是用户账号，退出登录是用户端「我的」页面的事；
  * 在工作台再放一个退出按钮，会让人以为退出后还会留着一个「打手登录」入口。
  *
- * 导航用**前缀匹配**判断选中（`/staff` 那种全等特例在这里不需要：
- * `/companion` 目前只有一项，先按同一套规则写，将来加页面时行为已经是对的）。
+ * 导航用**前缀匹配**判断选中，`/companion` 是例外（全等比较）——理由与
+ * `StaffHeader` 完全相同：它是其余所有 `/companion/...` 的前缀，
+ * 前缀匹配会让概览在每个子页面上都亮着。
  *
  * 打手昵称取自**护航资料**（`displayName`），不是用户昵称：用户端看到的那位
  * 「陪玩」就是他，两处名称必须一致，否则用户下单时选的是另一个人。
@@ -29,6 +30,9 @@ export default function CompanionHeader({ companion }: { companion: CompanionSes
   const pathname = usePathname();
 
   function isActive(href: string): boolean {
+    // `/companion` 是其余所有 `/companion/...` 的前缀，必须全等比较：
+    // 用前缀匹配的话，站在订单池页面上「工作台」也会一起点亮（与 `StaffHeader` 同一条规则）
+    if (href === "/companion") return pathname === "/companion";
     return pathname === href || pathname.startsWith(`${href}/`);
   }
 

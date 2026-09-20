@@ -246,16 +246,24 @@ test("不是护航 / 已下架时不读第二次：一次判定同样只读一�
  * 结构约束：**一次页面请求只有一份资格结果**。
  *
  * 用例级的读取计数只能证明「这一个函数读了一次」，证明不了「页面只调用了它一次」。
- * 因此这里再加一条源码级约束，把「第二处调用点」挡在代码评审之前：
+ * 因此这里再加一条源码级约束，把「多出来的读取」挡在代码评审之前：
  *
- * - 工作台路由目录下，`resolveCompanionAccess` 只允许有**一处**调用点，且在布局层；
- * - 页面（`page.tsx`）与身份卡组件都是**纯展示**：不许出现任何读取入口。
+ * - 资格判定只有 `resolveCompanionAccess()` 一个入口，而且**必须包在 `React.cache` 里**
+ *   （P0-5 起工作台有多个页面，布局与页面都会调它；靠缓存保证一次请求只算一次）；
+ * - 工作台路由目录下的调用点是**显式清单**，多一个文件就要在这里加一行
+ *   （与 `tests/admin.test.mjs` 的后台接口清单同一个做法）；
+ * - 概览页（`page.tsx`）与身份卡组件都是**纯展示**：不许出现任何读取入口。
  *
  * 为什么值得单独立一条结构约束：布局与页面在 React 里是**并行渲染**的，两者各查一次
  * 时，中间那个窗口足以让布局按旧记录渲染出工作台壳、页面按新记录取不到资料，
  * 最终停在「顶栏 + 空白」。这种中间态在测试里极难复现，只能靠结构上不可能发生。
+ *
+ * ⚠️ P0-5 修订：原来钉的是「工作台里只允许一处调用点」。工作台多了两张订单池页之后
+ * 这条不再够用——它们必须拿到当前打手的 id 才能取自己的池子，而布局无法给 `children`
+ * 传 props。因此约束改成两条更结实的：**缓存包装**（保证一次请求一份结果）+
+ * **调用点清单**（保证新增读取点必须被看见）。下面两条断言分别钉住它们。
  */
-test("结构约束：工作台只有一处资格调用点，页面与身份卡不许自己读数据", () => {
+test("结构约束：资格判定必须缓存包装，工作台的调用点是显式清单", () => {
   const consoleDir = path.join(ROOT, "app", "companion");
   const callSites = [...walk(consoleDir)]
     .filter((file) => file.endsWith(".tsx") || file.endsWith(".ts"))
@@ -265,8 +273,22 @@ test("结构约束：工作台只有一处资格调用点，页面与身份卡�
 
   assert.deepEqual(
     callSites,
-    ["app/companion/(console)/layout.tsx"],
-    "工作台只允许布局层调用一次资格判定；页面再调一次就会出现「顶栏 + 空白」的中间态",
+    [
+      "app/companion/(console)/exclusive/page.tsx",
+      "app/companion/(console)/layout.tsx",
+      "app/companion/(console)/pool/page.tsx",
+    ],
+    "工作台的资格调用点是一份显式清单：新增一处就必须在这里写清楚，并确认它与其他调用点共享同一份结果",
+  );
+
+  // 一次请求一份结果靠的是 React.cache，因此这条包装本身就是约束的一部分：
+  // 去掉它，上面那三个调用点就会变成三次独立的仓储读取
+  const access = stripComments(
+    readFileSync(path.join(ROOT, "lib", "services", "companionAccess.ts"), "utf8"),
+  );
+  assert.ok(
+    access.includes("cache(") && access.includes("resolveCompanionAccess = cache("),
+    "resolveCompanionAccess 必须由 React.cache 包装：布局与页面各调一次时，仓储只能读一次",
   );
 
   // 读取入口的黑名单：出现任何一个，都意味着展示数据可能来自另一次查询

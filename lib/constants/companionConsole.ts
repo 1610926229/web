@@ -1,3 +1,7 @@
+import {
+  COMPANION_EXCLUSIVE_PAGE_TITLE,
+  COMPANION_POOL_PAGE_TITLE,
+} from "@/lib/constants/dispatch";
 import { PLATFORM_NAME } from "@/lib/constants/site";
 
 /**
@@ -18,9 +22,18 @@ export const COMPANION_CONSOLE_NAME = `${PLATFORM_NAME} · 护航工作台`;
 
 export const COMPANION_OVERVIEW_PAGE_TITLE = "工作台";
 
-/** 顶部导航。P0-4 只有一页，因此只有一项；后续批次加页面时在这里加。 */
+/**
+ * 顶部导航。顺序即页面上从左到右的顺序。
+ *
+ * 两张池子分成两页而不是一页两个区：它们回答的是**两个不同的问题**——
+ * 「用户在等我」（专属池，一对一，十分钟）与「谁都能接」（公共池）。
+ * 合成一页的话，打手在专属池里翻找公共单时，会看不出哪些是「本来只给我」的。
+ * 标签文案取自 `lib/constants/dispatch.ts`，两个页面与导航引用的是同一份字符串。
+ */
 export const COMPANION_NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/companion", label: COMPANION_OVERVIEW_PAGE_TITLE },
+  { href: "/companion/exclusive", label: COMPANION_EXCLUSIVE_PAGE_TITLE },
+  { href: "/companion/pool", label: COMPANION_POOL_PAGE_TITLE },
 ];
 
 /**
@@ -72,18 +85,21 @@ export const COMPANION_BACK_TO_MINE_LABEL = "返回我的";
 /**
  * 本阶段工作台的边界说明。
  *
- * ⚠️ 这一句**必须跟着实际实现改**：工作台现在还只是身份接入，写清楚「哪些还没开放」
- * 比让人对着一个空页面猜要好；而等到 P0-5 真的开放接单时，这句话不改就会变成
- * 一句阻止打手使用功能的假话。
+ * ⚠️ 这一句**必须跟着实际实现改**：写清楚「哪些还没开放」比让人对着一个空页面猜要好；
+ * 而每开放一项就要同步删掉一句，否则它会变成一句阻止打手使用功能的假话。
  */
 export const COMPANION_SCOPE_NOTICE =
-  "本阶段只接入身份：打手可以从自己的用户账号直接进入工作台。订单与收益相关功能尚未开放。";
+  "本阶段已开放专属订单池与公共订单池：可以查看并接单。开始服务、完成材料与收益结算尚未开放。";
 
-/** 「后续开放」清单。⚠️ 只是**说明**，页面上没有任何一个对应的按钮或数据。 */
+/**
+ * 「后续开放」清单。⚠️ 只是**说明**，页面上没有任何一个对应的按钮或数据。
+ *
+ * ⚠️ P0-5 已把「订单池」与「接单」两项删掉，并且**不再出现「放弃接单」**：
+ * 打手不想接单时什么都不用做，专属池十分钟到点自动转入公共池——
+ * 把「放弃接单」留在「后续开放」里，等于承诺一个平台已经决定不做的功能。
+ */
 export const COMPANION_COMING_SOON_TITLE = "后续开放";
 export const COMPANION_COMING_SOON_ITEMS: readonly string[] = [
-  "专属订单池与公共订单池",
-  "接单与放弃接单",
   "开始服务与提交完成材料",
   "打手收益与分账明细",
 ];
