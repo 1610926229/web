@@ -50,7 +50,12 @@ import type { Order } from "@/lib/types/order";
  *   我现在接不了单不代表它没发生过。他仍然看得到它、知道它还剩多久转入公共池。
  * - **公共池**：所有**当前能接单**的打手都看得到；暂停接单时**一条都不返回**。
  *   V1 **不做**游戏过滤、商品过滤、等级匹配与智能推荐（需求已明确），
- *   因此这里除了 `available` 之外没有任何「挑单」逻辑。
+ *   因此这里除了下面两条之外没有任何「挑单」逻辑。
+ * - **自己下的单**：两张池子都**不返回**（EX-DISPATCH-08）。一个人不能接自己下的单，
+ *   而这张单原本会一字不差地出现在他自己的池子里——池子 DTO 不含 `userId`，
+ *   他本来就分不出哪张是自己的。给他看就等于在页面上承诺一件点下去必然失败的事。
+ *   ⚠️ 这一条与 `available` 一样是**诚实性**过滤，**不是**保护：真正的拒绝在
+ *   `acceptDispatch` 的原子区段里，两处都必须存在，但只有那里是安全边界。
  *
  * ## 池内 DTO 刻意不含游戏账号与备注
  *
@@ -107,6 +112,24 @@ export async function listCompanionPools(
     const order = orderById.get(record.orderId);
     // 订单查不到（或已不在可接状态）时不显示。不猜、不补一条假数据
     if (!order || order.status !== "paid") continue;
+
+    // 自己下的单不进池子（EX-DISPATCH-08）。这与上面两条是**同一性质**的过滤：
+    // 「不给他看，他就不会去点一个必然失败的按钮」。
+    //
+    // ⚠️ 它是**诚实性**，不是安全性。真正的保护只有 `acceptDispatch` 原子区段里那一次
+    // 比对；这里少一行会变成「池子里多一张点了必然被拒的单」，而那里少一行就是
+    // 一次真的自接单成功。将来若要重构，删这一行是可接受的，删那一道不行。
+    //
+    // ⚠️ 必须在服务端做：池子 DTO 刻意不含 `userId`（BF-16 / 权限表 §10），
+    // 页面上连一个可用的判据都没有。
+    //
+    // ⚠️ `userId !== null` 与原子区段里的写法**逐字一致**：平台早期的护航资料
+    // 没有关联用户（`companionSeed` 的 `cp-*` 全是 `null`），直接比两个值会把
+    // 「没有关联用户的护航」与「没有下单人的订单」判成同一个人（`null === null`），
+    // 那是一条凭空消失的订单。
+    if (companion !== null && companion.userId !== null && order.userId === companion.userId) {
+      continue;
+    }
 
     const progress = toDispatchProgress(record, at);
     if (!progress) continue;

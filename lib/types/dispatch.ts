@@ -128,6 +128,7 @@ export type CompanionWriteContext = {
  * | `not-eligible` | 专属池，而你不是用户指定的那位 | 你不在这单的专属范围内 |
  * | `companion-unavailable` | 你当前不能接单（资料已下架 / 已移除，或暂停接单） | 联系管理员 |
  * | `order-closed` | 订单本身已不可接取（例如已退款） | 该订单已关闭 |
+ * | `self-order` | **这一单是你自己下的**，而一个人不能接自己的单 | 不用再操作，它会继续等别的护航 |
  */
 export type DispatchAcceptResult =
   | { kind: "ok"; dispatch: DispatchRecord; replayed: boolean }
@@ -136,7 +137,8 @@ export type DispatchAcceptResult =
   | { kind: "expired" }
   | { kind: "not-eligible" }
   | { kind: "companion-unavailable" }
-  | { kind: "order-closed" };
+  | { kind: "order-closed" }
+  | { kind: "self-order" };
 
 /**
  * 接单接口返回给浏览器的结果：事务结果去掉仓储内部记录。
@@ -157,7 +159,8 @@ export type DispatchAcceptOutcome =
   | { kind: "expired" }
   | { kind: "not-eligible" }
   | { kind: "companion-unavailable" }
-  | { kind: "order-closed" };
+  | { kind: "order-closed" }
+  | { kind: "self-order" };
 
 /* ───────────────────────── 打手端 DTO ───────────────────────── */
 

@@ -351,6 +351,37 @@ test("专属池 7：仓库里不存在任何「拒绝 / 放弃 / 主动退回」
   }
 });
 
+test("专属池 4b：不是指定的人，在期限内也接不到", async () => {
+  restoreDefaultTimeout();
+  const user = uniqueUser();
+  const { order } = await placeOrder(user, { companionId: COMPANION_A });
+  const dispatch = await dispatchOf(order.id);
+  const at = plusMinutes(order.paidAt, 1);
+
+  // 专属池是**一对一**的：十分钟以内只有用户指定的那位接得到。
+  // 这与「被别人接走了」（not-open）、「手慢了」（expired）是三件不同的事，
+  // 合成一句「接单失败」会让 B 反复重试一张永远不会属于他的单
+  const byB = await acceptDispatchForCompanion(COMPANION_B, dispatch.id, at);
+  assert.equal(byB.kind, "not-eligible", "B 不在这单的专属范围内");
+
+  // 被拒之后不得留下任何写入痕迹
+  const after = await dispatchOf(order.id);
+  assert.equal(after.state, "exclusive");
+  assert.equal(after.acceptedByCompanionId, null);
+  assert.equal(after.acceptedAt, null);
+
+  const orderAfter = await orderOf(order.id);
+  assert.equal(orderAfter.status, "paid");
+  assert.equal(orderAfter.actualCompanionId, null);
+  assert.equal(orderAfter.companion, null, "接单快照不该被一次失败的接单写上");
+  assert.deepEqual(await notificationsOf(user), [], "被拒绝的接单不得发出通知");
+
+  // 拒绝不是把这一单锁死：指定的人照常接得到
+  const byA = await acceptDispatchForCompanion(COMPANION_A, dispatch.id, at);
+  assert.equal(byA.kind, "ok");
+  assert.equal((await dispatchOf(order.id)).acceptedByCompanionId, COMPANION_A);
+});
+
 // ——————————————————————————— 二、公共池（8~14）———————————————————————————
 
 test("公共池 8：未指定打手 → 直接进公共池，快照就是进入时的配置", async () => {
@@ -686,6 +717,52 @@ test("通知 22：通知只发给下单用户，不会串给别人", async () =>
   assert.deepEqual(await notificationsOf(bystander), [], "别的用户收件箱必须为空");
 });
 
+test("通知：三条派单通知的正文里都不带游戏账号与备注", async () => {
+  restoreDefaultTimeout();
+  await setPublicTimeoutMinutes(2);
+
+  // 隐私用两个不会偶然命中的串：通知里出现它们，只可能是有人把订单字段插进了文案
+  const account = `moyu_p05_${process.pid}_acct`;
+  const remark = `p05_${process.pid}_note`;
+  const secrets = [account, remark];
+
+  // 接单
+  const acceptedUser = uniqueUser();
+  const accepted = await placeOrder(acceptedUser, { gameAccountId: account, remark });
+  const acceptedDispatch = await dispatchOf(accepted.order.id);
+  await acceptDispatch(acceptedDispatch.id, {
+    companionId: COMPANION_A,
+    at: plusMinutes(accepted.order.paidAt, 1),
+  });
+
+  // 专属池到点转公共池
+  const movedUser = uniqueUser();
+  const moved = await placeOrder(movedUser, { companionId: COMPANION_A, gameAccountId: account, remark });
+  sweepExpiredDispatches((await dispatchOf(moved.order.id)).exclusiveDeadlineAt);
+
+  // 公共池到点自动退款
+  const refundedUser = uniqueUser();
+  const refunded = await placeOrder(refundedUser, { gameAccountId: account, remark });
+  sweepExpiredDispatches((await dispatchOf(refunded.order.id)).publicDeadlineAt);
+
+  for (const [event, user] of [
+    ["订单已被接单", acceptedUser],
+    ["指定护航未接单", movedUser],
+    ["订单已自动退款", refundedUser],
+  ]) {
+    const mine = await notificationsOf(user);
+    assert.equal(mine.length, 1, `「${event}」应当恰好产生一条通知`);
+    const serialized = JSON.stringify(mine[0]);
+    for (const secret of secrets) {
+      assert.equal(
+        serialized.includes(secret),
+        false,
+        `「${event}」通知把订单隐私带出去了——通知是只读展示，细节要进订单详情看`,
+      );
+    }
+  }
+});
+
 // ——————————————————————————— 五、兼容（23~25）———————————————————————————
 
 test("兼容 23：普通用户的订单列表与详情仍然正常，并显示池子进度", async () => {
@@ -873,6 +950,47 @@ test("池子 DTO：到点的单不会以「还能接」的样子留在池子里"
     "到点的单不该再出现在专属池里（点下去必然被拒）",
   );
   assert.equal((await dispatchOf(order.id)).state, "public", "它已经被挪进公共池");
+});
+
+test("池子 DTO 白名单：卡片上只有「决定接不接」用得上的字段", async () => {
+  restoreDefaultTimeout();
+  await setPublicTimeoutMinutes(30);
+
+  const user = uniqueUser();
+  const { order } = await placeOrder(user, { companionId: COMPANION_A });
+  const dispatch = await dispatchOf(order.id);
+  const at = plusMinutes(order.paidAt, 1);
+
+  const pools = await listCompanionPools(COMPANION_A, at);
+  const item = pools.exclusive.find((entry) => entry.dispatchId === dispatch.id);
+  assert.ok(item, "指定给 A 的单必须出现在 A 的专属池里");
+
+  // **白名单**，不是黑名单：金额域现在有六个字段、售后与备注还会更多，
+  // 逐个点名「不许出现」永远点不全。将来订单多一个字段（金额、售后、管理员备注……），
+  // 只要没人在这里显式挑出来，它就流不到打手端
+  assert.deepEqual(
+    Object.keys(item).sort(),
+    [
+      "deadlineAt",
+      "dispatchId",
+      "gameName",
+      "orderId",
+      "orderNo",
+      "paidAt",
+      "pool",
+      "poolLabel",
+      "productTitle",
+      "quantity",
+      "remainingSeconds",
+      "specName",
+    ],
+    "池子卡片的字段集变了：多出来的是隐私与账目，少掉的是接单要用的信息",
+  );
+  assert.equal(
+    item.deadlineAt,
+    dispatch.exclusiveDeadlineAt,
+    "卡片上的截止时间就是派单记录里冻结的那一个，不是读取时重算的",
+  );
 });
 
 /* ───────────────────────── 小工具 ───────────────────────── */
