@@ -11,7 +11,9 @@ import {
 import { CONSUMPTION_ORDER_STATUS, sumEffectiveSpend } from "../lib/constants/levels.ts";
 import { beijingDayStart } from "../lib/constants/rankingPeriods.ts";
 import { adminAuditStore } from "../lib/data/mockAdminAuditRepository.ts";
+import { refundStore } from "../lib/data/mockRefundRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
+import { approveRefund } from "../lib/data/adminRefundTransaction.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
 import { getRefundRepository } from "../lib/data/refundRepository.ts";
 import { getUserRepository } from "../lib/data/userRepository.ts";
@@ -322,6 +324,162 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
 
   const orderAfter = await getPaymentRepository().findOrderById(before.orderId);
   assert.equal(orderAfter.status, "refunded", "订单状态由通过决定，不由请求体决定");
+});
+
+// ——————————————— 全额退款的金额口径：refundedAmount（P0-5.5 R2 / R3）———————————————
+//
+// `Order.status === "refunded"` 表示**已全额退款**，因此这一单必须同时满足
+// `refundedAmount === actualPaidAmount`。少了这一步，用户会看到「已退款」但「累计已退 0 元」——
+// 状态与金额各说各话，而这正是本批要修的那个缺陷。
+//
+// 金额的**真值源是被修改的那张订单**（`order.actualPaidAmount`），不是退款申请上的
+// 快照字段。下面第 10 条用一份「两个数被改成不一样」的数据把这件事钉住：只有它分得出
+// 「取自订单」与「取自申请」。
+
+/** 一次写操作的上下文。直接调伪事务时需要自己凑（服务层会从会话与请求体里组装）。 */
+function writeContext(operationId) {
+  return {
+    actorId: ADMIN,
+    actorRole: "admin",
+    actorName: null,
+    operationId,
+    at: new Date().toISOString(),
+  };
+}
+
+test("通过全额退款：同一个订单对象上 status 与 refundedAmount 必须同时到位", async () => {
+  const before = await orderOf(PENDING_REFUND);
+  // 非 0 的起点是这条用例的前提：两个数都等于 0 时，上面那个等号什么也没证明
+  assert.ok(before.actualPaidAmount > 0, "预置订单的实付金额必须非 0");
+  assert.equal(before.refundedAmount, 0, "退款前累计已退是 0");
+
+  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "" });
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.status, "refunded", "退款申请通过就要把订单改成已退款");
+  assert.equal(
+    after.refundedAmount,
+    after.actualPaidAmount,
+    "全额退款后累计已退必须等于实付——不得出现「已退款但累计已退 0 元」",
+  );
+  assert.equal(after.refundedAmount, before.actualPaidAmount, "退的就是这一单当初实付的钱");
+  assert.notEqual(after.refundedAmount, 0);
+});
+
+test("金额真值源是订单不是退款申请：两个数被人为改开后，写进订单的是订单自己的实付", async () => {
+  const orderBefore = await orderOf(PENDING_REFUND);
+  const refundBefore = await refundOf(PENDING_REFUND);
+  // 起点自检：预置数据里两者本来就相等，所以下面的分歧只能来自这一行改动
+  assert.equal(refundBefore.amount, orderBefore.actualPaidAmount);
+
+  // 人为制造分歧：把退款申请上的金额快照改成一个一眼能认出来的错数。
+  // 这正是「有人误把 refund.amount 当成真值源」之后数据会长的样子。
+  // 直接改 store（不去动 lib/mocks 里的夹具）：这是一次性构造，没有第二个用例需要它。
+  //
+  // ⚠️ **换掉 Map 里的那一条，而不是就地改它**：预置数据的 `createStore` 是把
+  //    `refundSeed` 里的对象**原样**放进 Map 的，就地改会连模块级的种子一起改掉——
+  //    而 `resetMockStore()` 之后种子会被重新放进 Map，污染就漏到后面的用例了。
+  const wrong = orderBefore.actualPaidAmount + 12345;
+  const refunds = refundStore().refunds;
+  const stored = refunds.get(PENDING_REFUND);
+  assert.ok(stored, "预置退款记录必须存在");
+  refunds.set(PENDING_REFUND, { ...stored, amount: wrong });
+
+  try {
+    await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "" });
+
+    const after = await orderOf(PENDING_REFUND);
+    assert.equal(
+      after.refundedAmount,
+      orderBefore.actualPaidAmount,
+      "写进订单的必须是**订单自己的**实付（同一事实只有一个真值源）",
+    );
+    assert.notEqual(after.refundedAmount, wrong, "不得取退款申请上的金额快照");
+
+    // 审批只写「被修改的那张记录」：退款申请上的金额快照不该被顺手改写
+    assert.equal((await refundOf(PENDING_REFUND)).amount, wrong, "审批不改退款申请的金额快照");
+    // 订单的实付本身也不因退款而变（退的是历史事实，不是重算一遍）
+    assert.equal(after.actualPaidAmount, orderBefore.actualPaidAmount);
+  } finally {
+    refunds.set(PENDING_REFUND, stored);
+  }
+});
+
+test("重复批准（换一个幂等键）不重复累计：状态机挡住，refundedAmount 与 refundedAt 都不变", async () => {
+  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "" });
+  const first = await orderOf(PENDING_REFUND);
+  assert.equal(first.status, "refunded");
+  assert.ok(first.refundedAt, "第一次通过要记下退款时间");
+
+  // 「已通过」是终态：换一个键也不能再批一次（§退款审核：已出结果的记录不能二次裁决）
+  await assert.rejects(
+    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "" }),
+    (error) => {
+      assert.equal(error.code, "BAD_REQUEST");
+      assert.ok(error.message.includes("已通过"), `提示要说清当前状态：${error.message}`);
+      return true;
+    },
+  );
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.refundedAmount, first.refundedAmount, "被拒的第二次不该改动金额");
+  assert.equal(after.refundedAt, first.refundedAt, "被拒的第二次不该刷新退款时间");
+  assert.equal(await auditCount(), 1, "失败的请求不写审计");
+});
+
+test("同幂等键重放：replayed=true、changed/orderChanged=false，金额不变、审计仍只有一条", async () => {
+  const before = await orderOf(PENDING_REFUND);
+  const operationId = key();
+
+  const first = await approveRefund(PENDING_REFUND, "", writeContext(operationId));
+  assert.equal(first.kind, "ok");
+  assert.equal(first.replayed, false, "第一次不是重放");
+  assert.equal(first.changed, true);
+  assert.equal(first.value.orderChanged, true);
+  assert.deepEqual(
+    (await auditsFor(PENDING_REFUND)).map((entry) => entry.action),
+    ["refund.approve"],
+  );
+
+  const settled = await orderOf(PENDING_REFUND);
+  assert.equal(settled.refundedAmount, before.actualPaidAmount);
+
+  // 同一个键第二次到达：原样返回当时的结果，一个字节都不再写
+  const replay = await approveRefund(PENDING_REFUND, "", writeContext(operationId));
+  assert.equal(replay.kind, "ok");
+  assert.equal(replay.replayed, true, "同一个键第二次到达必须被判为重放");
+  assert.equal(replay.changed, false, "重放不算改动");
+  assert.equal(replay.value.orderChanged, false, "重放不该再动一次订单");
+  assert.equal(replay.value.order.refundedAt, settled.refundedAt, "重放返回的订单就是当时那一张");
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.refundedAmount, settled.refundedAmount, "重放不改金额");
+  assert.equal(after.refundedAt, settled.refundedAt, "重放不刷新退款时间");
+  assert.equal(await auditCount(), 1, "重放不写第二条审计");
+});
+
+test("金额不重复累计：批准 + 重放 + 换键重批之后，这一单仍然只退了一次", async () => {
+  const before = await orderOf(PENDING_REFUND);
+  const operationId = key();
+
+  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: operationId, reviewNote: "" });
+  // 同键重放：服务层成功返回，但不写任何东西
+  const replay = await approveAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: operationId,
+    reviewNote: "第二次提交（不该生效）",
+  });
+  assert.equal(replay.changed, false);
+  // 换键重批：被状态机挡住
+  await assert.rejects(
+    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "" }),
+  );
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.status, "refunded");
+  assert.equal(after.refundedAmount, after.actualPaidAmount, "终态仍必须是「全额退款」");
+  assert.equal(after.refundedAmount, before.actualPaidAmount, "金额等于实付，不多不少");
+  assert.notEqual(after.refundedAmount, before.actualPaidAmount * 2, "不得累计成两倍");
+  assert.equal(await auditCount(), 1, "三次请求里只有一次真的落了审计");
 });
 
 test("纯口径：已退款订单在任何计入口径里都是零", async () => {

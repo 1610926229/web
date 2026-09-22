@@ -1,5 +1,5 @@
 import { ApiError } from "@/lib/api/ApiError";
-import { isCompanionListed } from "@/lib/constants/companions";
+import { isCompanionAcceptingOrders } from "@/lib/constants/companions";
 import {
   MAX_QUANTITY,
   REMARK_MAX_LENGTH,
@@ -122,7 +122,11 @@ async function resolveAddons(rawIds: string[]): Promise<Addon[]> {
 /**
  * 陪玩：选填；填了就必须存在、**在公开名单里**且当前可选。
  *
- * 两个条件都要查，而且方向不同（P8A）：
+ * 后两个条件现在由 `isCompanionAcceptingOrders()` **一个谓词**回答
+ * （`= isCompanionListed() && available`，见 `lib/constants/companions.ts`）——
+ * 之前这里是内联的等价写法，属于同一规则的第三份拷贝，已收敛回唯一真值源。
+ *
+ * 它同时挡住两类否定，方向不同（P8A）：
  * - `isCompanionListed()` 挡的是**停用与被移除**——这两类在用户端任何地方都不该出现，
  *   但 `getCompanion()` 取得到它们（后台要管理、直链详情要展示），
  *   所以「取得到」不等于「可以拿来下单」；
@@ -136,7 +140,7 @@ async function resolveCompanion(id: string | null): Promise<Companion | null> {
 
   const companion = await getDataSource().getCompanion(id);
   if (!companion) throw new ApiError("BAD_REQUEST", "陪玩不存在，请重新选择");
-  if (!isCompanionListed(companion) || !companion.available) {
+  if (!isCompanionAcceptingOrders(companion)) {
     throw new ApiError("BAD_REQUEST", "该陪玩当前不可选，请重新选择");
   }
   return companion;

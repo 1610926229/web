@@ -117,7 +117,8 @@
 - 当前阶段人工退款审批**只有「拒绝 / 全额退款」两种结果**，部分退款尚未实现。
 - 批准时**必须**把 `order.actualPaidAmount` 作为实际退款金额写入 `order.refundedAmount`。
 - **`refundedAmount` = 该订单累计实际已经退还给用户的金额**；未来部分退款上线后扩展为累计值。
-- **⚠️ 当前缺陷**：`lib/data/adminRefundTransaction.ts:232` 调用时**省略了第三个参数**，会出现「已退款但 `refundedAmount` 为 0」。**裁定为修 Bug，不通过隐藏字段规避**，属 **P0-5.5**。
+- **曾经的缺陷（P0-5.5 已修复）**：`lib/data/adminRefundTransaction.ts` 调用 `applyOrderRefund` 时**省略了第三个参数**，会出现「已退款但 `refundedAmount` 为 0」。裁定为**修 Bug，不通过隐藏字段规避**——现显式传 `order.actualPaidAmount`（`adminRefundTransaction.ts:247`）。
+- 金额取自**被修改的那张订单**，不取退款申请上的 `amount` 快照；`applyOrderRefund` 对已 `refunded` 的订单短路返回 `changed: false`，因此重复批准不会重复累计、也不刷新 `refundedAt`。
 - **回归测试断言**：管理员全额退款后 `Order.status === "refunded"` **且** `refundedAmount === actualPaidAmount`。详见 `database-schema.md` §9。
 
 ### 客服端
@@ -176,7 +177,9 @@
 | POST | `/api/companion/dispatches/[id]/accept` | `requireCompanion` | `companionDispatch` | 接单（幂等重放）。所有判定在 `acceptDispatch` 的原子区段内 |
 
 **⚠️ 打手接口 CURRENT 只有这 2 个**（P0-6 后新增订单接口，见 §3.1）。
-**⚠️ `app/api/companion/**` 目前没有任何接口清单门禁**（管理端有 62 条、客服端有 16 条）——**已确认建立，属 P0-5.5**，见 §2.11。
+**⚠️ `app/api/companion/**` 的接口清单门禁属 P0-5.5**（管理端有 62 条、客服端有 16 条）：
+本轮已冻结下面两条的清单契约（`GET` / `POST`、`requireCompanion()` 为第一动作、引用的服务层函数），
+门禁测试写入 `tests/`，见 §2.11。
 
 ---
 
@@ -433,17 +436,19 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 |---|---|---|
 | 管理端 | `tests/admin.test.mjs` | 62 |
 | 客服端 | `tests/staff.test.mjs` | 16 |
-| 打手端 | **CURRENT 不存在** → **TARGET 建立** | — |
+| 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`） | 2 |
 
-**打手端门禁：已确认建立（产品裁定 2026-09-19），属 P0-5.5。**
+**打手端门禁：已确认建立（产品裁定 2026-09-19），属 P0-5.5，本轮落地。**
 建立与 Admin / Staff 类似的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对：
 
-- 当前预期清单至少含 `GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`；
-- **P0-6 后新增对应订单接口时同步扩充**；
+- 清单**逐条列出**（不是只断言数量），当前**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`；
+- 每个路由**导出的 HTTP 方法**要与清单一致（多一个方法也要现形），第一动作必须是 `requireCompanion()`，且不出现其它身份的守卫；引用的服务层函数也要与清单一致；
+- **不得**把 `/companion/orders`、`/companion/orders/[id]` 等尚不存在的 TARGET 路由登记进清单；
+- **P0-6 后新增对应订单接口时同步扩充清单**；
 - **新增、删除、误改路径时测试必须失败**；
 - **沿用现有 tests 的源码扫描 / 路由门禁方式，不新建测试框架**；文件名遵循仓库现有命名风格，不为了名字本身新增抽象。
 
-**CURRENT**：计划 §十 提到的 `tests/companion.test.mjs` 当前**不存在**，`app/api/companion/**` 目前没有任何门禁——新增打手接口时**不会**有任何测试失败。
+**`tests/companion.test.mjs` 已于 P0-5.5 建立**（当前 2 条路由 / 7 条用例，全绿）；上列清单即该文件里的 `COMPANION_API_MANIFEST`，「第一动作必须是 `requireCompanion()`」由位置断言强制（比较前先剥掉 import，否则该断言恒为真）。
 
 ---
 

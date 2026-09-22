@@ -252,12 +252,14 @@ export function applyOrderRefund(
   id: string,
   at: string,
   /**
-   * 这一次退掉的钱（分）。**不传表示「不改动累计已退」**——管理端的退款裁决当前
-   * 走的就是这条路：它按退款规则决定退多少，那条公式属于 P1-1，本批次不碰。
+   * 这一次退掉的钱（分）。**不传表示「不改动累计已退」**——这是一个技术上的默认值，
+   * 当前**没有任何调用方**依赖它：两条退款路径（P0-5 公共池超时自动退款、
+   * P0-5.5 起的管理端退款裁决）都是全额退款，都显式传 `actualPaidAmount`。
    *
-   * 传了就一并写进 `refundedAmount`：**全额退款**的调用方（P0-5 公共池超时自动退款）
-   * 传 `actualPaidAmount`，因为订单类型上写着「全额退款后 refundedAmount === actualPaidAmount」。
+   * 传了就一并写进 `refundedAmount`：**全额退款**的调用方传 `actualPaidAmount`，
+   * 因为订单类型上写着「全额退款后 refundedAmount === actualPaidAmount」。
    * 少了这一步，用户会看到「已退款」但「累计已退 0 元」。
+   * 将来部分退款上线后，这里才是「累计已退」的累加入口（公式属后续批次）。
    */
   refundedAmount?: number,
 ): { previous: Order; updated: Order; changed: boolean } | null {

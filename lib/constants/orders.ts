@@ -9,9 +9,10 @@ import { clampPage, clampPageSize, mergePageResult } from "./pagination";
  * 切换状态 / 搜索 / 加载更多由浏览器经 `/api/orders` 取数，两侧都调用 `parseOrderListQuery`，
  * 因此「页面看到的」与「接口返回的」不会出现两套口径。
  *
- * ⚠️ 本文件只有 `import type`（编译后完全消失），没有任何运行时依赖，
- * 因此可以被客户端组件引用（不会把服务端模块打进浏览器产物），
- * 也可以被 node 直接加载做纯逻辑测试。
+ * ⚠️ 本文件只有 `import type`（编译后完全消失）+ 常量表 + 纯函数，
+ * 没有任何运行时依赖，**因此仍然可以被客户端组件引用**
+ * （不会把服务端模块打进浏览器产物），也可以被 node 直接加载做纯逻辑测试。
+ * ⚠️ 新增内容时必须保持这一点：这里**不得**出现任何运行时的 `import`。
  */
 
 /** 五个用户端状态，顺序与 Tab 一致。`全部` 是查询条件，不在其中。 */
@@ -57,6 +58,48 @@ export const ORDER_STATUS_HINTS: Record<OrderStatus, string> = {
   completed: "本次护航已完成。",
   refunded: "本次订单已退款，金额与商品信息已保留。",
 };
+
+// ——————————————————————————— 状态机 ———————————————————————————
+
+/**
+ * 订单状态迁移表。**这是 `Order` 状态机唯一的定义处。**
+ *
+ * 键集合由 `Record<OrderStatus, …>` 保证与 `ORDER_STATUSES` 的五个状态一一对应。
+ * 终态写空数组而不是省略：`Record` 要求每个状态都出现，
+ * 将来新增一个状态时，漏掉它的迁移规则会直接编译不过。
+ *
+ * ⚠️ 它只回答「这种迁移在**结构上**是否允许」，**不是业务 Guard，
+ * 也不得被用来绕过 Guard**：
+ * - `paid → accepted` 仍必须满足 Dispatch 合法 / 未过 deadline / Companion 资格 /
+ *   禁止给自己下单 / `enabled` 与 `available` / 并发下的原子抢单，
+ *   这些判断全在 `acceptDispatch` 的原子区段里做；
+ * - `serving → completed` 将来仍必须满足完成材料已提交 + 客服审核通过；
+ * - `completed → refunded` 只能通过合法的投诉 / 售后 / 退款流程进入，
+ *   **不得因为表允许就提供一个按钮**。
+ *
+ * 因此「只要状态表允许就可以直接改状态」是**明确错误**的用法：
+ * 表允许只说明这个迁移在结构上讲得通，能不能做要由领域 Guard 回答。
+ */
+export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
+  paid: ["accepted", "refunded"],
+  accepted: ["serving", "refunded"],
+  serving: ["completed", "refunded"],
+  completed: ["refunded"],
+  refunded: [],
+};
+
+/**
+ * 这次迁移在结构上是否允许。
+ *
+ * `from === to` 一律返回 `false`——那不是一个「迁移」。
+ * `includes` 天然满足这一点：表里没有任何自环（见 `ORDER_TRANSITIONS`）。
+ *
+ * ⚠️ 返回 `true` **不代表**这次写入合法：业务 Guard 仍须单独满足，
+ * 理由见 `ORDER_TRANSITIONS` 的注释。
+ */
+export function canTransitionOrder(from: OrderStatus, to: OrderStatus): boolean {
+  return ORDER_TRANSITIONS[from].includes(to);
+}
 
 /** 列表页的 Tab：`all` 是查询条件，不是订单真实状态。 */
 export type OrderTabKey = OrderStatus | "all";

@@ -135,8 +135,8 @@ components/
 
 **这一层承载业务规则是刻意的，不是偶然。**
 
-- **状态机**：`adminRefunds.ts` / `adminComplaints.ts` / `adminApplications.ts` 各自声明 `Record<Status, readonly Status[]>` 转移表 + 派生 `canTransitionXxx` + `xxxAllowedActions`。
-  **TARGET（NOT IMPLEMENTED）**：`orders.ts` **没有** `ORDER_TRANSITIONS`。见 `architecture-rules.md` §2.6。
+- **状态机**：`adminRefunds.ts` / `adminComplaints.ts` / `adminApplications.ts` / `orders.ts` 各自声明 `Record<Status, readonly Status[]>` 转移表 + 派生 `canTransitionXxx`（`orders.ts` 的 `allowedOrderActions` 尚无需求）。
+  **P0-5.5 已实现**：`orders.ts` 的 `ORDER_TRANSITIONS` / `canTransitionOrder`（此前不存在）。见 `architecture-rules.md` §2.6。
 - **校验**：`checkout.ts`（`validateGameAccount`）、`safePath.ts`、`complaints.ts`（`validateComplaintText`）…
 - **金额规则**：`orderAmount.ts` —— 唯一合成点。
 - **集中配置**：`site.ts`（`PLATFORM_NAME = "超哥电竞"`、`PLACEHOLDER_NOTICE`）。**禁止在页面内硬编码平台名**。
@@ -222,8 +222,7 @@ tests/
 
 **三类特殊测试**：
 
-1. **接口清单门禁**：`admin.test.mjs`（62 条）、`staff.test.mjs`（16 条）。
-   ⚠️ **`app/api/companion/**` 目前没有门禁**——**已确认建立**（产品裁定 2026-09-19，属 **P0-5.5**）：扫描 `app/api/companion/**` 与预期清单比对，沿用现有源码扫描方式，**不新建测试框架**。
+1. **接口清单门禁**：`admin.test.mjs`（62 条）、`staff.test.mjs`（16 条）、`companion.test.mjs`（2 条，产品裁定 2026-09-19，**P0-5.5 建立**）。三者都扫描对应端口的 `app/api/**` 与预期清单比对，沿用现有源码扫描方式，**不新建测试框架**。
 2. **路由门禁**：`routes.test.mjs` 真实扫描 `app/` 并与页面配置里的入口地址比对。
 3. **HTTP 冒烟**：`http-smoke.test.mjs`，需 `APP_BASE_URL`。
 
@@ -274,7 +273,7 @@ public/
 
 ```
 lib/types/order.ts                          ← 通常无新字段（servingAt 已存在）
-lib/constants/orders.ts                     ← 状态机表（TARGET：ORDER_TRANSITIONS，转移表已确认）
+lib/constants/orders.ts                     ← 状态机表（`ORDER_TRANSITIONS`，P0-5.5 已实现；本轮不接入写入路径）
 lib/data/mockPaymentRepository.ts           ← 同步写原语（applyOrderServing）
 lib/data/companionOrderTransaction.ts       ← 伪事务（原子区段）
 lib/services/companionOrders.ts             ← 服务端业务

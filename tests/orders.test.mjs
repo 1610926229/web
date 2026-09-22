@@ -3,9 +3,13 @@ import test from "node:test";
 import {
   ORDER_PAGE_SIZE,
   ORDER_STATUSES,
+  ORDER_TRANSITIONS,
+  canTransitionOrder,
   mergeOrderPage,
 } from "../lib/constants/orders.ts";
 import { getOrderDetailForUser, queryOrdersForUser } from "../lib/services/orders.ts";
+import { resolveSource } from "./app-path.mjs";
+import { readSource, stripComments } from "./source-text.mjs";
 
 /**
  * 订单查询的仓储 / service 级测试。
@@ -388,4 +392,165 @@ test("真实数据下逐页加载：不重复、不丢单、末页正确收尾",
   assert.equal(ids.length, total, "逐页加载后应当拿到全部订单");
   assert.equal(new Set(ids).size, total, "逐页加载不应出现重复订单");
   assert.equal(merged.hasMore, false, "最后一页 hasMore 应为 false");
+});
+
+// ————————————————— 订单状态机：ORDER_TRANSITIONS / canTransitionOrder（P0-5.5 R1）—————————————————
+//
+// 这一节守的是 P0-5.5 冻结的那张迁移表。它回答的**只是**「这种迁移在结构上讲不讲得通」，
+// 不是业务 Guard：`paid → accepted` 仍要过接单资格与 deadline，`serving → completed`
+// 仍要过完成审核，`completed → refunded` 仍要过售后流程。
+//
+// 因此这张表一旦被顺手改宽（例如为了某个页面方便而加一条 `paid → completed`），
+// 后果不是「少了一次检查」，而是**凭空多出一个看起来合法的入口**。
+// 下面每一条都写得比实现啰嗦：它们要挡住的是「改一行、谁都看不出来」的改动。
+
+test("迁移表逐项冻结：五个状态的出边与冻结表完全相等，顺序也要一致", () => {
+  assert.deepEqual(ORDER_TRANSITIONS, {
+    paid: ["accepted", "refunded"],
+    accepted: ["serving", "refunded"],
+    serving: ["completed", "refunded"],
+    completed: ["refunded"],
+    refunded: [],
+  });
+
+  // 键的顺序也是契约的一部分：它与 ORDER_STATUSES 的五个 Tab 顺序一致，读起来才对得上
+  assert.deepEqual(Object.keys(ORDER_TRANSITIONS), [
+    "paid",
+    "accepted",
+    "serving",
+    "completed",
+    "refunded",
+  ]);
+});
+
+test("迁移表的键集合与 ORDER_STATUSES 是同一个：加了新状态却忘了补迁移规则会在这里现形", () => {
+  assert.deepEqual(Object.keys(ORDER_TRANSITIONS), [...ORDER_STATUSES]);
+});
+
+test("合法迁移全部为 true：五条主线 + 三条随时可退款", () => {
+  const legal = [
+    ["paid", "accepted"],
+    ["paid", "refunded"],
+    ["accepted", "serving"],
+    ["accepted", "refunded"],
+    ["serving", "completed"],
+    ["serving", "refunded"],
+    ["completed", "refunded"],
+  ];
+
+  for (const [from, to] of legal) {
+    assert.equal(canTransitionOrder(from, to), true, `${from} → ${to} 应当允许`);
+  }
+});
+
+test("非法迁移全部为 false：前跳、回退、终态复活都不行", () => {
+  const illegal = [
+    // 前跳：没接单就不能已在护航，没护航就不能已完成
+    ["paid", "completed"],
+    ["paid", "serving"],
+    ["accepted", "completed"],
+    // 回退：状态只往前走
+    ["completed", "serving"],
+    ["serving", "paid"],
+    ["completed", "accepted"],
+    // 终态：已退款不能回到任何活跃状态，也不能再「退一次」
+    ["refunded", "paid"],
+    ["refunded", "accepted"],
+    ["refunded", "refunded"],
+  ];
+
+  for (const [from, to] of illegal) {
+    assert.equal(canTransitionOrder(from, to), false, `${from} → ${to} 必须被拒`);
+  }
+});
+
+test("from === to 恒为 false：原地不动不是一次「迁移」", () => {
+  for (const status of ORDER_STATUSES) {
+    assert.equal(canTransitionOrder(status, status), false, `${status} → ${status} 不该被当成迁移`);
+  }
+});
+
+/**
+ * 5 × 5 的预期矩阵。**手写的**，不是用 `ORDER_TRANSITIONS[from].includes(to)` 现算的：
+ * 拿实现反推期望值等于用实现验证实现——表被改宽时，这样写出来的用例会跟着一起变绿，
+ * 而那正是这条用例唯一要防的事。列顺序与 `ORDER_STATUSES` 一致。
+ *
+ * 列：paid / accepted / serving / completed / refunded，1 = 允许，0 = 拒绝。
+ */
+const TRANSITION_MATRIX = [
+  ["paid", [0, 1, 0, 0, 1]],
+  ["accepted", [0, 0, 1, 0, 1]],
+  ["serving", [0, 0, 0, 1, 1]],
+  ["completed", [0, 0, 0, 0, 1]],
+  ["refunded", [0, 0, 0, 0, 0]],
+];
+
+test("穷举 25 格：逐格与手写的预期矩阵比对（矩阵自己也要先自检）", () => {
+  // 手写表最常见的错法是行数与列数对不上：先把它钉住，免得「25 格」名不副实
+  assert.deepEqual(ORDER_STATUSES, ["paid", "accepted", "serving", "completed", "refunded"]);
+  assert.equal(TRANSITION_MATRIX.length, ORDER_STATUSES.length, "矩阵的行数必须覆盖五个状态");
+  assert.deepEqual(
+    TRANSITION_MATRIX.map(([from]) => from),
+    [...ORDER_STATUSES],
+    "矩阵的行顺序必须与 ORDER_STATUSES 一致，否则对错了格子",
+  );
+
+  let cells = 0;
+  for (const [from, row] of TRANSITION_MATRIX) {
+    assert.equal(row.length, ORDER_STATUSES.length, `${from} 那一行必须写满五格`);
+    ORDER_STATUSES.forEach((to, index) => {
+      cells += 1;
+      assert.equal(
+        canTransitionOrder(from, to),
+        row[index] === 1,
+        `${from} → ${to} 与手写预期矩阵不一致`,
+      );
+    });
+  }
+  assert.equal(cells, 25, "五乘五必须一格不漏");
+});
+
+test("refunded 是终态：没有任何一条出边（已退款不能复活，也不能再退一次）", () => {
+  for (const to of ORDER_STATUSES) {
+    assert.equal(canTransitionOrder("refunded", to), false, `refunded → ${to} 必须被拒`);
+  }
+  assert.deepEqual(ORDER_TRANSITIONS.refunded, [], "终态写出空数组，而不是省略这一行");
+});
+
+test("源码约束：orders.ts 的依赖只有 import type + 同层的纯函数 ./pagination（仍可被客户端组件引用）", () => {
+  const code = stripComments(readSource(resolveSource("lib/constants/orders.ts")));
+
+  // 跨行的 import 也算一条；先去掉注释，否则文档注释里那句「不得出现任何运行时的 import」
+  // 会被当成一条真的 import 语句
+  const statements = code.match(/^import[\s\S]*?;$/gm) ?? [];
+  assert.equal(statements.length, 3, `扫到的 import 语句数量变了：\n${statements.join("\n")}`);
+
+  const typeImports = statements.filter((statement) => /^import\s+type\b/.test(statement));
+  const runtimeImports = statements.filter((statement) => !/^import\s+type\b/.test(statement));
+
+  // 类型 import 编译后完全消失，不构成「把服务端模块打进浏览器产物」的风险
+  assert.equal(typeImports.length, 2, "订单与分页的类型必须是 import type");
+
+  // ⚠️ 本文件**确实有一条运行时 import**（`./pagination` 的纯函数），因此
+  //    「所有 import 都是 import type」与仓库现状不符。真正要守的是 R1 的那句话：
+  //    依赖只有 import type + 纯函数。于是把运行时依赖**逐条冻结**——
+  //    多引一个模块（尤其 `@/lib/data/**`）立刻变红。
+  assert.deepEqual(
+    runtimeImports.map((statement) => statement.match(/from\s+"([^"]+)"/)?.[1]),
+    ["./pagination"],
+    "运行时依赖变了：多出来的那一个会被打进浏览器产物",
+  );
+
+  // 最容易发生的一种回流：顺手引一个服务端模块（这正是这条断言存在的理由）
+  for (const forbidden of [
+    "@/lib/data/",
+    "@/lib/services/",
+    "@/lib/mocks/",
+    "@/lib/api/",
+    "next/server",
+    "next/headers",
+    "server-only",
+  ]) {
+    assert.equal(code.includes(forbidden), false, `orders.ts 不该引用 ${forbidden}`);
+  }
 });

@@ -171,15 +171,18 @@
 > `refundedAmount` 表示**该订单累计实际已经退还给用户的金额**。
 
 - **当前（只有全额退款）**：`refundedAmount === actualPaidAmount`。
-- 管理员批准退款时**必须**把 `actualPaidAmount` 写入 `refundedAmount`。当前代码**没有做到**，见 §9 的缺陷说明与 P0-5.5。
+- 管理员批准退款时**必须**把 `actualPaidAmount` 写入 `refundedAmount`。
+  **P0-5.5 已落地**：金额取自**被修改的那张订单**（`order.actualPaidAmount`），
+  不取退款申请上的 `amount` 快照。曾经的缺陷说明见 §9。
 - **未来部分退款上线后**，它扩展为**累计**退款金额。
 - **⚠️ 部分退款本身不得自动把 `Order.status` 改成 `refunded`。**
   `Order.status === "refunded"` 的正式含义是：**该订单已经全额退款。**
 
-**⚠️ 状态机：CURRENT 缺口，但转移表已确认**：
-`lib/constants/orders.ts` **没有** `ORDER_TRANSITIONS` / `canTransitionOrder` / `allowedOrderActions`。
-`Order` 是全仓**唯一没有声明式状态机的实体**（退款 / 投诉 / 申请都有）。
-**转移表本身已由产品负责人正式确认**（2026-09-19），逐行内容见 T3；落地属 **P0-5.5**。
+**⚠️ 状态机：已实现（P0-5.5）**：
+`lib/constants/orders.ts:83` 的 `ORDER_TRANSITIONS` + `:100` 的 `canTransitionOrder`
+（`allowedOrderActions` 未做，本轮范围外）。`Order` 至此不再缺少声明式状态机。
+**转移表本身已由产品负责人正式确认**（2026-09-19），逐行内容见 T3，本轮按原值落地、一字未改。
+**⚠️ 本轮只交付中央定义，不接入任何写入路径**：`applyOrderAccepted` / `applyOrderRefund` 行为不变，也没有新增调用点。
 
 **⚠️ 当前运行时的真实迁移只有三条**：`paid → accepted → refunded`。
 `accepted → serving`（P0-6）与 `serving → completed`（P0-7）**尚未实现**；
@@ -275,14 +278,15 @@ cancelled  → []
 ```
 
 **⚠️ 退款有独立状态机，与 `OrderStatus` 无关。**
-**唯一例外**：审核通过会联动把订单置为 `refunded`（`adminRefundTransaction.ts:232`）。
+**唯一例外**：审核通过会联动把订单置为 `refunded`（`adminRefundTransaction.ts:247`）。
 
-**⚠️ 已确认的缺陷（产品负责人裁定：修 Bug，不隐藏字段）**：
-`adminRefundTransaction.ts:232` 调用 `applyOrderRefund` 时**省略了第三个参数**，导致订单被置为 `refunded` 但 **`refundedAmount` 为 0**。
+**⚠️ 曾经确认的缺陷（产品负责人裁定：修 Bug，不隐藏字段）——已于 P0-5.5 修复**：
+`adminRefundTransaction.ts` 调用 `applyOrderRefund` 时**省略了第三个参数**，导致订单被置为 `refunded` 但 **`refundedAmount` 为 0**。
 - **正式规则**：管理员批准退款时，**必须**把 `order.actualPaidAmount` 作为实际退款金额写入 `refundedAmount`。
+- **修复结果**：`adminRefundTransaction.ts:247` 现显式传 `order.actualPaidAmount`（订单字段，非申请上的 `amount` 快照）；
+  `applyOrderRefund` 对已 `refunded` 的订单短路返回 `changed: false`，因此重复批准不重复累计、不刷新 `refundedAt`。
 - **当前阶段仍然只有「拒绝 / 全额退款」两种审批结果**，部分退款尚未实现。
 - **回归测试要求**：管理员全额退款后，**同时**断言 `Order.status === "refunded"` **且** `refundedAmount === actualPaidAmount`。**不得再出现「已退款但退款金额为 0」。**
-- 落地属 **P0-5.5**。
 
 **写入点恰好 3 个业务入口**，审核态迁移收敛到**单一写入器** `applyRefundReview`（`mockRefundRepository.ts:163`）：
 
@@ -594,10 +598,11 @@ export type Earning = {
 
 **⚠️ 幂等键必须是 `orderId`（或 `orderId` + 事件类型）**，不得照抄通知的随机 UUID 方案。
 
-## T3. Order 状态机表 —— 补 `lib/constants/orders.ts`
+## T3. Order 状态机表 —— `lib/constants/orders.ts`（**P0-5.5 已实现**）
 
-**TARGET — NOT IMPLEMENTED**：`ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]>` + `canTransitionOrder`。
-形态应照抄 `lib/constants/adminRefunds.ts:153-166`。
+**CURRENT**：`ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]>` + `canTransitionOrder`
+（`lib/constants/orders.ts:83` / `:100`），形态与 `lib/constants/adminRefunds.ts:153-166` 一致。
+`allowedOrderActions` **未做**，不在本轮范围内。
 
 ### 转移表 —— **已由产品负责人正式确认**（2026-09-19），逐行即为最终内容
 
@@ -626,7 +631,8 @@ refunded  -> []
 未来实现部分退款时，**部分退款本身不得自动把 `Order.status` 改成 `refunded`**。
 
 **落地形态**：`Record<OrderStatus, readonly OrderStatus[]>` + 派生 `canTransitionOrder` / `allowedOrderActions`，
-形态照抄 `lib/constants/adminRefunds.ts:153-166`。属 **P0-5.5**。
+形态照抄 `lib/constants/adminRefunds.ts:153-166`。
+**P0-5.5 已落地前两者（Round `P0-5.5`）；`allowedOrderActions` 尚无需求，不属本轮。**
 
 ## T4. AfterSalesCase（售后）—— P1-2 / P1-4
 

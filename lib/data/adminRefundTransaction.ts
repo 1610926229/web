@@ -32,9 +32,12 @@ import { applyRefundReview, refundStore } from "./mockRefundRepository";
  * ## 三条状态边界
  *
  * - `start-review` 与 `reject` **只写退款申请**，一行订单代码都不碰。订单继续按原进度走。
- * - 只有 `approve` 会写订单，而且**只写 `status` 与 `refundedAt`**：不改金额、不改商品快照、
- *   更不改用户的任何累计字段。「退款之后消费等级与排行榜自动排除这一单」靠的是
- *   订单状态本身（口径见 `lib/constants/levels.ts`），不是去修用户的数字。
+ * - 只有 `approve` 会写订单，写 `status`、`refundedAt` 与 `refundedAmount`：
+ *   不改退款申请上的金额快照、不改商品快照、更不改用户的任何累计字段。
+ *   `refundedAmount` 写的是**订单自己的 `actualPaidAmount`**——当前只有全额退款，
+ *   因此 `status === "refunded"` 的含义就是「这一单已全额退款」。
+ *   「退款之后消费等级与排行榜自动排除这一单」靠的是订单状态本身
+ *   （口径见 `lib/constants/levels.ts`），不是去修用户的数字。
  * - 接入真实数据库后，本文件整体替换为一个事务（`BEGIN … COMMIT`），
  *   上层的 service 与接口一行都不用改。
  *
@@ -168,11 +171,19 @@ export async function startReviewRefund(
  *
  * 1. 退款申请状态改成 `approved`；
  * 2. 记录管理者（`reviewedBy`）、审核意见与审核时间（`reviewedAt`）；
- * 3. 订单改成 `refunded`；
+ * 3. 订单改成 `refunded`，并写入 `refundedAmount`（见下）；
  * 4. 写一条管理审计（before/after 里同时带着退款状态与订单状态）。
  *
- * ⚠️ **金额一个字都不写**：`amount` 是申请创建时的服务端订单实付快照，
- * 管理端没有修改它的入口。这里也没有任何参数能传金额进来。
+ * ⚠️ **金额取自订单，不取自退款申请**：`RefundRequest.amount` 是申请创建时的服务端
+ * 订单实付快照，管理端没有修改它的入口，这里也没有任何参数能传金额进来。
+ * 要写进 `Order.refundedAmount` 的那个数从**被修改的那张订单**上读
+ * （`order.actualPaidAmount`）——同一事实只有一个真值源，写的是订单实付（全额退款）。
+ *
+ * ⚠️ **幂等由 `applyOrderRefund` 兜底**：`order` 是原子区段开头取到的写入前快照，
+ * 而 `applyOrderRefund` 对已经是 `refunded` 的订单会短路返回 `changed: false`，
+ * 既不重复累计 `refundedAmount`、也不刷新 `refundedAt`。因此重复批准
+ * （无论是重放还是「已退款状态不能二次退款」被挡住之前的那一瞬）都不会把金额叠加两次。
+ * 「已退款不能二次退款」本身仍由 `canTransitionRefund` + 重放判定负责，这里不新增第二套判定。
  *
  * ⚠️ **不改用户的累计消费字段**：订单变成 `refunded` 之后就不再计入累计有效消费
  * （`sumEffectiveSpend` 只累计 `completed`），消费等级与排行榜因此自然排除这一单。
@@ -228,8 +239,12 @@ export async function approveRefund(
 
   // ③ 订单。这里**不会**返回 null（上一段刚确认过它存在），
   //    真发生也只能说明存储被换掉了；那种情况下宁可让整个请求失败，
-  //    也不能返回「已通过」——那会变成「退款已通过但订单未退款」
-  const orderWritten = applyOrderRefund(existing.orderId, ctx.at);
+  //    也不能返回「已通过」——那会变成「退款已通过但订单未退款」。
+  //    金额取自订单自己的实付（写入前的快照）：当前只有全额退款，故写 `actualPaidAmount`；
+  //    不传金额会让用户看到「已退款」但「累计已退 0 元」。
+  //    订单已经是 `refunded` 时 `applyOrderRefund` 短路返回 `changed: false`，
+  //    因此重复批准不会重复累计、也不会刷新 `refundedAt`。
+  const orderWritten = applyOrderRefund(existing.orderId, ctx.at, order.actualPaidAmount);
   if (!orderWritten) throw new Error("退款审核通过时订单写入失败");
 
   // ④ 审计。业务写入全部完成之后紧接着写，中间没有任何 `await`

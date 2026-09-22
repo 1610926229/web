@@ -53,6 +53,12 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 
 ## 当前 Round
 
-> 尚无。**不要提前创建空目录**——某轮真正准备开始时才创建。
+| Round | Title | Status |
+|---|---|---|
+| [`P0-5.5`](./P0-5.5/README.md) | 小型架构稳定化 | `AWAITING_ACCEPTANCE` |
+
+> **不要提前创建空目录**——某轮真正准备开始时才创建。
+> 上一轮 P0-5 建于本协议之前（`PRE-PROTOCOL`），不倒填历史档案。
+> 「开始服务」(`accepted → serving`) 仍是 `UNASSIGNED`，**编号由用户分配，Claude 不得自行创造**。
 
 全局进度真值源：[`../总需求进度表.md`](../总需求进度表.md)

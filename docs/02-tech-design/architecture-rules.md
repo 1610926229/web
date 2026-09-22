@@ -142,10 +142,12 @@ adminWriteSupport.ts（公共支持，不是事务）
 | `lib/types/*.ts` | 纯类型声明 | ❌ **业务逻辑** |
 | `lib/constants/*.ts` | ✅ 状态机表、校验、业务规则、固定文案、DTO 映射函数 | —— |
 
-`lib/constants/` 承载状态机是**明确的设计**，不是偶然：`ADMIN_REFUND_TRANSITIONS`、`ADMIN_COMPLAINT_TRANSITIONS`、`ADMIN_APPLICATION_TRANSITIONS` 都是 `Record<Status, readonly Status[]>` + 派生 `canTransitionXxx` + `xxxAllowedActions`。
+`lib/constants/` 承载状态机是**明确的设计**，不是偶然：`ADMIN_REFUND_TRANSITIONS`、`ADMIN_COMPLAINT_TRANSITIONS`、`ADMIN_APPLICATION_TRANSITIONS`、`ORDER_TRANSITIONS` 都是 `Record<Status, readonly Status[]>` + 派生 `canTransitionXxx` + `xxxAllowedActions`。
 
-**TARGET（NOT IMPLEMENTED）**：`lib/constants/orders.ts` 目前**没有** `ORDER_TRANSITIONS`。
-`Order` 是全仓唯一没有声明式状态机的实体。见 `database-schema.md` T3 与 §七。
+**CURRENT（P0-5.5 已实现）**：`lib/constants/orders.ts:83` 的 `ORDER_TRANSITIONS`（键集合由 `Record<OrderStatus, …>` 保证与 `ORDER_STATUSES` 的五个状态一一对应，终态写空数组）+ 派生 `canTransitionOrder`（`:100`）。
+`Order` 至此不再是「全仓唯一没有声明式状态机的实体」。见 `database-schema.md` T3 与 §七。
+
+**⚠️ 本轮只交付「中央定义」，不接入任何写入路径**：`applyOrderAccepted` / `applyOrderRefund` 的行为不变，也没有新增调用点。「用表替换 Guard」是明确错误的方向。
 
 **⚠️ 状态机表的边界（已由产品负责人正式确认，2026-09-19）**：
 状态机表**只表达「这种状态迁移在结构上是否允许」，它不能代替具体领域 Guard**。
@@ -170,7 +172,8 @@ adminWriteSupport.ts（公共支持，不是事务）
    CURRENT 的唯一显示层 `/100` 在 `components/admin/AdminSpecEditor.tsx:42`，是纯展示。
 7. **`refundedAmount` = 该订单累计实际已经退还给用户的金额**（已正式定义，2026-09-19）。
    当前只有全额退款，故 `refundedAmount === actualPaidAmount`；
-   管理员批准退款时**必须**把 `actualPaidAmount` 写入 `refundedAmount`。
+   管理员批准退款时**必须**把 `actualPaidAmount` 写入 `refundedAmount`
+   （P0-5.5 已落地：金额取自**订单字段**，不取退款申请上的 `amount` 快照）。
    未来部分退款上线后扩展为**累计**金额。
 8. **⚠️ 部分退款不得自动把 `Order.status` 改成 `refunded`。**
    `status === "refunded"` 的正式含义是**该订单已经全额退款**。
@@ -194,11 +197,19 @@ adminWriteSupport.ts（公共支持，不是事务）
 
 **为什么这条被反复强调**：两处判定的分叉不会以「报错」的样子出现，而是以「池子里空空如也」「界面上能选、数据里筛不出任何结果」这类**最难查的形态**出现。
 
-**CURRENT 的一处已知重复**：`lib/services/checkout.ts:139` 内联了 `!isCompanionListed(companion) || !companion.available`，与 `isCompanionAcceptingOrders` 语义等价但未复用。这是第三份拷贝。
+**曾经的一处重复（已收敛，P0-5.5）**：`lib/services/checkout.ts` 一度内联了 `!isCompanionListed(companion) || !companion.available`——
+与 `isCompanionAcceptingOrders` 语义等价但未复用，是同一规则的**第三份拷贝**（前两份是 `isCompanionAcceptingOrders` 自身与池子过滤那处）。
+**整改结果**：`checkout.ts:143` 已改为复用 `isCompanionAcceptingOrders(companion)`；
+对外文案、错误码与失败语义一字未变。
 
-**已裁定的整改方向（属 P0-5.5）**：改为复用统一业务规则 `isCompanionAcceptingOrders(companion)`（或现有函数真实签名的等价调用），
-让「是否允许接受新订单」保持**单一业务真值源**。
-**⚠️ 不得借此重构整个 Checkout / Companion 模块。**
+**⚠️ 收敛尚未走到「全仓只剩一处」**：`lib/constants/companions.ts:341` 的 DTO 投影
+（`selectable: isCompanionListed(companion) && companion.available`）仍是同一规则的**第四份内联**，
+同一文件 `:208` 的「谁该用它」清单也未把它列为使用点。
+P0-5.5 **有意不收敛它**——那属于改动 Companion 模块，超出该轮冻结范围
+（`isCompanionAcceptingOrders` 的 JSDoc 已把「结算页指定护航」列为使用点，与 §4.1 一致）。
+**收敛它需要单独一批。**
+
+**⚠️ 收敛时不得借机重构整个 Checkout / Companion 模块**（本轮确实没做）。
 
 ## 4.2 会话与身份
 
@@ -287,10 +298,10 @@ sweepMaturedEarnings(now)     ← TARGET，随 P0-8 落地
 
 | 项 | 来源 | 现状 | 落地批次 |
 |---|---|---|---|
-| `ORDER_TRANSITIONS` + `canTransitionOrder`（转移表**已确认**） | 本文件 §2.6 / `database-schema.md` T3 | `lib/constants/orders.ts` 中不存在 | **P0-5.5** |
-| 管理员全额退款写入 `refundedAmount` | 产品裁定 2026-09-19 | `adminRefundTransaction.ts:232` 省略第三参数，退款金额为 0 | **P0-5.5** |
-| Companion API 清单门禁（扫描 `app/api/companion/**`） | 产品裁定 2026-09-19 | 该目录**无任何门禁** | **P0-5.5** |
-| Checkout 复用 `isCompanionAcceptingOrders` | 产品裁定 2026-09-19 | `checkout.ts:139` 是第三份等价实现 | **P0-5.5** |
+| `ORDER_TRANSITIONS` + `canTransitionOrder`（转移表**已确认**） | 本文件 §2.6 / `database-schema.md` T3 | **已实现**（此前不存在）：`lib/constants/orders.ts:83` / `:100`；表内容按冻结值，未接入任何写入路径 | **P0-5.5**（Round `P0-5.5` 已完成） |
+| 管理员全额退款写入 `refundedAmount` | 产品裁定 2026-09-19 | **已实现**（此前 `adminRefundTransaction.ts` 省略第三参数，退款金额为 0）：现传 `order.actualPaidAmount`，见 `adminRefundTransaction.ts:247` | **P0-5.5**（Round `P0-5.5` 已完成） |
+| Companion API 清单门禁（扫描 `app/api/companion/**`） | 产品裁定 2026-09-19 | 路由清单契约已冻结并逐项核对：该目录下恰好两个 `route.ts`（`GET` / `POST`，均以 `requireCompanion()` 为第一动作）；门禁测试写入 `tests/`（同批交付） | **P0-5.5**（Round `P0-5.5`） |
+| Checkout 复用 `isCompanionAcceptingOrders` | 产品裁定 2026-09-19 | **已实现**（此前 `checkout.ts` 内联等价判定，是第三份拷贝）：改调 `isCompanionAcceptingOrders(companion)`，见 `checkout.ts:143` | **P0-5.5**（Round `P0-5.5` 已完成） |
 | 打手订单列表 `/companion/orders`（进行中 / 已结束） | 产品裁定 2026-09-19 | 打手端目前只有 `pool` / `exclusive` | P0-6 |
 | 打手订单详情 `/companion/orders/[id]` | 产品裁定 2026-09-19 | 不存在 | P0-6 |
 | `POST /api/companion/orders/[id]/start`（`accepted → serving`） | 计划 P0-6 | 不存在 | P0-6 |
@@ -386,11 +397,11 @@ docs/02-tech-design/database-schema.md
 1. `pnpm test` + `pnpm typecheck` + `pnpm lint` **三者全绿**（必要时加 `pnpm build`）。
 2. **原子区段审计**：任何新增的「读—判断—写」事务，区段内**不得出现 `await`**。逐段确认。
 3. **无第二套实现**：按 §4.3 的五条 grep 确认。
-4. **接口清单门禁**：涉及后台接口的批次必须同批扩充 `tests/admin.test.mjs`；涉及客服接口的扩充 `tests/staff.test.mjs`；涉及打手接口的扩充打手端门禁。
-   ⚠️ **CURRENT**：`app/api/companion/**` **没有任何清单门禁**（计划 §十 提到的 `tests/companion.test.mjs` 当前不存在）。
-   ✅ **已确认建立**（产品裁定 2026-09-19）：新增与 Admin / Staff 类似的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对——
-   当前清单至少含 `GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`，P0-6 后加入对应订单接口。
-   新增 / 删除 / 误改路径时测试**必须失败**。**沿用现有 tests 的源码扫描方式，不新建测试框架**；落地属 **P0-5.5**。
+4. **接口清单门禁**：涉及后台接口的批次必须同批扩充 `tests/admin.test.mjs`；涉及客服接口的扩充 `tests/staff.test.mjs`；涉及打手接口的扩充 `tests/companion.test.mjs`。
+   ✅ **已建立**（产品裁定 2026-09-19，P0-5.5 落地）：与 Admin / Staff 同形的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对——
+   当前清单**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`，P0-6 后加入对应订单接口。
+   新增 / 删除 / 误改路径时测试**必须失败**。**沿用现有 tests 的源码扫描方式，不新建测试框架**。
+   ⚠️ 打手接口的清单门禁在 `tests/companion.test.mjs`，**不是** `tests/companionAccess.test.mjs`（后者是「打手身份只有一套」的负向门禁，两者互补、互不替代）。
 5. **同步技术设计文档**：见 §十一。
 
 ---

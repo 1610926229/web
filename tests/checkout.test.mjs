@@ -7,7 +7,9 @@ import {
 } from "../lib/constants/checkout.ts";
 import { getCatalogRepository } from "../lib/data/catalogRepository.ts";
 import { catalogStore } from "../lib/data/mockCatalogRepository.ts";
+import { companionStore } from "../lib/data/mockCompanionRepository.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
+import { isCompanionAcceptingOrders } from "../lib/constants/companions.ts";
 import {
   confirmPaymentRequest,
   createPaymentRequest,
@@ -15,6 +17,8 @@ import {
   previewCheckout,
 } from "../lib/services/checkout.ts";
 import { queryOrdersForUser } from "../lib/services/orders.ts";
+import { resolveSource } from "./app-path.mjs";
+import { readSource, stripComments } from "./source-text.mjs";
 
 /**
  * 结算、金额与支付幂等的测试。
@@ -199,6 +203,262 @@ test("商品、规格、大区、数量非法一律拒绝", async () => {
       `${JSON.stringify(override)} 应当被拒绝`,
     );
   }
+});
+
+// ————————————————— 结算页指定陪玩：复用中央接单资格判断（P0-5.5 R5）—————————————————
+//
+// 「这个人现在能不能被指定」与「这个人现在能不能接新单」是同一条规则，
+// 因此它必须只有一个定义处（`lib/constants/companions.ts` 的 `isCompanionAcceptingOrders`）。
+// 这一节从**两个方向**钉住它：
+//
+// ① **行为**：同一份资料喂给结算页与谓词本身，两者必须给出同一个答案（下面第 19 条）；
+// ② **源码**：结算页不再自己写一份「名单 + available」的判断（下面第 20 条）。
+//
+// ⚠️ 第 19 条**不是**把 `!isCompanionListed(x) || !x.available` 抄进测试里再比一遍——
+//    那只是把第三份拷贝搬到测试文件里，而真值源仍然有三份。
+
+/** 在架、当前可接单。 */
+const COMPANION_OK = "cp-1";
+/** 在架但暂停接单（`available: false`），资料仍在公开名单里。 */
+const COMPANION_PAUSED = "cp-4";
+/** 已下架（`enabled: false`）。 */
+const COMPANION_DISABLED = "cp-7";
+
+/** 结算页拒绝一个不可选的陪玩时给出的原文案（R5：不得改变任何对外文案）。 */
+const COMPANION_UNAVAILABLE_MESSAGE = "该陪玩当前不可选，请重新选择";
+
+/**
+ * 临时给一条陪玩资料打补丁，返回还原函数。
+ *
+ * 陪玩 store 的 `createStore` 会把种子里每条记录**复制**一层再放进 Map，
+ * 因此就地改 Map 里那条不会污染模块级的种子；但还是要还原——
+ * 同一份 store 在本文件内是共享的，不还原就会漏给后面的用例。
+ */
+function withCompanionPatch(id, patch) {
+  const record = companionStore().companions.get(id);
+  assert.ok(record, `预置陪玩 ${id} 必须存在`);
+  const original = { ...record };
+  Object.assign(record, patch);
+  return () => {
+    Object.assign(record, original);
+  };
+}
+
+/** 结算页是否**接受**这个陪玩。只关心「过不过」，不关心失败的文案（那是上面几条的事）。 */
+async function checkoutAccepts(companionId) {
+  try {
+    await preview({ companionId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("指定已下架的陪玩：试算与正式下单都被挡成 BAD_REQUEST + 原文案", async () => {
+  // 隔离 enabled 这一项：把在架且可接单的那位临时下架，available 与 removedAt 都不动，
+  // 这样红的只可能是「不在名单里」这一半判定（cp-7 那位同时 available=false，分不清是谁挡的）
+  const restore = withCompanionPatch(COMPANION_OK, { enabled: false });
+  try {
+    const record = companionStore().companions.get(COMPANION_OK);
+    assert.equal(record.available, true, "这条用例要隔离 enabled：available 必须仍是 true");
+    assert.equal(record.removedAt, null, "这条用例要隔离 enabled：removedAt 必须仍是 null");
+
+    await assert.rejects(
+      () => preview({ companionId: COMPANION_OK }),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+      "试算就该挡下：用户不该先看到一个能算出来的价",
+    );
+
+    const user = uniqueUser();
+    const idempotencyKey = uniqueKey();
+    await assert.rejects(
+      () =>
+        createPaymentRequest(
+          { ...selection({ companionId: COMPANION_OK }), idempotencyKey },
+          user,
+        ),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+      "绕过页面直接下单同样挡得住",
+    );
+
+    // 被挡下的请求不留痕迹：既没有支付请求，也没有订单
+    assert.equal(await getPaymentRepository().findPaymentRequestByKey(user, idempotencyKey), null);
+    assert.equal((await queryOrdersForUser(user, new URLSearchParams(), "server")).total, 0);
+  } finally {
+    restore();
+  }
+
+  // 预置的「已下架」那位同样挡得住（enabled 与 available 都是 false 的真实数据）
+  assert.equal(companionStore().companions.get(COMPANION_DISABLED).enabled, false);
+  await assert.rejects(
+    () => preview({ companionId: COMPANION_DISABLED }),
+    (error) => error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+  );
+});
+
+test("指定已被移除的陪玩：同样被挡——移除与下架是两件事，对外是同一个结果", async () => {
+  // 隔离 removedAt 这一项：enabled 与 available 都保持 true
+  const restore = withCompanionPatch(COMPANION_OK, { removedAt: "2026-09-20T00:00:00.000Z" });
+  try {
+    const record = companionStore().companions.get(COMPANION_OK);
+    assert.equal(record.enabled, true, "这条用例要隔离 removedAt：enabled 必须仍是 true");
+
+    await assert.rejects(
+      () => preview({ companionId: COMPANION_OK }),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+    );
+
+    await assert.rejects(
+      () =>
+        createPaymentRequest(
+          { ...selection({ companionId: COMPANION_OK }), idempotencyKey: uniqueKey() },
+          uniqueUser(),
+        ),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("指定暂停接单的陪玩：被挡（人还在名单里、详情页正常可见，只是现在不接新单）", async () => {
+  const record = companionStore().companions.get(COMPANION_PAUSED);
+  // 起点自检：这位是在架的、没有被移除，红的只可能是 available
+  assert.equal(record.enabled, true);
+  assert.equal(record.removedAt, null);
+  assert.equal(record.available, false);
+
+  await assert.rejects(
+    () => preview({ companionId: COMPANION_PAUSED }),
+    (error) => error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+    "暂停接单不该只是列表上的一个字",
+  );
+
+  await assert.rejects(
+    () =>
+      createPaymentRequest(
+        { ...selection({ companionId: COMPANION_PAUSED }), idempotencyKey: uniqueKey() },
+        uniqueUser(),
+      ),
+    (error) => error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+  );
+});
+
+test("指定正常陪玩：试算与下单一律照旧（金额、快照、返回结构都不变）", async () => {
+  const draft = await preview({
+    companionId: COMPANION_OK,
+    quantity: 2,
+    addonIds: [ADDON_RUSH.id],
+  });
+
+  assert.equal(draft.itemsAmount, PRODUCT.specPrice * 2, "指定陪玩不影响商品金额");
+  assert.equal(draft.addonsAmount, ADDON_RUSH.price);
+  assert.equal(draft.totalAmount, PRODUCT.specPrice * 2 + ADDON_RUSH.price);
+  // 返回结构是契约：换了判定方式，DTO 一个字段都不该多、不该少
+  assert.deepEqual(Object.keys(draft).sort(), [
+    "addons",
+    "addonsAmount",
+    "itemsAmount",
+    "product",
+    "quantity",
+    "spec",
+    "totalAmount",
+  ]);
+
+  const user = uniqueUser();
+  const created = await createPaymentRequest(
+    { ...selection({ companionId: COMPANION_OK }), idempotencyKey: uniqueKey() },
+    user,
+  );
+  assert.equal(created.created, true);
+  assert.equal(created.request.companionId, COMPANION_OK);
+  assert.equal(created.request.snapshot.companion?.id, COMPANION_OK);
+  assert.equal(created.request.snapshot.companion?.name.length > 0, true, "快照仍带上昵称");
+
+  const confirmed = await confirmPaymentRequest(created.request.id, "success", user);
+  // 下单只进池：订单上还没有「实际接单的人」
+  assert.equal(confirmed.order.actualCompanionId, null);
+  assert.equal(confirmed.order.companion, null);
+});
+
+/**
+ * 「复用中央谓词」要证明的是**行为一致**：同一份资料，两条判断路径给出同一个答案。
+ *
+ * ⚠️ 这条用例**刻意不**在测试里重写 `isCompanionListed(x) && x.available`：
+ *    把谓词抄进来再比对，只是把第三份拷贝搬了个地方——真值源仍然是两份，
+ *    而两份里任何一份改了，测试都只会安静地跟着一起变。
+ *    这里比对的是**结算页的行为**与**谓词本身**。
+ */
+test("行为一致：结算页的可选性与 isCompanionAcceptingOrders() 对同一份资料给出同一答案", async () => {
+  const fixtures = [
+    { id: COMPANION_OK, patch: {}, label: "在架 + 可接单" },
+    { id: COMPANION_PAUSED, patch: {}, label: "在架 + 暂停接单" },
+    { id: COMPANION_DISABLED, patch: {}, label: "已下架" },
+    { id: COMPANION_OK, patch: { removedAt: "2026-09-20T00:00:00.000Z" }, label: "在架 + 已被移除" },
+    {
+      id: COMPANION_OK,
+      patch: { available: false, removedAt: "2026-09-20T00:00:00.000Z" },
+      label: "同时暂停接单与已被移除",
+    },
+  ];
+
+  /** 每一格得到的答案。循环后要用它自检「两侧都覆盖到了」，见下面的断言。 */
+  const answers = [];
+
+  for (const fixture of fixtures) {
+    const restore = withCompanionPatch(fixture.id, fixture.patch);
+    try {
+      const record = companionStore().companions.get(fixture.id);
+      const expected = isCompanionAcceptingOrders({ ...record });
+      const accepted = await checkoutAccepts(fixture.id);
+
+      assert.equal(
+        accepted,
+        expected,
+        `${fixture.id}（${fixture.label}）结算页与谓词给出了不同答案`,
+      );
+      answers.push(accepted);
+    } finally {
+      restore();
+    }
+  }
+
+  // 自检：这张夹具表必须同时覆盖「可选」与「不可选」两侧。
+  // 若哪天所有夹具都变成不可选，「两边一致」就退化成了「两边都拒绝」，什么也证明不了。
+  assert.ok(answers.includes(true), "夹具里必须有一位是可选的，否则这条比对没有鉴别力");
+  assert.ok(answers.includes(false), "夹具里必须有一位是不可选的");
+});
+
+test("源码防回流：checkout.ts 不再内联「名单 + available」判断，改由一个谓词回答", () => {
+  const code = stripComments(readSource(resolveSource("lib/services/checkout.ts")));
+
+  // 第四份拷贝的回流：把 `!isCompanionListed(c) || !c.available` 再写一遍
+  assert.equal(
+    code.includes("isCompanionListed"),
+    false,
+    "结算页不该再自己判断「在不在名单里」——那会与列表 / 详情的口径分叉",
+  );
+  assert.equal(
+    code.includes(".available"),
+    false,
+    "结算页不该再直接读 available —— 那正是第四份拷贝的起点",
+  );
+
+  // 但判断必须还在（而不是被整段删掉）：由中央谓词回答
+  assert.match(
+    code,
+    /if\s*\(\s*!isCompanionAcceptingOrders\(\s*companion\s*\)\s*\)/,
+    "指定陪玩的资格判断必须由 isCompanionAcceptingOrders() 回答",
+  );
+  assert.match(
+    code,
+    /throw new ApiError\(\s*"BAD_REQUEST"\s*,\s*"该陪玩当前不可选，请重新选择"\s*\)/,
+    "挡住之后的失败语义与文案不得改变",
+  );
 });
 
 // ——————————————————————————— 幂等 ———————————————————————————
