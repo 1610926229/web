@@ -4,6 +4,8 @@
 >
 > CURRENT 部分由扫描 `app/api/**/route.ts` 生成，共 **115 个 route.ts**。
 
+> **2026-09-23 需求重校准说明**：CURRENT 路由数量与现有行为保持不变；第三部分 TARGET 已按 `docs/01-requirements/` V0.3 更新。旧 P0-6/P0-7/P0-8 仅是历史计划编号，未来 Round 需重新分配。
+
 ---
 
 # 第一部分：CURRENT API
@@ -176,7 +178,7 @@
 | GET | `/api/companion/dispatches` | `requireCompanion` | `companionDispatch` | 当前打手的两张订单池（专属 + 公共），含 `canAccept` 与 `notice` |
 | POST | `/api/companion/dispatches/[id]/accept` | `requireCompanion` | `companionDispatch` | 接单（幂等重放）。所有判定在 `acceptDispatch` 的原子区段内 |
 
-**⚠️ 打手接口 CURRENT 只有这 2 个**（P0-6 后新增订单接口，见 §3.1）。
+**⚠️ 打手接口 CURRENT 只有这 2 个**；未来 Companion 订单/取消/开始服务接口见第三部分 TARGET，真正落地时再扩充清单。
 **⚠️ `app/api/companion/**` 的接口清单门禁属 P0-5.5**（管理端有 62 条、客服端有 16 条）：
 本轮已冻结下面两条的清单契约（`GET` / `POST`、`requireCompanion()` 为第一动作、引用的服务层函数），
 门禁测试写入 `tests/`，见 §2.11。
@@ -444,7 +446,7 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 - 清单**逐条列出**（不是只断言数量），当前**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`；
 - 每个路由**导出的 HTTP 方法**要与清单一致（多一个方法也要现形），第一动作必须是 `requireCompanion()`，且不出现其它身份的守卫；引用的服务层函数也要与清单一致；
 - **不得**把 `/companion/orders`、`/companion/orders/[id]` 等尚不存在的 TARGET 路由登记进清单；
-- **P0-6 后新增对应订单接口时同步扩充清单**；
+- **未来真正新增 Companion 订单/取消/开始服务接口时同步扩充清单**；
 - **新增、删除、误改路径时测试必须失败**；
 - **沿用现有 tests 的源码扫描 / 路由门禁方式，不新建测试框架**；文件名遵循仓库现有命名风格，不为了名字本身新增抽象。
 
@@ -454,86 +456,116 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 
 # 第三部分：TARGET API
 
-**以下接口已被规划文档明确确认，但尚未实现。**
-**一律标注 `TARGET — NOT IMPLEMENTED`。**
+**以下能力已由 2026-09-23 V0.3 需求确认，但尚未实现。**
+**一律标注 `TARGET — NOT IMPLEMENTED`；旧 P0-6/P0-7/P0-8 编号不再作为执行顺序真值。**
 
-## 3.1 P0-6 开始服务
+## 3.1 Companion 我的订单、主动取消与开始服务
 
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| POST | `/api/companion/orders/[id]/start` | `requireCompanion`（预期） | `lib/services/companionOrders.ts` | `accepted → serving`。**必须由打手点击触发，系统绝不自动推进** |
+| GET | `/api/companion/orders` | `requireCompanion`（预期） | `companionOrders` | 仅返回 `actualCompanionId = 当前打手` 的订单；至少区分进行中/已结束 |
+| GET | `/api/companion/orders/[id]` | `requireCompanion`（预期） | `companionOrders` | 打手订单详情；非 actualCompanion 统一按不泄露存在性的 404 处理 |
+| POST | `/api/companion/orders/[id]/cancel` | `requireCompanion`（预期） | `companionOrders` / 对应 transaction | 仅 `accepted` actualCompanion 可主动取消；请求体必须包含取消原因与幂等标识；成功后 `accepted → paid`、回 public、通知用户、记录最小退出历史；当前 P0 不处罚 |
+| POST | `/api/companion/orders/[id]/start` | `requireCompanion`（预期） | `companionOrders` | `accepted → serving`；必须由当前 actualCompanion 显式点击触发 |
 
-**已确认的约束**（来源：计划 P0-6）：
+**共同约束：**
 
-- 只有 `accepted` 可开始服务；`paid` / `serving` / `completed` / `refunded` 全部拒绝。
-- 只有 `order.actualCompanionId` 对应的打手能开始；其他打手 → **404**。
-- 重复调用同一 `operationId` → `replayed: true`，不重复写。
-- **不存在任何基于时间 / 备注 / 聊天自动推进的代码路径。**
+- `exclusiveCompanionId` 不授予我的订单详情/动作权限；资源归属看 `actualCompanionId`。
+- `cancel` 只允许 `accepted`；`serving` 后没有普通主动取消入口。
+- `cancel` 回 public 时必须重新冻结 `publicPoolEnteredAt / publicTimeoutMinutesSnapshot / publicDeadlineAt`，并清除“当前履约绑定”；历史由最小退出记录保留。
+- `start` 只有 `accepted` 合法，且不存在任何根据时间 / 备注 / 聊天自动进入 serving 的路径。
+- 幂等/并发下只允许一次真实状态推进，不重复通知、不刷新已经成功写入的时间。
+- 这些新增 Companion API 落地时必须同步扩充 `tests/companion.test.mjs` 的 manifest；未实现前不得预登记。
 
-**打手端页面入口 —— 已由产品负责人正式确认（2026-09-19），属 TARGET — NOT IMPLEMENTED**
-
-Companion 工作台后续采用：
+**打手端页面入口（TARGET）**：
 
 ```
-/companion
-/companion/exclusive
-/companion/pool
-/companion/orders            ← 新增：「我的订单」
-/companion/orders/[id]       ← 新增：打手订单详情页
+/companion/orders
+/companion/orders/[id]
 ```
 
-| 页面 | 职责 |
-|---|---|
-| `/companion/orders` | 「我的订单」。至少区分**进行中**（`accepted` / `serving`）与**已结束**（`completed` / `refunded`） |
-| `/companion/orders/[id]` | 打手订单详情页。P0-6 在此展示 `accepted` 状态下的**「开始服务」**按钮，成功后 `accepted → serving` |
+同一个详情页承载 `accepted` 的“开始服务”和 `serving` 的“提交完成材料”，不得为后续阶段复制第二套订单详情。
 
-**⚠️ P0-7 必须继续复用这个订单详情页**：`serving` 状态下增加**「提交完成材料」**。
-**不要为 P0-7 重新造第二套订单详情体系。**（见 §3.2）
-
-## 3.2 P0-7 完成材料 + 客服审核
+## 3.2 CompletionSubmission：人工审核 + 10 分钟默认自动审核
 
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| POST | `/api/companion/orders/[id]/completion` | `requireCompanion`（预期） | `lib/services/companionCompletions.ts` | 打手提交完成材料（截图 + 5~50 字说明） |
-| GET | `/api/staff/completions` | `requireStaff`（预期） | `lib/services/staffCompletions.ts` | 待审列表 |
-| GET | `/api/staff/completions/[id]` | `requireStaff`（预期） | `staffCompletions.ts` | 详情 |
-| POST | `/api/staff/completions/[id]/approve` | `requireStaff`（预期） | `staffCompletions.ts` | 通过 → 订单 `completed` |
-| POST | `/api/staff/completions/[id]/reject` | `requireStaff`（预期） | `staffCompletions.ts` | 驳回 → 订单保持 `serving` |
+| POST | `/api/companion/orders/[id]/completion` | `requireCompanion`（预期） | `companionCompletions` | 当前实际打手在 `serving` 提交截图 + 5~50 字说明 |
+| GET | `/api/staff/completions` | `requireStaff`（预期） | `staffCompletions` | 待审列表 |
+| GET | `/api/staff/completions/[id]` | `requireStaff`（预期） | `staffCompletions` | 详情 |
+| POST | `/api/staff/completions/[id]/approve` | `requireStaff`（预期） | `staffCompletions` | 人工通过 → Order `completed` |
+| POST | `/api/staff/completions/[id]/reject` | `requireStaff`（预期） | `staffCompletions` | 驳回 → Order 保持 `serving`；允许重新提交 |
 
-**入口页面（已确认，2026-09-19）**：**复用** P0-6 的 `/companion/orders/[id]` 订单详情页，
-在 `serving` 状态下增加「提交完成材料」。**不得新建第二套订单详情体系**，见 §3.1。
+**已确认约束：**
 
-**已确认的约束**：
+- 同一订单同时最多 **1 份 `pending`**；已有 pending 时重复提交必须拒绝/幂等，不创建第二份。
+- 自动审核配置默认 **10 分钟**，后台可修改。
+- 每次 submission 进入 pending 时冻结 `autoApprovalMinutesSnapshot` 与 `autoApprovalDeadlineAt`；后台之后改配置不追溯改变该份材料。
+- rejected 后重新提交时重新读取当前配置并重新计时。
+- `sweepCompletionAutoApprovals(now)`（名称可在实现 Round 按现有命名规范落地）只在：仍 pending、Order 仍 serving、deadline 已到、无投诉/有效售后阻塞、尚未被人工处理时自动通过。
+- 自动通过与客服通过都产生 `Order.status = completed`，但必须记录审核来源为 System，**不得伪装成 Staff**。
+- Companion 被封禁/移除导致订单回池时，其旧 pending CompletionSubmission 必须先作废并退出自动审核资格。
+- 人工通过、自动通过、人工驳回、封禁作废之间必须并发安全；先成功的一方决定事实，后续动作安全失败/no-op。
 
-- 摘要 5~50 字，越界 → `BAD_REQUEST`。
-- 只有 `serving` 状态可提交。
-- 只有当前打手可提交。
-- 驳回后订单仍是 `serving`，且 `rejectReason` 有值；驳回后可再次提交（新记录，旧的保留为历史）。
-- **客服路由里没有 `requireAdmin`。** 管理端能看，但本批次不做管理端审核入口——**审核是客服动作**。
-- 审核通过的原子区段包含：`completion.status` → `order.status = completed` + `completedAt` → （P0-8 后）建立 Earning → 通知打手 → `writeAudit`，**全部在同一无 `await` 区段内**。
+## 3.3 用户退款：未服务直接全额退款，已服务进入售后
 
-## 3.3 P0-8 结算域
+**复用 CURRENT `POST /api/orders/[id]/refunds` 作为用户退款入口，不新增第二套 Refund 系统。TARGET 行为按 Order 状态分流：**
+
+| Order.status | TARGET 行为 |
+|---|---|
+| `paid` | 直接全额退款成功；不需要客服/管理员审批 |
+| `accepted` | 直接全额退款成功；打手收益为 0，不生成 Earning；通知已接单打手；终态保留 `actualCompanionId` 历史事实 |
+| `serving` | 创建/进入人工售后退款链路，由客服调查，管理员最终决定资金 |
+| `completed` | 仅在本单 `complaintDeadlineAt` 前按投诉/售后规则处理 |
+| `refunded` | 不允许再次退款，幂等返回既有结果或业务拒绝 |
+
+**重要**：CURRENT `/api/orders/[id]/refunds` 仍是旧“创建退款申请”行为；上表是 TARGET，不得在文档中假装已经实现。
+
+## 3.4 平台生命周期配置
+
+CURRENT `/api/admin/platform-config` 继续复用，不新增第二个平台配置系统。TARGET 至少增加：
+
+- `exclusivePoolTimeoutMinutes`（或与现有命名规范等价的字段）：进入 exclusive 时冻结本单 snapshot/deadline；
+- `completionAutoApprovalMinutes`：默认 **10**；每次 completion 进入 pending 时冻结 snapshot/deadline；
+- `complaintWindowMinutes`：进入 completed 时冻结本单 snapshot/deadline；
+- 现有 `publicPoolTimeoutMinutes` 保持同样 snapshot 语义。
+
+PATCH 必须走既有 Admin 守卫、校验、审计与平台配置事务；修改配置只影响未来进入对应生命周期阶段的业务事实。
+
+## 3.5 Companion 封禁 / 移除的订单联动
+
+**复用 CURRENT 管理端 Companion disable/remove 动作，不新增“封禁订单”第二套接口。TARGET 事务副作用：**
+
+- 当前打手存在 `accepted` / `serving` 订单时，解除当前履约并重新进入 public；
+- 通知用户；
+- 若有其 pending CompletionSubmission，先作废并退出自动审核资格；
+- 记录最小退出历史；
+- 封禁动作本身不自动退款。
+
+## 3.6 客服直接换人（P0 最小实现）
+
+产品权限已确认：**客服可以直接执行换人，不需要管理员批准，且不设置固定换人次数上限；退款资金仍由管理员最终决定。**
+
+为避免提前引入复杂 Assignment 聚合，P0 技术映射采用“解除当前履约 → 回 public → 由新打手重新接单”的最小路径，并保留最小退出历史。客服动作的最终 URL/DTO 在对应 Round 按现有 `staff` 路由命名冻结后写入 manifest；**在真实路由出现前不得把猜测路径登记为 CURRENT。**
+
+## 3.7 Earning / Settlement
 
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| GET | `/api/companion/earnings` | `requireCompanion`（预期） | `lib/services/companionEarnings.ts` | 打手收益（总收入 / 冻结 / 可提现 / 罚款） |
+| GET | `/api/companion/earnings` | `requireCompanion`（预期） | `companionEarnings` | 打手收益（总收入 / 冻结 / 可提现；罚款自动规则仍未定义） |
 
-**已确认的约束**：
+**已确认目标语义：**
 
-- 订单完成 → 生成一条 `frozen` Earning，`incomeAmount` **等于订单的 `companionBaseIncome` 快照**（不重算）。
-- `availableAt = 完成时刻 + 48h`。
-- `fineAmount` **恒为 0**，且仓储里**没有任何可以减少 `incomeAmount` 的方法**。
-- **本批次不提供提现接口。**
-- `sweepMaturedEarnings()` 同步、幂等、可重复调用；调度器必须复用它。
+- Order completed → 为当时实际履约打手生成 frozen Earning，金额取订单 `companionBaseIncome` 快照；
+- 解冻时点不再硬编码 `completedAt + 48h`，而是消费本单冻结的 `complaintDeadlineAt`；
+- deadline 到达且无投诉/售后冻结原因后 `frozen → available`；
+- `sweepMaturedEarnings(now)` 同步、幂等、可重复调用；Scheduler 必须复用它；
+- 提现、自动罚款、余额桶细节仍按 TBD 处理。
 
-## 3.4 计划已提及但本阶段不做
+## 3.8 计划存在但本次不提前实现
 
-| 项 | 状态 |
-|---|---|
-| P0-9 消费累计改按实付 | `TARGET`（无新接口，改 `lib/constants/levels.ts`） |
-| P1-2 / P1-4 引入 `AfterSalesCase` | `TARGET` |
-
----
+- 优惠券正式核销、B/A/S 并发、提现、管理员余额调整/会费批扣账本细节等继续按各自后续需求处理。
+- 完整 AfterSalesCase 聚合不是 P0 必需条件；P0 可复用现有 Complaint / Refund + 最小回池动作，禁止为了“模型漂亮”先造复杂系统。
 
 # 第四部分：TBD — DO NOT INVENT
 
@@ -542,9 +574,9 @@ Companion 工作台后续采用：
 | 能力 | 状态 |
 |---|---|
 | **提现 API** | **TBD — DO NOT INVENT**。入口、审核流程、打款渠道、最小金额全部未定 |
-| **罚款 / 扣款 API** | **TBD — DO NOT INVENT**。`Earning.fineAmount` 恒为 0 |
+| **自动罚款 / 余额扣减 API** | **TBD — DO NOT INVENT**。accepted 主动取消当前 P0 明确不处罚；管理员人工余额调整/会费批扣仅确认业务需要，账本/API 细节未冻结 |
 | **结算 / 对账 API** | **TBD — DO NOT INVENT** |
-| **换人 / 改派 API（Replacement / Assignment）** | **TBD — DO NOT INVENT**。全仓无对应实体 |
+| **复杂 Replacement / Assignment 聚合 API** | **TBD — DO NOT INVENT**。P0 已确认客服直接换人、次数不限，并采用最小“回 public + 退出历史”路径；复杂指定改派/统一 Assignment 模型仍未确认 |
 | **用户封禁 API** | **TBD — DO NOT INVENT** |
 | **打手侧统一「操作史」查询 API** | **TBD — DO NOT INVENT**（计划 R7） |
 | **「服务异常」触发与售后区** | **TBD — DO NOT INVENT**（计划 R4） |

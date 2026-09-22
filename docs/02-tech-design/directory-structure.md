@@ -4,6 +4,8 @@
 >
 > **没有 `src/` 目录。** 路径别名 `@/*` 直接映射到仓库根（`tsconfig.json`）。
 
+> **2026-09-23 需求重校准说明**：本文的文件数量/目录树仍是 CURRENT 源码快照；需求 V0.3 新增的取消接单、自动完成审核、封禁/客服换人回池等只在 TARGET 放置规则中描述，**不得因此修改 CURRENT 计数或假装目录已经存在**。
+
 ---
 
 # 一、顶层
@@ -267,43 +269,76 @@ public/
 
 # 八、新功能放置规则
 
-## 8.1 一个功能通常跨越的位置
+## 8.1 生命周期类 P0 功能通常跨越的位置
 
-**以未来的 P0-6（打手「开始服务」）为例**——这是 `TARGET — NOT IMPLEMENTED`：
+> 旧文档用“P0-6 开始服务”作示例。2026-09-23 需求重排后，具体 Round 编号待 `总需求进度表` 重新分配；以下仅描述 **TARGET — NOT IMPLEMENTED** 的放置规则。
 
-```
-lib/types/order.ts                          ← 通常无新字段（servingAt 已存在）
-lib/constants/orders.ts                     ← 状态机表（`ORDER_TRANSITIONS`，P0-5.5 已实现；本轮不接入写入路径）
-lib/data/mockPaymentRepository.ts           ← 同步写原语（applyOrderServing）
-lib/data/companionOrderTransaction.ts       ← 伪事务（原子区段）
-lib/services/companionOrders.ts             ← 服务端业务
-lib/services/companionHttp.ts               ← 浏览器客户端（若页面需要）
-app/api/companion/orders/[id]/start/route.ts← Route Handler（guard + 解析 + response）
-app/companion/(console)/orders/page.tsx     ← 打手「我的订单」（进行中 / 已结束）
-app/companion/(console)/orders/[id]/page.tsx← 打手订单详情（P0-6「开始服务」按钮在此）
-components/companion/CompanionOrderCard.tsx ← 展示组件
-tests/companionOrders.test.mjs              ← 测试
-docs/02-tech-design/api-contract.md         ← 同步文档
-```
+### A. 打手“我的订单 / 取消接单 / 开始服务”
 
-**打手端页面入口已确认（2026-09-19，TARGET — NOT IMPLEMENTED）**：
-
-```
-/companion
-/companion/exclusive
-/companion/pool
-/companion/orders          ← 新增：我的订单
-/companion/orders/[id]     ← 新增：订单详情；P0-6 的「开始服务」与 P0-7 的「提交完成材料」都在这一个页面
+```text
+lib/types/order.ts
+lib/constants/orders.ts                          ← TARGET 新结构状态机
+lib/data/mockPaymentRepository.ts                ← 同步 Order 写原语（按现有历史归属，不强行重构 Repository）
+lib/data/companionOrderTransaction.ts            ← 跨 Order / Dispatch / release history / notification 的伪事务
+lib/services/companionOrders.ts
+lib/services/companionHttp.ts                    ← 浏览器客户端可继续复用/扩展
+app/api/companion/orders/route.ts                 ← GET 我的订单（真正实现时才加入 manifest）
+app/api/companion/orders/[id]/route.ts            ← GET 详情
+app/api/companion/orders/[id]/cancel/route.ts     ← POST accepted 主动取消 + reason
+app/api/companion/orders/[id]/start/route.ts      ← POST accepted → serving
+app/companion/(console)/orders/page.tsx
+app/companion/(console)/orders/[id]/page.tsx
+components/companion/*Order*.tsx
+tests/companionOrders.test.mjs
+docs/02-tech-design/api-contract.md
 ```
 
-**⚠️ P0-7 必须复用 `/companion/orders/[id]`，不得另造第二套订单详情体系。**
+同一个 `/companion/orders/[id]` 详情页继续承载 `serving` 的“提交完成材料”，不得为 completion 再造第二套订单详情。
 
-**⚠️ 不要为了一个功能把所有代码写进 `route.ts` 或 `page.tsx`。**
-Route Handler 只做四件事（guard / 解析 / 调 service / response），页面只做渲染。
+### B. CompletionSubmission + 自动审核
 
-**⚠️ 但也不要为了目录纯洁强制创建没有实际内容的空层。**
-如果一个功能确实只需要改 `lib/constants/` 与 `lib/services/`，那就只改这两处。
-判定标准是**职责是否需要分开**，不是**目录看起来是否整齐**。
+```text
+lib/types/completion.ts
+lib/constants/completions.ts                     ← 5~50 字、状态/动作校验
+lib/data/completionRepository.ts
+lib/data/mockCompletionRepository.ts
+lib/data/completionTransaction.ts                ← 提交/人工审核/自动审核/作废的原子区段
+lib/services/companionCompletions.ts
+lib/services/staffCompletions.ts
+app/api/companion/orders/[id]/completion/route.ts
+app/api/staff/completions/**/route.ts
+components/companion/*                           ← 复用打手订单详情
+components/staff/*                                ← 客服完成审核 UI（若该 Round 包含 UI）
+tests/completions.test.mjs
+```
+
+规则：同一订单最多一个 pending；默认自动审核 10 分钟但由平台配置；每次 pending 冻结 snapshot/deadline；封禁回池时旧 pending 必须失效。真实 Scheduler 以后只调用同一 domain sweep，不另写逻辑。
+
+### C. 最小“履约退出历史 / 回公共池”
+
+P0 明确不先建设复杂 Assignment 聚合。若实现需要独立持久事实，按 `database-schema.md` T4 的最小 `CompanionReleaseRecord` 放置：
+
+```text
+lib/types/companionRelease.ts                    ← 仅最小历史字段
+lib/data/companionReleaseRepository.ts
+lib/data/mockCompanionReleaseRepository.ts
+```
+
+它由以下事务消费，不自己拥有业务状态机：
+
+- 打手 accepted 主动取消；
+- Admin 封禁/移除当前打手；
+- Staff 直接换人。
+
+三者统一复用“写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 回 public → 通知”的底层能力；**accepted 用户直接退款是终态退款，保留 actualCompanionId，不走回池清绑定语义。**
+
+### D. 平台 lifecycle 配置
+
+继续复用现有 `PlatformConfig` / `/api/admin/platform-config`，不要新建第二套配置域。TARGET 增加 exclusive timeout、Completion 自动审核时长、投诉窗口；进入对应生命周期阶段时冻结 snapshot/deadline。
+
+**⚠️ 不要为了一个功能把所有代码写进 `route.ts` 或 `page.tsx`。** Route Handler 仍只做 guard / 参数解析 / service / response；页面只做取数与渲染。
+
+**⚠️ 也不要为了目录纯洁强制创建没有职责的空层。** 上述是落点参考；若实现 Round 能在现有模块内清晰完成，就复用现有模块，尤其禁止借需求变更顺手重构 PaymentRepository / adminHttp / Session。
 
 ## 8.2 各目录的「该放什么」
 
@@ -332,12 +367,14 @@ Route Handler 只做四件事（guard / 解析 / 调 service / response），页
 - [ ] `app/api/...` —— Route Handler
 - [ ] `components/...` + `app/.../page.tsx` —— 界面
 - [ ] `tests/xxx.test.mjs` —— 测试
-- [ ] **`tests/admin.test.mjs` / `staff.test.mjs` 的清单数组**（若新增后台或客服接口）
+- [ ] **`tests/admin.test.mjs` / `staff.test.mjs` / `companion.test.mjs` 的清单数组**（按新增接口所属边界同步扩充；未实现的 TARGET 不得预登记）
 - [ ] `docs/02-tech-design/api-contract.md` + `database-schema.md` —— 同步文档
 
 **⚠️ 若涉及金额**：必须复用 `lib/constants/orderAmount.ts`，不得新写公式。
 **⚠️ 若涉及跨实体写入**：必须走 `*Transaction.ts` 的原子区段，区段内**不得有 `await`**。
-**⚠️ 若涉及幂等**：业务键必须可推导（如 `orderId`），**不得**照抄通知的随机 UUID 方案。
+**⚠️ 若涉及幂等**：业务键必须可推导（如 `orderId` / `orderId + eventType`），不得照抄通知的随机 UUID 方案。
+**⚠️ 若涉及 lifecycle timeout**：配置放既有 PlatformConfig，进入阶段时冻结 snapshot/deadline；真实 Scheduler 只调用同一 domain sweep。
+**⚠️ 若涉及回池**：必须同时处理 Order 当前履约绑定、Dispatch public deadline、最小退出历史、通知，以及旧 pending completion 的失效（若存在）。
 
 ---
 

@@ -51,14 +51,18 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 
 ---
 
-## 当前 Round
+## Round 索引
 
-| Round | Title | Status |
-|---|---|---|
-| [`P0-5.5`](./P0-5.5/README.md) | 小型架构稳定化 | `AWAITING_ACCEPTANCE` |
+| Round | Title | Status | Git Commit |
+|---|---|---|---|
+| [`P0-5.5`](./P0-5.5/README.md) | 小型架构稳定化 | `DONE` | `6bd10fc` |
 
+> **当前没有进行中的 Round。**
+> 2026-09-23 需求重校准后，下一 Round **尚未重新编号**——必须以最新的
+> `docs/01-requirements/`、`docs/02-tech-design/`、`docs/03-dev/总需求进度表.md` 为准，
+> 由用户明确给出新一轮 Prompt 才能开始。**编号由用户分配，Claude 不得自行创造。**
+>
 > **不要提前创建空目录**——某轮真正准备开始时才创建。
 > 上一轮 P0-5 建于本协议之前（`PRE-PROTOCOL`），不倒填历史档案。
-> 「开始服务」(`accepted → serving`) 仍是 `UNASSIGNED`，**编号由用户分配，Claude 不得自行创造**。
 
 全局进度真值源：[`../总需求进度表.md`](../总需求进度表.md)

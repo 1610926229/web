@@ -12,6 +12,8 @@
 > **本文件不设计 SQL 类型、不设计表名、不设计 FK cascade、不设计 index。**
 > **数据库选型（PostgreSQL / MySQL）与 ORM 选型（Prisma / Drizzle）均未确认，禁止自行选定。**
 
+> **2026-09-23 需求重校准说明**：第一部分 CURRENT 继续描述当前源码；第二部分 TARGET 已按需求 V0.3 更新。旧状态机、固定 48h 结算与“客服是唯一完成审核来源”等只能作为 CURRENT/历史事实，不能继续当作未来最终规则。
+
 ---
 
 # 第一部分：CURRENT 逻辑实体
@@ -185,8 +187,9 @@
 **⚠️ 本轮只交付中央定义，不接入任何写入路径**：`applyOrderAccepted` / `applyOrderRefund` 行为不变，也没有新增调用点。
 
 **⚠️ 当前运行时的真实迁移只有三条**：`paid → accepted → refunded`。
-`accepted → serving`（P0-6）与 `serving → completed`（P0-7）**尚未实现**；
-`serving` / `completed` 目前**只存在于种子数据**，`lib/data/` 里没有任何地方写过它们。
+`accepted → serving` 与 `serving → completed` **尚未实现**；`serving` / `completed` 目前只存在于种子数据。
+
+**TARGET — NOT IMPLEMENTED（2026-09-23）**：结构状态机需扩为 `accepted → paid`、`serving → paid` 的回池路径；对应当前履约绑定在回池时解除，历史由最小退出记录保存。`accepted` 终态直接退款则**保留** `actualCompanionId` 作为历史事实。具体见 T3。
 
 **订单写入点（CURRENT，恰好两处）**，都在 `lib/data/mockPaymentRepository.ts`：
 
@@ -250,7 +253,7 @@ PaymentRequest ──(1:1，支付成功后)──> Order ──(1:1)──> Dis
 2. **存在两条写入通道**：同步的 `appendNotification()`（在原子区段内）与异步的 `createNotificationForUser()`（`lib/services/notifications.ts:132`，**生产代码零调用方**，只被测试调用）。
 3. **id 用随机 UUID + 冲突重试**（`newNotificationId()`，`mockNotificationRepository.ts:59`），且 `appendNotification` **遇到 id 冲突直接抛错、拒绝覆盖**。
 
-**⚠️ 新增 P0-6 / P0-7 / P0-8 的通知事件时，幂等键必须是可推导的**（如 `orderId` + 事件类型），
+**⚠️ 后续新增订单取消 / 开始服务 / Completion / Earning 等生命周期通知时，幂等键必须是可推导的**（如 `orderId` + 事件类型），
 **不得照抄随机 UUID 方案**。见第三部分。
 
 ---
@@ -468,6 +471,8 @@ closed     → []
 
 **⚠️ 改配置不动历史订单**：订单进入需要计时的环节时把自己那一刻的参数值冻结成快照。
 
+**TARGET — NOT IMPLEMENTED（V0.3）**：同一个 PlatformConfig 继续作为唯一平台配置真值源，后续至少扩展：exclusive pool timeout、CompletionSubmission 自动审核时长（默认 10 分钟）、投诉窗口时长。三个新参数都遵循“进入对应生命周期阶段时冻结 snapshot/deadline”的规则；不得新建第二套配置实体。
+
 ---
 
 ## 20. AdminAccount / StaffAccount（后台账号）
@@ -536,39 +541,52 @@ closed     → []
 
 **以下领域已被规划文档明确确认，但当前代码中不存在。**
 
-## T1. CompletionSubmission（完成材料）—— P0-7
+## T1. CompletionSubmission（完成材料）—— TARGET — NOT IMPLEMENTED
 
 ```ts
-export type CompletionSubmissionStatus = "pending" | "approved" | "rejected";
+export type CompletionSubmissionStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "invalidated"; // 封禁/回池导致旧材料失效；名称可在实现时保持等价语义，但必须有明确终态
+
+export type CompletionSubmissionReviewSource = "staff" | "system" | null;
 
 export type CompletionSubmission = {
   id: string;
   orderId: string;
   companionId: string;
   evidenceNames: string[];
-  summary: string;            // 5~50 字
+  summary: string;                    // 5~50 字
   status: CompletionSubmissionStatus;
   submittedAt: string;
-  reviewedByStaffId: string | null;
+
+  autoApprovalMinutesSnapshot: number; // 每次进入 pending 时冻结；默认配置 10 分钟
+  autoApprovalDeadlineAt: string;
+
+  reviewSource: CompletionSubmissionReviewSource;
+  reviewedByStaffId: string | null;    // system 自动通过时必须为 null
   reviewedByName: string | null;
   reviewedAt: string | null;
   rejectReason: string | null;
+  invalidatedAt: string | null;
 };
 ```
 
-**已确认的业务语义**：
+**已确认业务语义：**
 
-- 只有 `serving` 状态的订单可提交，且只有当前打手可提交。
-- **审核驳回 → `Order` 保持 `serving`，可再次提交**（新记录，旧的保留为历史）。
-- 审核通过 → 订单变 `completed`。
-- 计划新增 `"completion"` store 名，以及 `AdminAuditTargetType` 的 `"completion"`、
-  `AdminAuditAction` 的 `"completion.approve"` / `"completion.reject"`。
+- 只有 `serving` 且操作人是当前 actualCompanion 才能提交。
+- 同一订单同时最多 **1 份 pending**；Mock 仓储必须有等价约束，未来数据库使用 partial unique / 条件唯一语义保证。
+- rejected 后允许新建下一份 submission；重新提交重新读取当前平台配置并重新计算 deadline。
+- 平台配置默认自动审核 **10 分钟**；已经 pending 的 deadline 不被之后的配置修改追溯改变。
+- staff approve → approved + Order completed；staff reject → rejected + Order 保持 serving。
+- System 到 deadline 后，仅在仍 pending、Order 仍 serving、无投诉/有效售后阻塞时自动 approved + completed；`reviewSource = "system"`，不得伪造 staff 身份。
+- Companion 被封禁/移除、或其他已确认回池动作使原履约失效时，属于旧打手的 pending submission 必须进入不可自动通过的失效终态（这里以 `invalidated` 表达）。
+- 自动通过/人工通过/驳回/失效必须在同一业务事实竞争下并发安全。
 
-**⚠️ 尚未实现，且计划中未包含 UI 页面**——打手端「进行中的订单」页面尚未定义。见 `api-contract.md` §3.1。
+> 字段名属于技术设计；若实现 Round 发现已有仓库命名更合适，可做等价命名调整，但不得改变上面的业务语义。
 
-**⚠️ 不要自行补齐字段。** 以上是规划文档已确认的部分，未列出的字段（如是否要多个附件、是否要驳回次数上限）**属于 TBD**。
-
-## T2. Earning / Settlement（打手收益）—— P0-8
+## T2. Earning / Settlement（打手收益）—— TARGET — NOT IMPLEMENTED
 
 ```ts
 export type EarningStatus = "frozen" | "available" | "withdrawn" | "reversed";
@@ -580,66 +598,98 @@ export type Earning = {
   incomeAmount: number;      // 来自订单快照
   status: EarningStatus;
   frozenAt: string;
-  availableAt: string | null; // 冻结到期 = 订单完成时刻 + 48h
+  availableAt: string | null; // TARGET：等于本单 complaintDeadlineAt，而不是写死 completed + 48h
   withdrawnAt: string | null;
-  reversedAmount: number;    // 冲正累计（部分退款）
-  fineAmount: number;        // ⚠️ 恒为 0，本轮无扣款操作
+  reversedAmount: number;
+  fineAmount: number;        // 自动罚款规则仍未定义；accepted 主动取消当前 P0 不处罚
 };
 ```
 
-**已确认的业务语义**：
+**已确认业务语义：**
 
-- 订单完成 → 生成一条 `frozen` Earning，`incomeAmount` **等于订单的 `companionBaseIncome` 快照**（不重算）。
-- `availableAt = 完成时刻 + 48h`。
-- `fineAmount` **恒为 0**，且仓储里**没有任何可以减少 `incomeAmount` 的方法**。
-- **本批次不提供提现。** 收益只推进到 `available` 为止。
-- `sweepMaturedEarnings()` **同步、幂等、可重复调用**；后台调度器必须复用它。
-- 资金四类：总收入 = Σ`incomeAmount`；冻结 = Σ`status==="frozen"`；可提现 = Σ`status==="available"`；**罚款 = 恒 0**。
+- 订单进入 completed（人工审核或系统自动审核）后，为当时实际履约打手生成一条 frozen Earning；`incomeAmount = Order.companionBaseIncome` 快照。
+- Order completed 时冻结 `complaintWindowMinutesSnapshot` / `complaintDeadlineAt`；Earning.availableAt 复用该 deadline。
+- deadline 到达且无投诉/有效售后冻结原因后 `frozen → available`。
+- 平台之后修改投诉期不改变已 completed 订单的 deadline。
+- 提现、自动罚款、管理员余额调整/会费批扣的账本细节仍不在本实体本轮强行定义。
+- `sweepMaturedEarnings()` 同步、幂等、可重复调用；后台 Scheduler 必须复用它。
 
-**⚠️ 幂等键必须是 `orderId`（或 `orderId` + 事件类型）**，不得照抄通知的随机 UUID 方案。
+## T3. Order 状态机表 —— CURRENT 旧实现 + TARGET 新转移
 
-## T3. Order 状态机表 —— `lib/constants/orders.ts`（**P0-5.5 已实现**）
+**CURRENT**：P0-5.5 已实现 `ORDER_TRANSITIONS` + `canTransitionOrder`，但表内容仍是 2026-09-19 旧需求基线。它是源码事实，不再是未来“最终不可改”规则。
 
-**CURRENT**：`ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]>` + `canTransitionOrder`
-（`lib/constants/orders.ts:83` / `:100`），形态与 `lib/constants/adminRefunds.ts:153-166` 一致。
-`allowedOrderActions` **未做**，不在本轮范围内。
+**TARGET — NOT IMPLEMENTED（2026-09-23）**：
 
-### 转移表 —— **已由产品负责人正式确认**（2026-09-19），逐行即为最终内容
-
-```ts
-Order 主状态固定为：
-
+```text
 paid      -> accepted | refunded
-accepted  -> serving  | refunded
-serving   -> completed | refunded
+accepted  -> paid | serving | refunded
+serving   -> paid | completed | refunded
 completed -> refunded
 refunded  -> []
 ```
 
-**⚠️ 这张表只表达「这种状态迁移在结构上是否允许」，它不能代替具体领域 Guard。**
+状态机之外必须满足的领域 Guard：
 
-以下三种迁移虽然结构上允许，但**仍必须**通过各自的业务校验：
-
-| 迁移 | 状态机之外**仍然必须**满足的条件 |
+| 迁移 | 必须额外满足 |
 |---|---|
-| `paid → accepted` | Dispatch、deadline、接单资格、并发等条件（见 `acceptDispatch` 的原子区段） |
-| `serving → completed` | 完成材料**已提交且客服审核通过**（P0-7） |
-| `completed → refunded` | **只能通过合法的投诉 / 售后 / 退款流程进入**——不得因为状态机允许就提供任意按钮 |
+| `paid → accepted` | Dispatch、deadline、接单资格、禁止自接等现有 Guard |
+| `accepted → paid` | 当前 actualCompanion 主动取消（尚未 serving）或已确认的回池动作；记录最小退出历史、通知用户、重新建立 public deadline |
+| `accepted → serving` | 当前 actualCompanion 显式开始服务；只写一次 servingAt |
+| `accepted → refunded` | 用户未服务直接全额退款；打手收益 0、不建 Earning、通知打手；终态保留 actualCompanionId 历史事实 |
+| `serving → paid` | 封禁/客服换人等已确认回池动作；若有旧 pending CompletionSubmission 必须先失效 |
+| `serving → completed` | staff 人工 approve，或 System 满足自动审核 deadline + 无阻塞条件 |
+| `serving/completed → refunded` | 只能通过合法投诉/售后/退款流程 |
 
-**⚠️ 与部分退款的关系（已确认）**：
-`Order.status = "refunded"` 表达**该订单已经全额退款**。
-未来实现部分退款时，**部分退款本身不得自动把 `Order.status` 改成 `refunded`**。
+`Order.status = "refunded"` 仍表达**已完成全额退款**；未来部分退款本身不得自动改成 refunded。
 
-**落地形态**：`Record<OrderStatus, readonly OrderStatus[]>` + 派生 `canTransitionOrder` / `allowedOrderActions`，
-形态照抄 `lib/constants/adminRefunds.ts:153-166`。
-**P0-5.5 已落地前两者（Round `P0-5.5`）；`allowedOrderActions` 尚无需求，不属本轮。**
+### T3.1 Order 的 TARGET 生命周期 deadline 字段
 
-## T4. AfterSalesCase（售后）—— P1-2 / P1-4
+当前 Order 还没有投诉窗口快照字段。V0.3 TARGET 要求进入 completed 时冻结：
 
-**已确认**：`OrderStatus` **不含**售后状态。售后是**独立实体**，P0 阶段不产生（超时自动退款不进售后）。
-**⚠️ 结构未定义**——属 TBD，见第三部分。
+```ts
+complaintWindowMinutesSnapshot: number | null;
+complaintDeadlineAt: string | null;
+```
 
----
+这些字段只在 completed 生命周期建立后有值，平台配置后续变更不追溯修改历史订单。
+
+## T4. 最小 CompanionReleaseRecord（履约退出历史）—— TARGET — NOT IMPLEMENTED
+
+P0 明确**不引入复杂 Assignment 聚合**，但回池后必须能回答“谁曾经负责、为什么退出、何时退出、谁触发”。最小逻辑实体：
+
+```ts
+export type CompanionReleaseSource =
+  | "companion_cancel"
+  | "companion_disabled"
+  | "staff_reassign";
+
+export type CompanionReleaseRecord = {
+  id: string;
+  orderId: string;
+  companionId: string;
+  source: CompanionReleaseSource;
+  reason: string | null;       // companion_cancel 时必须非空
+  actorId: string | null;      // 打手本人/管理员/客服；system 场景可空
+  createdAt: string;
+};
+```
+
+用途仅限追溯，不承载新的订单状态机：
+
+- accepted 主动取消：写 release → 清当前履约绑定 → `accepted → paid` → Dispatch 回 public → 通知用户；当前 P0 不处罚。
+- Companion 封禁 accepted/serving：写 release → 旧 pending completion 失效（如有）→ 清当前履约绑定 → Order 回 paid → public → 通知用户。
+- 客服换人：允许直接执行且次数不限；P0 最小技术映射同样是“写 release → 回 public”，由新打手正常 accept。
+- accepted 用户直接退款是**终态退款而不是回池**，因此保留 Order.actualCompanionId，不使用“清当前履约绑定”的语义。
+
+## T5. AfterSales / Complaint 的 P0 边界
+
+P0 **不要求先造完整 `AfterSalesCase` 新聚合**。可以复用现有 Complaint / Refund 体系 + 已确认的客服回池动作跑通：
+
+- serving 用户退款 → 客服调查 → 管理员最终决定资金；
+- completed 在 complaintDeadlineAt 前投诉/退款 → 同样走人工售后；
+- 客服决定换人时可直接执行，不需管理员批准；没有固定换人次数上限。
+
+完整 AfterSalesCase 实体、复杂 Assignment、指定新打手等仍可后置，不应为了模型完整阻塞 P0。
 
 # 第三部分：TBD — DO NOT INVENT
 
@@ -648,9 +698,9 @@ refunded  -> []
 | 领域 | 状态 |
 |---|---|
 | **Withdrawal（提现）** | **TBD — DO NOT INVENT**。入口、审核流程、打款渠道、最小金额、与 Earning 的关系全部未定 |
-| **Penalty / 罚款** | **TBD — DO NOT INVENT**。`Earning.fineAmount` 恒为 0，已知「本轮无扣款操作」，但**未来是否有、怎么扣、扣到哪**未定 |
+| **Penalty / 自动罚款** | **TBD — DO NOT INVENT**。accepted 主动取消当前 P0 已确认不处罚；管理员人工余额调整/会费批扣已确认“需要”，但余额桶、负余额、账本与失败补偿未定 |
 | **User Ban（用户封禁）** | **TBD — DO NOT INVENT**。全仓无对应实体 |
-| **Replacement / Assignment（换人 / 改派）** | **TBD — DO NOT INVENT**。全仓无对应实体。⚠️ 与 `Dispatch.exclusiveCompanionId` 的关系未定 |
+| **复杂 Replacement / Assignment 聚合** | **TBD — DO NOT INVENT**。P0 仅采用 T4 最小退出历史 + 回 public；客服换人权限与不限次数已确认，但完整 Assignment/指定改派模型不做 |
 | **AfterSalesCase 结构** | **TBD — DO NOT INVENT**（计划 R4：谁触发、什么条件、如何进入售后区） |
 | **非普通投诉通道** | **TBD — DO NOT INVENT**（计划 R5） |
 | **`ProductSpec` 是否拆表** | **TBD — DO NOT INVENT** |
@@ -707,6 +757,7 @@ mockComplaintRepository 的 applyComplaintStatus
 | `companionIdByUser` | **一名用户最多一条有效护航** | ⚠️ **部分唯一索引**（仅未移除的行） |
 | `applicationIdByUser` | **一个人最多一条申请** | ⚠️ 语义待确认是否部分唯一 |
 | `messageIdByKey` | `${orderId}:${senderId}:${key}` | unique |
+| TARGET `pendingCompletionIdByOrder`（等价实现） | **同一订单同时最多 1 个 pending CompletionSubmission** | partial/conditional unique |
 
 **⚠️ 新增实体（Earning / CompletionSubmission）的幂等键必须从一开始就设计成可推导的**（如 `orderId`），
 **不得**沿用通知的随机 UUID + 冲突重试方案。
@@ -718,14 +769,17 @@ mockComplaintRepository 的 applyComplaintStatus
 | **`actualCompanionId` 与接单人必须一致** | `applyOrderAccepted` + `applyDispatchAccepted` 在同一原子区段 | **必须同一事务** |
 | **Payment / Order / Dispatch 创建必须一致** | `confirmPaymentRequest` 的原子区段内回调 `buildOrderFromRequest`，随后 `createDispatchForOrder` | **必须同一事务**（含派单创建） |
 | **退款审核通过 → 订单置 `refunded`** | `adminRefundTransaction.approveRefund` | **必须同一事务** |
-| **完成审核通过 → 订单置 `completed` + 建立 Earning + 通知 + 审计** | TARGET（P0-7） | **必须同一事务** |
+| **完成材料人工/自动通过 → Order `completed` + Earning + 通知 + 审核来源** | TARGET | **必须同一事务**；自动通过不得伪装 staff |
+| **accepted 主动取消 → release history + Order 回 paid + Dispatch public + 通知** | TARGET | **必须同一事务** |
+| **Companion 封禁/客服换人 → pending completion 失效 + release history + Order 回 paid + Dispatch public + 通知** | TARGET | **必须同一事务** |
+| **paid/accepted 直接退款 → Order refunded + refundedAmount + 通知；accepted 不建 Earning** | TARGET | **必须同一事务** |
 | **申请通过 → 建护航记录 + 发资格 + 审计** | `adminCompanionTransaction` | **必须同一事务** |
 
 ## C4. deadline 必须持久化
 
 **`Dispatch.exclusiveDeadlineAt` 目前只是内存里的一个 ISO 字符串，且推进是惰性的**（有读才清扫）。
 
-**迁移要求**：deadline 必须持久化，且**不得**依赖「有人读取」来推进。
+**迁移要求**：所有 lifecycle deadline 必须持久化，且**不得**依赖「有人读取」来推进。V0.3 至少包括：Dispatch exclusive/public deadline、CompletionSubmission.autoApprovalDeadlineAt、Order.complaintDeadlineAt。
 
 **⚠️ 生产阻塞项 TD-1**：`sweepExpiredDispatches(now)` / `sweepMaturedEarnings(now)`
 目前只在有人读取时被调用。**真实生产不能依赖这一点**——恶意用户静置订单即可让超时退款永不发生、打手收益永不解冻。
@@ -738,7 +792,8 @@ mockComplaintRepository 的 applyComplaintStatus
 
 ```
 sweepExpiredDispatches(now)
-sweepMaturedEarnings(now)     ← TARGET，随 P0-8 落地
+sweepCompletionAutoApprovals(now)   ← TARGET
+sweepMaturedEarnings(now)            ← TARGET
 ```
 
 **严禁**在调度器里另写一套超时退款逻辑——那会让两条路径的金额与状态判定迟早分叉。
@@ -753,7 +808,7 @@ companionRateSnapshot  companionBaseIncome  clubNetIncome
 ```
 
 **⚠️ `companionRateSnapshot` 来自商品当时的 `companionRateBp`。** 改商品配置**不影响历史订单**。
-**⚠️ `PlatformConfig.publicPoolTimeoutMinutes` 同理**——订单进入计时环节时冻结自己那一刻的值。
+**⚠️ 生命周期配置同理**——public/exclusive timeout、Completion 自动审核时长、投诉窗口都必须在进入各自计时阶段时冻结 snapshot/deadline；已经进入阶段的历史事实不随后台配置修改漂移。
 
 **⚠️ 迁移后不得引入「实时重算利润」的视图或触发器。**
 

@@ -7,6 +7,8 @@
 >
 > 若某条规则与源码冲突，以源码为准，并立刻修正本文件——文档失真比没有文档更危险。
 
+> **2026-09-23 需求重校准说明**：`docs/01-requirements/` V0.3 已改变若干 P0 规则。本文必须继续区分 **CURRENT 源码事实** 与 **TARGET — NOT IMPLEMENTED**：旧代码仍按 P0-5.5 时的状态机运行，但新目标已经改为支持 `accepted → paid` / `serving → paid` 回池、未服务直接退款、完成材料 10 分钟默认自动审核（可配置 + snapshot）、封禁回池、客服直接换人。**不得把 TARGET 写成已经实现。**
+
 ---
 
 ## 状态标签约定
@@ -144,16 +146,27 @@ adminWriteSupport.ts（公共支持，不是事务）
 
 `lib/constants/` 承载状态机是**明确的设计**，不是偶然：`ADMIN_REFUND_TRANSITIONS`、`ADMIN_COMPLAINT_TRANSITIONS`、`ADMIN_APPLICATION_TRANSITIONS`、`ORDER_TRANSITIONS` 都是 `Record<Status, readonly Status[]>` + 派生 `canTransitionXxx` + `xxxAllowedActions`。
 
-**CURRENT（P0-5.5 已实现）**：`lib/constants/orders.ts:83` 的 `ORDER_TRANSITIONS`（键集合由 `Record<OrderStatus, …>` 保证与 `ORDER_STATUSES` 的五个状态一一对应，终态写空数组）+ 派生 `canTransitionOrder`（`:100`）。
-`Order` 至此不再是「全仓唯一没有声明式状态机的实体」。见 `database-schema.md` T3 与 §七。
+**CURRENT（P0-5.5 已实现，源码尚未按 2026-09-23 新需求整改）**：`lib/constants/orders.ts:83` 的 `ORDER_TRANSITIONS` + 派生 `canTransitionOrder`（`:100`）仍是当前源码事实。`Order` 已有声明式状态机，但**表内容属于旧需求基线**，不能再写成“最终不得改动”。
 
-**⚠️ 本轮只交付「中央定义」，不接入任何写入路径**：`applyOrderAccepted` / `applyOrderRefund` 的行为不变，也没有新增调用点。「用表替换 Guard」是明确错误的方向。
+**TARGET — NOT IMPLEMENTED（2026-09-23 已确认）**：主 `OrderStatus` 仍只保留五个值，但结构允许关系调整为：
 
-**⚠️ 状态机表的边界（已由产品负责人正式确认，2026-09-19）**：
-状态机表**只表达「这种状态迁移在结构上是否允许」，它不能代替具体领域 Guard**。
-`paid → accepted` 仍必须检查 Dispatch / deadline / 接单资格 / 并发；
-`serving → completed` 仍必须满足完成材料已提交且客服审核通过；
-`completed → refunded` **只能通过合法的投诉 / 售后 / 退款流程进入**——不得因为状态机允许就提供任意按钮。
+```text
+paid      -> accepted | refunded
+accepted  -> paid | serving | refunded
+serving   -> paid | completed | refunded
+completed -> refunded
+refunded  -> []
+```
+
+结构迁移的领域含义：
+
+- `accepted → paid`：当前实际打手在尚未开始服务时主动取消；必须提交原因、记录最小退出历史、通知用户、当前 P0 不处罚，然后重新进入 public Dispatch。
+- `serving → paid`：当前实际打手被 `enabled=false` / 封禁，或未来客服按已确认售后规则执行换人时，解除当前履约并重新进入 public Dispatch；若存在该打手的 pending CompletionSubmission，必须先作废其自动审核资格。
+- `paid/accepted → refunded`：用户未开始服务直接全额退款；`accepted` 情况打手收益为 0、不生成 Earning、通知打手，终态退款保留 `actualCompanionId` 历史事实。
+- `serving → completed`：可以由客服人工审核通过，**也可以**由 System 在 pending 到 `autoApprovalDeadlineAt`、仍未人工处理且无投诉/有效售后阻塞时自动通过。
+- `completed → refunded`：仍只能通过合法投诉 / 售后 / 退款流程进入。
+
+**⚠️ 状态机表永远只表达“结构上允许”**，不能替代动作级 Guard。回池、退款、自动审核、封禁与客服换人都必须各自校验权限、资源归属、当前状态、deadline、幂等和跨实体一致性。
 
 ---
 
@@ -255,20 +268,32 @@ P0-5.5 **有意不收敛它**——那属于改动 Companion 模块，超出该�
 
 `deadline` 驱动的超时（派单转公共池、超时退款）目前**只在有人读取时被推进**，没有定时器。
 
-## 5.3 TARGET（NOT IMPLEMENTED）—— 自动超时必须复用同一个 domain service
+## 5.3 TARGET（NOT IMPLEMENTED）—— 生命周期 deadline 统一使用“配置 + snapshot + 同一 domain service”
 
-**这是硬约束，不是建议。**
+**这是硬约束，不是建议。** 2026-09-23 后，P0 至少存在四类 deadline：
 
-将来接入后台定时调度器时，调度器**必须**调用**同一套**已经存在的同步、幂等、可重复调用的业务入口：
+| 生命周期 | 配置/来源 | snapshot 时点 |
+|---|---|---|
+| public Dispatch timeout | `PlatformConfig.publicPoolTimeoutMinutes`（CURRENT 已有） | 真正进入 public 时 |
+| exclusive Dispatch timeout | TARGET：后台可配置 | 真正进入 exclusive 时 |
+| CompletionSubmission 自动审核 | TARGET：后台可配置，默认 **10 分钟** | 每次 submission 进入 pending 时；驳回后重提重新计时 |
+| completed 投诉窗口 | TARGET：后台可配置 | Order 真正进入 completed 时 |
+
+已经冻结的 deadline **不被后续平台配置修改追溯改变**。
+
+将来接入后台定时调度器时，调度器**必须**调用同一套同步、幂等、可重复调用的业务入口，例如：
 
 ```
-sweepExpiredDispatches(now)
-sweepMaturedEarnings(now)     ← TARGET，随 P0-8 落地
+sweepExpiredDispatches(now)          // CURRENT domain 入口
+sweepCompletionAutoApprovals(now)    // TARGET
+sweepMaturedEarnings(now)             // TARGET
 ```
 
-**严禁**在调度器里另写一套超时退款逻辑——那会让两条路径的金额与状态判定迟早分叉。
+自动完成审核必须再次检查 submission 仍为 `pending`、Order 仍为 `serving`、deadline 已到、无投诉/有效售后阻塞；客服人工审核、封禁回池等并发动作一旦先成功，后续 sweep 必须安全 no-op。
 
-（来源：计划 §九 TD-1。TD-1 是**真实支付上线前的阻塞项**。）
+**严禁**在调度器里另写第二套超时退款、自动完成或收益释放逻辑。
+
+（真实 Scheduler 仍是上线前阻塞项；当前 Mock 阶段允许惰性 sweep / 显式测试调用。）
 
 ---
 
@@ -296,20 +321,23 @@ sweepMaturedEarnings(now)     ← TARGET，随 P0-8 落地
 
 ## 7.1 TARGET — NOT IMPLEMENTED
 
-| 项 | 来源 | 现状 | 落地批次 |
-|---|---|---|---|
-| `ORDER_TRANSITIONS` + `canTransitionOrder`（转移表**已确认**） | 本文件 §2.6 / `database-schema.md` T3 | **已实现**（此前不存在）：`lib/constants/orders.ts:83` / `:100`；表内容按冻结值，未接入任何写入路径 | **P0-5.5**（Round `P0-5.5` 已完成） |
-| 管理员全额退款写入 `refundedAmount` | 产品裁定 2026-09-19 | **已实现**（此前 `adminRefundTransaction.ts` 省略第三参数，退款金额为 0）：现传 `order.actualPaidAmount`，见 `adminRefundTransaction.ts:247` | **P0-5.5**（Round `P0-5.5` 已完成） |
-| Companion API 清单门禁（扫描 `app/api/companion/**`） | 产品裁定 2026-09-19 | 路由清单契约已冻结并逐项核对：该目录下恰好两个 `route.ts`（`GET` / `POST`，均以 `requireCompanion()` 为第一动作）；门禁测试写入 `tests/`（同批交付） | **P0-5.5**（Round `P0-5.5`） |
-| Checkout 复用 `isCompanionAcceptingOrders` | 产品裁定 2026-09-19 | **已实现**（此前 `checkout.ts` 内联等价判定，是第三份拷贝）：改调 `isCompanionAcceptingOrders(companion)`，见 `checkout.ts:143` | **P0-5.5**（Round `P0-5.5` 已完成） |
-| 打手订单列表 `/companion/orders`（进行中 / 已结束） | 产品裁定 2026-09-19 | 打手端目前只有 `pool` / `exclusive` | P0-6 |
-| 打手订单详情 `/companion/orders/[id]` | 产品裁定 2026-09-19 | 不存在 | P0-6 |
-| `POST /api/companion/orders/[id]/start`（`accepted → serving`） | 计划 P0-6 | 不存在 | P0-6 |
-| `CompletionSubmission`（完成材料） | 计划 §2.3 | `lib/types/completion.ts` 不存在 | P0-7 |
-| P0-7 **复用**同一订单详情页，serving 状态增加「提交完成材料」 | 产品裁定 2026-09-19 | —— | P0-7 |
-| `Earning` / 结算域 | 计划 §2.4 | `lib/types/earning.ts` 与 `earningRepository` 均不存在 | P0-8 |
-| 后台定时调度器 | 计划 TD-1 | 不存在 | TBD |
-| 提现 | 计划 TD-4 | 不存在，且**本轮范围外** | 范围外 |
+> 2026-09-23 需求重排后，旧的 P0-6 / P0-7 / P0-8 编号不再作为未来开发顺序真值；**具体 Round 由 `docs/03-dev/总需求进度表.md` 与 Round Protocol 重新分配**。下表只描述已经确认的目标能力。
+
+| 项 | 已确认目标 | 当前差距 |
+|---|---|---|
+| Order 结构状态机整改 | 新增 `accepted → paid`、`serving → paid`，并保留五状态主枚举 | P0-5.5 源码仍是旧转移表，需新 Round `NEEDS_FIX` |
+| accepted 主动取消 | actualCompanion 可在未 serving 前提交原因取消；通知用户；当前不处罚；回 public；保留最小退出历史 | 未实现 |
+| 未服务直接退款 | `paid/accepted` 用户直接全额退款；accepted 打手收益 0、通知打手、保留终态 `actualCompanionId` | 当前 `/refunds` 仍按旧人工申请链路，需要整改 |
+| Companion 我的订单 | `/companion/orders` + `/companion/orders/[id]`，只允许 actualCompanion 查看 | 未实现 |
+| 开始服务 | actualCompanion 显式 `accepted → serving`，不得由时间/备注/聊天自动触发 | 未实现 |
+| CompletionSubmission | 截图 + 5~50 字；同一订单最多 1 个 pending；驳回可重提并重新计时 | 未实现 |
+| 完成自动审核 | 默认 10 分钟、后台可配置；pending 时冻结 snapshot/deadline；无投诉/售后阻塞时 System 自动通过 | 未实现 |
+| completed 投诉窗口 | 后台可配置；进入 completed 时冻结本单 deadline；Earning 解冻消费该 deadline | 未实现 |
+| Companion 封禁联动 | accepted/serving 均解除当前履约并回 public；通知用户；旧 pending completion 作废 | 当前 Companion disable 尚未联动这些实体 |
+| 客服直接换人 | 客服无需管理员批准；P0 不设次数上限；涉及退款资金仍由管理员最终决定 | 权限已确认，最小回池实现尚未落地 |
+| 最小履约退出历史 | 不引入复杂 Assignment 聚合；只保留“订单、原打手、退出来源/原因、时间、操作者”满足追溯 | 未实现 |
+| Earning / 结算域 | completed 后生成 frozen；到本单 complaint deadline 且无阻塞后 available | 未实现 |
+| 后台 Scheduler | 必须复用同一 domain sweep 入口 | 不存在 |
 
 ## 7.2 TBD — DO NOT INVENT
 
@@ -323,9 +351,9 @@ sweepMaturedEarnings(now)     ← TARGET，随 P0-8 落地
 | R7 | **打手侧是否需要统一「操作史」查询**（跨 Dispatch / CompletionSubmission / Earning） | 计划 §8.2 |
 | R10 | **`Order.companion` 快照是否要同时保留指定打手** | 计划 §8.2 |
 | — | **提现**：入口、审核、打款渠道、最小金额 | 计划 TD-4 |
-| — | **罚款 / 扣款**：`Earning.fineAmount` 恒为 0，无任何扣款操作 | 计划 §2.4 |
+| — | **自动罚款规则**仍未定义；但 2026-09-23 已确认 accepted 主动取消当前 P0 **不处罚**。管理员人工余额调整/会费批扣是后续独立资金能力，不等于自动罚款 | V0.3 |
 | — | **用户封禁** | 全仓无对应实体 |
-| — | **换人 / 改派（Replacement / Assignment）的最终结构** | 全仓无对应实体 |
+| — | **换人/改派的复杂 Assignment 最终结构**仍不做；P0 已确认采用最小可用方案：客服可直接换人、次数不限，并保留最小退出历史。复杂聚合/统一操作史仍 TBD | V0.3 |
 | — | **真正的数据库选型（PostgreSQL / MySQL）与 ORM 选型（Prisma / Drizzle）** | **均未确认，禁止自行选定** |
 
 ## 7.3 P0-5.5 批次边界（**已确认**）
@@ -334,7 +362,7 @@ sweepMaturedEarnings(now)     ← TARGET，随 P0-8 落地
 
 **只允许做这 6 件事**：
 
-1. `ORDER_TRANSITIONS` + `canTransitionOrder`（见 §2.6 与 `database-schema.md` T3，**转移表已确认，不得改动内容**）；
+1. `ORDER_TRANSITIONS` + `canTransitionOrder`（这是 P0-5.5 当时的历史冻结内容；**2026-09-23 产品规则已 supersede 旧转移表，后续必须在新的需求整改 Round 中修改，不能回写篡改 P0-5.5 历史**）；
 2. 修复管理员全额退款的 `refundedAmount`（见 §三 第 7 条）；
 3. Companion API 清单门禁（扫描 `app/api/companion/**`，沿用现有 tests 的源码扫描方式，**不新建测试框架**，文件名遵循现有命名风格）；
 4. Checkout 复用统一的 Companion 接单资格规则（见 §4.1）；
@@ -399,7 +427,7 @@ docs/02-tech-design/database-schema.md
 3. **无第二套实现**：按 §4.3 的五条 grep 确认。
 4. **接口清单门禁**：涉及后台接口的批次必须同批扩充 `tests/admin.test.mjs`；涉及客服接口的扩充 `tests/staff.test.mjs`；涉及打手接口的扩充 `tests/companion.test.mjs`。
    ✅ **已建立**（产品裁定 2026-09-19，P0-5.5 落地）：与 Admin / Staff 同形的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对——
-   当前清单**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`，P0-6 后加入对应订单接口。
+   当前清单**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`；未来任何 Companion 订单/取消/开始服务接口真正落地时，必须同批扩充清单。
    新增 / 删除 / 误改路径时测试**必须失败**。**沿用现有 tests 的源码扫描方式，不新建测试框架**。
    ⚠️ 打手接口的清单门禁在 `tests/companion.test.mjs`，**不是** `tests/companionAccess.test.mjs`（后者是「打手身份只有一套」的负向门禁，两者互补、互不替代）。
 5. **同步技术设计文档**：见 §十一。

@@ -5,20 +5,27 @@
 
 Round ID: P0-5.5
 Title: 小型架构稳定化（订单状态迁移中央定义 / 管理员退款金额修复 / Companion 接口清单门禁 / Checkout 接单资格收敛）
-Status: AWAITING_ACCEPTANCE
+Status: DONE
 Depends On: P0-5（派单 / 接单，已完成编码并人工验收通过，commit `77877e0`）
 Goal: 在不扩大业务范围的前提下，收口四处已经架构审查确认的结构性问题
 Primary Domain: Order 生命周期 · 退款金额 · Companion API 契约 · Checkout 资格判定
 Primary State Transition: 无新增可执行迁移。本轮只**声明**订单状态迁移表（`ORDER_TRANSITIONS`），不新增任何一条会真正改状态的业务路径
 Started At: 2026-09-21
 Development Completed At: 2026-09-21
-Accepted At:
-Git Commit:
+Accepted At: 2026-09-23（验收确认日。开发完成于 2026-09-21，人工验收在该日之后、提交 `6bd10fc` 之前完成；记录中无精确时刻，故不记时分秒）
+Git Commit: 6bd10fc0ed2575b12d5a6c2d44fd48cc95282caa
 
-> ⚠️ **`AWAITING_ACCEPTANCE` 不是完成。** 转为 `DONE` 需要**两个条件同时满足**：
-> 用户明确说人工验收通过 **+** 用户已自行完成 Git commit。
-> Claude **不得**自行标 `DONE`、**不得**执行任何 Git 写操作。
+> **`DONE` 的依据 —— `development-workflow.md` §四 的双重门槛，两个条件均已满足：**
+> 1. 用户明确告知人工验收通过（见 `04-acceptance.md` → `Final Result: PASSED`）；
+> 2. 用户已自行完成 Git commit 并提供 hash（`6bd10fc`）。
+>
+> 2026-09-23 另做了一次**提交一致性核查**（结论 `P0-5.5 CAN CLOSE AS DONE`）并重跑全量自动门禁，
+> 记录在 `04-acceptance.md` 的「提交一致性核查」一节。
 > 人工验收清单见 `04-acceptance.md`。
+
+> ⚠️ **本轮范围在 `6bd10fc` 时点即已冻结完成。** 2026-09-23 之后的需求重校准
+> （`ORDER_TRANSITIONS` 目标变化、`accepted` 主动取消、`serving` 封禁回池、生命周期配置化、
+> Completion 自动审核、新退款规则等）属于**后续整改需求**，不得据此把本轮改回 `NEEDS_FIX`。
 
 ---
 
