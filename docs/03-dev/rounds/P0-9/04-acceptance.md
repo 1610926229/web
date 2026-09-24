@@ -1,19 +1,19 @@
 # P0-9 — 人工验收记录
 
 Round: P0-9
-**Status: AWAITING_ACCEPTANCE**
+**Status: DONE**
 **User Result: PASSED**
 **Final Result: PASSED**
 Accepted At: 2026-09-24
 Issues Found: 无
-Git Commit: （**由用户本人提交**，待填）
+Git Commit: eef4e62
 Recorded At: 2026-09-24
 
 > ✅ **人工验收已于 2026-09-24 通过**（批次 `cmd_batch_p0-6.1_to_p0-9.md` 的统一验收，本轮为最后一站）：
 > 用户本人走完本文件的 A–G 各组并确认**全部通过**，**四轮验收至此全部通过**。
 > 日期与关键验收场景见 **§四**。
-> ⚠️ **`Status` 仍为 `AWAITING_ACCEPTANCE`，本轮不标 `DONE`**——「DONE 双门槛」的第二个条件
-> （**用户本人完成 Git 提交**）尚未满足，四轮的改动至今全部躺在工作区，Claude 全程零 Git 写操作。
+> ✅ **已收口为 `DONE`（2026-09-24）**——「DONE 双门槛」的第二个条件（**用户本人完成 Git 提交**）
+> 已由用户本人提交 **`eef4e62`** 满足。原记录：提交前四轮改动全部躺在工作区，Claude 全程零 Git 写操作。
 
 > ⚠️ **本文件曾在 `CLARIFYING` 阶段写过一版「无内容可验收」的版本。**
 > 那一版记录的是**中间状态**，不是本轮结论。按「追加历史、不覆盖历史」，
@@ -148,7 +148,7 @@ Recorded At: 2026-09-24
 | User Result | **PASSED** |
 | Final Result | **PASSED** |
 | Accepted At | **2026-09-24** |
-| Git Commit | ——（**由用户本人提交**；Claude 不执行任何 Git 写操作） |
+| Git Commit | **`eef4e62`**（用户本人提交；Claude 未执行任何 Git 写操作） |
 | Issues Found | 无（本轮验收未发现新问题） |
 | Reviewer BLOCKER / MAJOR | **0 / 0**（首轮 0 / 2 → 修复 → 只读复核 0 / 0），见 `03-delivery.md` §七 |
 
@@ -170,14 +170,14 @@ Recorded At: 2026-09-24
 > 仓库里没有调度器，所有「到点」都是读路径上的惰性物化。它是**上线前的 production blocker**（批次报告 §E.3），
 > 不是本轮遗漏。F 组验的是「同一个 sweep 函数在时钟前进后确实会释放」，不是「有一个进程会自己醒来」。
 
-> ⚠️ **本轮状态仍为 `AWAITING_ACCEPTANCE`，不标 `DONE`。**
-> 按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件必须**同时**满足：
-> ① 用户本人说明验收通过 —— ✅ 已于 2026-09-24 满足；
-> ② 用户本人完成该项目相关的 Git 提交 —— ☐ **尚未满足**。
-> 因此在用户本人提交之前，本轮停在 `AWAITING_ACCEPTANCE`。
-> ⚠️ `Status: AWAITING_ACCEPTANCE` 与 `Accepted At: 2026-09-24` **并不矛盾**：
+> ✅ **本轮已收口为 `DONE`（2026-09-24）。**
+> 按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件**同时**满足：
+> ① 用户本人说明验收通过 —— ✅ 2026-09-24 满足；
+> ② 用户本人完成该项目相关的 Git 提交 —— ✅ **`eef4e62`**。
+> ⚠️ `Status: DONE` 与 `Accepted At: 2026-09-24` 是两件事：
 > 前者是「Round 是否收口」的唯一状态字段，后者记录人工验收通过的时间。
-> **AI 不得自行标 `DONE`**，也不得代为提交。
+> 📌 交付时 `Status` 曾保持 `AWAITING_ACCEPTANCE`，**Claude 未自行标 `DONE`、也未代为提交**——
+> 提交是用户本人做的，Claude 至今**零 Git 写操作**。
 
 ---
 

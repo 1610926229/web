@@ -5,15 +5,15 @@
 
 Round ID: P0-7
 Title: `accepted → serving` —— 由当前实际打手主动点击「开始服务」
-Status: AWAITING_ACCEPTANCE
-Depends On: P0-6.1（`AWAITING_ACCEPTANCE`，工作台返回入口 + 订单池等待最久优先）· P0-6（打手主动取消 + 回池，`53481ea`）· P0-5（派单 / 接单，`77877e0`）· P0-5.5（订单状态迁移中央定义，`6bd10fc`）· P0-4（打手身份来自 User 会话）
+Status: DONE
+Depends On: P0-6.1（`DONE`，工作台返回入口 + 订单池等待最久优先）· P0-6（打手主动取消 + 回池，`53481ea`）· P0-5（派单 / 接单，`77877e0`）· P0-5.5（订单状态迁移中央定义，`6bd10fc`）· P0-4（打手身份来自 User 会话）
 Goal: 让**当前实际履约的打手**把一张 `accepted` 订单推进到 `serving`，并冻结 `servingAt`；同时保证「不能自动开始、不能由客服代替、不能由别的打手开始」
 Primary Domain: Order 状态迁移 · 打手订单动作（Companion）· 伪事务原子性
 Primary State Transition: **`accepted → serving`**（本轮唯一新增的迁移）
 Started At: 2026-09-24
 Development Completed At: 2026-09-24
 Accepted At: 2026-09-24
-Git Commit:
+Git Commit: eef4e62
 
 > ⚠️ **本轮不实现**：CompletionSubmission、客服完成审核、10 分钟自动审核、Earning、
 > complaint settlement、`serving` 的普通主动取消、封禁回池、客服换人、新退款资金联动、
@@ -102,8 +102,8 @@ CompletionSubmission · 客服完成审核 · 10min 自动审核 · Earning · c
   **不等待用户逐轮确认，自动进入下一轮**（本轮的下一站是 P0-8）；
 - 四轮的 `User Result` / `Final Result` 一律保持 `PENDING`，由用户在 **P0-9 完成后一次性验收**；
   📌 **该统一验收已于 2026-09-24 完成，四轮全部 `PASSED`**（见下方「人工验收」一节）；
-- ⚠️ 因此本轮**不会**出现 P0-6 / DEV-1 那样的「验收通过 + 用户本人提交」双门槛收口——
-  它停在 `AWAITING_ACCEPTANCE`，等待批次结束后的统一验收。
+- ✅ **该批次已于 2026-09-24 结束并统一验收通过**；四轮实现由**用户本人**提交于 **`eef4e62`**，
+  本轮 Status 已随之收口为 `DONE`（「验收通过 + 用户本人提交」双门槛均已满足）。
 
 ---
 
@@ -119,10 +119,10 @@ CompletionSubmission · 客服完成审核 · 10min 自动审核 · Earning · c
 | Accepted At | **2026-09-24** |
 | User Result | **PASSED** |
 | Final Result | **PASSED** |
-| Git Commit | （**由用户本人提交**，待填） |
-| Status | **仍为 `AWAITING_ACCEPTANCE`** |
+| Git Commit | **`eef4e62`**（用户本人提交） |
+| Status | **`DONE`** |
 
-> ⚠️ **为什么验收通过了状态还不是 `DONE`**：按 `development-workflow.md` §十七 的「DONE 双门槛」，
-> 需要 ① 用户本人说明验收通过 **且** ② 用户本人完成 Git 提交。**② 尚未发生**——
-> 整个批次（P0-6.1 → P0-9）的改动至今全部躺在工作区，Claude 全程**零 Git 写操作**。
-> 用户本人提交之后，本轮的 Status 才改为 `DONE`。
+> ✅ **收口（2026-09-24）**：按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件**均已满足** ——
+> ① 用户本人说明验收通过（2026-09-24）；② 用户本人完成 Git 提交（**`eef4e62`**，本批次实现随该提交进入版本库）。
+> 因此本轮 Status 已由 `AWAITING_ACCEPTANCE` 收口为 `DONE`。
+> ⚠️ **这是纯文档收口**：`User Result` / `Final Result` / `Accepted At` 与验收结论**一律未改动**，业务代码与测试未被触碰。

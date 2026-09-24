@@ -4,7 +4,8 @@ Batch: `docs/03-dev/rounds/cmd_batch_p0-6.1_to_p0-9.md`（P0-6.1 → P0-7 → P0
 Report Time: 2026-09-24
 Report Author: Claude Code（AI）
 **报告性质：批次「验收收口」** —— **四轮全部交付、统一人工验收已于 2026-09-24 全部通过**，
-但**状态仍停在 `AWAITING_ACCEPTANCE`**：按「DONE 双门槛」，还需**用户本人完成 Git 提交**。
+且**用户本人随后已完成 Git 提交（`eef4e62`）**：按「DONE 双门槛」两个条件均已满足，
+四轮**已由 `AWAITING_ACCEPTANCE` 收口为 `DONE`**（**纯文档收口，2026-09-24**）。
 详见 **§G 人工验收结果**。
 
 ---
@@ -17,8 +18,8 @@ Report Author: Claude Code（AI）
 | 没有交付代码的轮次 | **0 轮**。P0-9 曾因 `Q1`（投诉窗口默认值未定义）**真停止在 `CLARIFYING`**，产品裁定后已于 2026-09-24 继续开发并交付；`CLARIFYING` 那一版是**中间状态**，不是本轮结论 |
 | 领域链跑到哪 | `paid → accepted → serving → completed → Earning.frozen → Earning.available` **已真实跑通**；`settling` / `settled` 仍是**派生展示阶段**（`Earning.frozen` / `available`），**不进 `OrderStatus`** |
 | 人工验收 | ✅ **2026-09-24 全部通过**（P0-6.1 / P0-7 / P0-8 / P0-9 四轮 `User Result` / `Final Result` = **`PASSED`**，`Issues Found` 无，见 §G） |
-| 用户还需要做的事 | **只剩一件**：**由用户本人完成 Git 提交**。提交之后四轮才可从 `AWAITING_ACCEPTANCE` 收口为 `DONE` |
-| Git | **零写操作**。HEAD 仍是 `249f7c1`，四轮的改动全部躺在工作区 |
+| 用户还需要做的事 | ✅ **没有了**。用户本人已于 2026-09-24 完成 Git 提交 **`eef4e62`**，四轮已由 `AWAITING_ACCEPTANCE` 收口为 **`DONE`** |
+| Git | AI **零写操作**（批次期间未执行任何 Git 写命令）。**报告时点** HEAD = `249f7c1`；**用户本人的提交 `eef4e62` 随后到达**，当前 HEAD = `eef4e62`，四轮改动全部进入版本库 |
 
 ---
 
@@ -32,6 +33,9 @@ Report Author: Claude Code（AI）
 | **P0-7** | 🟣 `AWAITING_ACCEPTANCE` | 无 `OPEN`（D1–D8） | `1154 / pass 1030 / fail 0 / skipped 124` | `1154 / 1154 / fail 0 / **skipped 0**` | 0 | 0 | 0 | 首轮 **0 / 1** → 修复 → 只读复核 **0 / 0**（复核轮另抓 2 条 MINOR，已修） |
 | **P0-8** | 🟣 `AWAITING_ACCEPTANCE` | 无 `OPEN`（D1–D13） | `1222 / pass 1094 / fail 0 / skipped 128` | `1222 / 1222 / fail 0 / **skipped 0**` | 0 | 0 | 0 | 首轮 **0 / 2** → 修复 → 只读复核 **0 / 0**（2 条 MINOR 已处置） |
 | **P0-9** | 🟣 `AWAITING_ACCEPTANCE` | 通过（D1–D15 + 产品裁定 D16–D24；`Q1` 已 `RESOLVED`） | `1255 / pass 1123 / fail 0 / skipped 132` | `1255 / 1255 / fail 0 / **skipped 0**` | 0 | 0 | 0 | 首轮 **0 / 2** → 修复 → 只读复核 **0 / 0**（3 条 MINOR 已处置，见 §B.4） |
+
+> 📌 **`Status` 列是「交付时点」的读数**，留档不改。四轮在收到**用户本人**的提交 **`eef4e62`** 后，
+> 已于 2026-09-24 全部由 `AWAITING_ACCEPTANCE` 收口为 `DONE`——见 **§G.1**。
 
 ### A.2 合并终态复跑（2026-09-24，P0-9 **reviewer 修复后**，**当前工作区**）
 
@@ -458,6 +462,10 @@ git diff --shortstat: 46 files changed, 2247 insertions(+), 281 deletions(-)
 `rebase` / `amend`。只执行过只读命令：`git status` / `git diff` / `git log` / `git rev-parse` / `git show`。
 **所有四轮的改动都未提交，全部躺在工作区，由用户本人决定如何提交。**
 
+> ✅ **已收口（2026-09-24）**：上面「未提交、躺在工作区」是**报告时点**的事实。**用户本人**随后完成提交
+> **`eef4e62`**（`115 files changed, 19741 insertions(+), 282 deletions(-)`，含四轮全部档案），
+> 工作区随之 clean；四轮已由 `AWAITING_ACCEPTANCE` 收口为 `DONE`。**AI 至今零 Git 写操作。**
+
 ⚠️ 提交前建议先处理 §E.2 #9（那个 GBK 文件名损坏的文件）。
 ✅ **该文件的核对已于 2026-09-24 完成**，结论见 §G.3：它是 `P0-6.1/01-prompt-extended.md`
 的**逐字重复副本**（GBK 编码，转码后 `md5` 完全相同），确认可安全删除——**由用户本人决定是否删除**，
@@ -475,16 +483,18 @@ AI 不执行任何删除 / Git 写操作。
 
 | Round | `User Result` | `Final Result` | `Accepted At` | `Issues Found` | `Git Commit` | Status |
 |---|---|---|---|---|---|---|
-| **P0-6.1** | **PASSED** | **PASSED** | 2026-09-24 | 无 | （待用户本人提交） | `AWAITING_ACCEPTANCE` |
-| **P0-7** | **PASSED** | **PASSED** | 2026-09-24 | 无 | （待用户本人提交） | `AWAITING_ACCEPTANCE` |
-| **P0-8** | **PASSED** | **PASSED** | 2026-09-24 | 无 | （待用户本人提交） | `AWAITING_ACCEPTANCE` |
-| **P0-9** | **PASSED** | **PASSED** | 2026-09-24 | 无 | （待用户本人提交） | `AWAITING_ACCEPTANCE` |
+| **P0-6.1** | **PASSED** | **PASSED** | 2026-09-24 | 无 | **`eef4e62`** | `DONE` |
+| **P0-7** | **PASSED** | **PASSED** | 2026-09-24 | 无 | **`eef4e62`** | `DONE` |
+| **P0-8** | **PASSED** | **PASSED** | 2026-09-24 | 无 | **`eef4e62`** | `DONE` |
+| **P0-9** | **PASSED** | **PASSED** | 2026-09-24 | 无 | **`eef4e62`** | `DONE` |
 
-⚠️ **`Accepted At` 已填、`Status` 仍是 `AWAITING_ACCEPTANCE`，两者并不矛盾**：
-按 `development-workflow.md` §十七 的「DONE 双门槛」，收口需要
+✅ **「DONE 双门槛」两个条件均已满足，四轮已收口为 `DONE`。**
+按 `development-workflow.md` §十七，收口需要
 ① 用户本人说明验收通过 **且** ② 用户本人完成该项目相关的 Git 提交。
-**条件 ① 于 2026-09-24 满足，条件 ② 尚未发生**——本批次全程**零 Git 写操作**，
-四轮的改动至今全部躺在工作区（见 §F）。**因此本轮不标 `DONE`，由用户本人提交后再收口。**
+**条件 ① 于 2026-09-24 满足；条件 ② 由用户本人提交 `eef4e62` 满足**——
+本批次（AI 侧）全程**零 Git 写操作**，因此该提交**不是** AI 代提交（见 §F）。
+⚠️ **本次收口是纯文档动作**：`User Result` / `Final Result` / `Accepted At` / `Issues Found`
+与全部验收结论、业务代码、测试**一律未改动**。
 
 ### G.2 验收覆盖（逐轮要点）
 

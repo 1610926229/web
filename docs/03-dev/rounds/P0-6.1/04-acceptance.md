@@ -1,25 +1,26 @@
 # P0-6.1 · 04-acceptance.md
 
 Round ID: P0-6.1
-Status: AWAITING_ACCEPTANCE
+Status: DONE
 **User Result: PASSED**
 **Final Result: PASSED**
 Accepted At: 2026-09-24
 Issues Found: 无
-Git Commit: （**由用户本人提交**，待填）
+Git Commit: eef4e62
 
 > ✅ **人工验收已于 2026-09-24 通过**（批次 `cmd_batch_p0-6.1_to_p0-9.md` 的统一验收）：
 > 用户本人走完本文件的 A–E 五组并确认**全部通过**。日期与关键验收场景见文末
 > 「验收日期 / 关键验收场景 / User Result / Final Result」。
-> ⚠️ **`Status` 仍为 `AWAITING_ACCEPTANCE`，本轮不标 `DONE`**——「DONE 双门槛」的第二个条件
-> （**用户本人完成 Git 提交**）尚未满足，四轮的改动至今全部躺在工作区，Claude 全程零 Git 写操作。
+> ✅ **已收口为 `DONE`（2026-09-24）**——「DONE 双门槛」的第二个条件（**用户本人完成 Git 提交**）
+> 已由用户本人提交 **`eef4e62`** 满足。原记录：提交前四轮改动全部躺在工作区，Claude 全程零 Git 写操作。
 
 > ⚠️ **本文件在交付时只写 Checklist 与「待验收」，不预先填写结论。**
 > `User Result` / `Final Result` 由**用户**在人工验收后给出；Claude 不得自行填 `PASSED`，
 > 也不得自行把 `Status` 改成 `DONE`（`development-workflow.md` §十七「DONE 的双重门槛」）。
 > 📌 **上方已填的 `PASSED` 是「记录用户给出的结论」，不是「Claude 自行判定」**——
 > 用户已于 2026-09-24 明确回复「P0-6.1、P0-7、P0-8、P0-9 人工验收全部通过」。
-> `Status` 仍保持 `AWAITING_ACCEPTANCE`，未被改成 `DONE`。
+> 交付时 `Status` 保持 `AWAITING_ACCEPTANCE`，**Claude 未自行改成 `DONE`**（当时提交尚未发生）；
+> 用户本人提交 **`eef4e62`** 后，本轮已收口为 `DONE`。
 
 ---
 
@@ -122,10 +123,9 @@ Git Commit: （**由用户本人提交**，待填）
 
 （**由用户本人提交**——Claude 不执行任何 Git 写操作；本字段由用户在提交后填写）
 
-> ⚠️ **本轮状态仍为 `AWAITING_ACCEPTANCE`，不标 `DONE`。**
-> 按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件必须**同时**满足：
-> ① 用户本人说明验收通过 —— ✅ 已于 2026-09-24 满足；
-> ② 用户本人完成该项目相关的 Git 提交 —— ☐ **尚未满足**。
-> 因此在用户本人提交之前，本轮停在 `AWAITING_ACCEPTANCE`，由用户本人决定如何提交。
-> ⚠️ `Status: AWAITING_ACCEPTANCE` 与 `Accepted At: 2026-09-24` **并不矛盾**：
+> ✅ **本轮已收口为 `DONE`（2026-09-24）。**
+> 按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件**同时**满足：
+> ① 用户本人说明验收通过 —— ✅ 2026-09-24 满足；
+> ② 用户本人完成该项目相关的 Git 提交 —— ✅ **`eef4e62`**。
+> ⚠️ `Status: DONE` 与 `Accepted At: 2026-09-24` 是两件事：
 > 前者是「Round 是否收口」的唯一状态字段，后者记录人工验收通过的时间。

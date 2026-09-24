@@ -6,15 +6,15 @@
 
 Round ID: P0-9
 Title: `completed` → 生成实际打手 `Earning.frozen` → 可配置投诉窗口结束且无阻塞 → `Earning.available`
-**Status: AWAITING_ACCEPTANCE**
-Depends On: P0-8（`serving → completed` 的两条合法完成来源，`AWAITING_ACCEPTANCE`）· P0-1（平台参数真值源 `PlatformConfig`）· P0-5（投诉 / 售后模块）· P0-6 / P0-7（打手工作台与订单生命周期）
+**Status: DONE**
+Depends On: P0-8（`serving → completed` 的两条合法完成来源，`DONE`）· P0-1（平台参数真值源 `PlatformConfig`）· P0-5（投诉 / 售后模块）· P0-6 / P0-7（打手工作台与订单生命周期）
 Goal: 把正常履约链闭合到 `completed → Earning.frozen →（投诉窗口结束且无阻塞）→ Earning.available`；把投诉窗口改为后台可配置并在订单进入 `completed` 时冻结本单 snapshot/deadline
 Primary Domain: Earning（新领域，**不进 `OrderStatus`**）· 平台配置（`PlatformConfig`）· 伪事务原子性
 Primary State Transition: **`Earning.frozen → Earning.available`**（`Earning` 是**独立领域**，不加入 `OrderStatus`）
 Started At: 2026-09-24
 Development Completed At: 2026-09-24（`Q1` 裁定后继续开发并交付）
 Accepted At: 2026-09-24
-Git Commit:
+Git Commit: eef4e62
 
 > ⚠️ **本轮先停在 `CLARIFYING`，后经产品裁定继续开发并交付。**
 > 第一次开工时「投诉窗口的 Mock 默认值」在**所有权威文档里都没有定义**，
@@ -95,7 +95,8 @@ withdrawal · 钱包完整账本 · 人工余额调整 · 会费批扣 · 部分
 - 四轮（P0-6.1 / P0-7 / P0-8 / P0-9）全部止于 `AWAITING_ACCEPTANCE`，
   `User Result` / `Final Result` 一律保持 `PENDING`，等待用户的**统一人工验收**；
   📌 **该统一验收已于 2026-09-24 完成，四轮全部 `PASSED`**（见下方「人工验收」一节）；
-- 验收通过并**由用户本人提交**之后才可标 `DONE`——Claude 不得自行标 `DONE`，也不得代为提交。
+- ✅ **该批次已于 2026-09-24 结束并统一验收通过**；四轮实现由**用户本人**提交于 **`eef4e62`**，
+  本轮 Status 已随之收口为 `DONE`（「验收通过 + 用户本人提交」双门槛均已满足）。
 
 ---
 
@@ -112,14 +113,15 @@ withdrawal · 钱包完整账本 · 人工余额调整 · 会费批扣 · 部分
 | Accepted At | **2026-09-24** |
 | User Result | **PASSED** |
 | Final Result | **PASSED** |
-| Git Commit | （**由用户本人提交**，待填） |
-| Status | **仍为 `AWAITING_ACCEPTANCE`** |
+| Git Commit | **`eef4e62`**（用户本人提交） |
+| Status | **`DONE`** |
 
 > ⚠️ **未验的一条（如实声明）**：「自然到期后由**真 Scheduler** 自动释放」没有被验、也无法被验——
 > 仓库里没有调度器，所有「到点」都是读路径上的惰性物化。它是**上线前的 production blocker**
 > （批次报告 §E.3），不是本轮遗漏。验收用「把未来的 `at` 注入同一个 `sweepMaturedEarnings`」代替。
 
-> ⚠️ **为什么验收通过了状态还不是 `DONE`**：按 `development-workflow.md` §十七 的「DONE 双门槛」，
-> 需要 ① 用户本人说明验收通过 **且** ② 用户本人完成 Git 提交。**② 尚未发生**——
-> 四轮的改动至今全部躺在工作区，Claude 全程**零 Git 写操作**。
-> 用户本人提交之后，本轮的 Status 才改为 `DONE`。
+> ✅ **收口（2026-09-24）**：按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件**均已满足** ——
+> ① 用户本人说明验收通过（2026-09-24）；② 用户本人完成 Git 提交（**`eef4e62`**，四轮实现随该提交进入版本库）。
+> 因此本轮 Status 已由 `AWAITING_ACCEPTANCE` 收口为 `DONE`。
+> ⚠️ **这是纯文档收口**：`User Result` / `Final Result` / `Accepted At` 与验收结论**一律未改动**，业务代码与测试未被触碰。
+> ⚠️ 上一条「真 Scheduler 未验」的声明**继续有效**，不因本轮 `DONE` 而消失。

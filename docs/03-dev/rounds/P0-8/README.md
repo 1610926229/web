@@ -5,8 +5,8 @@
 
 Round ID: P0-8
 Title: `serving` → 完成材料（`CompletionSubmission`）→ 客服人工审核 / 到期 System 自动审核 → `completed`
-Status: AWAITING_ACCEPTANCE
-Depends On: P0-7（`accepted → serving` + `servingAt` 冻结，`AWAITING_ACCEPTANCE`）· P0-6.1（工作台返回入口）· P0-6（打手主动取消 + 回池）· P0-5（派单 / 接单）· P0-5.5（订单状态迁移中央定义）· P0-1（平台参数真值源 `PlatformConfig`）· P0-4（打手身份来自 User 会话）· P8D-2（客服工作台壳层 / auth / DTO 组织）
+Status: DONE
+Depends On: P0-7（`accepted → serving` + `servingAt` 冻结，`DONE`）· P0-6.1（工作台返回入口）· P0-6（打手主动取消 + 回池）· P0-5（派单 / 接单）· P0-5.5（订单状态迁移中央定义）· P0-1（平台参数真值源 `PlatformConfig`）· P0-4（打手身份来自 User 会话）· P8D-2（客服工作台壳层 / auth / DTO 组织）
 Goal: 让 `serving` 订单经由**打手提交完成材料**、**客服人工审核**或**到期 System 自动审核**进入 `completed`；同时保证「同一订单最多一份 pending」「配置改动不追溯已 pending 的 deadline」「自动通过与人工通过并发只能产生一个完成事实」「自动审核不伪装成客服人工审核」
 Primary Domain: Order 状态迁移 · 完成材料（CompletionSubmission）· 平台配置（PlatformConfig）· 伪事务原子性
 Primary State Transition: **`serving → completed`**（本轮唯一新增的 Order 迁移）
@@ -14,7 +14,7 @@ Secondary State Machine: **`CompletionSubmission`：`pending → approved | reje
 Started At: 2026-09-24
 Development Completed At: 2026-09-24（含首轮 review 后的 A / B / M1 / M2 修复与门禁 22 / 23 补测）
 Accepted At: 2026-09-24
-Git Commit:
+Git Commit: eef4e62
 
 > ⚠️ **本轮不实现**：Earning / `frozen → available` / withdrawal、部分退款冲正、
 > 封禁回池及 pending invalidation 动作、客服换人、`serving` 普通主动取消、
@@ -110,8 +110,8 @@ Earning · `frozen → available` · withdrawal · 部分退款冲正 · 封禁�
   **不等待用户逐轮确认，自动进入下一轮**（本轮的下一站是 P0-9）；
 - 四轮的 `User Result` / `Final Result` 一律保持 `PENDING`，由用户在 **P0-9 完成后一次性验收**；
   📌 **该统一验收已于 2026-09-24 完成，四轮全部 `PASSED`**（见下方「人工验收」一节）；
-- ⚠️ 因此本轮**不会**出现 P0-6 / DEV-1 那样的「验收通过 + 用户本人提交」双门槛收口——
-  它停在 `AWAITING_ACCEPTANCE`，等待批次结束后的统一验收。
+- ✅ **该批次已于 2026-09-24 结束并统一验收通过**；四轮实现由**用户本人**提交于 **`eef4e62`**，
+  本轮 Status 已随之收口为 `DONE`（「验收通过 + 用户本人提交」双门槛均已满足）。
 
 ---
 
@@ -128,10 +128,10 @@ Earning · `frozen → available` · withdrawal · 部分退款冲正 · 封禁�
 | Accepted At | **2026-09-24** |
 | User Result | **PASSED** |
 | Final Result | **PASSED** |
-| Git Commit | （**由用户本人提交**，待填） |
-| Status | **仍为 `AWAITING_ACCEPTANCE`** |
+| Git Commit | **`eef4e62`**（用户本人提交） |
+| Status | **`DONE`** |
 
-> ⚠️ **为什么验收通过了状态还不是 `DONE`**：按 `development-workflow.md` §十七 的「DONE 双门槛」，
-> 需要 ① 用户本人说明验收通过 **且** ② 用户本人完成 Git 提交。**② 尚未发生**——
-> 整个批次（P0-6.1 → P0-9）的改动至今全部躺在工作区，Claude 全程**零 Git 写操作**。
-> 用户本人提交之后，本轮的 Status 才改为 `DONE`。
+> ✅ **收口（2026-09-24）**：按 `development-workflow.md` §十七 的「DONE 双门槛」，两个条件**均已满足** ——
+> ① 用户本人说明验收通过（2026-09-24）；② 用户本人完成 Git 提交（**`eef4e62`**，本批次实现随该提交进入版本库）。
+> 因此本轮 Status 已由 `AWAITING_ACCEPTANCE` 收口为 `DONE`。
+> ⚠️ **这是纯文档收口**：`User Result` / `Final Result` / `Accepted At` 与验收结论**一律未改动**，业务代码与测试未被触碰。
