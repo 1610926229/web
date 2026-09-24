@@ -2,8 +2,12 @@
 
 > Round: `DEV-1` — Mock 身份切换验收工具
 > 性质：**开发 / 测试基础设施**，不是 P0 业务功能（`01-prompt.md` §一）
-> Status: `AWAITING_ACCEPTANCE`（编码与四道门禁完成，等人工验收）
-> ⚠️ 本轮**不修改 P0-6 的任何行为，也不修改 P0-6 的验收结果**；P0-6 保持 `AWAITING_ACCEPTANCE`。
+> Status: `DONE` · Git Commit: `53481ea`（**用户本人**提交）
+> ✅ **`DEV-1 DONE — implementation committed in 53481ea`**
+> ✅ **2026-09-24 人工验收已通过**（`User Result` / `Final Result` = `PASSED`，见 `04-acceptance.md`）。
+> ⚠️ 本轮**不修改 P0-6 的任何行为，也不修改 P0-6 的验收结果**。
+> ⚠️ **本文件正文是交付时点的记录，不回溯改写**。验收后发现的两个整改项（FIX-1 / FIX-2）属 P0-6 域，
+> 记在 `04-acceptance.md` 的 `Issues Found` 与 `../总需求进度表.md`，**不回写本文件的实现描述**。
 
 > **本文件是第二次交付的版本。** 第一次交付后用户在人工验收阶段**打回**：
 > 「当前可切换用户中没有任何有效 Companion」，因此「在一个浏览器里验收 P0-6 的

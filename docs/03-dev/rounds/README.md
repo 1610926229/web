@@ -56,10 +56,20 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 | Round | Title | Status | Git Commit |
 |---|---|---|---|
 | [`P0-5.5`](./P0-5.5/README.md) | 小型架构稳定化 | `DONE` | `6bd10fc` |
-| [`P0-6`](./P0-6/README.md) | accepted 主动取消接单 + 重新进入公共池 | `AWAITING_ACCEPTANCE` | — |
-| [`DEV-1`](./DEV-1/README.md) | Mock 身份切换验收工具（开发 / 测试基础设施） | `AWAITING_ACCEPTANCE` | — |
+| [`P0-6`](./P0-6/README.md) | accepted 主动取消接单 + 重新进入公共池 | `DONE` | `53481ea` |
+| [`DEV-1`](./DEV-1/README.md) | Mock 身份切换验收工具（开发 / 测试基础设施） | `DONE` | `53481ea` |
 
-> **当前等待人工验收的 Round：P0-6 与 DEV-1**（两个独立 Round，互不阻塞）。
+> ✅ **P0-6 与 DEV-1 均已 `DONE` 收口**（两个独立 Round，互不阻塞）。
+> 两者的 `User Result` / `Final Result` 均为 `PASSED`（2026-09-24 人工验收通过），
+> 且由**用户本人**在同一个提交 **`53481ea`** 中完成提交——「DONE 的双重门槛」
+> （`development-workflow.md` §十七）两个条件均已满足。
+>
+> ⚠️ **验收期间另发现两个独立整改项**（**均属 P0-6 域**，**不推翻 P0-6 的 `DONE` 结论**）：
+> **FIX-1** 打手工作台缺少返回普通用户主界面的入口；**FIX-2** 订单池排序应改为
+> 「等待最久优先」（公共池 `publicPoolEnteredAt` ASC / 专属池 `exclusiveEnteredAt` ASC）。
+> 二者已登记为 `../总需求进度表.md` 中的独立 `NEEDS_FIX` 待办（**Round 编号仍为 `UNASSIGNED`**，
+> 由用户 / ChatGPT 在正式启动时分配），明细见 [`P0-6/04-acceptance.md`](./P0-6/04-acceptance.md)
+> 的 `Issues Found`。**它们不回写 P0-6 的历史实现描述。**
 >
 > `DEV-1` 是 2026-09-24 用户分配编号的开发 / 测试基础设施轮次，**不是产品功能**：
 > 它只提供用户端的 Mock 身份切换面板，让 P0-6 的多角色人工验收在同一个窗口里完成。
@@ -69,8 +79,8 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 > Companion B 链路。重做批在既有 fixture 体系里**真的预置了两位有效打手**
 > （`cp-10`/`u-1022`、`cp-11`/`u-1023`），验收链路从此不需要任何后台审核动作；
 > 决策反转为 D6 **V2**，见 [`DEV-1/02-decisions.md`](./DEV-1/02-decisions.md)。
-> ⚠️ **DEV-1 不修改 P0-6 的任何行为，也不修改 P0-6 的验收结果**，P0-6 保持
-> `AWAITING_ACCEPTANCE`。
+> ⚠️ **DEV-1 不修改 P0-6 的任何行为，也不修改 P0-6 的验收结果**；两者的验收各自独立记录，
+> 只是按用户指令在同一个提交（`53481ea`）中一起收口。
 >
 > **P0-6**（2026-09-23 需求重校准后的第一轮，
 > 编号由用户分配）。Requirement Check 已完成，无 `OPEN` 决策，见
