@@ -125,16 +125,31 @@ export function applyDispatchAccepted(
 }
 
 /**
- * 专属池到点 → 转公共池（**同步写入器**，无 `await`）。
+ * 一条派单**回到公共池**（**同步写入器**，无 `await`）。
  *
- * 三件事同时发生，缺一不可：
+ * 两个调用方，语义完全一致：
+ * - **专属池到点**没有接（`sweepExpiredDispatches`）；
+ * - **打手取消接单**（P0-6 的 `cancelAcceptedOrder`）。
+ *
+ * 四件事同时发生，缺一不可：
  * 1. 状态回到 `public`；
- * 2. **重记**公共池的进入时刻与截止时间——不是沿用上一次，专属池从来没有过公共池截止时间；
- * 3. **按此刻的配置重新冻结快照**：用户被承诺的是「进入池子那一刻的规则」。
+ * 2. **重记**公共池的进入时刻与截止时间——不是沿用上一次，而是按**那一刻**的配置
+ *    重新冻结快照（用户被承诺的是「进入池子那一刻的规则」，后台之后改参数不影响这一单）；
+ * 3. 清空**当前接单绑定**（`acceptedByCompanionId` / `acceptedAt`）；
+ * 4. `updatedAt` 跟着走。
+ *
+ * ⚠️ 第 3 条是 P0-6 补上的（D3）。此前唯一的调用点是专属池超时清扫，那条路径上
+ * 从来没人接过单，两个字段本来就是 `null`，漏清**看不见**；一旦被取消接单复用，
+ * 漏清就是 `state === "public"` 却留着 `acceptedByCompanionId` 这种自相矛盾，
+ * 而 `01-prompt.md` §四 点名要求做一致性清理。
+ * 对既有超时清扫路径这是 **no-op**（原值已是 `null`），既有行为一字未变。
+ * 补上之后，这个写入器的契约才真正等于它名字的字面意思：**回到公共池 = 现在没人接**。
  *
  * ⚠️ `exclusiveCompanionId` / `exclusiveEnteredAt` / `exclusiveDeadlineAt`
  * **一个都不清空**：它们是历史事实，管理端与客服以后要能回答
- * 「用户当初指定的是谁」。
+ * 「用户当初指定的是谁、什么时候轮的、等了多久」。
+ * 订单转公共池、被别人接走、甚至超时退款之后，`exclusiveCompanionId` 都保持不变
+ * （见 `lib/types/dispatch.ts`）。
  */
 export function applyDispatchToPublic(
   id: string,
@@ -151,6 +166,8 @@ export function applyDispatchToPublic(
     publicPoolEnteredAt: enteredAt,
     publicDeadlineAt: plusMinutes(enteredAt, timeoutMinutes),
     publicTimeoutMinutesSnapshot: timeoutMinutes,
+    acceptedByCompanionId: null,
+    acceptedAt: null,
     updatedAt: enteredAt,
   };
   current.dispatches.set(id, updated);

@@ -15,6 +15,7 @@
  * `lib/services/orders.ts` 负责。
  */
 
+import type { CompanionReleaseRecord } from "./companionRelease";
 import type { OrderComplaintSummary } from "./complaint";
 import type { ConversationStats } from "./message";
 import type { RefundSummary } from "./refund";
@@ -288,6 +289,156 @@ export type OrderDetail = OrderListItem & {
   allowedActions: OrderAllowedActions;
 };
 
+/* ───────────────────────── 打手端订单 DTO（P0-6） ───────────────────────── */
+
+/**
+ * 打手「我的订单」列表项。
+ *
+ * ## 归属只按 `actualCompanionId`
+ *
+ * 列表与服务端详情的归属判定都是**同一件事**：
+ * `Order.actualCompanionId === 当前 companionId`。
+ * `exclusiveCompanionId === 当前 companionId` **绝不等于**订单归本人——
+ * 那是「用户当初选了谁」的历史事实，与「现在谁在履约」是两个字段
+ * （见 `Order.actualCompanionId` 与 `Dispatch.exclusiveCompanionId`）。
+ *
+ * ## 刻意不含的东西
+ *
+ * ⚠️ **平台金额域一个都没有**：`clubNetIncome` / `companionBaseIncome` /
+ * `companionRateSnapshot` / `refundedAmount` 全部不在本 DTO 上。
+ * 打手要完成这一单所需的信息里没有一分钱是必须的，而「护航收益」属于收益域、
+ * 「平台净收入」属于平台自己的账——把它们带进打手端响应，只是让内部账目
+ * 顺着接口流到浏览器。
+ *
+ * ⚠️ **也不含**：`userId`（下单人是另一个人，给 id 没有用途）、
+ * 管理员备注（内部信息）、售后 / 投诉 / 退款摘要（那属于用户与客服的页面）、
+ * `exclusiveCompanionId`（那是用户的选择，服务端据此收窄归属，
+ * 但「用户当初想要谁」不该反过来告诉接单的人），以及任何内部审计记录。
+ *
+ * ⚠️ 本类型与其它的订单 DTO 一样是**显式挑字段**的：给 `Order` 新增字段
+ * 不会自动出现在打手端响应里。
+ */
+export type CompanionOrderListItem = {
+  id: string;
+  orderNo: string;
+  status: OrderStatus;
+  /** 状态中文名（`ORDER_STATUS_LABELS`）。服务端给，页面不自己维护一份文案 */
+  statusLabel: string;
+  /** 下单（支付成功）时间 */
+  paidAt: string;
+  /** 接单时间；本列表里都是他接过的单，因此正常有值，历史数据缺失时为 null */
+  acceptedAt: string | null;
+  productTitle: string;
+  productCoverUrl: string;
+  specName: string;
+  quantity: number;
+  gameName: string;
+  region: string;
+  /**
+   * 此刻能不能主动取消接单。
+   *
+   * ⚠️ **由服务端算好**（就是 `status === "accepted"`）：前端不得自己用状态推断。
+   * 状态与规则各写一份，分叉的那一天页面上会出现一个点下去必然失败的按钮。
+   * 这里只是**诚实性**提示，真正的保护在 `cancelAcceptedOrder` 的原子区段里。
+   */
+  canCancel: boolean;
+};
+
+/**
+ * 打手订单详情：在列表项之上补齐履约必需的字段。
+ *
+ * ⚠️ `gameAccountId` 与 `remark` **只在这里出现**（与公共池 DTO 刻意相反）：
+ * 接单**之前**打手没有任何理由看到别人的游戏账号；接单**之后**他要照账号进游戏
+ * 才能完成这一单，不给就等于让他做不了活。这条界线是「履约所需」，
+ * 不是「打手能看的都给他」——因此详情里仍然没有联系方式、平台展示 ID、头像、
+ * 金额域与售后摘要。
+ *
+ * ⚠️ `Order` 上**没有**「服务要求」这个字段：需求里提到过它，但它从未落到订单模型上
+ * （用户提交的就是 `remark`）。这里不为了凑一个字段名去虚构它——
+ * 那会让页面读到一个永远为空的字段，而真正有内容的 `remark` 反而没人看。
+ */
+export type CompanionOrderDetail = CompanionOrderListItem & {
+  gameAccountId: string;
+  remark: string;
+  addons: OrderAddonSnapshot[];
+  /** 增值服务合计（分） */
+  addonsAmount: number;
+  /** 单价（分） */
+  unitPrice: number;
+  /** 单价 × 数量（分） */
+  itemsAmount: number;
+  /** 商品 + 增值服务合计（分）。**不含**平台分账信息 */
+  totalAmount: number;
+  /**
+   * 下单用户的**必要**信息：只够在页面上称呼对方。
+   *
+   * ⚠️ 刻意**只有昵称**：没有联系方式、没有 `displayId`、没有头像。
+   * 打手与用户的联系发生在聊天里（后续批次），不需要靠订单详情带出身份信息。
+   * 用户记录查不到时给空串，而不是让整页报错——订单本身是有效的。
+   */
+  customerNickname: string;
+};
+
+/** 打手「我的订单」一次要显示的全部内容。 */
+export type CompanionOrderListData = {
+  items: CompanionOrderListItem[];
+};
+
+/**
+ * 主动取消接单的结果（事务层）。
+ *
+ * 失败情形**逐个分开**，与 `DispatchAcceptResult` 同一取舍：它们对打手要说的话
+ * 不一样，页面上的处置也不一样。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的取消了 | 200 |
+ * | `replayed` | 同一个幂等键第二次到达（连点两次、网络重试） | 200，`changed: false` |
+ * | `not-found` | 订单不存在，**或**不是本人实际履约 | 404（不泄露存在性） |
+ * | `not-accepted` | 是本人的单，但状态已不是 `accepted` | 400 |
+ *
+ * ⚠️ 两种失败**必须用不同的状态码**：`not-found` 是「这一单与你无关」，
+ * 而 `not-accepted` 是「你点了一个此刻不该存在的按钮」——后者不是重放，
+ * 也不能按幂等成功处理（见 D5）。
+ *
+ * ⚠️ 两个成功分支的 `status` 都是**字面量** `"paid"`，含义是
+ * **「这次取消把订单置成了什么状态」**——即本次操作的结果，而**不是**「订单此刻的状态」。
+ * 它会一直是 `"paid"`，因为在同一条原子区段里订单刚被写成 `paid`。
+ *
+ * 这解释了一个看似反直觉的场景：打手 A 用键 K 取消成功 → 订单回到 `paid` →
+ * 打手 B 接走（订单变 `accepted`）→ A 用**同一个键 K** 重放，接口仍然回答 `status: "paid"`。
+ * 这不是 bug：**重放必须返回与第一次完全相同的响应**（`api-contract.md` §2.8），
+ * 去读实时状态反而会让同一个请求在两次到达时给出不同答案，那才是幂等被破坏。
+ * 所以消费方**不要**把这个字段当作订单现状，要看现状请查详情接口。
+ *
+ * 唯一例外是 `not-accepted`：它带的是**当前**状态 `OrderStatus`，因为那正是
+ * 「你点了一个此刻不该存在的按钮」这句话要回答的东西。
+ */
+export type CompanionCancelOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      status: "paid";
+      /** 本次写入的退出历史 id */
+      releaseRecordId: string;
+      cancelledAt: string;
+      changed: true;
+    }
+  | {
+      kind: "replayed";
+      orderId: string;
+      orderNo: string;
+      status: "paid";
+      /** **第一次**写入的那条退出历史 id（重放不产生第二条） */
+      releaseRecordId: string;
+      /** **第一次**取消的时刻（重放不刷新它） */
+      cancelledAt: string;
+      changed: false;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-accepted"; status: OrderStatus };
+
 /* ───────────────────────── 管理端订单 DTO（P8C） ───────────────────────── */
 
 /**
@@ -353,6 +504,27 @@ export type AdminOrderDetail = AdminOrderListItem & {
   exclusiveCompanion: OrderCompanionSnapshot | null;
   /** **实际接到**这一单的护航；还没有人接为 null（来自 `Order.companion`） */
   actualCompanion: OrderCompanionSnapshot | null;
+
+  /**
+   * 这一单的最小履约退出历史（打手主动取消等）；**从没有人退出过为空数组**（P0-6）。
+   *
+   * 退出之后订单上的 `actualCompanionId` / `companion` 已经清空（订单要能重新进公共池），
+   * 「谁曾经接过、为什么退出、何时退出」因此不再有任何现成字段回答得了——
+   * 而客服恰恰要回答「我明明看到有人接过，怎么又回到等待接单了」。
+   *
+   * ⚠️ 空数组而不是 `null`：没有退出过是**正常情况**，不是「查不到」。
+   * 用 `null` 会让页面多出一条「要不要显示这个区块」的空值分支。
+   *
+   * ⚠️ 本 DTO 是给管理端订单详情用的。退出历史**也出现在三个客服 DTO 上**
+   * （`StaffOrderSummary` / `StaffComplaintOrderSummary` / `StaffRefundDetail`），
+   * 因为管理端与客服工作台是**两套账号**——`canEnterAdminConsole(role)` 只对 `admin`
+   * 为真，`customer_service` 进不了 `/admin`（`lib/constants/admin.ts`）。
+   * 两边各自渲染，**不是**「进同一个后台」。
+   *
+   * ⚠️ 但用户端订单详情、打手端订单 DTO、公共池 DTO **都不带它**：
+   * 普通打手与下单用户没有理由看到「上一位打手为什么走」。
+   */
+  releaseHistory: CompanionReleaseRecord[];
 
   /** 这一单的退款申请摘要；没有申请过为 null。完整内容要去退款详情看 */
   refundSummary: RefundSummary | null;

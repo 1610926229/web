@@ -342,6 +342,7 @@ export type AdminOrderDetailExtras = Pick<
   AdminOrderDetail,
   | "timeline"
   | "exclusiveCompanion"
+  | "releaseHistory"
   | "refundSummary"
   | "complaintSummary"
   | "conversationSummary"

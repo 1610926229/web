@@ -825,3 +825,41 @@ test("HTTP：合法迁移 / 幂等重放 / 非法迁移 / 响应不含敏感字�
   assert.equal(rejected.status, 200);
   assert.equal(JSON.parse(await rejected.text()).data.status, "rejected");
 });
+
+/**
+ * 履约退出历史（P0-6）在退款详情的**顶层**（不是某一层的子字段）。
+ *
+ * ⚠️ 它与 `conversationOrderId` 是两件独立的事：退款详情有自己的订单区，
+ * 而「进入会话」入口在没有沟通记录时是 `null`——只挂会话页会让这类退款漏掉退出历史，
+ * 因此它必须出现在退款详情自己的载荷里。
+ *
+ * ⚠️ 这里断言的是空数组：**字段在、类型对、没有被序列化吃掉**。为空不是因为
+ * 「没人能成为打手」（DEV-1 起预置的 `u-1022` / `u-1023` 就是有效打手），
+ * 而是这条预置退款对应的订单从未被取消过接单，且 HTTP 用例不写共享内存。
+ * 内容口径由 `tests/staffReleaseHistory.test.mjs` 覆盖。
+ * 只读 `rf-seed-1001-01`，与写用例占用的 `rf-seed-1002-01` 分开。
+ */
+test("退款详情接口：顶层带 releaseHistory，匿名一律 401", { skip: SKIP_HTTP }, async () => {
+  const pathname = `/api/staff/refunds/${PENDING_REFUND}`;
+
+  // 匿名：401。与客服端的既有身份矩阵同一结论，这一条不依赖任何开关
+  assert.equal((await requestWithCookie(pathname, null)).status, 401);
+
+  const login = await staffLogin("staff-1");
+  if (login.status !== 200) return;
+  const cookie = login.setCookie[0].split(";")[0];
+
+  const detail = await requestWithCookie(pathname, cookie);
+  assert.equal(detail.status, 200);
+  const payload = JSON.parse(detail.body);
+
+  assert.deepEqual(
+    payload.data.releaseHistory,
+    [],
+    "没有退出过就是空数组（正常情况），不是 null / undefined（查不到）",
+  );
+  // 退出历史的**内部字段**一个都不许顺着接口流出去
+  for (const hidden of ["actorId", "releaseRecordId"]) {
+    assert.equal(new RegExp(`"${hidden}"`).test(detail.body), false, `退款详情不该出现 ${hidden}`);
+  }
+});

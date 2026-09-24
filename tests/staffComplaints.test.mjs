@@ -1027,3 +1027,43 @@ test("HTTP 写：合法迁移 200、非法迁移 400、同键重放只有一个�
     assert.equal(result.status, 400, `终态下 ${action} 必须 400`);
   }
 });
+
+/**
+ * 履约退出历史（P0-6）随**订单摘要**一起下发，接口层同样要看得见。
+ *
+ * ⚠️ `releaseHistory` 在详情里**不是顶层字段**——它挂在 `orderSummary` 上，
+ * 与投诉未关联订单时 `orderSummary === null` 的既有语义配套：订单读不到时，
+ * 这一整块（含退出历史）都不出现。顶层放一份就等于在投诉与订单之间多开一条路。
+ *
+ * ⚠️ 这里断言的是空数组：**字段在、类型对、没有被序列化吃掉**。为空不是因为
+ * 「没人能成为打手」（DEV-1 起预置的 `u-1022` / `u-1023` 就是有效打手），
+ * 而是这几张预置订单从未被取消过接单，且 HTTP 用例不写共享内存。
+ * 内容口径由 `tests/staffReleaseHistory.test.mjs` 覆盖。
+ */
+test("投诉详情接口：releaseHistory 挂在 orderSummary 上且匿名一律 401", { skip: SKIP_HTTP }, async () => {
+  const pathname = "/api/staff/complaints/cmp-seed-1001-02";
+
+  // 匿名：401。与客服端的既有身份矩阵同一结论，这一条不依赖任何开关
+  assert.equal((await requestWithCookie(pathname, null)).status, 401);
+
+  const login = await staffLogin("staff-1");
+  if (login.status !== 200) return;
+  const staffCookie = login.setCookie[0].split(";")[0];
+
+  const detail = await requestWithCookie(pathname, staffCookie);
+  assert.equal(detail.status, 200);
+  const payload = JSON.parse(detail.body);
+
+  assert.ok(payload.data.orderSummary, "cmp-seed-1001-02 关联的订单读得到，否则测的不是空数组");
+  assert.deepEqual(
+    payload.data.orderSummary.releaseHistory,
+    [],
+    "没有退出过就是空数组（正常情况），不是 null / undefined（查不到）",
+  );
+  // 顶层不得再放一份：两处同名字段迟早会分叉，且会让「订单读不到」这一块形同虚设
+  assert.equal(Object.hasOwn(payload.data, "releaseHistory"), false);
+  // 退出历史的**内部字段**一个都不许顺着接口流出去
+  for (const hidden of ["actorId", "releaseRecordId"]) {
+    assert.equal(new RegExp(`"${hidden}"`).test(detail.body), false, `投诉详情不该出现 ${hidden}`);
+  }
+});

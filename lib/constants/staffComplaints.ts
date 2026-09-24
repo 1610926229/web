@@ -25,7 +25,7 @@ import type {
   StaffComplaintOrderSummary,
 } from "@/lib/types/complaint";
 import type { OrderStatus } from "@/lib/types/order";
-import type { StaffUserSummary } from "@/lib/types/staff";
+import type { StaffCompanionReleaseEntry, StaffUserSummary } from "@/lib/types/staff";
 import { clampPage, clampPageSize } from "./pagination";
 
 /**
@@ -336,13 +336,20 @@ export function toStaffComplaintListItem(
   };
 }
 
-/** 关联订单摘要的输入：由服务层从订单仓储取好，本层只做拼装。 */
+/**
+ * 关联订单摘要的输入：由服务层从订单仓储取好，本层只做拼装。
+ *
+ * ⚠️ `releaseHistory` 也在这里，理由与订单其余字段相同：**订单摘要要回答的问题**
+ * 里包含「这一单有没有人中途退出」。服务层负责取数与解名字
+ * （`toStaffCompanionReleaseEntry` 是转换规则的唯一出处），本层不碰 `lib/data`。
+ */
 export type StaffComplaintOrderInput = {
   id: string;
   orderNo: string;
   status: OrderStatus;
   productTitle: string;
   totalAmount: number;
+  releaseHistory: StaffCompanionReleaseEntry[];
 };
 
 export function toStaffComplaintOrderSummary(
@@ -355,6 +362,7 @@ export function toStaffComplaintOrderSummary(
     statusLabel: ORDER_STATUS_LABELS[order.status],
     productTitle: order.productTitle,
     totalAmount: order.totalAmount,
+    releaseHistory: order.releaseHistory,
   };
 }
 

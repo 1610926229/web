@@ -1,7 +1,7 @@
 import type { ActorRole } from "./actor";
 import type { SupportEvidence } from "./evidence";
 import type { OrderStatus } from "./order";
-import type { StaffUserSummary } from "./staff";
+import type { StaffCompanionReleaseEntry, StaffUserSummary } from "./staff";
 import type { AdminUserSummary } from "./user";
 
 /**
@@ -289,7 +289,7 @@ export type StaffRefundAllowedActions = {
  * 客服端退款详情。
  *
  * 比列表项多出：退款原因、说明、凭证、金额对照、审核信息、进度时间轴、
- * 服务端判定的可执行动作，以及**关联会话入口**。
+ * 服务端判定的可执行动作、**关联会话入口**，以及**履约退出历史**。
  */
 export type StaffRefundDetail = StaffRefundListItem & {
   reasonKey: RefundReasonKey;
@@ -329,6 +329,18 @@ export type StaffRefundDetail = StaffRefundListItem & {
    * 没有沟通记录时为 null，页面就不给这个入口——而不是给一个点进去 404 的链接。
    */
   conversationOrderId: string | null;
+
+  /**
+   * 这笔退款关联订单的履约退出历史（P0-6），按退出时间正序；没有退出过是**空数组**。
+   *
+   * ⚠️ 它回答的是客服看退款时最先会问的那个问题：「有人在服务前取消过接单吗」。
+   * 与 `conversationOrderId` 同一个理由——退款详情有自己的订单区，而「进入会话」
+   * 入口在订单没有沟通记录时是 `null`，只挂会话页会让这一类退款漏掉它。
+   *
+   * ⚠️ 它与钱**无关**：本轮退出不退款、不罚款、不扣减收益，因此这里既不是
+   * 退款依据，也不改变任何金额。它只是这一单发生过的事实的只读记录。
+   */
+  releaseHistory: StaffCompanionReleaseEntry[];
 
   allowedActions: StaffRefundAllowedActions;
 };

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import StaffConversationConsole from "@/components/staff/StaffConversationConsole";
 import StaffOrderSummaryPanel from "@/components/staff/StaffOrderSummaryPanel";
+import StaffReleaseHistory from "@/components/staff/StaffReleaseHistory";
 import {
   STAFF_CONVERSATIONS_PAGE_TITLE,
   STAFF_CONVERSATION_DETAIL_TITLE,
@@ -77,6 +78,14 @@ export default async function StaffConversationDetailPage({
           </section>
 
           <StaffOrderSummaryPanel order={detail.order} />
+
+          {/* 履约退出历史挂在订单摘要**下面**，而不是塞进 `StaffOrderSummaryPanel`：
+              那张卡的职责是把订单字段渲染成一张只读网格，而退出历史属于另一个域
+              （履约经过核对），有自己的标题、说明与逐条结构；合进去会让「订单摘要」卡里
+              出现一段与订单字段无关的内容，也让它的行数随退出次数变化。
+              `releaseHistory` 本来就挂在 `detail.order` 上，放在这里同样是
+              「由页面取好、组件只渲染」，没有多一次取数。 */}
+          <StaffReleaseHistory entries={detail.order.releaseHistory} />
         </div>
       </div>
     </div>

@@ -25,6 +25,7 @@ import {
   getPaymentRepository,
 } from "@/lib/data/paymentRepository";
 import { getCompanionRepository } from "@/lib/data/companionRepository";
+import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseRepository";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getReviewRepository } from "@/lib/data/reviewRepository";
@@ -258,13 +259,17 @@ export async function getAdminOrderDetail(
     const order = await getPaymentRepository().findOrderById(id);
     if (!order) return null;
 
-    const [users, refund, complaintStats, conversation, exclusiveCompanion] = await Promise.all([
-      adminUserIndex(),
-      getRefundRepository().findRefundByOrderId(order.id),
-      getComplaintRepository().summarizeComplaintsByOrder(order.id),
-      getMessageRepository().findConversation(order.userId, order.id),
-      resolveExclusiveCompanion(order.id),
-    ]);
+    const [users, refund, complaintStats, conversation, exclusiveCompanion, releaseHistory] =
+      await Promise.all([
+        adminUserIndex(),
+        getRefundRepository().findRefundByOrderId(order.id),
+        getComplaintRepository().summarizeComplaintsByOrder(order.id),
+        getMessageRepository().findConversation(order.userId, order.id),
+        resolveExclusiveCompanion(order.id),
+        // 履约退出历史（P0-6）：打手主动取消之后订单上的人已经清空，而客服恰恰要回答
+        // 「刚才那个人为什么走了」。没有退出过就是空数组，不是「查不到」
+        getCompanionReleaseRepository().listReleasesByOrderId(order.id),
+      ]);
 
     // 未读数与用户端同一个口径；会话不存在时摘要为 null
     const conversationSummary = conversation
@@ -280,6 +285,7 @@ export async function getAdminOrderDetail(
     return toAdminOrderDetail(order, users.get(order.userId) ?? missingUser(order.userId), {
       timeline: buildOrderTimeline(order),
       exclusiveCompanion,
+      releaseHistory,
       refundSummary: refund ? toRefundSummary(refund) : null,
       complaintSummary: toOrderComplaintSummary(complaintStats),
       conversationSummary,

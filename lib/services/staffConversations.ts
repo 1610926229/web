@@ -11,6 +11,7 @@ import {
   readStaffOrderStatusFilter,
   staffConversationMatchesKeyword,
   staffUnreadCount,
+  toStaffCompanionReleaseEntry,
   toStaffConversationListItem,
   toStaffConversationMessage,
   toStaffOrderSummary,
@@ -18,6 +19,8 @@ import {
   type StaffOrderStatusFilter,
 } from "@/lib/constants/staff";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
+import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseRepository";
+import { getCompanionRepository } from "@/lib/data/companionRepository";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
@@ -27,6 +30,7 @@ import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { Order } from "@/lib/types/order";
 import type { OrderMessage } from "@/lib/types/message";
 import type {
+  StaffCompanionReleaseEntry,
   StaffConversationDetail,
   StaffConversationListData,
   StaffConversationListItem,
@@ -135,6 +139,44 @@ function toListItem(row: StaffConversationRow): StaffConversationListItem {
     lastMessageRole: last ? last.senderRole : null,
     staffUnreadCount: staffUnreadCount(row.messages, row.staffLastReadAt),
   });
+}
+
+// ——————————————————————————— 履约退出历史（P0-6） ———————————————————————————
+
+/**
+ * 订单 → 客服可读的履约退出历史。
+ *
+ * 打手在开始服务前主动取消接单之后，订单上的 `actualCompanionId` / `companion`
+ * 已经被清空（订单必须能重新进公共池），因此「谁曾经接过、为什么走」只能从这里看。
+ * 客服在会话页上最常被问到的正是这件事。
+ *
+ * ⚠️ 与 `staffUserIndex()` / `missingUser()` 一样，这是**客服侧各服务各写一份的私有小助手**：
+ * 取数（按订单查退出历史 + 按 id 解护航展示名）只有两行仓储调用，
+ * 而「一条退出历史怎么变成客服看得懂的条目」**不在这里**——它在
+ * `toStaffCompanionReleaseEntry()`（唯一转换点），因此三处不会出现三种口径。
+ *
+ * ⚠️ 名字用 `findCompanionById()` 而不是任何「有效护航」口径的查询：
+ * 事后被下架的护航照样要显示得出名字，那是历史事实。
+ * 查不到（资料被彻底删除）时传空串，由构造函数回落到 `companionId`——
+ * **回落到 id 这条规则本身也只有那一处**。
+ *
+ * 没有退出过返回**空数组**，不是 `null`：那是正常情况，不是「查不到」。
+ */
+async function releaseHistoryFor(orderId: string): Promise<StaffCompanionReleaseEntry[]> {
+  const records = await getCompanionReleaseRepository().listReleasesByOrderId(orderId);
+  if (records.length === 0) return [];
+
+  // 同一单上可能同一位护航退出过多次：按 id 缓存名字，不重复查同一条资料
+  const names = new Map<string, string>();
+  for (const record of records) {
+    if (names.has(record.companionId)) continue;
+    const companion = await getCompanionRepository().findCompanionById(record.companionId);
+    names.set(record.companionId, companion ? companion.displayName : "");
+  }
+
+  return records.map((record) =>
+    toStaffCompanionReleaseEntry(record, names.get(record.companionId) ?? ""),
+  );
 }
 
 // ——————————————————————————— 工作台首页 ———————————————————————————
@@ -329,8 +371,12 @@ export async function getStaffConversationDetail(
     ]),
   );
 
+  // 履约退出历史（P0-6）：会话页是客服与订单之间的主界面，也是「是不是有人中途退出过」
+  // 最先被问到的地方。它与消息、用户同属「这一单发生过什么」，因此在这里一并取好
+  const releaseHistory = await releaseHistoryFor(order.id);
+
   return {
-    order: toStaffOrderSummary(order, user ? user.nickname : "用户"),
+    order: toStaffOrderSummary(order, user ? user.nickname : "用户", releaseHistory),
     user: {
       id: user ? user.id : order.userId,
       nickname: user ? user.nickname : "用户",

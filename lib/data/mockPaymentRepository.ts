@@ -184,6 +184,15 @@ export const mockPaymentRepository: PaymentRepository = {
     return [...store().orders.values()].filter((order) => order.userId === userId);
   },
 
+  async queryOrdersByCompanion(companionId) {
+    // `actualCompanionId` 是**查询条件**而不是「查出来再比对」：本方法只可能返回
+    // 这一位打手实际接过的单。与 queryOrders 同一个 Map，因此刚接的单立刻可见、
+    // 取消之后（`actualCompanionId` 被清空）也立刻不可见
+    return [...store().orders.values()]
+      .filter((order) => order.actualCompanionId === companionId)
+      .sort(compareOrdersNewestFirst);
+  },
+
   async listAllOrders() {
     // 订单在 Map 里按 id 键控，因此每条订单只会出现一次——「同一订单只累计一次」的**数据侧**保证
     return [...store().orders.values()];
@@ -228,6 +237,55 @@ export function applyOrderAccepted(
     // 因此「派单说被 A 接了、订单说没人接」这种状态在结构上产生不出来
     actualCompanionId: input.companionId,
     companion: input.companion,
+  };
+  current.orders.set(id, updated);
+  return { previous, updated };
+}
+
+/**
+ * 打手主动取消接单 → 订单退出当前履约（**同步写入器**，无 `await`），P0-6。
+ *
+ * 与上面的 `applyOrderAccepted` **严格对称**：那边一次写四个字段
+ * （`status` / `acceptedAt` / `actualCompanionId` / `companion`），
+ * 这里就把这四个字段**一起**退回去。四个必须同进同退，理由有三条：
+ *
+ * 1. **对称性**：接单是一次四字段的原子赋值，取消只回退其中一部分，
+ *    就会留下一条永远对不齐的不变量（「什么时候接的」被清空而「谁接的」还在）；
+ * 2. **技术设计把前两者定义为一个整体**：`database-schema.md` 把
+ *    `actualCompanionId` 与 `companion` 归在「履约人」同一组；
+ *    `01-prompt.md` §2.3 说的是「当前**履约绑定**必须解除」——绑定指的就是这一组；
+ * 3. **不清空会直接渲染出自相矛盾的界面**：`lib/services/orders.ts` 的 `TIMELINE_SOURCE`
+ *    把 `acceptedAt` 直接变成用户可见的时间轴节点（只判「时间戳非 null」），
+ *    残留的 `acceptedAt` 会让一张已回到 `paid` 的订单在用户端显示「已接单」；
+ *    而 `toOrderListItem()` 输出 `order.companion`，残留快照会让订单列表里
+ *    挂着一个并不在履约的打手。
+ *
+ * 「谁曾经接过这一单」不在这里保存：它由 `CompanionReleaseRecord` 记一位，
+ * 由伪事务在同一段代码里写下去（`lib/data/companionOrderTransaction.ts`）。
+ *
+ * ⚠️ 与同文件另外两个写入器同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （是不是本人、状态是不是还停在 `accepted`）。合法性由伪事务在调用它之前判定。
+ *
+ * ⚠️ `Order` 上**没有** `updatedAt` 字段，因此这里没有「一并刷新时间戳」这一步——
+ * `applyOrderAccepted` 也没有。订单的时间事实是它自己的那五个节点，
+ * 「最后一次改动发生在何时」不属于订单模型。
+ */
+export function applyOrderAcceptanceReleased(
+  id: string,
+): { previous: Order; updated: Order } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  const updated: Order = {
+    ...order,
+    status: "paid",
+    acceptedAt: null,
+    // 与派单的 `acceptedByCompanionId` 同段写下去，因此「派单说没人接、订单说有人接」
+    // 这种状态在结构上产生不出来（见 applyOrderAccepted 的同一句注释）
+    actualCompanionId: null,
+    companion: null,
   };
   current.orders.set(id, updated);
   return { previous, updated };

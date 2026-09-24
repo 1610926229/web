@@ -3,6 +3,7 @@ import {
   normalizeAdminComplaintResult,
 } from "@/lib/constants/adminComplaints";
 import { COMPLAINT_STATUS_LABELS } from "@/lib/constants/complaints";
+import { toStaffCompanionReleaseEntry } from "@/lib/constants/staff";
 import {
   STAFF_COMPLAINT_LIST_NOTICE,
   STAFF_COMPLAINT_MISSING_IDEMPOTENCY_KEY_MESSAGE,
@@ -27,6 +28,8 @@ import {
   type AdminComplaintWriteFailure,
   type AdminWriteContext,
 } from "@/lib/data/adminComplaintTransaction";
+import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseRepository";
+import { getCompanionRepository } from "@/lib/data/companionRepository";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
@@ -38,7 +41,7 @@ import type {
   StaffComplaintListData,
   StaffComplaintWriteResult,
 } from "@/lib/types/complaint";
-import type { StaffSessionUser, StaffUserSummary } from "@/lib/types/staff";
+import type { StaffCompanionReleaseEntry, StaffSessionUser, StaffUserSummary } from "@/lib/types/staff";
 
 /**
  * 客服端「投诉处理」服务 —— 列表、详情与三个处理动作的唯一入口。
@@ -75,9 +78,46 @@ function missingUser(userId: string): StaffUserSummary {
 }
 
 /**
+ * 订单 → 客服可读的履约退出历史（P0-6）。
+ *
+ * 打手在开始服务前主动取消接单之后，订单上的履约人已经被清空，而投诉正文经常问的
+ * 正是「怎么又没人做了」。投诉详情有自己的订单区，但它的「进入会话」入口在订单
+ * 没有沟通记录时是 `null`——只把退出历史挂在会话页上，这一类投诉就看不到它，
+ * 因此它随订单摘要一起给。
+ *
+ * ⚠️ 与 `staffUserIndex()` / `missingUser()` 一样，这是**客服侧各服务各写一份的私有小助手**：
+ * 「一条退出历史怎么变成客服看得懂的条目」不在这里——它在
+ * `toStaffCompanionReleaseEntry()`（唯一转换点），因此三处不会出现三种口径。
+ * 名字用 `findCompanionById()`（事后被下架的护航照样要显示得出名字），
+ * 查不到时传空串、由构造函数回落到 `companionId`。
+ *
+ * 没有退出过返回**空数组**，不是 `null`：那是正常情况，不是「查不到」。
+ */
+async function releaseHistoryFor(orderId: string): Promise<StaffCompanionReleaseEntry[]> {
+  const records = await getCompanionReleaseRepository().listReleasesByOrderId(orderId);
+  if (records.length === 0) return [];
+
+  // 同一单上可能同一位护航退出过多次：按 id 缓存名字，不重复查同一条资料
+  const names = new Map<string, string>();
+  for (const record of records) {
+    if (names.has(record.companionId)) continue;
+    const companion = await getCompanionRepository().findCompanionById(record.companionId);
+    names.set(record.companionId, companion ? companion.displayName : "");
+  }
+
+  return records.map((record) =>
+    toStaffCompanionReleaseEntry(record, names.get(record.companionId) ?? ""),
+  );
+}
+
+/**
  * 投诉关联的订单摘要输入。未关联订单时返回 null；**关联的订单查不到时也返回 null**——
  * 投诉本身是完整可读的（正文、凭证、联系方式、处理结果都在投诉自己身上），
  * 为了一条查不到的订单把整条投诉变成 404，会让客服连用户写了什么都看不到。
+ *
+ * ⚠️ 退出历史（P0-6）**不改变这条语义**：它排在「订单读得到」的判定**之后**，
+ * 且只按 `orderId` 查一张历史表——订单查不到时既不查它、也不会因为它而多一种失败。
+ * 「多取一份数据」不该让一条本来可读的投诉变成 404。
  */
 async function orderSummaryInput(orderId: string | null): Promise<StaffComplaintOrderInput | null> {
   if (!orderId) return null;
@@ -85,12 +125,15 @@ async function orderSummaryInput(orderId: string | null): Promise<StaffComplaint
   const order = await getPaymentRepository().findOrderById(orderId);
   if (!order) return null;
 
+  const releaseHistory = await releaseHistoryFor(orderId);
+
   return {
     id: order.id,
     orderNo: order.orderNo,
     status: order.status,
     productTitle: order.productTitle,
     totalAmount: order.totalAmount,
+    releaseHistory,
   };
 }
 

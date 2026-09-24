@@ -20,7 +20,7 @@
 
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| POST | `/api/auth/mock-login` | — | `lib/auth/session` + `lib/data/userRepository` ⚠️ | 模拟登录，写 Mock 会话 Cookie。由 `ENABLE_MOCK_AUTH` 控制，关闭时 404。**验收期可用 `{"userId":"u-1002"}` 切换身份；用户端页面无切换入口** |
+| POST | `/api/auth/mock-login` | — | `lib/auth/session` + `lib/data/userRepository` ⚠️ | 模拟登录，写 Mock 会话 Cookie。由 `ENABLE_MOCK_AUTH` 控制，关闭时 404。可用 `{"userId":"u-1002"}` 切换身份：接口层（自动化 / curl）一直可以，**DEV-1 起用户端也有一个开发环境专用的悬浮面板**（`lib/auth/MockIdentityPanel.tsx`，服务端开关控制、关闭时整块不渲染）。切换 = **替换**当前会话，不是第二套登录态 |
 | POST | `/api/auth/logout` | — | `lib/auth/session` | 清除会话 Cookie。`ENABLE_MOCK_AUTH` 关闭时 404 |
 
 ⚠️ `/api/auth/mock-login` 的 Route Handler **直接调用 `lib/data/userRepository`**，未经过 service 层。这是 Observed Current，见 §API Conventions 的说明。
@@ -177,11 +177,19 @@
 |---|---|---|---|---|
 | GET | `/api/companion/dispatches` | `requireCompanion` | `companionDispatch` | 当前打手的两张订单池（专属 + 公共），含 `canAccept` 与 `notice` |
 | POST | `/api/companion/dispatches/[id]/accept` | `requireCompanion` | `companionDispatch` | 接单（幂等重放）。所有判定在 `acceptDispatch` 的原子区段内 |
+| GET | `/api/companion/orders` | `requireCompanion` | `companionOrders` | 仅返回 `actualCompanionId = 当前打手` 的订单 |
+| GET | `/api/companion/orders/[id]` | `requireCompanion` | `companionOrders` | 打手订单详情；非 actualCompanion 统一按不泄露存在性的 404 处理 |
+| POST | `/api/companion/orders/[id]/cancel` | `requireCompanion` | `companionOrders` / `companionOrderTransaction` | 仅 `accepted` actualCompanion 可主动取消；请求体含取消原因与幂等标识；成功后 `accepted → paid`、回 public、通知用户、记录最小退出历史；当前 P0 不处罚 |
 
-**⚠️ 打手接口 CURRENT 只有这 2 个**；未来 Companion 订单/取消/开始服务接口见第三部分 TARGET，真正落地时再扩充清单。
-**⚠️ `app/api/companion/**` 的接口清单门禁属 P0-5.5**（管理端有 62 条、客服端有 16 条）：
-本轮已冻结下面两条的清单契约（`GET` / `POST`、`requireCompanion()` 为第一动作、引用的服务层函数），
-门禁测试写入 `tests/`，见 §2.11。
+**⚠️ 打手接口 CURRENT 共 5 个**（上表即全部；`dispatches` 两条属 P0-5，`orders` 三条属 P0-6）。
+本章是打手端 CURRENT 的**唯一真值源**——`COMPANION_API_MANIFEST` 与磁盘上的
+`app/api/companion/**` 都由门禁与本表对齐，别处不要再列第二份 CURRENT 清单。
+未来 Companion 开始服务接口见第三部分 TARGET，真正落地时再扩充清单。
+
+**⚠️ `app/api/companion/**` 的接口清单门禁由 P0-5.5 建立**（管理端有 62 条、客服端有 16 条）：
+清单契约（`GET` / `POST`、`requireCompanion()` 为第一动作、引用的服务层函数）由
+`tests/companion.test.mjs` 强制，且该文件**扫描磁盘上的真实 route 文件**与清单做双向
+`deepEqual`，见 §2.11。
 
 ---
 
@@ -438,34 +446,37 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 |---|---|---|
 | 管理端 | `tests/admin.test.mjs` | 62 |
 | 客服端 | `tests/staff.test.mjs` | 16 |
-| 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`） | 2 |
+| 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`；P0-6 扩充） | 5 |
 
 **打手端门禁：已确认建立（产品裁定 2026-09-19），属 P0-5.5，本轮落地。**
 建立与 Admin / Staff 类似的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对：
 
-- 清单**逐条列出**（不是只断言数量），当前**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`；
+- 清单**逐条列出**（不是只断言数量）。**P0-6 起共五条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`（P0-5.5），`GET /api/companion/orders`、`GET /api/companion/orders/[id]`、`POST /api/companion/orders/[id]/cancel`（P0-6）；
 - 每个路由**导出的 HTTP 方法**要与清单一致（多一个方法也要现形），第一动作必须是 `requireCompanion()`，且不出现其它身份的守卫；引用的服务层函数也要与清单一致；
-- **不得**把 `/companion/orders`、`/companion/orders/[id]` 等尚不存在的 TARGET 路由登记进清单；
-- **未来真正新增 Companion 订单/取消/开始服务接口时同步扩充清单**；
+- **不得**把**尚未实现**的 TARGET 路由登记进清单。**P0-6 之后的负向门禁是 `/companion/orders/[id]/start`**（`accepted → serving`，仍属后续 Round）：它既不能出现在清单里，磁盘上也不能存在该 route 文件，且 `orders/[id]` 下**只允许 `cancel` 一个 `POST` 写入口**——门禁按「导出 `POST` 的文件集合」判定，因此把接口改名成 `begin` / `serve` / `complete` 也绕不过去；
+- **未来真正新增 Companion 订单接口时同步扩充清单**；
 - **新增、删除、误改路径时测试必须失败**；
 - **沿用现有 tests 的源码扫描 / 路由门禁方式，不新建测试框架**；文件名遵循仓库现有命名风格，不为了名字本身新增抽象。
 
-**`tests/companion.test.mjs` 已于 P0-5.5 建立**（当前 2 条路由 / 7 条用例，全绿）；上列清单即该文件里的 `COMPANION_API_MANIFEST`，「第一动作必须是 `requireCompanion()`」由位置断言强制（比较前先剥掉 import，否则该断言恒为真）。
+**`tests/companion.test.mjs` 已于 P0-5.5 建立，P0-6 扩充至 5 条路由 / 7 条用例**（全绿）；上列清单即该文件里的 `COMPANION_API_MANIFEST`，「第一动作必须是 `requireCompanion()`」由位置断言强制（比较前先剥掉 import，否则该断言恒为真）。
 
 ---
 
 # 第三部分：TARGET API
 
-**以下能力已由 2026-09-23 V0.3 需求确认，但尚未实现。**
-**一律标注 `TARGET — NOT IMPLEMENTED`；旧 P0-6/P0-7/P0-8 编号不再作为执行顺序真值。**
+**以下能力已由 2026-09-23 V0.3 需求确认，尚未实现的一律标注 `TARGET — NOT IMPLEMENTED`；旧 P0-6/P0-7/P0-8 编号不再作为执行顺序真值。**
 
 ## 3.1 Companion 我的订单、主动取消与开始服务
 
+> ⚠️ **「我的订单 + 主动取消」三条已实现（P0-6）**，它们属 CURRENT，
+> 清单**只在 §8 列出一次**，本节不重复——同一份文档里放两张 CURRENT 表，
+> 迟早会有一张先改、另一张被当成还没实现。
+> 本节只保留**尚未实现**的部分。
+
+### TARGET — NOT IMPLEMENTED
+
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| GET | `/api/companion/orders` | `requireCompanion`（预期） | `companionOrders` | 仅返回 `actualCompanionId = 当前打手` 的订单；至少区分进行中/已结束 |
-| GET | `/api/companion/orders/[id]` | `requireCompanion`（预期） | `companionOrders` | 打手订单详情；非 actualCompanion 统一按不泄露存在性的 404 处理 |
-| POST | `/api/companion/orders/[id]/cancel` | `requireCompanion`（预期） | `companionOrders` / 对应 transaction | 仅 `accepted` actualCompanion 可主动取消；请求体必须包含取消原因与幂等标识；成功后 `accepted → paid`、回 public、通知用户、记录最小退出历史；当前 P0 不处罚 |
 | POST | `/api/companion/orders/[id]/start` | `requireCompanion`（预期） | `companionOrders` | `accepted → serving`；必须由当前 actualCompanion 显式点击触发 |
 
 **共同约束：**
@@ -475,16 +486,11 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 - `cancel` 回 public 时必须重新冻结 `publicPoolEnteredAt / publicTimeoutMinutesSnapshot / publicDeadlineAt`，并清除“当前履约绑定”；历史由最小退出记录保留。
 - `start` 只有 `accepted` 合法，且不存在任何根据时间 / 备注 / 聊天自动进入 serving 的路径。
 - 幂等/并发下只允许一次真实状态推进，不重复通知、不刷新已经成功写入的时间。
-- 这些新增 Companion API 落地时必须同步扩充 `tests/companion.test.mjs` 的 manifest；未实现前不得预登记。
+- 新增 Companion API 落地时必须同步扩充 `tests/companion.test.mjs` 的 manifest；未实现前不得预登记（见第二部分末的负向门禁）。
 
-**打手端页面入口（TARGET）**：
+**打手端页面入口**：`/companion/orders`、`/companion/orders/[id]`（P0-6 已实现）。
 
-```
-/companion/orders
-/companion/orders/[id]
-```
-
-同一个详情页承载 `accepted` 的“开始服务”和 `serving` 的“提交完成材料”，不得为后续阶段复制第二套订单详情。
+同一个详情页继续承载 `accepted` 的“开始服务”和 `serving` 的“提交完成材料”，不得为后续阶段复制第二套订单详情。
 
 ## 3.2 CompletionSubmission：人工审核 + 10 分钟默认自动审核
 

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import MobileShell from "@/components/common/MobileShell";
+import MockIdentitySwitcher from "@/lib/auth/MockIdentitySwitcher";
 
 /**
  * 用户端（移动）外壳。
@@ -20,7 +21,18 @@ import MobileShell from "@/components/common/MobileShell";
  *
  * 组件本身仍然叫 `MobileShell`（它描述的正是「移动端外壳」这件事），
  * 只是改由本组引用——而不是继续赖在根布局上，让每个端都不得不接受它。
+ *
+ * ⚠️ **DEV-1 的身份切换面板挂在这里，而不是挂在 `MobileShell` 上。**
+ * `MobileShell` 还被打手工作台（`app/companion/(console)/layout.tsx`）复用，
+ * 挂在它上面等于顺着壳层漏进另一端；挂在**本路由组**上，「用户端才有的开发工具」
+ * 与「用户端」在结构上是同一句话。开关与渲染条件全在
+ * `lib/auth/MockIdentitySwitcher.tsx`，本文件只负责给它一个位置。
  */
 export default function MobileLayout({ children }: { children: ReactNode }) {
-  return <MobileShell>{children}</MobileShell>;
+  return (
+    <MobileShell>
+      {children}
+      <MockIdentitySwitcher />
+    </MobileShell>
+  );
 }

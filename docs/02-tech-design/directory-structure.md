@@ -122,7 +122,7 @@ components/
 | `lib/constants/` | 47 / 12645 | **领域规则**：状态机表、校验、固定文案、DTO 映射 |
 | `lib/data/` | 59 / 9834 | 仓储接口 + Mock 实现 + 伪事务 |
 | `lib/services/` | 62 / 12229 | 服务端业务 + 浏览器 HTTP 客户端 |
-| `lib/auth/` | 9 / 552 | 会话、登录门、适配器 |
+| `lib/auth/` | 11 / 771 | 会话、登录门、适配器、Mock 身份切换面板 |
 | `lib/api/` | 6 / 381 | 四个路由守卫 + 响应信封 + 浏览器 HTTP 出口 |
 | `lib/mocks/` | 22 | 种子数据与调试工具 |
 | `lib/config/` | 1 / 62 | Mock 环境开关 |
@@ -199,7 +199,16 @@ lib/mocks/
 
 ## 4.7 `lib/auth/`
 
-`session.ts`（用户）/ `adminSession.ts` / `staffSession.ts` 三套 + `AuthAdapter.ts` / `MockAuthAdapter.ts` / `useAuth.tsx` / `LoginGate.tsx` / `RequireAuth.tsx` / `MockUserPicker.tsx`。
+`session.ts`（用户）/ `adminSession.ts` / `staffSession.ts` 三套 + `AuthAdapter.ts` / `MockAuthAdapter.ts` / `useAuth.tsx` / `LoginGate.tsx` / `RequireAuth.tsx` / `MockUserPicker.tsx` / `MockIdentitySwitcher.tsx` / `MockIdentityPanel.tsx`。
+
+后两个是 **DEV-1 的开发工具**：服务端门禁（`MockIdentitySwitcher`，判 `ENABLE_MOCK_AUTH`
+并读会话）+ 客户端面板（`MockIdentityPanel`，复用 `MockUserPicker` 与 `authAdapter`）。
+
+⚠️ `MockIdentitySwitcher` 还多做一件事：它**逐个现算**名单里每个账号的打手资格
+（`lib/services/companionAccess.ts` 的 `resolveCompanionAccess`，与打手工作台、打手接口守卫
+同一个入口），把结果作为**显示用**标签传给面板。这只是显示——面板不拿它做禁用或跳转，
+页面放行仍只由守卫决定。这段计算在开关早返回**之后**，因此正式形态不执行、也不进响应。
+它们只换掉**当前**会话，不构成身份来源，也不出现在管理端 / 客服端 / 打手工作台。
 
 **⚠️ 打手没有自己的会话模块**——复用用户会话。**禁止新增第二套打手认证。**
 
@@ -209,7 +218,7 @@ lib/mocks/
 
 ```
 tests/
-├── *.test.mjs                 51 个测试文件
+├── *.test.mjs                 57 个测试文件
 ├── alias-hook.mjs             node --import 入口，注册下面的 hook
 ├── alias-loader.mjs           ~20 行，教会 node「@/ 别名」与「无扩展名相对导入」
 ├── app-path.mjs               按**路由**（忽略路由组）查找 app/ 下源文件
@@ -224,7 +233,7 @@ tests/
 
 **三类特殊测试**：
 
-1. **接口清单门禁**：`admin.test.mjs`（62 条）、`staff.test.mjs`（16 条）、`companion.test.mjs`（2 条，产品裁定 2026-09-19，**P0-5.5 建立**）。三者都扫描对应端口的 `app/api/**` 与预期清单比对，沿用现有源码扫描方式，**不新建测试框架**。
+1. **接口清单门禁**：`admin.test.mjs`（62 条）、`staff.test.mjs`（16 条）、`companion.test.mjs`（5 条，产品裁定 2026-09-19，**P0-5.5 建立 / P0-6 扩充**）。三者都扫描对应端口的 `app/api/**` 与预期清单比对，沿用现有源码扫描方式，**不新建测试框架**。
 2. **路由门禁**：`routes.test.mjs` 真实扫描 `app/` 并与页面配置里的入口地址比对。
 3. **HTTP 冒烟**：`http-smoke.test.mjs`，需 `APP_BASE_URL`。
 
@@ -271,7 +280,17 @@ public/
 
 ## 8.1 生命周期类 P0 功能通常跨越的位置
 
-> 旧文档用“P0-6 开始服务”作示例。2026-09-23 需求重排后，具体 Round 编号待 `总需求进度表` 重新分配；以下仅描述 **TARGET — NOT IMPLEMENTED** 的放置规则。
+> 旧文档用“P0-6 开始服务”作示例。2026-09-23 需求重排后编号已由用户重新分配：
+> **P0-6 = `accepted` 主动取消接单 + 重新进入公共池（含打手「我的订单」最小入口）**。
+>
+> **CURRENT（P0-6 落地）**：A 段的 `lib/types/order.ts`、`lib/constants/orders.ts`、
+> `lib/data/mockPaymentRepository.ts`、`lib/services/companionOrders.ts`、
+> `lib/services/companionHttp.ts`、`app/api/companion/orders/**`（三件套）、
+> `app/companion/(console)/orders/**`、`components/companion/*Order*.tsx`、
+> `tests/companionOrders.test.mjs` 均已落地；伪事务落在
+> `lib/data/companionOrderTransaction.ts`（新增，A 段原文未列出该文件名，实现时新增）。
+> **TARGET — NOT IMPLEMENTED**：A 段的 `orders/[id]/start/route.ts`（`accepted → serving`）
+> 与完成材料提交；B 段（CompletionSubmission / 自动审核）、D 段（lifecycle 配置扩展）全部。
 
 ### A. 打手“我的订单 / 取消接单 / 开始服务”
 
@@ -282,10 +301,11 @@ lib/data/mockPaymentRepository.ts                ← 同步 Order 写原语（�
 lib/data/companionOrderTransaction.ts            ← 跨 Order / Dispatch / release history / notification 的伪事务
 lib/services/companionOrders.ts
 lib/services/companionHttp.ts                    ← 浏览器客户端可继续复用/扩展
-app/api/companion/orders/route.ts                 ← GET 我的订单（真正实现时才加入 manifest）
-app/api/companion/orders/[id]/route.ts            ← GET 详情
-app/api/companion/orders/[id]/cancel/route.ts     ← POST accepted 主动取消 + reason
-app/api/companion/orders/[id]/start/route.ts      ← POST accepted → serving
+app/api/companion/orders/route.ts                 ← GET 我的订单；**已落地并已在 manifest**（P0-6）
+app/api/companion/orders/[id]/route.ts            ← GET 详情；**已落地并已在 manifest**（P0-6）
+app/api/companion/orders/[id]/cancel/route.ts     ← POST accepted 主动取消 + reason；**已落地并已在 manifest**（P0-6）
+app/api/companion/orders/[id]/start/route.ts      ← POST accepted → serving（TARGET — NOT IMPLEMENTED；
+                                                     同时是 P0-6 之后的**负向门禁**对象：不得入 manifest、不得存在文件）
 app/companion/(console)/orders/page.tsx
 app/companion/(console)/orders/[id]/page.tsx
 components/companion/*Order*.tsx
@@ -326,11 +346,11 @@ lib/data/mockCompanionReleaseRepository.ts
 
 它由以下事务消费，不自己拥有业务状态机：
 
-- 打手 accepted 主动取消；
-- Admin 封禁/移除当前打手；
-- Staff 直接换人。
+- 打手 accepted 主动取消 —— **CURRENT（P0-6）**：`lib/data/companionOrderTransaction.ts` 的 `cancelAcceptedOrder`；底层「写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 回 public → 通知」抽成一个**非导出**的私有出口，本轮只有 `cancelAcceptedOrder` 一个公开入口；
+- Admin 封禁/移除当前打手 —— **TARGET — NOT IMPLEMENTED**（§十四 out of scope）；
+- Staff 直接换人 —— **TARGET — NOT IMPLEMENTED**（§十四 out of scope）。
 
-三者统一复用“写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 回 public → 通知”的底层能力；**accepted 用户直接退款是终态退款，保留 actualCompanionId，不走回池清绑定语义。**
+三者统一复用上面那条底层能力；**accepted 用户直接退款是终态退款，保留 actualCompanionId，不走回池清绑定语义。**
 
 ### D. 平台 lifecycle 配置
 

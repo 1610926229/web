@@ -293,11 +293,14 @@ test("会话列表 DTO 与订单摘要都不含游戏 ID、订单备注与用户
   const order = orderSeed.find((item) => item.id === "ord-seed-1001-04");
   assert.ok(order, "预置订单缺失：ord-seed-1001-04");
 
-  const summary = toStaffOrderSummary(order, "老板A");
+  // 第三个入参是履约退出历史（P0-6）：本层不做仓储读取，由服务层查好传进来。
+  // 传空数组是**有意义的**输入——「这一单没有人退出过」是正常情况，不是缺失取值。
+  const summary = toStaffOrderSummary(order, "老板A", []);
   assert.equal(summary.orderNo, order.orderNo);
   assert.equal(summary.totalAmount, order.totalAmount);
   assert.equal(summary.userNickname, "老板A");
   assert.ok(summary.companionSummary.length > 0, "没有护航时要写成「等待接单」，不是空白");
+  assert.deepEqual(summary.releaseHistory, [], "没有退出过就是空数组，不是 undefined");
 
   // 字段表就是边界：少一个字段就少一条泄漏路径
   for (const forbidden of ["gameAccountId", "remark", "userId", "payCredential"]) {
@@ -1606,4 +1609,51 @@ test("伪造的客服身份请求会话详情：不存在的订单与没权限�
   assert.equal(noConversation.status, 404);
   assert.equal(missing.status, 404);
   assert.equal(noConversation.body, missing.body, "两种情形必须完全无法区分，否则订单号可以被逐个试探");
+});
+
+/**
+ * 退出历史（P0-6）必须在**接口层**也下得来。
+ *
+ * 内容口径（六个字段、名字回落、顺序、空数组语义）由 `tests/staffReleaseHistory.test.mjs`
+ * 逐条守住；这里只回答接口这一层的问题：三个既有详情接口的 JSON 里到底有没有这个字段、
+ * 它是不是数组、以及它有没有把匿名请求放进来。
+ *
+ * ⚠️ 这里断言的是**空数组**：「字段在、类型对、没有被序列化吃掉」；非空的内容在
+ * 服务层用例里覆盖。为空的原因**不再是「没人能成为打手」**——DEV-1 起预置数据里
+ * 有 `u-1022` / `u-1023` 两位有效打手，接口层是可以产生退出历史的；为空是因为
+ * 本用例读的这几张**预置订单**从来没有被打手取消过，而且本仓库的 HTTP 用例
+ * 不写共享内存（见 `adminCompanionManagement.test.mjs` 的约定），不会去造一条。
+ */
+test("会话详情接口：releaseHistory 是数组，匿名一律 401", { skip: SKIP_HTTP }, async () => {
+  const pathname = "/api/staff/conversations/ord-seed-1001-04";
+
+  // 匿名：401。这一条不依赖任何开关，先跑——退出历史不得成为一条不用登录的读法
+  assert.equal((await requestWithCookie(pathname, null)).status, 401);
+
+  const login = await staffLogin("staff-1");
+  if (login.status !== 200) {
+    assert.equal(login.status, 404, "客服端开关关闭时登录接口按「不存在」返回");
+    return;
+  }
+  const staffCookie = login.setCookie[0].split(";")[0];
+
+  const detail = await requestWithCookie(pathname, staffCookie);
+  assert.equal(detail.status, 200);
+  const payload = JSON.parse(detail.body);
+
+  assert.equal(
+    Object.hasOwn(payload.data.order, "releaseHistory"),
+    true,
+    "字段必须始终在：时有时无会让页面在两种状态下渲染出不同的结构",
+  );
+  assert.deepEqual(
+    payload.data.order.releaseHistory,
+    [],
+    "没有退出过就是空数组（正常情况），不是 null / undefined（查不到）",
+  );
+
+  // 退出历史的**内部字段**一个都不许顺着接口流出去
+  for (const hidden of ["actorId", "releaseRecordId"]) {
+    assert.equal(new RegExp(`"${hidden}"`).test(detail.body), false, `会话详情不该出现 ${hidden}`);
+  }
 });

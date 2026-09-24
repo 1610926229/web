@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { hasAppFile } from "./app-path.mjs";
 import { collectFiles, readSource, stripComments, withoutImports } from "./source-text.mjs";
 
 /**
@@ -22,10 +23,23 @@ import { collectFiles, readSource, stripComments, withoutImports } from "./sourc
  *
  * ⚠️ 清单**逐条列出**而不是只断言数量：数量相同但地址被换掉的改动同样必须现形。
  *
- * ⚠️ 清单只描述**当前真实存在**的接口。`/companion/orders` 与
- * `/companion/orders/[id]`（「开始服务」，`accepted → serving`）属于**后续业务 Round**，
- * 其轮次编号由用户分配，本轮**不得**把它们当成 CURRENT 登记进来——
- * 那等于在文档与门禁里同时宣称一个不存在的接口已经存在。
+ * ⚠️ 清单只描述**当前真实存在**的接口。
+ *
+ * ## 2026-09-23（P0-6）修订
+ *
+ * 原文是「`/companion/orders` 与 `/companion/orders/[id]`（「开始服务」，
+ * `accepted → serving`）属于后续业务 Round，不得登记」——这句话已经把**两件不同的事**
+ * 写成了一件。P0-6 实现了前者（打手「我的订单」列表 / 详情 / 主动取消接单三件套），
+ * 后者**仍然没有实现**、也**仍然不属于本轮**。
+ *
+ * 因此这条约束被拆成两半，各自有对面那半挡住：
+ * - **列表 / 详情 / 取消接单**已登记为 CURRENT（见下面清单）；
+ * - **「开始服务」（`accepted → serving`）继续是负向门禁**：它既不许出现在清单里，
+ *   也不许出现在磁盘上，而且 `orders/[id]` 下**只有 cancel 一个写入口**。
+ *   详见本文件最后一条用例——那是这一段注释真正的意图所在。
+ *
+ * 保留这条约束的理由没有变：把未实现的接口登记进清单，等于在门禁与文档里
+ * 同时宣称一个不存在的能力已经存在，而门禁本身将再也发现不了它的缺失。
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,6 +78,36 @@ const COMPANION_API_MANIFEST = [
     guardModule: "@/lib/api/companionRoute",
     service: "acceptDispatchForCompanion",
     serviceModule: "@/lib/services/companionDispatch",
+  },
+  // —— P0-6：打手「我的订单」三件套 ——
+  // 三条都走同一个服务模块：列表、详情与取消接单对归属的判定必须是**同一件事**
+  // （`Order.actualCompanionId`），拆成两个模块就迟早会有一边判成 `exclusiveCompanionId`。
+  {
+    route: "orders/route.ts",
+    methods: ["GET"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "listCompanionOrders",
+    serviceModule: "@/lib/services/companionOrders",
+  },
+  {
+    route: "orders/[id]/route.ts",
+    methods: ["GET"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "getCompanionOrderDetail",
+    serviceModule: "@/lib/services/companionOrders",
+  },
+  {
+    // 全轮唯一的**写**入口（`accepted → paid`）。它出现在这里就意味着：
+    // 打手端从此有了一个能改订单状态的接口，因此 `orders/[id]` 下的写入口
+    // 必须与下面那条负向门禁一起看——多一个就是偷偷实现了后续 Round。
+    route: "orders/[id]/cancel/route.ts",
+    methods: ["POST"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "cancelCompanionOrder",
+    serviceModule: "@/lib/services/companionOrders",
   },
 ];
 
@@ -156,13 +200,14 @@ test("清单自己先自检：没有重复地址、每个地址至少声明一�
     );
   }
 
-  // 打手端当前恰好两个接口。改这个数就要同步改清单，不能只是「多了一个」。
-  assert.equal(COMPANION_API_MANIFEST.length, 2);
+  // 打手端当前恰好**五个**接口（P0-5.5 两条 + P0-6 三条）。
+  // 改这个数就要同步改清单，不能只是「多了一个」。
+  assert.equal(COMPANION_API_MANIFEST.length, 5);
 });
 
 // ——————————————————————————— 二、清单与实际路由一致 ———————————————————————————
 
-test("打手接口清单固定：当前恰好两个接口，多一个 / 少一个 / 被改名都会在这里现形", () => {
+test("打手接口清单固定：当前恰好五个接口，多一个 / 少一个 / 被改名都会在这里现形", () => {
   const routeFiles = collectFiles(COMPANION_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   assert.deepEqual(
@@ -271,19 +316,49 @@ test("打手接口不会混进别的身份守卫：混进一个就等于开了�
 
 // ——————————————————————————— 四、不得提前落地未来的接口 ———————————————————————————
 
-test("打手端不存在「开始服务」的接口：/companion/orders 属于后续业务 Round，不得提前登记为 CURRENT", () => {
-  // 这一条挡的是**提前实现**，不是「以后不许做」：那一轮真正开始时，
-  // 它会把地址加进上面的清单，而这份断言会提醒改它的人同时更新档案与进度表。
-  const ordersRoutes = collectFiles(COMPANION_API_DIR).filter((file) =>
-    relativeRoute(file).split("/").includes("orders"),
+/**
+ * 负向门禁：`orders/[id]` 下**只有** cancel 一个写入口。
+ *
+ * ## 这条挡的不是「以后不许做」，而是「现在别偷偷做」
+ *
+ * P0-6 真正新增的可执行迁移只有一条：`accepted → paid`（打手主动取消接单）。
+ * 结构状态机里还有 `serving → paid`，而 `serving → completed` 更是 TARGET 里的主线——
+ * 它们都是**后续 Round** 的内容（`01-prompt.md` §十四 明令 out of scope：
+ * `accepted → serving`、CompletionSubmission、Earning…）。
+ *
+ * 轮次真正开始时，那一位会建文件、写服务、把地址加进上面的清单——
+ * 那时本用例会红，提醒他同时更新档案与进度表；这正是它存在的意义。
+ *
+ * ## 为什么断言「写入口集合」而不是只断言某个具体名字
+ *
+ * 只断言 `start` 这个名字的话，把接口叫 `begin` / `serve` / `complete` 就绕过去了，
+ * 而「打手点一下就能把订单推进到服务中」这件事与名字无关。因此判据是**行为性质**：
+ * 一个 route 文件导出了 `POST`，它就是一个写入口，而 P0-6 只允许有一个。
+ */
+test("负向门禁：orders/[id] 下只有 cancel 一个写入口——「开始服务」（accepted → serving）仍未落地", () => {
+  // (1) 具名地址不存在。`hasAppFile` 已忽略路由组，因此换个目录层级也躲不过去
+  assert.equal(
+    hasAppFile("api/companion/orders/[id]/start/route.ts"),
+    false,
+    "「开始服务」属于后续 Round（01-prompt.md §十四），不得提前落地",
   );
-  assert.deepEqual(ordersRoutes.map(relativeRoute), [], "orders 下的接口尚未开始，不得提前落地");
 
-  for (const entry of COMPANION_API_MANIFEST) {
-    assert.equal(
-      entry.route.split("/").includes("orders"),
-      false,
-      `${entry.route} 不该出现在清单里：它是 TARGET，不是 CURRENT`,
-    );
-  }
+  // (2) 不点名任何具体动词：`orders/**` 下导出 POST 的只能有一个，且必须是 cancel
+  const writeEntries = collectFiles(path.join(COMPANION_API_DIR, "orders"))
+    .filter((file) => file.endsWith("route.ts"))
+    .filter((file) => exportedMethods(readSource(file)).includes("POST"))
+    .map(relativeRoute)
+    .sort();
+
+  assert.deepEqual(
+    writeEntries,
+    ["orders/[id]/cancel/route.ts"],
+    "orders 下多了一个写入口：P0-6 只有「主动取消接单」，其余写动作都是后续 Round 的范围",
+  );
+
+  // (3) 清单里也不许为未实现的接口背书：登记进去而磁盘上没有，是最难被发现的一种不一致
+  const startEntries = COMPANION_API_MANIFEST.filter((entry) =>
+    entry.route.split("/").includes("start"),
+  );
+  assert.deepEqual(startEntries, [], "清单不得登记任何 start 段：它是 TARGET，不是 CURRENT");
 });

@@ -270,8 +270,8 @@ export async function acceptDispatch(
   // ⚠️ 「因为异常数据导致某用户把自己选成指定打手」也走这条：专属池的
   // `exclusiveCompanionId === ctx.companionId` 只会**放行**，不会因此绕过本判定。
   //
-  // ⚠️ 平台早期的护航资料 `userId` 为 `null`（`companionSeed` 里 `cp-*` 全是 null），
-  // 这类护航**不受影响、照常接单**：`null` 不等于任何订单的用户。
+  // ⚠️ 平台早期的护航资料没有关联用户（`companionSeed` 里 `cp-*` **大多**是 `null`；
+  // `cp-10` / `cp-11` 是例外），这类护航**不受影响、照常接单**：`null` 不等于任何订单的用户。
   // 因此显式写成 `!== null` 而不是直接比两个值——直接比会让「没有关联用户的护航」
   // 与「没有下单人的订单」被判成同一个人（`null === null`），那是一条凭空造出来的拒绝。
   if (companion.userId !== null && order.userId === companion.userId) {

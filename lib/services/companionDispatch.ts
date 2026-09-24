@@ -124,9 +124,10 @@ export async function listCompanionPools(
     // 页面上连一个可用的判据都没有。
     //
     // ⚠️ `userId !== null` 与原子区段里的写法**逐字一致**：平台早期的护航资料
-    // 没有关联用户（`companionSeed` 的 `cp-*` 全是 `null`），直接比两个值会把
+    // 没有关联用户（`companionSeed` 的 `cp-*` 大多为 `null`），直接比两个值会把
     // 「没有关联用户的护航」与「没有下单人的订单」判成同一个人（`null === null`），
-    // 那是一条凭空消失的订单。
+    // 那是一条凭空消失的订单。（`cp-10` / `cp-11` 起有非空的关联用户，但这道判空
+    // 对其它记录仍然必要，因此不能因为「现在有值是常态」就删掉。）
     if (companion !== null && companion.userId !== null && order.userId === companion.userId) {
       continue;
     }

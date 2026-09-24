@@ -73,17 +73,28 @@ export const ORDER_STATUS_HINTS: Record<OrderStatus, string> = {
  * - `paid → accepted` 仍必须满足 Dispatch 合法 / 未过 deadline / Companion 资格 /
  *   禁止给自己下单 / `enabled` 与 `available` / 并发下的原子抢单，
  *   这些判断全在 `acceptDispatch` 的原子区段里做；
+ * - `accepted → paid` 仍必须满足「当前 `actualCompanionId` 就是本人」且状态恰好是
+ *   `accepted`、必须填原因、必须原子地写退出历史 + 清履约绑定 + 派单回公共池 + 通知用户，
+ *   这些判断全在 `cancelAcceptedOrder` 的原子区段里做；
  * - `serving → completed` 将来仍必须满足完成材料已提交 + 客服审核通过；
  * - `completed → refunded` 只能通过合法的投诉 / 售后 / 退款流程进入，
  *   **不得因为表允许就提供一个按钮**。
  *
  * 因此「只要状态表允许就可以直接改状态」是**明确错误**的用法：
  * 表允许只说明这个迁移在结构上讲得通，能不能做要由领域 Guard 回答。
+ *
+ * ## 2026-09-23 TARGET 结构：两条回到 `paid` 的路径都只是**结构许可**
+ *
+ * 表里出现的 `accepted → paid` 与 `serving → paid` 是 V0.3 需求确认的回池结构关系。
+ * 但**只有前者在本轮有入口**（打手主动取消接单）；`serving → paid` 是
+ * 封禁回池 / 客服换人的结构位置，本批次**不实现、也不提供任何 API 或按钮**
+ * （`01-prompt.md` §五 / §十四）。状态机允许不等于该动作存在入口——
+ * 这一条正是「表不代替 Guard」在**入口**层面的同一种表达。
  */
 export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
   paid: ["accepted", "refunded"],
-  accepted: ["serving", "refunded"],
-  serving: ["completed", "refunded"],
+  accepted: ["paid", "serving", "refunded"],
+  serving: ["paid", "completed", "refunded"],
   completed: ["refunded"],
   refunded: [],
 };

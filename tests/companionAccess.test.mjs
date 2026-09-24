@@ -80,7 +80,8 @@ async function grantCompanion(userId, overrides) {
 // ——————————————————————— 一、三种访问态 ———————————————————————
 
 test("没有护航资料的用户 → not-a-companion（含预置用户与空 id）", async () => {
-  // u-1001 是预置普通用户：预置护航（cp-*）的 userId 一律为 null，没有用户关联到它
+  // u-1001 是预置普通用户：预置护航里没有一条的 userId 指向它
+  //（`cp-*` 大多为 null，有关联的只有 `cp-10` / `cp-11` → u-1022 / u-1023）
   for (const userId of ["u-1001", uniqueUser(), "", "u-不存在的人"]) {
     assert.deepEqual(
       await resolveCompanionAccess(userId),
@@ -262,6 +263,11 @@ test("不是护航 / 已下架时不读第二次：一次判定同样只读一�
  * 这条不再够用——它们必须拿到当前打手的 id 才能取自己的池子，而布局无法给 `children`
  * 传 props。因此约束改成两条更结实的：**缓存包装**（保证一次请求一份结果）+
  * **调用点清单**（保证新增读取点必须被看见）。下面两条断言分别钉住它们。
+ *
+ * ⚠️ P0-6 修订：打手多了「我的订单」列表页与订单详情页（`orders/`），
+ * 两页都由 URL 里的订单 id 或当前会话打手 id 取数，因此同样要拿会话身份——
+ * 清单随之从三个变五个。清单**不是**「只准三处」的配额，而是
+ * 「每多一处都必须有人确认它走的是同一份 `React.cache` 结果」。
  */
 test("结构约束：资格判定必须缓存包装，工作台的调用点是显式清单", () => {
   const consoleDir = path.join(ROOT, "app", "companion");
@@ -276,13 +282,15 @@ test("结构约束：资格判定必须缓存包装，工作台的调用点是�
     [
       "app/companion/(console)/exclusive/page.tsx",
       "app/companion/(console)/layout.tsx",
+      "app/companion/(console)/orders/[id]/page.tsx",
+      "app/companion/(console)/orders/page.tsx",
       "app/companion/(console)/pool/page.tsx",
     ],
     "工作台的资格调用点是一份显式清单：新增一处就必须在这里写清楚，并确认它与其他调用点共享同一份结果",
   );
 
   // 一次请求一份结果靠的是 React.cache，因此这条包装本身就是约束的一部分：
-  // 去掉它，上面那三个调用点就会变成三次独立的仓储读取
+  // 去掉它，上面那五个调用点就会变成五次独立的仓储读取
   const access = stripComments(
     readFileSync(path.join(ROOT, "lib", "services", "companionAccess.ts"), "utf8"),
   );

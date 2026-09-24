@@ -653,7 +653,13 @@ complaintDeadlineAt: string | null;
 
 这些字段只在 completed 生命周期建立后有值，平台配置后续变更不追溯修改历史订单。
 
-## T4. 最小 CompanionReleaseRecord（履约退出历史）—— TARGET — NOT IMPLEMENTED
+## T4. 最小 CompanionReleaseRecord（履约退出历史）—— 部分实现
+
+**CURRENT（P0-6 落地）**：本实体与 `source = companion_cancel` 这一条路径**已实现**
+（`lib/types/companionRelease.ts`、`lib/data/mockCompanionReleaseRepository.ts`，
+写入者是 `lib/data/companionOrderTransaction.ts` 的原子区段）。
+**TARGET — NOT IMPLEMENTED**：`companion_disabled`（封禁回池）与 `staff_reassign`（客服换人）
+两个 `source` 取值只有类型占位，**没有任何写入路径**——它们是 §十四 的 out of scope 项。
 
 P0 明确**不引入复杂 Assignment 聚合**，但回池后必须能回答“谁曾经负责、为什么退出、何时退出、谁触发”。最小逻辑实体：
 

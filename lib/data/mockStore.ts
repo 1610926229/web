@@ -77,7 +77,12 @@ export type MockStoreName =
    * 因此「改配置」不会动到已经生成的订单。
    * 见 `lib/data/mockPlatformConfigRepository.ts`。
    */
-  | "platformConfig";
+  | "platformConfig"
+  /**
+   * 履约退出历史（谁曾经接过、为什么退出、何时退出）。P0-6 起由打手主动取消写入，
+   * **只增不改**、没有预置数据。见 `lib/data/mockCompanionReleaseRepository.ts`。
+   */
+  | "companionRelease";
 
 const PREFIX = "__youmuMockStore__";
 

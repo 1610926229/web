@@ -226,6 +226,53 @@ export const companionApplicationSeed: CompanionApplication[] = [
     reviewNote: "资料已查看，截图与大区对得上。名单展示与接单方式的规则确认后会再联系你。（Mock 备注）",
   }),
 
+  // —— 已通过（DEV-1 验收用）：这两条申请**已经有对应的护航资料** ——
+  //
+  // `ca-1008` / `ca-1009` 与上面那条 `ca-1004` 的区别，正是 DEV-1 需要它们的原因：
+  // 只有这两条的 `userId` 在 `companionSeed` 里查得到护航（`cp-10` / `cp-11`），
+  // 因此 `resolveCompanionAccess("u-1022" / "u-1023")` 判定 `granted`，
+  // Mock 身份切换工具一启动就有「打手 A / 打手 B」两个身份可切，不必先走一遍审核。
+  //
+  // ⚠️ `ca-1004`（`u-1004`）**刻意保持「已通过但没有护航」**：那是「申请已通过、
+  // 护航资料另行产生」这个中间态的样本，补一条护航等于把它弄没。
+  build({
+    id: "ca-1008",
+    applicationNo: "RA-MOCK-0008",
+    userId: "u-1022",
+    status: "approved",
+    displayName: "夜航（占位）",
+    gameIds: ["g-delta", "g-valorant"],
+    regions: ["手游", "端游"],
+    serviceTags: ["护航", "上分", "语音开黑"],
+    experience: "三角洲行动机密单为主，无畏契约打端游排位，两边都能接。（Mock 文案）",
+    introduction: "工作日晚上八点后在线，周末全天可以打，不接加急单。（Mock 文案）",
+    contactNote: "站内留言即可，当天回。（Mock 说明）",
+    evidence: [{ kind: "image", name: "level-screenshot-4.png" }],
+    submittedDaysAgo: 20,
+    updatedDaysAgo: 17,
+    reviewNote: "资料齐全，截图与大区都对得上。已通过，名单展示与接单方式的规则确认后会再联系你。（Mock 备注）",
+  }),
+  build({
+    id: "ca-1009",
+    applicationNo: "RA-MOCK-0009",
+    userId: "u-1023",
+    status: "approved",
+    displayName: "栖迟（占位）",
+    gameIds: ["g-valorant"],
+    regions: ["端游"],
+    serviceTags: ["上分", "语音开黑", "新手带打"],
+    experience: "无畏契约端游排位两年，场均稳定，语音全程可开。（Mock 文案）",
+    introduction: "只打端游排位，白天要上班，晚上在线。（Mock 文案）",
+    contactNote: "晚上八点后回消息比较快。（Mock 说明）",
+    evidence: [
+      { kind: "image", name: "rank-3.png" },
+      { kind: "image", name: "rank-4.png" },
+    ],
+    submittedDaysAgo: 16,
+    updatedDaysAgo: 14,
+    reviewNote: "段位截图与所选大区一致，已通过。名单展示与接单方式的规则确认后会再联系你。（Mock 备注）",
+  }),
+
   // —— 未通过：备注说明原因，不替平台给出补偿或重新申请的口子 ——
   build({
     id: "ca-1005",

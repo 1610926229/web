@@ -51,8 +51,9 @@ function createStore(): MockCompanionStore {
 
   const companionIdByUser = new Map<string, string>();
   for (const companion of companions.values()) {
-    // 预置数据里这两项都是 null（见 companionSeed 的说明），因此这条循环当前不会登记任何东西；
-    // 保留它，是为了「将来种子补一条带 userId 的记录」时索引自动跟上，而不是静默漏掉。
+    // 预置数据里大部分记录的 `userId` 是 null（平台早期的护航资料没有关联用户），
+    // 但 `cp-10` / `cp-11` 有值——DEV-1 的验收身份正是靠这条循环被登记进来的，
+    // 因此这里**必须**与 `createCompanionRecord()` 用同一个判据（见下方注释）。
     if (companion.userId && companion.removedAt === null) {
       companionIdByUser.set(companion.userId, companion.id);
     }

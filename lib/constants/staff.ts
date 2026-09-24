@@ -1,11 +1,14 @@
+import { COMPANION_RELEASE_SOURCE_LABELS } from "@/lib/constants/dispatch";
 import { ORDER_STATUSES, ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import { PLATFORM_NAME } from "@/lib/constants/site";
 import { clampPage, clampPageSize } from "@/lib/constants/pagination";
 import { MESSAGE_MAX_LENGTH } from "@/lib/constants/service";
+import type { CompanionReleaseRecord } from "@/lib/types/companionRelease";
 import type { Order } from "@/lib/types/order";
 import type { MessageSenderRole, OrderMessage } from "@/lib/types/message";
 import type { OrderStatus } from "@/lib/types/order";
 import type {
+  StaffCompanionReleaseEntry,
   StaffConversationListItem,
   StaffConversationMessage,
   StaffOrderSummary,
@@ -164,6 +167,29 @@ export const STAFF_NOT_REALTIME_NOTICE =
 export const STAFF_ORDER_READONLY_NOTICE =
   "客服只能查看订单摘要与沟通，不能修改订单状态、金额、商品；" +
   "退款与投诉在各自的页面里处理，可执行的动作以那里的按钮为准。";
+
+/**
+ * 履约退出历史区块的文案（P0-6）。
+ *
+ * ⚠️ 这些常量放在本文件的原因与其它客服端文案一致：**渲染方不拥有常量层**，
+ * 客服工作台、投诉详情、退款详情三处看到的是**同一份字符串**。
+ * 每处各写一遍「履约退出历史」这种标题，迟早有一处写成别的叫法，
+ * 而同一件事有两种叫法时，读的人只会以为它们是两件事。
+ *
+ * ⚠️ 这里**刻意没有「无退出记录」的空态文案**：客服端空数组时整段不渲染
+ * （`components/staff/StaffReleaseHistory.tsx` 的 `entries.length === 0` 分支）。
+ * 客服这三页是**作业面**，而绝大多数订单本来就不该有退出记录——占位句会出现在
+ * 每一张正常订单上，久了就被读成装饰，等人真的退出过时同样被跳过；
+ * 「出现本身就是信号」才是这里要的。
+ * ⚠️ 管理端订单详情**正好相反**（空数组显示「无退出记录」），那是**刻意的不对称**：
+ * 审计视角要的是「查过了，没有」这个明确结论，一片空白区分不了「没有」与「没查」。
+ */
+export const STAFF_RELEASE_HISTORY_TITLE = "履约退出历史（只读）";
+export const STAFF_RELEASE_HISTORY_COMPANION_LABEL = "原打手";
+export const STAFF_RELEASE_HISTORY_SOURCE_LABEL = "退出方式";
+export const STAFF_RELEASE_HISTORY_TIME_LABEL = "退出时间";
+export const STAFF_RELEASE_HISTORY_REASON_LABEL = "退出原因";
+export const STAFF_RELEASE_HISTORY_READONLY_NOTE = "仅用于核对履约经过，客服不能修改退出记录。";
 
 // ——————————————————————————— 消息 ———————————————————————————
 
@@ -367,8 +393,16 @@ export function toStaffConversationListItem(input: {
  * ⚠️ 字段表就是边界：**没有** `gameAccountId`（游戏 ID）、`remark`（备注）、
  * `userId`，也没有任何支付凭据。客服当前阶段不需要它们，
  * 而少一个字段就少一条泄漏路径。
+ *
+ * ⚠️ `releaseHistory` 与 `userNickname` 一样由调用方查好传进来，本层不做仓储读取：
+ * 它是浏览器端组件也会引用的常量模块，碰 `lib/data` 会把 Mock 存储打进前端产物。
+ * 条目本身由 `toStaffCompanionReleaseEntry()` 转换——那是唯一的转换口径。
  */
-export function toStaffOrderSummary(order: Order, userNickname: string): StaffOrderSummary {
+export function toStaffOrderSummary(
+  order: Order,
+  userNickname: string,
+  releaseHistory: StaffCompanionReleaseEntry[],
+): StaffOrderSummary {
   return {
     orderId: order.id,
     orderNo: order.orderNo,
@@ -381,6 +415,45 @@ export function toStaffOrderSummary(order: Order, userNickname: string): StaffOr
     userNickname,
     // 护航摘要：未绑定陪玩时是一句明确的「等待接单」，不是空白
     companionSummary: order.companion ? order.companion.name : "等待接单",
+    releaseHistory,
+  };
+}
+
+/**
+ * 一条退出历史 → 客服视野里的条目（P0-6）。**三个客服 DTO 共用的唯一转换点**
+ * （会话详情、投诉详情的订单摘要、退款详情），因此「退出方式怎么显示」
+ * 「原因取哪个字段」只有这一处口径。
+ *
+ * ## 为什么名字要靠调用方解析，而不是存进记录
+ *
+ * `CompanionReleaseRecord` 上**只有 `companionId`**，没有名字快照，这是刻意的：
+ *
+ * 1. **记录只写已经发生的事实**。它是 `database-schema.md` T4 定义的 7 字段结构
+ *    （P0-6 冻结，不加字段）。往里塞一个「名字快照」等于让它承担展示职责，
+ *    而展示职责会随时间变——名字快照与护航资料一改就分叉，那时两份数据
+ *    谁对谁错没有规则可依。
+ * 2. **名字是可推导的**：`getCompanionRepository().findCompanionById()` 按 id 查得到
+ *    （它连**已移除**的记录都查得到，因此事后被下架的护航仍然显示得出名字）。
+ *    可推导的东西存第二份，就是两个真值源。
+ * 3. 本文件**不能自己去查**：它是浏览器端组件也会引用的常量模块，碰 `lib/data`
+ *    会把 Mock 存储打进前端产物。因此解名字是服务层的事，这里只做拼装。
+ *
+ * ⚠️ **回落到 `companionId`、绝不留空串**：查不到护航资料（资料被彻底删除）
+ * 时，页面上仍要看得出「退出的是哪一位」。空名字会让那一行看起来像界面坏了，
+ * 而 id 至少是可核对的。调用方查不到时传空串即可，这条规则只在这里执行一次。
+ */
+export function toStaffCompanionReleaseEntry(
+  record: CompanionReleaseRecord,
+  companionName: string,
+): StaffCompanionReleaseEntry {
+  return {
+    companionId: record.companionId,
+    companionName: companionName || record.companionId,
+    source: record.source,
+    // 标签表复用派单域那一份（`COMPANION_RELEASE_SOURCE_LABELS`），不另写一套叫法
+    sourceLabel: COMPANION_RELEASE_SOURCE_LABELS[record.source],
+    reason: record.reason,
+    createdAt: record.createdAt,
   };
 }
 

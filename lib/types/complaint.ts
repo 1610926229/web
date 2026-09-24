@@ -1,7 +1,7 @@
 import type { ActorRole } from "./actor";
 import type { SupportEvidence } from "./evidence";
 import type { OrderStatus } from "./order";
-import type { StaffUserSummary } from "./staff";
+import type { StaffCompanionReleaseEntry, StaffUserSummary } from "./staff";
 import type { AdminUserSummary } from "./user";
 
 /**
@@ -287,6 +287,16 @@ export type StaffComplaintOrderSummary = {
   productTitle: string;
   /** 单位：分。只读展示，客服不能改 */
   totalAmount: number;
+  /**
+   * 这一单的履约退出历史（P0-6），按退出时间正序；没有退出过是**空数组**。
+   *
+   * ⚠️ 投诉详情**有自己的订单区**，但它的「进入会话」入口在订单没有沟通记录时
+   * 是 `null`——只把退出历史挂在会话页上，这一类投诉就会漏掉「上一任护航为什么走」，
+   * 而投诉正文经常正是在问这件事。因此它随订单摘要一起给。
+   *
+   * 仍然是只读展示：这里没有任何修改退出记录的路径，退出历史本身也**只增不改**。
+   */
+  releaseHistory: StaffCompanionReleaseEntry[];
 };
 
 /**

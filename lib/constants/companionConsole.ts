@@ -1,5 +1,6 @@
 import {
   COMPANION_EXCLUSIVE_PAGE_TITLE,
+  COMPANION_ORDERS_PAGE_TITLE,
   COMPANION_POOL_PAGE_TITLE,
 } from "@/lib/constants/dispatch";
 import { PLATFORM_NAME } from "@/lib/constants/site";
@@ -29,9 +30,16 @@ export const COMPANION_OVERVIEW_PAGE_TITLE = "工作台";
  * 「用户在等我」（专属池，一对一，十分钟）与「谁都能接」（公共池）。
  * 合成一页的话，打手在专属池里翻找公共单时，会看不出哪些是「本来只给我」的。
  * 标签文案取自 `lib/constants/dispatch.ts`，两个页面与导航引用的是同一份字符串。
+ *
+ * ⚠️ 「我的订单」排在**概览之后、两张池子之前**（P0-6），顺序不是随意的：
+ * 导航从左到右读下来是「我是谁 → **我手上的单** → 我能接的单」，
+ * 即**当前责任**先于**新机会**。把它放在池子后面，读起来会变成
+ * 「先看看有什么可抢的，再看自己扛着什么」——那正是这一轮要纠正的视角。
+ * 它也不能放在第一位：那会挤掉「工作台」这个入口的身份说明作用。
  */
 export const COMPANION_NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/companion", label: COMPANION_OVERVIEW_PAGE_TITLE },
+  { href: "/companion/orders", label: COMPANION_ORDERS_PAGE_TITLE },
   { href: "/companion/exclusive", label: COMPANION_EXCLUSIVE_PAGE_TITLE },
   { href: "/companion/pool", label: COMPANION_POOL_PAGE_TITLE },
 ];
@@ -89,7 +97,7 @@ export const COMPANION_BACK_TO_MINE_LABEL = "返回我的";
  * 而每开放一项就要同步删掉一句，否则它会变成一句阻止打手使用功能的假话。
  */
 export const COMPANION_SCOPE_NOTICE =
-  "本阶段已开放专属订单池与公共订单池：可以查看并接单。开始服务、完成材料与收益结算尚未开放。";
+  "本阶段已开放专属订单池、公共订单池与「我的订单」：可以查看并接单，也可以在开始服务前提交原因取消接单。开始服务、完成材料与收益结算尚未开放。";
 
 /**
  * 「后续开放」清单。⚠️ 只是**说明**，页面上没有任何一个对应的按钮或数据。

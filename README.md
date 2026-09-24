@@ -106,6 +106,13 @@ http://localhost:3000/api/home?mockEmpty=1
 
 **不调用任何真实微信接口，不使用任何凭据**：会话是名为 `mock_user_id` 的 Cookie，值为 Mock 用户 id。
 
+**在浏览器里换身份**：用户端每个页面的右下角有一个 `Mock 身份（开发工具）` 悬浮按钮，
+展开后能看到当前身份、点一个测试账号即可切换、也可以退出登录（DEV-1）。
+它**替换的是当前会话**（同一个 Cookie），不是同时登录两个账号；
+`ENABLE_MOCK_AUTH` 不为 `true` 时它整块不渲染，名单也不会出现在响应里。
+
+**命令行 / 脚本**：
+
 ```bash
 # 默认用户登录
 curl -i -X POST http://localhost:3000/api/auth/mock-login
@@ -114,6 +121,16 @@ curl -i -X POST -H 'content-type: application/json' \
   -d '{"userId":"u-1002"}' http://localhost:3000/api/auth/mock-login
 curl -X POST http://localhost:3000/api/auth/logout
 ```
+
+⚠️ 测试账号名单（8 位）里**已经有两位一启动就是有效打手**：`u-1022`（夜航）/ `u-1023`（栖迟），
+名下各有预置的护航资料（`cp-10` / `cp-11`，由 `ca-1008` / `ca-1009` 两条已通过的入驻申请产生）。
+**验收打手链路（公共池接单 / 打手「我的订单」/ 取消接单）不需要任何后台审核动作**，
+面板上每个账号右侧的资格标签由服务端 `resolveCompanionAccess()` 现算，只用于显示。
+
+名单里另外几位**还不是打手**，用于走「产生打手」的那几条路：`u-1001` / `u-1010` 是下单用户；
+`u-1002` / `u-1003` 名下分别是「待查看 / 审核中」的入驻申请（后台可直接通过它已有的一条），
+`u-1008` / `u-1009` 没有申请（先提交一条再由后台通过）。
+⚠️ 管理端与用户端是两套 Cookie，同一个浏览器开两个标签页即可互不干扰。
 
 ### Mock 管理端认证（需 `ENABLE_MOCK_ADMIN=true`）
 

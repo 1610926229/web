@@ -3,6 +3,7 @@ import {
   normalizeAdminReviewNote,
 } from "@/lib/constants/adminRefunds";
 import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
+import { toStaffCompanionReleaseEntry } from "@/lib/constants/staff";
 import {
   DEFAULT_STAFF_REFUND_STATUS_FILTER,
   STAFF_REFUND_LIST_NOTICE,
@@ -26,6 +27,8 @@ import {
   type AdminRefundWriteFailure,
   type AdminWriteContext,
 } from "@/lib/data/adminRefundTransaction";
+import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseRepository";
+import { getCompanionRepository } from "@/lib/data/companionRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { ADMIN_ORDER_UNFILTERED_QUERY, getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
@@ -39,7 +42,11 @@ import type {
   StaffRefundListData,
   StaffRefundWriteResult,
 } from "@/lib/types/refund";
-import type { StaffSessionUser, StaffUserSummary } from "@/lib/types/staff";
+import type {
+  StaffCompanionReleaseEntry,
+  StaffSessionUser,
+  StaffUserSummary,
+} from "@/lib/types/staff";
 
 /**
  * 客服工作台「退款处理」服务 —— 列表、详情与两个审核动作的唯一入口。
@@ -96,6 +103,40 @@ function orderOf(index: Map<string, Order>, refund: RefundRequest): Order | unde
 /** 用户记录缺失时的占位摘要（缺一条用户记录不该让整页打不开）。 */
 function missingUser(userId: string): StaffUserSummary {
   return { id: userId, nickname: "", avatarUrl: "" };
+}
+
+/**
+ * 订单 → 客服可读的履约退出历史（P0-6）。
+ *
+ * 客服看一笔退款时最先会问的是「有人在服务前取消过接单吗」——那件事在订单上
+ * 已经查不到了（取消之后履约人被清空，订单要能重新进公共池）。
+ *
+ * ⚠️ 与 `staffUserIndex()` / `missingUser()` 一样，这是**客服侧各服务各写一份的私有小助手**：
+ * 「一条退出历史怎么变成客服看得懂的条目」不在这里——它在
+ * `toStaffCompanionReleaseEntry()`（唯一转换点），因此三处不会出现三种口径。
+ * 名字用 `findCompanionById()`（事后被下架的护航照样要显示得出名字），
+ * 查不到时传空串、由构造函数回落到 `companionId`。
+ *
+ * ⚠️ 它与金额**无关**：本轮退出不退款、不罚款，因此既不改 `amount`，
+ * 也不改任何审核结论——它只是这一单发生过的事实的只读记录。
+ *
+ * 没有退出过返回**空数组**，不是 `null`：那是正常情况，不是「查不到」。
+ */
+async function releaseHistoryFor(orderId: string): Promise<StaffCompanionReleaseEntry[]> {
+  const records = await getCompanionReleaseRepository().listReleasesByOrderId(orderId);
+  if (records.length === 0) return [];
+
+  // 同一单上可能同一位护航退出过多次：按 id 缓存名字，不重复查同一条资料
+  const names = new Map<string, string>();
+  for (const record of records) {
+    if (names.has(record.companionId)) continue;
+    const companion = await getCompanionRepository().findCompanionById(record.companionId);
+    names.set(record.companionId, companion ? companion.displayName : "");
+  }
+
+  return records.map((record) =>
+    toStaffCompanionReleaseEntry(record, names.get(record.companionId) ?? ""),
+  );
 }
 
 // ——————————————————————————— 列表 ———————————————————————————
@@ -212,11 +253,16 @@ export async function getStaffRefundDetail(
     // §八：只读现有仓储，不新建任何方法。会话不存在时给 null，页面就不给入口。
     const conversation = await getMessageRepository().findConversationForStaff(refund.orderId);
 
+    // 履约退出历史（P0-6）：与上一步同一个理由——退款详情有自己的订单区，
+    // 而「进入会话」入口在没有沟通记录时是 null，只挂会话页会让这类退款漏掉它
+    const releaseHistory = await releaseHistoryFor(refund.orderId);
+
     return toStaffRefundDetail(
       refund,
       order,
       users.get(refund.userId) ?? missingUser(refund.userId),
       conversation ? refund.orderId : null,
+      releaseHistory,
     );
   });
 }

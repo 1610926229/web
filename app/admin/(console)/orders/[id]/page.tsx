@@ -13,6 +13,7 @@ import {
 } from "@/lib/constants/adminOrders";
 import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
 import { COMPLAINT_STATUS_LABELS } from "@/lib/constants/complaints";
+import { COMPANION_RELEASE_SOURCE_LABELS } from "@/lib/constants/dispatch";
 import { getAdminOrderDetail } from "@/lib/services/adminOrders";
 import type { AdminOrderDetail, OrderCompanionSnapshot } from "@/lib/types/order";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
@@ -57,6 +58,7 @@ export default async function AdminOrderDetailPage({
       <UserSection order={order} />
       <AmountSection order={order} />
       <CompanionSection order={order} />
+      <ReleaseHistorySection order={order} />
       <TimelineSection order={order} />
       <AfterSaleSection order={order} />
     </div>
@@ -230,6 +232,59 @@ function CompanionRow({
         <p className="text-[13px] text-ink-3">{emptyHint}</p>
       )}
     </div>
+  );
+}
+
+/**
+ * 履约退出历史（P0-6）：谁曾经接过这一单、为什么退出、什么时候退出。
+ *
+ * ⚠️ 打手主动取消接单之后，订单上的 `actualCompanionId` 与 `companion` 已经清空
+ * （订单要能重新进公共池等人接）。上面那块「护航」因此会显示「还没有人接单」——
+ * 这两块**不是自相矛盾**，一个说的是**现在是谁**，一个说的是**之前是谁**。
+ *
+ * ⚠️ 只显示，没有任何按钮：本页是只读的（见文件头）。
+ *
+ * ⚠️ 客服侧**另有三个入口**能看到同一份历史（会话 / 投诉 / 退款详情，
+ * 见 `components/staff/StaffReleaseHistory.tsx`），因此这里**不是**唯一入口。
+ * 客服进不了本页（`canEnterAdminConsole` 只放行 `admin`），那两个面是分开的。
+ *
+ * ⚠️ 这里只渲染**标识**（`companionId`）而不是昵称。这**不是数据限制**：
+ * `getCompanionRepository().findCompanionById()` 按 id 查得到展示名
+ * （连已下架的护航也查得到），客服侧就是这么解析的。管理端不解析**是一个取舍**——
+ * 本轮管理端不在改动范围内，保持原样以免扩大批次。
+ * ⚠️ 因此本页显示的是形如 `cp_xxxx` 的内部标识，与客服侧同一段历史显示的名字
+ * **观感不一致**。这是已知的不对称，已记入 `03-delivery.md` §15.6，等后续裁定。
+ * 不要据此以为「名字拿不到」而在客服侧也退回显示 id。
+ */
+function ReleaseHistorySection({ order }: { order: AdminOrderDetail }) {
+  return (
+    <Section title="履约退出历史">
+      {order.releaseHistory.length > 0 ? (
+        <ul className="flex flex-col">
+          {order.releaseHistory.map((record, index) => (
+            <li
+              key={record.id}
+              className={`border-admin-line ${index > 0 ? "border-t pt-3" : ""}`}
+            >
+              <DetailRow label="护航标识" value={record.companionId} />
+              <DetailRow label="动作" value={COMPANION_RELEASE_SOURCE_LABELS[record.source]} />
+              <DetailRow label="时间" value={formatDateTime(record.createdAt)} />
+              <div className="mt-2">
+                {/* 原因是打手自己写的一句话，原样展示、保留换行、不做任何截断 */}
+                <FieldBlock title="原因" content={record.reason ?? ""} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-[13px] text-ink-3">无退出记录</p>
+      )}
+
+      <p className="mt-2 text-[12px] leading-4 text-ink-3">
+        打手在开始服务前取消接单会在这里留一条记录；订单回到公共池之后就不再挂着那位打手，
+        这段记录是唯一能看出「原来是谁接的、为什么走」的地方。
+      </p>
+    </Section>
   );
 }
 

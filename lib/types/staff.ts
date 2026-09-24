@@ -1,3 +1,4 @@
+import type { CompanionReleaseSource } from "./companionRelease";
 import type { MessageSenderRole } from "./message";
 
 /**
@@ -260,6 +261,45 @@ export type StaffUserSummary = {
 };
 
 /**
+ * 一条履约退出历史，**客服视野里的版本**（P0-6）。
+ *
+ * 打手在开始服务前主动取消接单之后，订单上的 `actualCompanionId` / `companion`
+ * 会被清空（订单必须能重新进公共池），因此「谁曾经接过、为什么走」不再有任何
+ * 现成字段回答得了——而客服处理与这一单有关的投诉 / 退款 / 会话时，恰恰要先能回答
+ * 「我明明看到有人接过，怎么又回到等待接单了」。这一份就是那个答案。
+ *
+ * ⚠️ **刻意不含 `id` 与 `actorId`**：
+ *
+ * - `id` 是仓储主键，客服履职不需要拿它做任何二次查询；
+ * - `actorId` 是「谁触发的」，而本轮唯一的写入路径（打手主动取消）里它恒等于
+ *   `companionId`——给出它只会多一条内部标识的泄漏路径，回答不了任何客服要回答的问题。
+ *
+ * 两者都是**内部字段**，这是 DTO 最小化的一部分：少一个字段就少一条泄漏路径。
+ *
+ * ⚠️ 上面说「不给 `actorId`」与下面保留 `companionId` **不矛盾**，别看成同一个东西：
+ * 本轮两者恰好同值只是当前写入路径的巧合，而 `companionId` 是需求点名的那个事实本身
+ * ——「保留**原打手**」（`EX-SERVICE-01` / 业务流程表）。`companionName` 在护航资料
+ * 被彻底删除时会回落成 id，客服要核对「退出的是哪一位」也只能靠它。
+ * **不要因为「它和 actorId 一样」就删掉 `companionId`**，删了就违反需求。
+ *
+ * ⚠️ 这里也**没有任何金额字段**：本轮退出不退款、不罚款、不扣减收益（BF-15），
+ * 退出历史与钱无关，带上金额只会让人以为那笔钱被动过。
+ */
+export type StaffCompanionReleaseEntry = {
+  /** 原打手（履约退出者）的平台标识 */
+  companionId: string;
+  /** 原打手的展示名；查不到该护航记录时回落到 companionId，**不许留空串** */
+  companionName: string;
+  source: CompanionReleaseSource;
+  /** 中文标签，取自 `COMPANION_RELEASE_SOURCE_LABELS` */
+  sourceLabel: string;
+  /** 退出原因原文；无原因时为 null（本轮恒有值） */
+  reason: string | null;
+  /** 退出发生的时间（ISO 串） */
+  createdAt: string;
+};
+
+/**
  * 订单只读摘要（工作台右侧）。
  *
  * ⚠️ 边界由字段表本身保证：这里**没有**支付凭据、Cookie、OpenID / UnionID，
@@ -279,6 +319,17 @@ export type StaffOrderSummary = {
   userNickname: string;
   /** 护航摘要：未接单时是一句「等待接单」，接了单就是陪玩名 */
   companionSummary: string;
+  /**
+   * 这一单的履约退出历史（P0-6），按退出时间正序。
+   *
+   * ⚠️ **空数组而不是 `null`**：没有退出过是**正常情况**，不是「查不到」。
+   * 用 `null` 只会让页面多出一条「要不要显示这个区块」的空值分支。
+   *
+   * ⚠️ 它**只对客服 / 管理员可见**。用户端订单详情与打手端订单 DTO 都不带它：
+   * 下单用户收到的是「护航已取消接单」这条通知，普通打手也没有理由看到
+   * 「上一位为什么走」。
+   */
+  releaseHistory: StaffCompanionReleaseEntry[];
 };
 
 /**

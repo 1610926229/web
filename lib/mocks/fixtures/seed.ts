@@ -199,6 +199,31 @@ export const userSeed: UserRecord[] = [
     avatarUrl: "/mock/avatar-2.svg",
     bio: "",
   },
+  {
+    // ————— 以下两人只服务 DEV-1 的多角色人工验收 —————
+    // 他们**已经**是有效打手：名下有一条 `approved` 入驻申请（`ca-1008` / `ca-1009`）
+    // 与一条绑定了 `userId` 的护航资料（`cp-10` / `cp-11`）。
+    //
+    // 为什么不能拿现成的 `u-1002` / `u-1003` 顶替：那两位的申请预置是「待查看 / 审核中」，
+    // 是「后台直接通过一条申请」这个验收场景唯一的样本，改成已通过等于把那一步弄没。
+    // 为什么不去把 `u-1004`（`ca-1004` 已通过）补一条护航：同一份理由——那一条是
+    // 「申请已通过」这个状态的样本，动它会让后台申请列表少一个可看的终态。
+    // 因此验收需要的「现成的打手」单独造，不动既有样本。
+    //
+    // ⚠️ 昵称与护航展示名保持一致，但**不用昵称做关联**：关联是 `Companion.userId`。
+    id: "u-1022",
+    displayId: "c8a4f169-3b72-4d58-8e04-9a1f5c7b2d63",
+    nickname: "夜航（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "晚上八点后在线（占位）",
+  },
+  {
+    id: "u-1023",
+    displayId: "d2b7e408-5c91-4a63-b7f2-6e8d3a0c5f19",
+    nickname: "栖迟（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    bio: "端游排位为主（占位）",
+  },
 ];
 
 /**
@@ -223,17 +248,29 @@ export const userSeed: UserRecord[] = [
  *   （详情页因此能看到「评价只展示前几条」的状态）；
  * - 游戏覆盖 g-delta 与 g-valorant 两个游戏、手游与端游两个大区，
  *   服务标签覆盖目录里的五项。
+ * - `cp-10` / `cp-11` 是**唯一两条由入驻审核产生**的记录（`userId` / `applicationId` 都有值），
+ *   也是 Mock 身份切换工具里「打手 A / 打手 B」两个身份对应的资料（DEV-1）。
  *
  * 评价时间相对**进程内冻结的基准时间**构造（`getMockSeedNow()`），不写绝对日期：
  * 写死日期的话，过一段时间打开详情页看到的全是几个月前的评价。
  *
- * P8A 给每条记录补上了三个**平台侧**字段，这里全部取「没有」：
- * - `userId: null` / `applicationId: null`：这批陪玩是平台早期数据，不由任何入驻申请产生。
- *   审核通过产生的那一条则两者都有值（见 `lib/data/companionRepository.ts`），
- *   因此「这份名单里有没有人是审核进来的」是看得出来的；
- * - `removedAt: null`：没有被移除。软移除是后台动作，预置数据不该一上来就有一条移除记录
+ * P8A 给每条记录补上了三个**平台侧**字段：
+ * - `cp-1`…`cp-9` 的 `userId: null` / `applicationId: null`：这批陪玩是平台早期数据，
+ *   不由任何入驻申请产生；
+ * - **`cp-10` / `cp-11` 是例外，两者都有值**：他们由虚构的入驻申请 `ca-1008` / `ca-1009`
+ *   审核通过产生（DEV-1 的多角色人工验收需要「一启动就已经是打手」的账号，
+ *   否则每轮验收都要先手工走一遍审核）。因此「这份名单里有没有人是审核进来的」
+ *   一眼看得出来，`cp-10` / `cp-11` 就是那两个样本，不必去后台翻申请；
+ * - `removedAt: null`：都没有被移除。软移除是后台动作，预置数据不该一上来就有一条移除记录
  *   ——那样「筛选出已移除的护航」这一条筛选项就没有一个干净的空态可看。
  * 三个字段都**不进任何公开 DTO**。
+ *
+ * ⚠️ `cp-10` / `cp-11` 的 `enabled` 与 `available` **都必须是 `true`**：
+ * 前者决定他们进不进得了打手工作台（`disabled` 态），后者决定公共池给不给他们单
+ * （`BR-01`：`available=false` 时公共池一条都不返回）。DEV-1 的验收正是要他们能直接接单。
+ * 顺带一提，`available: false` 的那两条既有样本是 `cp-4` / `cp-6`，`enabled: false` 的只有 `cp-7`
+ * ——`tests/companions.test.mjs` 与 `tests/adminCompanionManagement.test.mjs` 按 id 写死了这三条，
+ * 新增记录保持 `available: true && enabled: true` 就不会撞上它们。
  */
 const DAY_MS = 24 * 60 * 60 * 1000;
 const COMPANION_SEED_NOW_MS = getMockSeedNow().getTime();
@@ -551,6 +588,83 @@ export const companionSeed: Companion[] = [
         rating: 4,
         content: "价格没变，速度稍慢一点。（Mock 评价）",
         createdAt: reviewDaysAgo(45),
+      },
+    ],
+  },
+  {
+    // DEV-1 验收用：**由入驻审核产生**的打手 A。
+    // `userId` / `applicationId` 都指向真实存在的预置记录（`u-1022` / `ca-1008`），
+    // `enabled` 与 `available` 都为 true —— 因此 `resolveCompanionAccess("u-1022")`
+    // 判定 `granted`、`requireCompanion()` 放行、公共池给他单、接单区段的
+    // `isCompanionAcceptingOrders()` 也放行。四个条件缺一不可，别为了「看着像休息中」改掉。
+    id: "cp-10",
+    userId: "u-1022",
+    applicationId: "ca-1008",
+    removedAt: null,
+    displayName: "夜航（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    rankLabel: "星耀打手",
+    intro:
+      "工作日晚上八点后在线，周末全天可以打。三角洲行动机密单跑得多，端游排位也接。（占位文案）",
+    gameIds: ["g-delta", "g-valorant"],
+    regions: ["手游", "端游"],
+    serviceTags: ["护航", "上分", "语音开黑"],
+    available: true,
+    unavailableReason: "",
+    completedOrderCount: 76,
+    rating: 4.7,
+    tipsCount: 12,
+    reviewCount: 2,
+    sortOrder: 100,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-10-r1",
+        nickname: "老板A（占位）",
+        rating: 5,
+        content: "约的时间很准，全程没换人。（Mock 评价）",
+        createdAt: reviewDaysAgo(6),
+      },
+      {
+        id: "cp-10-r2",
+        nickname: "青柠（占位）",
+        rating: 4,
+        content: "打得不急不躁，适合新手。（Mock 评价）",
+        createdAt: reviewDaysAgo(19),
+      },
+    ],
+  },
+  {
+    // DEV-1 验收用：由入驻审核产生的打手 B。
+    // 与 cp-10 打**不同的游戏**（只打无畏契约端游），用来证明公共池**不按游戏过滤**：
+    // 打手 A 取消接单后回池的那张单，打手 B 照样接得到（`lib/services/companionDispatch.ts`
+    // 明确不做游戏 / 商品 / 等级过滤）。这一点在 04-acceptance.md 的 §G 会走到。
+    id: "cp-11",
+    userId: "u-1023",
+    applicationId: "ca-1009",
+    removedAt: null,
+    displayName: "栖迟（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    rankLabel: "钻石打手",
+    intro: "只打无畏契约端游排位，语音全程可开，不接加急单。（占位文案）",
+    gameIds: ["g-valorant"],
+    regions: ["端游"],
+    serviceTags: ["上分", "语音开黑", "新手带打"],
+    available: true,
+    unavailableReason: "",
+    completedOrderCount: 41,
+    rating: 4.6,
+    tipsCount: 5,
+    reviewCount: 1,
+    sortOrder: 110,
+    enabled: true,
+    reviews: [
+      {
+        id: "cp-11-r1",
+        nickname: "星野（占位）",
+        rating: 5,
+        content: "排位稳，语音一直在。（Mock 评价）",
+        createdAt: reviewDaysAgo(9),
       },
     ],
   },

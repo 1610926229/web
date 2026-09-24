@@ -120,13 +120,31 @@ test("列表只含在架陪玩，排序稳定，分页不重不漏", async () =>
   assert.equal(all.total, expected.length);
   assert.equal(all.hasMore, false);
 
-  // 分页：把三页拼起来，应当与一次性取出的顺序完全一致，且没有重复
+  // 分页：逐页翻到底，拼起来应当与一次性取出的顺序完全一致，且没有重复。
+  //
+  // ⚠️ 页数由**数据**决定，不写死「三页」。DEV-1 往种子里补了两位在架陪玩之后，
+  // 写死的三页断言立刻变红——而它红的原因与「分页对不对」毫无关系，
+  // 只是在说「列表恰好是 8 条」。这种断言会在每次加数据时误报，掩盖真正的回归。
+  const pageSize = 3;
   const collected = [];
-  for (const pageNumber of [1, 2, 3]) {
-    const one = await query({ pageSize: 3, page: pageNumber });
+  let pageNumber = 1;
+  let hasMore = true;
+  while (hasMore) {
+    const one = await query({ pageSize, page: pageNumber });
     collected.push(...one.items.map((item) => item.id));
-    assert.equal(one.hasMore, pageNumber < 3);
+    hasMore = one.hasMore;
+
+    // 「还有下一页」必须与实际剩余条数一致：否则翻页入口会凭空停住（少）或多出一页空白（多）
+    assert.equal(
+      hasMore,
+      collected.length < expected.length,
+      `第 ${pageNumber} 页的 hasMore 与实际剩余条数对不上`,
+    );
+
+    pageNumber += 1;
+    assert.ok(pageNumber < 100, "分页没有终止：hasMore 一直是 true");
   }
+  // 取完最后还是不满一页时，也必须停下来——否则最后一页会被重复取一次
   assert.deepEqual(collected, expected);
   assert.equal(new Set(collected).size, collected.length, "分页出现了重复的陪玩");
 });

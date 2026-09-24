@@ -19,7 +19,7 @@ import type {
   StaffRefundDetail,
   StaffRefundListItem,
 } from "@/lib/types/refund";
-import type { StaffUserSummary } from "@/lib/types/staff";
+import type { StaffCompanionReleaseEntry, StaffUserSummary } from "@/lib/types/staff";
 
 /**
  * 客服端「退款处理」的筛选规则、状态机结论与 DTO 转换（服务端与浏览器共用）。
@@ -281,7 +281,14 @@ export function toStaffRefundListItem(
   };
 }
 
-/** 内部实体 → 客服端详情。在列表项之上补齐原因、说明、凭证、金额对照、审核信息与可执行动作。 */
+/**
+ * 内部实体 → 客服端详情。在列表项之上补齐原因、说明、凭证、金额对照、审核信息、
+ * 履约退出历史与可执行动作。
+ *
+ * ⚠️ `releaseHistory` 与 `conversationOrderId` 一样由服务层查好传进来：
+ * 本层不碰 `lib/data`（它同时被浏览器端引用）。条目本身由
+ * `toStaffCompanionReleaseEntry` 转换——那是「退出历史怎么显示」的唯一出处。
+ */
 export function toStaffRefundDetail(
   refund: RefundRequest,
   order: {
@@ -293,6 +300,7 @@ export function toStaffRefundDetail(
   },
   user: StaffUserSummary,
   conversationOrderId: string | null,
+  releaseHistory: StaffCompanionReleaseEntry[],
 ): StaffRefundDetail {
   return {
     ...toStaffRefundListItem(refund, order, user),
@@ -310,6 +318,7 @@ export function toStaffRefundDetail(
     cancelledAt: refund.cancelledAt,
     timeline: buildStaffRefundTimeline(refund),
     conversationOrderId,
+    releaseHistory,
     allowedActions: staffRefundAllowedActions(refund.status),
   };
 }

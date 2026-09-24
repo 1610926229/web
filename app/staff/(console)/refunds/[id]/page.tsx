@@ -9,6 +9,7 @@ import AdminStatusBadge, {
   REFUND_STATUS_TONE,
 } from "@/components/admin/AdminStatusBadge";
 import StaffRefundConsole from "@/components/staff/StaffRefundConsole";
+import StaffReleaseHistory from "@/components/staff/StaffReleaseHistory";
 import { formatAuditActorLabel } from "@/lib/constants/adminAudit";
 import { EVIDENCE_KIND_LABELS } from "@/lib/constants/evidence";
 import { STAFF_REFUNDS_PAGE_TITLE } from "@/lib/constants/staff";
@@ -61,6 +62,11 @@ export default async function StaffRefundDetailPage({
       </div>
 
       <SummarySection refund={refund} />
+      {/* 履约退出历史紧跟在「退款申请」下面（那一块里就是订单号、商品与订单状态）。
+          退款理由常常就是「接单的打手走了」——原打手、退出方式与退出时间
+          是客服判断这一笔该不该退时要先看的上下文，因此放在订单信息旁边而不是页尾。
+          没有退出记录时整段不渲染（组件自己返回 null），本页其余部分不受影响。 */}
+      <StaffReleaseHistory entries={refund.releaseHistory} />
       <AmountSection refund={refund} />
       <UserSection refund={refund} />
       <ContentSection refund={refund} />

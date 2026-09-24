@@ -325,10 +325,10 @@ sweepMaturedEarnings(now)             // TARGET
 
 | 项 | 已确认目标 | 当前差距 |
 |---|---|---|
-| Order 结构状态机整改 | 新增 `accepted → paid`、`serving → paid`，并保留五状态主枚举 | P0-5.5 源码仍是旧转移表，需新 Round `NEEDS_FIX` |
-| accepted 主动取消 | actualCompanion 可在未 serving 前提交原因取消；通知用户；当前不处罚；回 public；保留最小退出历史 | 未实现 |
+| Order 结构状态机整改 | 新增 `accepted → paid`、`serving → paid`，并保留五状态主枚举 | **已实现（P0-6）**：`lib/constants/orders.ts` 的 `ORDER_TRANSITIONS` 已含两条回池边；`serving → paid` 目前**没有**入口，是给后续「封禁回池」预留的表能力 |
+| accepted 主动取消 | actualCompanion 可在未 serving 前提交原因取消；通知用户；当前不处罚；回 public；保留最小退出历史 | **已实现（P0-6）**，**本行无遗留缺口**：退出历史管理端（`/admin/orders/[id]`）与客服端（会话 / 投诉 / 退款三个只读详情）**两半都可看**。客服侧**没有为此新增任何接口**，见 `rounds/P0-6/02-decisions.md` D6 **V3** |
 | 未服务直接退款 | `paid/accepted` 用户直接全额退款；accepted 打手收益 0、通知打手、保留终态 `actualCompanionId` | 当前 `/refunds` 仍按旧人工申请链路，需要整改 |
-| Companion 我的订单 | `/companion/orders` + `/companion/orders/[id]`，只允许 actualCompanion 查看 | 未实现 |
+| Companion 我的订单 | `/companion/orders` + `/companion/orders/[id]`，只允许 actualCompanion 查看 | **已实现（P0-6）** |
 | 开始服务 | actualCompanion 显式 `accepted → serving`，不得由时间/备注/聊天自动触发 | 未实现 |
 | CompletionSubmission | 截图 + 5~50 字；同一订单最多 1 个 pending；驳回可重提并重新计时 | 未实现 |
 | 完成自动审核 | 默认 10 分钟、后台可配置；pending 时冻结 snapshot/deadline；无投诉/售后阻塞时 System 自动通过 | 未实现 |
@@ -427,8 +427,9 @@ docs/02-tech-design/database-schema.md
 3. **无第二套实现**：按 §4.3 的五条 grep 确认。
 4. **接口清单门禁**：涉及后台接口的批次必须同批扩充 `tests/admin.test.mjs`；涉及客服接口的扩充 `tests/staff.test.mjs`；涉及打手接口的扩充 `tests/companion.test.mjs`。
    ✅ **已建立**（产品裁定 2026-09-19，P0-5.5 落地）：与 Admin / Staff 同形的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对——
-   当前清单**恰好两条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`；未来任何 Companion 订单/取消/开始服务接口真正落地时，必须同批扩充清单。
-   新增 / 删除 / 误改路径时测试**必须失败**。**沿用现有 tests 的源码扫描方式，不新建测试框架**。
+   **P0-6 起清单共五条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`（P0-5.5 落地），`GET /api/companion/orders`、`GET /api/companion/orders/[id]`、`POST /api/companion/orders/[id]/cancel`（P0-6 落地）；未来任何 Companion 接口真正落地时，必须同批扩充清单。
+   新增 / 删除 / 误改路径时测试**必须失败**。**未实现的 TARGET 不得预登记**——P0-6 之后的负向门禁是 `/companion/orders/[id]/start`。
+   **沿用现有 tests 的源码扫描方式，不新建测试框架**。
    ⚠️ 打手接口的清单门禁在 `tests/companion.test.mjs`，**不是** `tests/companionAccess.test.mjs`（后者是「打手身份只有一套」的负向门禁，两者互补、互不替代）。
 5. **同步技术设计文档**：见 §十一。
 
