@@ -1,4 +1,5 @@
 import { compareOrdersForAdmin, orderInDateRange } from "@/lib/constants/adminOrders";
+import { plusMinutes } from "@/lib/constants/dispatch";
 import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
@@ -289,6 +290,141 @@ export function applyOrderAcceptanceReleased(
   };
   current.orders.set(id, updated);
   return { previous, updated };
+}
+
+/**
+ * 打手开始服务 → 订单进入「护航中」（**同步写入器**，无 `await`），P0-7。
+ *
+ * ⚠️ 与同文件另外三个写入器同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （是不是本人实际履约、状态是不是还停在 `accepted`）。合法性由伪事务在调用它之前
+ * 判定（`lib/data/companionOrderTransaction.ts` 的 `startCompanionOrder`）。
+ *
+ * ## 只写两个字段，一个都不多
+ *
+ * | 字段 | 动不动 | 为什么 |
+ * |---|---|---|
+ * | `status` | 写成 `"serving"` | 这就是这次迁移本身 |
+ * | `servingAt` | 第一次进入时写入 | 需求要的「记录开始服务时间」 |
+ * | `acceptedAt` | **不动** | 历史事实。进入 `serving` 不抹掉「什么时候接的」（`01-prompt.md` §二） |
+ * | `actualCompanionId` / `companion` | **不动** | 履约绑定。进入 `serving` 恰恰是它成立的证明；这里清掉就等于「人还在干活、订单说没人」 |
+ * | 金额域四个字段 | **不动** | 开始服务不是一个资金事件（P0-7 不做任何资金联动） |
+ *
+ * ⚠️ **不能复用 `applyOrderAccepted`**：那个函数会写 `acceptedAt` 与 `actualCompanionId`，
+ * 用它「顺手推进状态」等于把接单时刻改写成开始服务的时刻，并且让「谁接的」有第二个出处。
+ *
+ * ⚠️ **同步**是必须的：它被伪事务的原子区段调用，里面出现 `await` 就会让出执行权，
+ * 「订单已开始服务、别的字段还没写完」的那一瞬会被别的请求读到。
+ *
+ * ⚠️ `servingAt` 只在**第一次**进入 `serving` 时写入：已经是 `serving` 的订单再写一次
+ * 返回 `changed: false` 且**不刷新时间戳**（照 `applyOrderRefund` 的既有先例）。
+ * 「这一单是几点开始的」不该被第二次点击改掉；事务层据此把重复点击判成重放。
+ */
+export function applyOrderServing(
+  id: string,
+  at: string,
+): { previous: Order; updated: Order; changed: boolean } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  if (order.status === "serving") {
+    return { previous, updated: previous, changed: false };
+  }
+
+  const updated: Order = {
+    ...order,
+    status: "serving",
+    // 已经写过的时刻原样保留（`??` 而不是直接赋值）：这一条是对「历史数据里
+    // 状态还是 accepted 但 servingAt 已有值」的防御，与 refundedAt 同一写法
+    servingAt: order.servingAt ?? at,
+  };
+  current.orders.set(id, updated);
+  return { previous, updated, changed: true };
+}
+
+/**
+ * 把订单标记为「已完成」（**同步写入器**，无 `await`），P0-8。
+ *
+ * ⚠️ 与 `applyOrderServing` 同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （完成材料有没有提交并审核通过、订单是不是还停在 `serving`）。合法性由伪事务在
+ * 调用它之前判定（`lib/data/completionTransaction.ts` 的 `approveCompletion` 与
+ * `sweepCompletionAutoApprovals`）。
+ *
+ * ## 只写四个字段，一个都不多
+ *
+ * | 字段 | 动不动 | 为什么 |
+ * |---|---|---|
+ * | `status` | 写成 `"completed"` | 这就是这次迁移本身 |
+ * | `completedAt` | 第一次进入时写入 | 需求要的「记录完成时间」 |
+ * | `complaintWindowMinutesSnapshot` | 第一次进入时写入（P0-9） | 本单的投诉窗口，冻结后不随后续改配置变化 |
+ * | `complaintDeadlineAt` | 第一次进入时写入（P0-9） | 就是 `completedAt + 上面那个快照` |
+ * | `servingAt` | **不动** | 历史事实。进入 `completed` 不抹掉「什么时候开始的」 |
+ * | `actualCompanionId` / `companion` | **不动** | 履约绑定。完成恰恰是它成立的证明 |
+ * | 金额域五个字段 | **不动** | 完成不是资金事件，收益金额在 `Earning` 那一侧直接搬快照 |
+ *
+ * ⚠️ **不能复用 `applyOrderServing` / `applyOrderRefund`**：那两个写的是别的状态与
+ * 别的时间字段，用它「顺手推进状态」等于把完成时刻写成开始 / 退款时刻。
+ *
+ * ⚠️ `completedAt` 只在**第一次**进入 `completed` 时写入：已经是 `completed` 的订单
+ * 再写一次返回 `changed: false` 且**不刷新时间戳**。重复清扫据此做到
+ * 「不重复完成、不刷新 completedAt」。
+ *
+ * ## 为什么投诉窗口快照在这里算（P0-9）
+ *
+ * `completedAt` 与 `complaintDeadlineAt` 之间有一条**必须恒成立**的等式：
+ * `complaintDeadlineAt === completedAt + complaintWindowMinutesSnapshot`。
+ * 两个值若由两个地方分别算出来，这条等式就只靠调用方自觉；而它一旦不成立
+ * （例如完成时刻来自历史数据、而 deadline 是按本次的 `at` 算的），
+ * 用户端会显示一个与打手收益解冻时刻**不一致**的投诉截止时间——
+ * 同一个业务事实在两张页面上给出两个答案。
+ *
+ * 因此两个字段在**这里**一起写：`completedAt` 先定下来（`?? at` 保留历史值），
+ * 快照与 deadline 随后从它算出来。调用方只提供**分钟数**，提供不了时刻。
+ *
+ * ⚠️ `Earning.availableAt` 也**必须**等于这个 deadline（`lib/data/earningTransaction.ts`
+ * 里直接读订单算好的值，不自己再加一次），否则「可投诉到几点」与「钱几点解冻」
+ * 会分叉。
+ *
+ * ⚠️ `plusMinutes` 是仓库里唯一的「分钟加法」实现（它住在 `lib/constants/dispatch.ts`
+ * 是历史原因，与派单无关）。这里复用它而不是自己写一段 `Date` 运算：
+ * 同一件事有两份实现，迟早出现一处四舍五入、另一处不。
+ */
+export function applyOrderCompletion(
+  id: string,
+  at: string,
+  /**
+   * 本次完成应当采用的投诉窗口（分钟）。由伪事务从平台参数读出后传入——
+   * 仓储不读平台配置（那是 `lib/data/adminPlatformConfigTransaction.ts` 的职责），
+   * 也不做「取值是否合法」的判断（校验在服务层）。
+   */
+  complaintWindowMinutes: number,
+): { previous: Order; updated: Order; changed: boolean } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  if (order.status === "completed") {
+    return { previous, updated: previous, changed: false };
+  }
+
+  // 已经写过的时刻原样保留（`??` 而不是直接赋值）：对「历史数据里状态还是
+  // serving 但 completedAt 已有值」的防御，与 servingAt / refundedAt 同一写法
+  const completedAt = order.completedAt ?? at;
+  // 同理：已经有快照的记录沿用旧快照（正常路径上它与状态一起为 null，
+  // 这只在重复完成被上面那一步挡住之后才谈得上）
+  const snapshot = order.complaintWindowMinutesSnapshot ?? complaintWindowMinutes;
+
+  const updated: Order = {
+    ...order,
+    status: "completed",
+    completedAt,
+    complaintWindowMinutesSnapshot: snapshot,
+    complaintDeadlineAt: order.complaintDeadlineAt ?? plusMinutes(completedAt, snapshot),
+  };
+  current.orders.set(id, updated);
+  return { previous, updated, changed: true };
 }
 
 /**

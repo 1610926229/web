@@ -2,13 +2,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  COMPLAINT_WINDOW_DEFAULT_MINUTES,
+  COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES,
+  COMPLETION_AUTO_APPROVAL_MAX_MINUTES,
+  COMPLETION_AUTO_APPROVAL_MIN_MINUTES,
+  PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE,
   PLATFORM_CONFIG_ID,
+  PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE,
   PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE,
   PLATFORM_CONFIG_OPERATION_CONFLICT_MESSAGE,
   PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
   PUBLIC_POOL_TIMEOUT_MAX_MINUTES,
   PUBLIC_POOL_TIMEOUT_MIN_MINUTES,
+  isValidCompletionAutoApprovalMinutes,
   isValidPublicPoolTimeoutMinutes,
 } from "../lib/constants/platformConfig.ts";
 import { getAdminAuditRepository } from "../lib/data/adminAuditRepository.ts";
@@ -52,6 +59,27 @@ test("公共池超时只接受 1~1440 的整数分钟", () => {
   }
 });
 
+// ——————————————————————————— 完成材料自动审核时长（P0-8） ———————————————————————————
+
+test("完成材料自动审核默认值是 10 分钟", () => {
+  assert.equal(COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES, 10);
+});
+
+test("完成材料自动审核上下限复用公共池超时的同一套 1 与 1440 分钟", () => {
+  // 两者是同一个配置实体上的同类量，分别定义一套上下限只会让两个数字慢慢分叉
+  assert.equal(COMPLETION_AUTO_APPROVAL_MIN_MINUTES, PUBLIC_POOL_TIMEOUT_MIN_MINUTES);
+  assert.equal(COMPLETION_AUTO_APPROVAL_MAX_MINUTES, PUBLIC_POOL_TIMEOUT_MAX_MINUTES);
+});
+
+test("完成材料自动审核只接受 1~1440 的整数分钟", () => {
+  for (const bad of [0, -1, 1441, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "10", null, undefined, {}, []]) {
+    assert.equal(isValidCompletionAutoApprovalMinutes(bad), false, `${String(bad)} 不该通过`);
+  }
+  for (const good of [1, 2, 10, 1439, 1440]) {
+    assert.equal(isValidCompletionAutoApprovalMinutes(good), true, `${good} 应当通过`);
+  }
+});
+
 // ——————————————————————————— 存储与仓储 ———————————————————————————
 
 test("仓储对外只有 getConfig 一个方法", () => {
@@ -75,12 +103,14 @@ test("写入后读回新值，旧值被整体替换", async () => {
   const now = "2026-09-17T00:00:00.000Z";
   writePlatformConfig({
     publicPoolTimeoutMinutes: 90,
+    completionAutoApprovalMinutes: 15,
     updatedAt: now,
     updatedByAdminId: "admin-1",
   });
 
   const updated = readPlatformConfig();
   assert.equal(updated.publicPoolTimeoutMinutes, 90);
+  assert.equal(updated.completionAutoApprovalMinutes, 15);
   assert.equal(updated.updatedAt, now);
   assert.equal(updated.updatedByAdminId, "admin-1");
 
@@ -93,12 +123,15 @@ test("写入返回改动前后的两份副本，之后改返回的对象不影�
 
   const written = writePlatformConfig({
     publicPoolTimeoutMinutes: 30,
+    completionAutoApprovalMinutes: 12,
     updatedAt: "2026-09-17T00:00:00.000Z",
     updatedByAdminId: "admin-1",
   });
 
   assert.equal(written.previous.publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(written.previous.completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
   assert.equal(written.updated.publicPoolTimeoutMinutes, 30);
+  assert.equal(written.updated.completionAutoApprovalMinutes, 12);
 
   // 调用方手上的对象与存储里的那一份**互不影响**：审计快照要的是「写入前那一刻」，
   // 如果返回的是存储里的同一个对象，紧接着的一次写入会把 before 一起改掉。
@@ -110,6 +143,7 @@ test("写入返回改动前后的两份副本，之后改返回的对象不影�
 test("resetMockStore 之后回到预置值，测试之间不互相污染", () => {
   writePlatformConfig({
     publicPoolTimeoutMinutes: 7,
+    completionAutoApprovalMinutes: 20,
     updatedAt: "2026-09-17T00:00:00.000Z",
     updatedByAdminId: "admin-1",
   });
@@ -138,6 +172,8 @@ test("修改平台参数：写业务数据 + 写一条审计", async () => {
   assert.equal(result.changed, true);
   assert.equal(result.replayed, false);
   assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 30);
+  // P0-8：只改公共池超时，另一个字段必须**保持原值**而不是被清空或回退到默认值
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
 
   const audits = await getAdminAuditRepository().listAudits({ targetType: "platformConfig" });
   assert.equal(audits.length, 1);
@@ -147,6 +183,8 @@ test("修改平台参数：写业务数据 + 写一条审计", async () => {
   assert.equal(audits[0].actorRole, "admin");
   assert.equal(audits[0].before.publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
   assert.equal(audits[0].after.publicPoolTimeoutMinutes, 30);
+  assert.equal(audits[0].before.completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
+  assert.equal(audits[0].after.completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
 });
 
 test("同一个 operationId 重放：不写数据、不写第二条审计", async () => {
@@ -221,6 +259,27 @@ test("每次写入刷新 updatedByAdminId 与 updatedAt", async () => {
   const after = readPlatformConfig();
   assert.equal(after.updatedByAdminId, "admin-1");
   assert.equal(after.updatedAt, ctx.at);
+});
+
+test("事务层：只改完成材料自动审核时长，公共池超时保持原值", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  const result = await updatePlatformConfig(
+    { completionAutoApprovalMinutes: 25 },
+    { ...ctx, operationId: "op-pc-completion-only" },
+  );
+
+  assert.equal(result.kind, "ok");
+  assert.equal(result.changed, true);
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, 25);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+
+  const audits = await getAdminAuditRepository().listAudits({ targetType: "platformConfig" });
+  assert.equal(audits[0].before.publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(audits[0].after.publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(audits[0].before.completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
+  assert.equal(audits[0].after.completionAutoApprovalMinutes, 25);
 });
 
 // ——————————————————————————— 服务层（接口里的那一层） ———————————————————————————
@@ -393,6 +452,194 @@ test("服务层写入：键被另一个操作者用掉 → 400 冲突，且不�
 
   assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 20);
   assert.equal(await getAdminAuditRepository().countAudits(), 1);
+});
+
+// ——————————————————————————— P0-8 / P0-9：三个字段的 PATCH 语义 ———————————————————————————
+
+test("服务层写入：空 PATCH（三个字段都没带）→ 400「没有可修改的参数」，且什么都不写", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await assert.rejects(
+    () => updateAdminPlatformConfig(ADMIN_ID, { idempotencyKey: "op-pc-empty" }),
+    (error) => {
+      assert.equal(error.code, "BAD_REQUEST");
+      assert.equal(error.status, 400);
+      assert.equal(error.message, PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE);
+      return true;
+    },
+  );
+
+  // 什么都不能写：配置与审计都还是初始状态
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
+  assert.equal(readPlatformConfig().complaintWindowMinutes, COMPLAINT_WINDOW_DEFAULT_MINUTES);
+  assert.equal(await getAdminAuditRepository().countAudits(), 0);
+});
+
+/**
+ * 第三个参数（投诉窗口，P0-9）的「保留」方向。
+ *
+ * ⚠️ 它与上面那条「只带投诉窗口」是**两个方向**，缺一个就有一半没盖住：
+ * 合并逻辑漏掉 `complaintWindowMinutes ?? previous.complaintWindowMinutes` 时，
+ * 「改池超时把投诉窗口顺手改掉」这种错误只在**这一条**下现形。
+ * 因此先把窗口改成非默认值（2880 = 2 天），这样「保留原值」与「回退到默认 1440」可区分。
+ */
+test("服务层写入：只带 publicPoolTimeoutMinutes → 保留投诉窗口原值（不清空、不回默认）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    complaintWindowMinutes: 2880,
+    idempotencyKey: "op-pc-cw-2880",
+  });
+  assert.equal(readPlatformConfig().complaintWindowMinutes, 2880);
+
+  const result = await updateAdminPlatformConfig(ADMIN_ID, withKey(90, "op-pc-timeout-only-cw"));
+  assert.equal(result.changed, true);
+  assert.equal(result.config.publicPoolTimeoutMinutes, 90);
+  assert.equal(result.config.complaintWindowMinutes, 2880);
+  assert.equal(readPlatformConfig().complaintWindowMinutes, 2880);
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
+});
+
+test("服务层写入：只带 publicPoolTimeoutMinutes → 保留 completionAutoApprovalMinutes 原值（不清空、不回默认）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 先把另一个字段改成非默认值 33，这样「保留原值」与「回退到默认 10」才可区分
+  await updateAdminPlatformConfig(ADMIN_ID, { completionAutoApprovalMinutes: 33, idempotencyKey: "op-pc-caa-33" });
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, 33);
+
+  const result = await updateAdminPlatformConfig(ADMIN_ID, withKey(90, "op-pc-timeout-only"));
+  assert.equal(result.changed, true);
+  assert.equal(result.config.publicPoolTimeoutMinutes, 90);
+  assert.equal(result.config.completionAutoApprovalMinutes, 33);
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, 33);
+});
+
+test("服务层写入：只带 completionAutoApprovalMinutes → 保留 publicPoolTimeoutMinutes 原值", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, withKey(90, "op-pc-timeout-90"));
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 90);
+
+  const result = await updateAdminPlatformConfig(ADMIN_ID, {
+    completionAutoApprovalMinutes: 45,
+    idempotencyKey: "op-pc-caa-only",
+  });
+  assert.equal(result.changed, true);
+  assert.equal(result.config.completionAutoApprovalMinutes, 45);
+  assert.equal(result.config.publicPoolTimeoutMinutes, 90);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 90);
+});
+
+test("服务层写入：完成材料自动审核时长取值非法 → 400，绝不静默取默认值", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  for (const value of [0, -1, 1441, 1.5, "10", null, undefined, Number.NaN]) {
+    await assert.rejects(
+      () => updateAdminPlatformConfig(ADMIN_ID, {
+        completionAutoApprovalMinutes: value,
+        idempotencyKey: "op-pc-caa-bad-1",
+      }),
+      (error) => {
+        assert.equal(error.code, "BAD_REQUEST");
+        assert.equal(error.status, 400);
+        assert.equal(error.message, PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE);
+        return true;
+      },
+      `${String(value)} 不该被接受`,
+    );
+  }
+
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES);
+  assert.equal(await getAdminAuditRepository().countAudits(), 0);
+});
+
+test("服务层写入：两个字段都带且都变了 → changed:true，审计写一次（没带的第三个字段不动）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  const result = await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 30,
+    completionAutoApprovalMinutes: 15,
+    idempotencyKey: "op-pc-both",
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.config.publicPoolTimeoutMinutes, 30);
+  assert.equal(result.config.completionAutoApprovalMinutes, 15);
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+});
+
+test("服务层写入：no-op 判据覆盖三个字段——送进来的字段都与现状相同才算没改", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 基线：先改成 30 / 15，并记住这次写入后的 updatedAt
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 30,
+    completionAutoApprovalMinutes: 15,
+    idempotencyKey: "op-pc-base",
+  });
+  const baselineUpdatedAt = readPlatformConfig().updatedAt;
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  // (1) 两个字段都与现状相同 → changed:false，不刷新 updatedAt，不写审计
+  const bothSame = await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 30,
+    completionAutoApprovalMinutes: 15,
+    idempotencyKey: "op-pc-both-same",
+  });
+  assert.equal(bothSame.changed, false);
+  assert.equal(readPlatformConfig().updatedAt, baselineUpdatedAt);
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  // (2) 只送一个字段、且该字段值与现状相同 → 仍是 changed:false（不是「一个字段相同即 no-op」
+  //    的错读；另一个字段根本没被改）
+  const oneSame = await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 30,
+    idempotencyKey: "op-pc-one-same",
+  });
+  assert.equal(oneSame.changed, false);
+  assert.equal(readPlatformConfig().updatedAt, baselineUpdatedAt);
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  // (3) 只送一个字段、该字段与现状不同 → changed:true，另一个未送的字段保持原值
+  const oneChanged = await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 45,
+    idempotencyKey: "op-pc-one-changed",
+  });
+  assert.equal(oneChanged.changed, true);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 45);
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, 15);
+  assert.equal(await getAdminAuditRepository().countAudits(), 2);
+
+  // (4) P0-9：第三个字段（投诉窗口）也要走同一条 no-op 判据。
+  //     先与现状相同 → changed:false；再改它 → changed:true 且另外两个字段不动。
+  //     ⚠️ 这一段是「no-op 判据是否把新字段算进去」的唯一直接证据：
+  //     `PATCHABLE_FIELDS` 漏登记第三个字段时，只改投诉窗口会被判成「没有变化」，
+  //     接口返回成功而配置**没有被写入**——那种错误只看返回值发现不了。
+  const cwSame = await updateAdminPlatformConfig(ADMIN_ID, {
+    complaintWindowMinutes: COMPLAINT_WINDOW_DEFAULT_MINUTES,
+    idempotencyKey: "op-pc-cw-same",
+  });
+  assert.equal(cwSame.changed, false);
+  assert.equal(readPlatformConfig().updatedAt, baselineUpdatedAt);
+  assert.equal(await getAdminAuditRepository().countAudits(), 2);
+
+  const cwChanged = await updateAdminPlatformConfig(ADMIN_ID, {
+    complaintWindowMinutes: 2880,
+    idempotencyKey: "op-pc-cw-changed",
+  });
+  assert.equal(cwChanged.changed, true);
+  assert.equal(readPlatformConfig().complaintWindowMinutes, 2880);
+  assert.equal(readPlatformConfig().publicPoolTimeoutMinutes, 45);
+  assert.equal(readPlatformConfig().completionAutoApprovalMinutes, 15);
+  assert.equal(await getAdminAuditRepository().countAudits(), 3);
 });
 
 test("规则常量文件没有任何 import：浏览器端可以安全引用", () => {

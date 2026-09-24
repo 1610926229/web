@@ -579,6 +579,7 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
     [
       "acceptedAt",
       "canCancel",
+      "canStart",
       "gameName",
       "id",
       "orderNo",
@@ -594,6 +595,8 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
     "列表字段集变了：多出来的可能是隐私与账目，少掉的是接单要用的信息",
   );
   assert.equal(item.canCancel, true);
+  // P0-7 的动作旗标与 canCancel 成对：`accepted` 上两者都为真
+  assert.equal(item.canStart, true);
   assert.equal(item.statusLabel, "已接单");
 
   const detail = await getCompanionOrderDetail(COMPANION_A, order.id);
@@ -605,6 +608,8 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
       "addons",
       "addonsAmount",
       "canCancel",
+      "canStart",
+      "completion",
       "customerNickname",
       "gameAccountId",
       "gameName",
@@ -617,6 +622,7 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
       "quantity",
       "region",
       "remark",
+      "servingAt",
       "specName",
       "status",
       "statusLabel",
@@ -625,6 +631,12 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
     ],
     "详情只比列表多「履约必需」的那几项",
   );
+
+  // ⚠️ `servingAt` 是 P0-7 唯一新增的**详情**字段：还没开始服务时为 null，
+  // 而它**不进列表项**（列表由状态名「护航中」表达，见 CompanionOrderDetail 注释）。
+  // 上面两份白名单已经钉住了这一点，这里点名是为了说明**为什么**列表里不该有它
+  assert.equal(detail.servingAt, null, "accepted 的单还没开始服务");
+  assert.equal("servingAt" in item, false, "servingAt 只属于详情，不属于列表项");
 
   // 白名单已经覆盖了这一点，逐个点名是为了说明**为什么**它们不该在
   for (const leaked of [
@@ -645,6 +657,16 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
   // 履约必需的两项必须在：没有账号与备注就打不了这一单
   assert.equal(detail.gameAccountId, order.gameAccountId);
   assert.equal(detail.remark, order.remark);
+
+  // P0-8：详情带上完成材料摘要，形状由服务端算好（4 个字段的契约见 staffCompletions.test.mjs）。
+  // accepted（还没开始服务）的单：从未提交过 → status 为 null、canSubmit 为 false、其余两项为 null
+  assert.deepEqual(
+    Object.keys(detail.completion).sort(),
+    ["autoApprovalDeadlineAt", "canSubmit", "rejectReason", "status"],
+    "打手详情里的完成材料摘要字段集变了",
+  );
+  assert.equal(detail.completion.status, null);
+  assert.equal(detail.completion.canSubmit, false);
 
   // `canCancel` 不是「看状态猜」：serving 的单也看得到，但这里必须是 false
   const serving = (await listCompanionOrders(COMPANION_A)).items.find((entry) => entry.id === SEEDED_SERVING);
@@ -910,7 +932,24 @@ test("兼容：P0-5 的派单规则不回归——自己不能接自己下的单
   assert.deepEqual(await releasesOf(order.id), []);
 });
 
-test("结构约束：取消的伪事务里没有一个 await，且回池写入只有 cancelAcceptedOrder 一个出口", () => {
+/**
+ * 取某个导出函数的函数体（从它的 `export async function NAME` 到下一个导出函数之前）。
+ *
+ * 这个文件里两个导出函数都要单独看「自己那条路径上有没有领域 Guard」，
+ * 因此不能只在整个文件的源码串上 `includes`——那会让 A 函数的 Guard 替 B 函数背书。
+ */
+function functionBody(code, name) {
+  const start = code.indexOf(`export async function ${name}`);
+  assert.notEqual(start, -1, `找不到 ${name}：结构约束无法判定`);
+
+  const next = code.indexOf("export async function", start + 1);
+  return next === -1 ? code.slice(start) : code.slice(start, next);
+}
+
+/** 领域 Guard 的**字面**判据：动作必须自己看订单此刻的状态，而不是只问状态机表。 */
+const STATUS_GUARD = 'order.status !== "accepted"';
+
+test("结构约束：打手订单伪事务全程无 await，且取消 / 开始服务两条路径各自保留领域 Guard", () => {
   const code = stripComments(readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")));
 
   // 原子性不是靠运气：区段里出现任何一个 `await`，就等于把「读—判断—写」拆到两个 tick 上，
@@ -918,7 +957,7 @@ test("结构约束：取消的伪事务里没有一个 await，且回池写入�
   assert.equal(
     /\bawait\b/.test(code),
     false,
-    "取消的伪事务必须全程同步：加一个 await 就是 bug，哪怕加的是 await Promise.resolve()",
+    "两个伪事务必须全程同步：加一个 await 就是 bug，哪怕加的是 await Promise.resolve()",
   );
 
   // 四件事写在同一段同步代码里
@@ -935,19 +974,51 @@ test("结构约束：取消的伪事务里没有一个 await，且回池写入�
   // 幂等走的是 store 级索引，**不是**管理操作审计表（D1）
   assert.equal(code.includes("adminWriteSupport"), false, "打手取消不是管理行为，不该写进管理审计表");
 
-  // 状态机表只表达结构许可，不能替代领域 Guard：判定必须直接看 `order.status`
-  assert.equal(
-    code.includes("canTransitionOrder"),
-    false,
-    "表允许不等于该动作有入口：Guard 只能由领域自己回答",
+  // —— 状态机表只能当**结构校验之一**，不能替代领域 Guard ——
+  //
+  // ⚠️ P0-6 时这里断言的是「本文件不得出现 canTransitionOrder」。P0-7 的「开始服务」
+  // 按指令 §三 **必须**用中央状态机做一道结构校验，因此那条断言**不是被删掉，
+  // 而是被改写成更精确的两条**：
+  //   1. 每条动作路径上都必须有一句直接看 `order.status` 的领域 Guard
+  //      （「表允许」不等于「这一单此刻能这么做」——状态机不是权限）；
+  //   2. 结构校验必须排在领域 Guard **之前**，两道门都真的在跑；
+  //   3. 取消路径**不得**引用状态机（把原来那条全文件级禁令收窄后的那一半补回来）。
+  for (const name of ["cancelAcceptedOrder", "startCompanionOrder"]) {
+    assert.ok(
+      functionBody(code, name).includes(STATUS_GUARD),
+      `${name} 缺少直接看 ${STATUS_GUARD} 的领域 Guard：表允许不等于这一单此刻能这么做`,
+    );
+  }
+
+  const startBody = functionBody(code, "startCompanionOrder");
+  assert.ok(
+    startBody.includes("canTransitionOrder("),
+    "开始服务必须用中央状态机（canTransitionOrder）做一道结构校验：这条边存不存在由状态表回答",
   );
 
-  // 回池写入能力**只导出 cancelAcceptedOrder**：另外两个 source（封禁回池 / 客服换人）
-  // 是后续 Round，提前导出一个「谁都能调的回池函数」等于给它们留一扇没有 Guard 的门
+  // ⚠️ 上面那条「start 必须含结构校验」在逻辑上**隐含**「这条断言不能对全文件成立」——
+  // 因此原来那条全文件级禁令收窄成逐函数判断后，取消路径必须**单独**把它的那一半钉回来：
+  // 取消只需要领域 Guard（`accepted → paid` 这条边在表里，问了也是白问），
+  // 不该顺带引用状态机。少了这一条，将来给取消路径加一句
+  // `if (!canTransitionOrder(...)) return not-accepted` 不会变红——
+  // 权限仍然是对的，但 P0-6「状态表只出现在真正需要它的动作路径上」这个判断就没人守了。
+  assert.equal(
+    functionBody(code, "cancelAcceptedOrder").includes("canTransitionOrder("),
+    false,
+    "取消接单不需要结构校验：它有直接看状态的领域 Guard，引用状态机属于多余的判断",
+  );
+  assert.ok(
+    startBody.indexOf("canTransitionOrder(") < startBody.indexOf(STATUS_GUARD),
+    "结构校验必须在领域 Guard 之前：先问「这条边存在吗」，再问「这一单站在它的起点上吗」",
+  );
+
+  // 回池写入能力（`writeAcceptanceRelease`）**不导出**：另外两个 source（封禁回池 /
+  // 客服换人）是后续 Round，提前导出一个「谁都能调的回池函数」等于给它们留一扇没有 Guard 的门。
+  // 本文件对外的**只有这两个动作**——多一个就是给后续 Round 提前开了入口
   const exported = [...code.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)]
     .map((match) => match[1])
     .sort();
-  assert.deepEqual(exported, ["cancelAcceptedOrder"]);
+  assert.deepEqual(exported, ["cancelAcceptedOrder", "startCompanionOrder"]);
   for (const notYet of ["companion_disabled", "staff_reassign"]) {
     assert.equal(code.includes(notYet), false, `${notYet} 还没有任何写入路径，不该出现在这里`);
   }
@@ -995,11 +1066,19 @@ const SESSION_PLAIN = BASE ? await loginAs("u-1001") : null;
 const SKIP_SESSION =
   SKIP || (SESSION_PLAIN ? false : "服务端未开启 ENABLE_MOCK_AUTH，跳过需要登录态的用例");
 
-/** 三个打手订单接口。路径里刻意不用中文，避免编码问题把 404 与 403 混起来。 */
+/**
+ * 四个打手订单接口（P0-7 起把 `start` 也纳进来）。路径里刻意不用中文，
+ * 避免编码问题把 404 与 403 混起来。
+ *
+ * ⚠️ `start` 与另外三个不同：它**没有请求体**。下面这个 helper 仍然给它发了一个
+ * cancel 形状的体——刻意如此：守卫必须**先于**请求体的任何解读，因此带着什么体到达
+ * 都只能得到 401 / 403，而不是 400。
+ */
 const COMPANION_ORDER_ROUTES = [
   ["GET", "/api/companion/orders"],
   ["GET", "/api/companion/orders/ord-not-exist"],
   ["POST", "/api/companion/orders/ord-not-exist/cancel"],
+  ["POST", "/api/companion/orders/ord-not-exist/start"],
 ];
 
 function requestRoute(method, url, cookie) {
@@ -1013,7 +1092,7 @@ function requestRoute(method, url, cookie) {
   });
 }
 
-test("权限矩阵：未登录打这三个接口都是 401（不是 403，也不是 200）", { skip: SKIP }, async () => {
+test("权限矩阵：未登录打这四个接口都是 401（不是 403，也不是 200）", { skip: SKIP }, async () => {
   for (const [method, url] of COMPANION_ORDER_ROUTES) {
     const response = await requestRoute(method, url);
     assert.equal(response.status, 401, `${method} ${url} 未登录应当 401`);

@@ -43,6 +43,29 @@ export type PlatformConfig = {
    */
   publicPoolTimeoutMinutes: number;
 
+  /**
+   * 完成材料「提交后等待多久算自动通过」的时长，**单位：分钟**（P0-8）。
+   *
+   * 语义：打手提交完成材料的那一刻起算，达到这个时长仍 pending、无阻塞，
+   * 且订单仍 serving → 由 System 自动通过（`reviewSource = "system"`）。
+   * 与公共池超时同一套快照语义：提交时冻结 `autoApprovalMinutesSnapshot` /
+   * `autoApprovalDeadlineAt`，之后改配置不影响已 pending 的材料。
+   */
+  completionAutoApprovalMinutes: number;
+
+  /**
+   * 订单完成后的「投诉窗口」时长，**单位：分钟**（P0-9）。
+   *
+   * 语义：订单真正进入 `completed` 的那一刻起算，用户在这么长时间内仍可发起投诉；
+   * 同时它决定打手这一单收益的冻结时长——`Earning.availableAt` 等于本单的
+   * `complaintDeadlineAt`。默认 1440（24 小时），取值 60 ~ 10080 分钟。
+   *
+   * ⚠️ 与另外两项一样按**快照**语义：订单进入 completed 时把当时的取值冻结成
+   * `Order.complaintWindowMinutesSnapshot` 并算出 `complaintDeadlineAt`，
+   * 之后改配置**不影响**已经 completed 的历史订单。
+   */
+  complaintWindowMinutes: number;
+
   /** 最后一次修改时间（ISO 字符串）。 */
   updatedAt: string;
 
@@ -82,9 +105,16 @@ export type AdminPlatformConfigWriteResult = {
  * 按会话与时钟填。把它们做成可选字段（`updatedAt?: string`）等于给「客户端
  * 声称自己是谁、改动发生在什么时候」留了一个入口。
  *
- * 下界 0 由页面与服务端各自用 `isValidPublicPoolTimeoutMinutes()` 判定，
- * **不在这里**用类型表达（`number` 表达不了「1~1440 的整数」）。
+ * ⚠️ 三个字段都是**可选**：PATCH 只带要改的那一项，服务端会把没带的字段
+ * 保持现状（不是清空）。但**至少要带一个**——空 PATCH 不算一次改动；
+ * 这个「至少一个」由服务端校验，不在这里用类型表达（联合类型表达不了）。
+ *
+ * 取值合法性由页面与服务端各自用 `isValidPublicPoolTimeoutMinutes()` /
+ * `isValidCompletionAutoApprovalMinutes()` / `isValidComplaintWindowMinutes()`
+ * 判定，**不在这里**用类型表达（`number` 表达不了「60~10080 的整数」）。
  */
 export type AdminPlatformConfigPatch = {
-  publicPoolTimeoutMinutes: number;
+  publicPoolTimeoutMinutes?: number;
+  completionAutoApprovalMinutes?: number;
+  complaintWindowMinutes?: number;
 };

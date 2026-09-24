@@ -268,6 +268,45 @@ export const COMPANION_CANCEL_CONFIRM_NOTICE =
 export const COMPANION_CANCEL_SUCCESS_LABEL =
   "已取消接单。这一单已回到公共订单池，不再属于你，也不会再出现在「我的订单」里。";
 
+// ——————————————————————————— 开始服务（P0-7） ———————————————————————————
+
+/**
+ * 是本人的单、但状态不是 `accepted` 时的提示（400）。
+ *
+ * ⚠️ 与 `COMPANION_ORDER_NOT_FOUND_MESSAGE` **必须分开**，与取消同一条理由：
+ * 这一单确实是他的，只是此刻不该出现「开始服务」这个按钮（已经开始了 / 已完成 / 已退款）。
+ * 说成 404 会让他以为订单丢了。
+ */
+export const COMPANION_ORDER_NOT_STARTABLE_MESSAGE = "当前订单状态不允许开始服务";
+
+/** 开始服务的按钮与进行中的文案。 */
+export const COMPANION_START_LABEL = "开始服务";
+export const COMPANION_START_CONFIRM_LABEL = "确认开始服务";
+export const COMPANION_START_PENDING_LABEL = "处理中…";
+
+/**
+ * 展开确认区时的那段说明。
+ *
+ * ⚠️ 必须点出**这是一扇单向门**：开始服务之后**没有**普通「取消接单」这条路
+ * （需求里 `serving` 不允许打手主动取消）。不说清，一位点错了的打手会去找那个
+ * 已经消失的按钮，而不知道真正的出路是联系客服。
+ *
+ * ⚠️ 也不写「服务时长从此刻开始计算」「请立即联系用户」这类话：需求没有为
+ * `servingAt` 冻结任何计价或提醒规则，写了就等于自己造一条规则。
+ */
+export const COMPANION_START_CONFIRM_NOTICE =
+  "开始服务后订单进入「护航中」，下单用户会看到这一单已经开始。开始服务之后不能取消接单，请确认可以继续这一单后再操作。";
+
+/**
+ * 成功后的反馈。
+ *
+ * ⚠️ 两句都不能省：**「这一单现在处于护航中」**（说清这一下发生了什么），
+ * **「已不能取消接单」**（说清下一步不能再做什么）。页面此时已经刷新成 `serving`，
+ * 取消入口也已经消失，不解释一句，打手只会以为按钮被页面吞了。
+ */
+export const COMPANION_START_SUCCESS_LABEL =
+  "已开始服务。这一单现在处于「护航中」，开始服务后不能取消接单；如遇到无法继续的情况请联系客服。";
+
 /**
  * 履约退出动作的显示名（`CompanionReleaseSource`），管理端订单详情用它。
  *

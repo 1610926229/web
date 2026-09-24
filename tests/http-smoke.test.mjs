@@ -66,16 +66,22 @@ const SESSION_JOIN_APPROVED = BASE ? await loginAs("u-1004") : null; // 预置�
 const SESSION_JOIN_APPLICANT = BASE ? await loginAs("u-1008") : null; // 预置没有申请
 
 /**
- * 去掉 `<script>` 标签后再做「页面上不该出现某段文字」的断言。
+ * 去掉构建产物标签后再做「页面上看得见的文字」的断言。
  *
- * 理由：Next 的 HTML 里有两段**不是页面内容**的东西——RSC 的 flight 载荷与
- * Turbopack 的分块文件名（`/_next/static/chunks/05w-twpn2bx9w.js`）。
- * 它们由构建产物决定，会随任何一次改动变化，且长相随机：
+ * 理由：Next 的 HTML 里有两类**不是页面内容**的东西——RSC 的 flight 载荷与
+ * Turbopack 的分块文件名。分块文件名是内容哈希，长得随机，且**同时**出现在
+ * `<script src>`、`<link rel="stylesheet">` 与 `<link rel="preload">` 里：
+ * - JS 分块形如 `/_next/static/chunks/05w-twpn2bx9w.js`，天然命中 `\d+w\b`；
+ * - CSS 分块形如 `/_next/static/chunks/3k-j_e9-s-66i.css`，天然命中 `\d+k\b`。
+ * 它们由构建产物决定，会随任何一次改动变化：
  * 「金额不该用 k / w 缩写」这类断言扫到它们就会红，而且红得与断言的本意毫无关系。
- * 因此凡是判断**页面上看得见的文字**的断言，都应当先过一遍这里。
+ * 因此凡是判断**页面上看得见的文字**的断言，都应当先过一遍这里——
+ * 只剥 `<script>` 是不够的：chunk 文件名同样住在 `<link>` 里，换一次构建哈希就会红。
  */
-function stripScripts(html) {
-  return html.replace(/<script[\s\S]*?<\/script>/g, "");
+function stripBuildArtifacts(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/g, "")
+    .replace(/<link\b[^>]*>/g, "");
 }
 
 async function get(path, cookie) {
@@ -564,11 +570,12 @@ test("游客可以打开 /rank：拿到完整榜单，但没有「我的排名�
   assert.equal(html.includes(TABBAR_TEXT), false, "/rank 不该显示底部 TabBar");
 
   // 榜单金额是完整两位小数，没有 k / w 缩写。
-  // ⚠️ 这一条必须**排除 script 标签**再判断：Turbopack 的分块文件名是内容哈希，
-  // 形如 `/_next/static/chunks/05w-twpn2bx9w.js`，天然会命中 `\d+w\b`。
-  // 早先直接扫整页 HTML，是因为当时的哈希恰好没有撞上——那属于运气，不是保证：
-  // 换一次构建产物就会红，而且红得跟金额毫无关系。
-  const visible = stripScripts(html);
+  // ⚠️ 这一条必须**排除构建产物标签**再判断：Turbopack 的分块文件名是内容哈希，
+  // 形如 `/_next/static/chunks/05w-twpn2bx9w.js`（命中 `\d+w\b`）与
+  // `/_next/static/chunks/3k-j_e9-s-66i.css`（命中 `\d+k\b`），分别住在
+  // `<script>` 与 `<link>` 里。早先直接扫整页 HTML 没红，是因为当时的哈希恰好
+  // 没有撞上——那属于运气，不是保证：换一次构建产物就会红，而且红得跟金额毫无关系。
+  const visible = stripBuildArtifacts(html);
   assert.ok(/¥\d+\.\d{2}/.test(visible), "榜单金额应保留两位小数");
   assert.equal(/\d+k\b|\d+w\b/.test(visible), false, "榜单金额不该使用 k / w 缩写");
 });

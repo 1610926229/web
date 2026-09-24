@@ -1,8 +1,10 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { isComplaintWindowClosed } from "@/lib/constants/complaints";
 import { DISPATCH_POOL_LABELS } from "@/lib/constants/dispatch";
 import { ORDER_STATUS_LABELS, parseOrderListQuery } from "@/lib/constants/orders";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { sweepExpiredDispatches, toDispatchProgress } from "@/lib/data/companionDispatchTransaction";
+import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
 import { getDispatchRepository } from "@/lib/data/dispatchRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
@@ -150,6 +152,8 @@ export async function queryOrdersForUser(
   // 就该看到它已经退款，而不是「等待接单」——那会让人以为还有希望。
   // 放在查询**之前**，而且是不带 await 的同步调用（见全局约束 13）
   materializeDispatchTimeouts();
+  // 完成材料到期自动通过的事实也一样（P0-8）：用户订单详情要显示得出「已完成」
+  materializeCompletionAutoApprovals();
 
   const page = await withMockDebug(params, surface, () =>
     getPaymentRepository().queryOrders({ ...parsed.query, userId }),
@@ -174,6 +178,19 @@ function materializeDispatchTimeouts(): void {
 }
 
 /**
+ * 把已经到点的完成材料自动通过写成事实。
+ *
+ * 与 `materializeDispatchTimeouts()` 同一条惰性物化机制（P0-8）：自动通过不是被
+ * 定时触发的，而是「deadline 到点就已经成立」，读取路径只是恰好把它写下来。
+ * 重复执行幂等：第一次执行后 submission 已不是 pending，第二次直接跳过，
+ * 不重复完成、不刷新 `completedAt`。真实调度器上线后调用**同一个**
+ * `sweepCompletionAutoApprovals()`，**不是**另写一套。
+ */
+function materializeCompletionAutoApprovals(): void {
+  sweepCompletionAutoApprovals(new Date().toISOString());
+}
+
+/**
  * 读取当前用户的单个订单。
  *
  * 订单不存在、或不属于当前用户，一律返回 null——**两种情况的对外表现完全相同**，
@@ -192,6 +209,7 @@ export async function getOrderDetailForUser(
   if (!orderId) return null;
 
   materializeDispatchTimeouts();
+  materializeCompletionAutoApprovals();
 
   const order = await withMockDebug(params, surface, () =>
     getPaymentRepository().findOrderById(orderId),
@@ -230,9 +248,13 @@ export async function getOrderDetailForUser(
       ...buildRefundActions(order, refund),
       // 评价同样由评价规则统一算：已完成、未评价、且没有进行中 / 已通过的退款
       ...buildReviewActions(order, review, refund),
-      // 自己的订单一律可以沟通、可以投诉：投诉不会自动退款，也不改订单状态
+      // 自己的订单一律可以沟通：它不会改写任何业务事实
       canOpenConversation: true,
-      canSubmitComplaint: true,
+      // ⚠️ P0-9：投诉入口不是恒真的。completed 的订单在投诉窗口关闭后，
+      // 普通投诉入口一并关闭（判定与接口用的是**同一个**纯函数，
+      // 因此不存在「页面还显示按钮、接口已经拒绝」的窗口期）。
+      // 在途订单与没有快照的历史订单不受影响（`isComplaintWindowClosed` 的注释）
+      canSubmitComplaint: !isComplaintWindowClosed(order, new Date().toISOString()),
     },
   });
 }

@@ -3,6 +3,7 @@ import {
   COMPANION_CANCEL_REASON_REQUIRED_MESSAGE,
   COMPANION_ORDER_NOT_CANCELLABLE_MESSAGE,
   COMPANION_ORDER_NOT_FOUND_MESSAGE,
+  COMPANION_ORDER_NOT_STARTABLE_MESSAGE,
 } from "@/lib/constants/dispatch";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import {
@@ -10,7 +11,13 @@ import {
   readIdempotencyKey,
   readTrimmedString,
 } from "@/lib/constants/writes";
-import { cancelAcceptedOrder } from "@/lib/data/companionOrderTransaction";
+import {
+  cancelAcceptedOrder,
+  // 事务层与服务层同名（两处都是这个域动作的对外名字）。这里显式起别名，
+  // 是为了让下面那一行调用一眼能看出「这是数据层的伪事务，不是本文件自己的函数」
+  startCompanionOrder as startCompanionOrderTransaction,
+} from "@/lib/data/companionOrderTransaction";
+import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getUserRepository } from "@/lib/data/userRepository";
 import type {
@@ -18,11 +25,13 @@ import type {
   CompanionOrderDetail,
   CompanionOrderListData,
   CompanionOrderListItem,
+  CompanionStartOutcome,
   Order,
 } from "@/lib/types/order";
+import { getCompanionCompletionInfo } from "./companionCompletions";
 
 /**
- * 打手「我的订单」服务（P0-6）—— 列表、详情与主动取消的**唯一**入口。
+ * 打手「我的订单」服务（P0-6 / P0-7）—— 列表、详情与两个订单动作的**唯一**入口。
  *
  * ⚠️ **只被服务端引用**：本模块依赖 `lib/data` 与 `lib/mocks`，
  * 浏览器端取数走 `lib/services/companionHttp.ts`。两者分开是必须的，
@@ -30,11 +39,11 @@ import type {
  *
  * ## 归属只按 `actualCompanionId`
  *
- * 三个函数都以 `Order.actualCompanionId === companionId` 为准：
+ * 四个导出函数都以 `Order.actualCompanionId === companionId` 为准：
  *
  * - 列表把它当**查询条件**（`queryOrdersByCompanion`），不是「查出来再比对」；
  * - 详情**服务端重新校验**，不是「列表里没有就等于看不到」——列表入口隐藏不是保护；
- * - 取消把它当**真正的安全边界**（`cancelAcceptedOrder` 的原子区段里再判一次）。
+ * - 开始服务与取消把它当**真正的安全边界**（两个伪事务的原子区段里各再判一次）。
  *
  * ⚠️ `exclusiveCompanionId === companionId` **绝不等于**订单归本人：那是「用户当初
  * 指定了谁」的历史事实，订单回公共池、被别人接走之后都不清（见 `DispatchRecord`）。
@@ -43,7 +52,8 @@ import type {
  *
  * 「他是不是打手」只由 `requireCompanion()`（接口）回答，本模块不再查一次。
  * 也不引入 `isCompanionAcceptingOrders()`（`available`）：那是「能不能接**新**单」，
- * 取消是**退出**，拿它当门槛会得出「暂停接单的人无法退出自己已经接下的单」这个荒谬结论。
+ * 开始服务与取消针对的都是**已经在自己名下**的单，拿它当门槛会得出
+ * 「暂停接单的人无法完成手上这一单」这个荒谬结论。
  *
  * ## DTO 最小化
  *
@@ -55,6 +65,15 @@ import type {
 /** 取消成功的两种结果（`ok` / `replayed`）。失败在 `cancelCompanionOrder` 里抛成 `ApiError`。 */
 export type CompanionCancelSuccess = Extract<
   CompanionCancelOutcome,
+  { kind: "ok" } | { kind: "replayed" }
+>;
+
+/**
+ * 开始服务成功的两种结果（`ok` / `replayed`）。
+ * 失败在 `startCompanionOrder` 里抛成 `ApiError`。
+ */
+export type CompanionStartSuccess = Extract<
+  CompanionStartOutcome,
   { kind: "ok" } | { kind: "replayed" }
 >;
 
@@ -73,9 +92,30 @@ function toCompanionOrderListItem(order: Order): CompanionOrderListItem {
     quantity: order.quantity,
     gameName: order.gameName,
     region: order.region,
-    // 服务端算好，前端不自己用状态推断（见 CompanionOrderListItem.canCancel）
+    // 两个动作旗标都由服务端算好，前端不自己用状态推断
+    // （见 CompanionOrderListItem.canCancel / canStart）
     canCancel: order.status === "accepted",
+    // ⚠️ 与 `canCancel` 今天恰好同值（两个动作都只在 accepted 上成立），
+    // 但它们是**两条独立的规则**：`serving` 的取消将来可能开放（TARGET），
+    // 开始服务则永远不会。因此两处各写一遍，不合并成 `canAct`
+    canStart: order.status === "accepted",
   };
+}
+
+/**
+ * 把已经到点的完成材料自动通过写成事实。
+ *
+ * 与用户端 / 管理端订单读同一套惰性物化机制（P0-8）：自动通过不是被定时触发的，
+ * 而是「deadline 到点就已经成立」，读取路径只是恰好把它写下来。打手提交完成材料后
+ * 若一直没人打开用户 / 管理端 / 客服的读路径，他自己刷新订单也该看到「已完成」，
+ * 而不是停在「护航中」——因此打手端的列表与详情两条读路径也都要挂。
+ *
+ * 重复执行幂等：第一次执行后 submission 已不是 pending，第二次直接跳过，
+ * 不重复完成、不刷新 `completedAt`。真实调度器上线后调用**同一个**
+ * `sweepCompletionAutoApprovals()`，**不是**另写一套。
+ */
+function materializeCompletionAutoApprovals(): void {
+  sweepCompletionAutoApprovals(new Date().toISOString());
 }
 
 /**
@@ -88,6 +128,9 @@ function toCompanionOrderListItem(order: Order): CompanionOrderListItem {
  * `companionId` **只允许**来自 `requireCompanion()` 返回的会话身份。
  */
 export async function listCompanionOrders(companionId: string): Promise<CompanionOrderListData> {
+  // 惰性物化自动通过事实（幂等）：列表同样展示订单状态，只挂详情会让列表停在 serving
+  materializeCompletionAutoApprovals();
+
   const orders = await getPaymentRepository().queryOrdersByCompanion(companionId);
   return { items: orders.map(toCompanionOrderListItem) };
 }
@@ -120,11 +163,18 @@ export async function getCompanionOrderDetail(
 ): Promise<CompanionOrderDetail | null> {
   if (!orderId) return null;
 
+  // 惰性物化自动通过事实（幂等）：详情要显示得出「已完成」，而不是停在「护航中 + 已过期的
+  // 自动审核截止时刻」（见 materializeCompletionAutoApprovals 的注释）
+  materializeCompletionAutoApprovals();
+
   const order = await getPaymentRepository().findOrderById(orderId);
   if (!order || order.actualCompanionId !== companionId) return null;
 
   return {
     ...toCompanionOrderListItem(order),
+    // ⚠️ `servingAt` **只在这里出现**，不进列表项：列表卡片只显示下单与接单两个节点，
+    // `serving` 那一单在列表里由状态名「护航中」表达（见 CompanionOrderDetail 的注释）
+    servingAt: order.servingAt,
     gameAccountId: order.gameAccountId,
     remark: order.remark,
     addons: order.addons,
@@ -133,6 +183,9 @@ export async function getCompanionOrderDetail(
     itemsAmount: order.itemsAmount,
     totalAmount: order.totalAmount,
     customerNickname: await resolveCustomerNickname(order.userId),
+    // 完成材料摘要（P0-8）：`canSubmit` 由 `buildCompanionCompletionInfo` 服务端算好，
+    // 页面只按值渲染，不自己用订单状态推断（serving + 已有 pending 时 canSubmit 为 false）
+    completion: await getCompanionCompletionInfo(order.id, order),
   };
 }
 
@@ -195,4 +248,50 @@ export async function cancelCompanionOrder(
     throw new ApiError("NOT_FOUND", COMPANION_ORDER_NOT_FOUND_MESSAGE, 404);
   }
   throw new ApiError("BAD_REQUEST", COMPANION_ORDER_NOT_CANCELLABLE_MESSAGE, 400);
+}
+
+/**
+ * 当前实际履约的打手开始服务（`accepted → serving`，P0-7）。
+ *
+ * ## 本函数只做两件事：取一个时刻、把事务结果转成对外结果
+ *
+ * 「能不能开始」（是不是本人、状态是不是还停在 `accepted`）全部在
+ * `startCompanionOrder` 的原子区段里判定，并在**同一段**代码里写下 `serving` 与
+ * `servingAt`。到这里再判一次就等于把判定与写入拆开——中间那段窗口正是
+ * 「判完到写之间状态被改掉」的入口。
+ *
+ * ⚠️ **没有 `body` 参数，也没有任何需要校验的字段**（与取消刻意不同）：
+ * 这个动作没有附属记录、没有原因、没有幂等键（幂等判据是状态本身，
+ * 见 `02-decisions.md` D2）。因此**没有 400「参数非法」这一类失败**，
+ * 失败只剩归属与状态两种。少一个参数就是少一条「哪些字段合法」的规则要维护。
+ *
+ * ⚠️ 也正因为没有 body，**身份不可能是调用方声明的**：`companionId` 只来自
+ * `requireCompanion()` 的会话身份。
+ *
+ * `at` 取**一次**并贯穿整段事务：事务里再取一次 `new Date()` 的话，
+ * 「这次开始服务的时刻」与写进订单的时刻会来自两个时刻。
+ *
+ * ## 失败语义（与取消同一条取舍）
+ *
+ * | 结果 | 抛出 | 为什么 |
+ * |---|---|---|
+ * | 订单不存在 / 不是本人实际履约 | `NOT_FOUND` → 404 | 两种表现必须一致，不泄露存在性 |
+ * | 是本人的单，但状态不是 `accepted` | `BAD_REQUEST` → 400 | 不是重放，是「点了此刻不该存在的按钮」 |
+ *
+ * 「重复点击」不走这条：这一单已经是 `serving` 且归本人时返回 200 与第一次的结果
+ * （`kind: "replayed"`，`servingAt` 仍是第一次的时刻）。
+ */
+export async function startCompanionOrder(
+  companionId: string,
+  orderId: string,
+): Promise<CompanionStartSuccess> {
+  const at = new Date().toISOString();
+
+  const outcome = await startCompanionOrderTransaction({ companionId, orderId, at });
+
+  if (outcome.kind === "ok" || outcome.kind === "replayed") return outcome;
+  if (outcome.kind === "not-found") {
+    throw new ApiError("NOT_FOUND", COMPANION_ORDER_NOT_FOUND_MESSAGE, 404);
+  }
+  throw new ApiError("BAD_REQUEST", COMPANION_ORDER_NOT_STARTABLE_MESSAGE, 400);
 }

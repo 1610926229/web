@@ -14,6 +14,7 @@ import {
   STAFF_OVERVIEW_PAGE_TITLE,
   STAFF_REFUNDS_PAGE_TITLE,
 } from "@/lib/constants/staff";
+import { STAFF_COMPLETION_DETAIL_TITLE } from "@/lib/constants/staffCompletions";
 import { logoutStaff } from "@/lib/services/staffHttp";
 import type { StaffSessionUser } from "@/lib/types/staff";
 
@@ -29,6 +30,7 @@ const NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/staff/conversations", label: STAFF_CONVERSATIONS_PAGE_TITLE },
   { href: "/staff/refunds", label: STAFF_REFUNDS_PAGE_TITLE },
   { href: "/staff/complaints", label: STAFF_COMPLAINTS_PAGE_TITLE },
+  { href: "/staff/completions", label: STAFF_COMPLETION_DETAIL_TITLE },
 ];
 
 /**

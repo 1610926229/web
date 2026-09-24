@@ -58,6 +58,40 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 | [`P0-5.5`](./P0-5.5/README.md) | 小型架构稳定化 | `DONE` | `6bd10fc` |
 | [`P0-6`](./P0-6/README.md) | accepted 主动取消接单 + 重新进入公共池 | `DONE` | `53481ea` |
 | [`DEV-1`](./DEV-1/README.md) | Mock 身份切换验收工具（开发 / 测试基础设施） | `DONE` | `53481ea` |
+| [`P0-6.1`](./P0-6.1/README.md) | 验收后整改：FIX-1 工作台返回用户端 + FIX-2 订单池「等待最久优先」 | `AWAITING_ACCEPTANCE` | — |
+| [`P0-7`](./P0-7/README.md) | `accepted → serving` —— 由当前实际打手点击「开始服务」 | `AWAITING_ACCEPTANCE` | — |
+| [`P0-8`](./P0-8/README.md) | CompletionSubmission + 客服审核 + 10 分钟自动审核 | `AWAITING_ACCEPTANCE` | — |
+| [`P0-9`](./P0-9/README.md) | Earning.frozen + 可配置投诉窗口 + `frozen → available` | `AWAITING_ACCEPTANCE` | — |
+
+> 🟡 **`P0-6.1` / `P0-7` / `P0-8` / `P0-9` 四轮全部止于 `AWAITING_ACCEPTANCE`**：它们都在批次
+> [`cmd_batch_p0-6.1_to_p0-9.md`](./cmd_batch_p0-6.1_to_p0-9.md) 之内（P0-6.1 → P0-7 → P0-8 → P0-9）。
+> 批次模式要求**每轮自动门禁全绿 + reviewer 无 BLOCKER/MAJOR 后不等待逐轮确认、自动进入下一轮**。
+>
+> ✅ **2026-09-24：四轮的统一人工验收已全部通过**——用户本人走完批次报告 §D 的完整清单，
+> 确认 P0-6.1 / P0-7 / P0-8 / P0-9 **四轮全部 `User Result = PASSED` / `Final Result = PASSED`**，
+> `Issues Found` 无。四轮的 `Accepted At` 均为 **2026-09-24**。
+> ⚠️ **状态仍为 `AWAITING_ACCEPTANCE`，这不矛盾**：按 `development-workflow.md` §十七 的
+> 「DONE 双门槛」，还需要**用户本人完成 Git 提交**——而四轮的改动至今全部躺在工作区，
+> 本批次**零 Git 写操作**。因此 `Git Commit` 一列留空是**正确状态**，
+> 用户本人提交之后才改为 `DONE`。Claude 不得自行标 `DONE`。
+
+> 🔵 **`P0-9` 曾经停在 `CLARIFYING`（已解除）。** 本轮第一次开工时，「投诉窗口的 Mock 默认值」
+> 在**所有权威文档里都没有定义**，因此按 `cmd_p0-9.md` §二 / 批次 §五 / §十 的**真停止条件**
+> 停在 `CLARIFYING` 向产品提问（`Q1`），**当时没有交付任何代码**。
+> 产品负责人于 **2026-09-24** 裁定 `Q1`（默认 24 小时 / 单位分钟 / 取值 60~10080 分钟，
+> 见 [`P0-9/02-decisions.md`](./P0-9/02-decisions.md) §八 D16~D18）后，本轮继续开发并**已交付**，
+> 现止于 `AWAITING_ACCEPTANCE`。⚠️ **`CLARIFYING` 那一版记录的是中间状态，不是本轮结论**；
+> 提问原文与证据链按「追加历史、不覆盖历史」保留在该文件 §三 / §八。
+>
+> 📋 **批次最终报告见 [`BATCH_p0-6.1_to_p0-9_最终报告.md`](./BATCH_p0-6.1_to_p0-9_最终报告.md)**
+> （A 四轮状态表 · B 每轮交付 · C 最终领域链 · **D 统一人工验收清单** · E 遗留 · F Git）。
+> ✅ 该报告 §D 的清单已于 **2026-09-24** 由用户本人走完，四轮**全部通过**；
+> 报告 §A.1 / §A.2 与摘要已同步记录最终验收结果（见该文件 §G）。
+
+> 🟡 **`P0-6.1` 止于 `AWAITING_ACCEPTANCE`**：它是 P0-6 / DEV-1 人工验收通过后登记的
+> **两个整改项**（FIX-1 / FIX-2）的落地轮，**不是新功能**，也**不推翻** P0-6 / DEV-1 的 `DONE`。
+> `Git Commit` 一列为空是**正确状态**——「DONE 的双重门槛」要求用户本人完成提交，
+> 在提交之前该列必须留空、状态必须停在 `AWAITING_ACCEPTANCE`（Claude 不得自行标 `DONE`）。
 
 > ✅ **P0-6 与 DEV-1 均已 `DONE` 收口**（两个独立 Round，互不阻塞）。
 > 两者的 `User Result` / `Final Result` 均为 `PASSED`（2026-09-24 人工验收通过），

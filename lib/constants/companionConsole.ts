@@ -3,6 +3,7 @@ import {
   COMPANION_ORDERS_PAGE_TITLE,
   COMPANION_POOL_PAGE_TITLE,
 } from "@/lib/constants/dispatch";
+import { COMPANION_EARNINGS_PAGE_TITLE } from "@/lib/constants/earnings";
 import { PLATFORM_NAME } from "@/lib/constants/site";
 
 /**
@@ -31,15 +32,21 @@ export const COMPANION_OVERVIEW_PAGE_TITLE = "工作台";
  * 合成一页的话，打手在专属池里翻找公共单时，会看不出哪些是「本来只给我」的。
  * 标签文案取自 `lib/constants/dispatch.ts`，两个页面与导航引用的是同一份字符串。
  *
- * ⚠️ 「我的订单」排在**概览之后、两张池子之前**（P0-6），顺序不是随意的：
- * 导航从左到右读下来是「我是谁 → **我手上的单** → 我能接的单」，
- * 即**当前责任**先于**新机会**。把它放在池子后面，读起来会变成
+ * ⚠️ 「我的订单」与「我的收益」排在**概览之后、两张池子之前**（P0-6 / P0-9），
+ * 顺序不是随意的：导航从左到右读下来是
+ * 「我是谁 → **我手上的单** → **我这单挣了多少** → 我能接的单」，
+ * 即**当前责任**先于**新机会**。把它们放在池子后面，读起来会变成
  * 「先看看有什么可抢的，再看自己扛着什么」——那正是这一轮要纠正的视角。
- * 它也不能放在第一位：那会挤掉「工作台」这个入口的身份说明作用。
+ * 「工作台」也不能挪到后面：它承担的是「这是谁的地盘」的身份说明作用。
+ *
+ * ⚠️ 收益紧跟在订单**之后**（而不是更靠后）：问「这一单挣了多少」的人，
+ * 十有八九是刚从订单页点过来的；两者被池子隔开的话，他会以为收益在别处。
+ * 标签文案取自 `lib/constants/earnings.ts`，页面与导航引用的是同一份字符串。
  */
 export const COMPANION_NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/companion", label: COMPANION_OVERVIEW_PAGE_TITLE },
   { href: "/companion/orders", label: COMPANION_ORDERS_PAGE_TITLE },
+  { href: "/companion/earnings", label: COMPANION_EARNINGS_PAGE_TITLE },
   { href: "/companion/exclusive", label: COMPANION_EXCLUSIVE_PAGE_TITLE },
   { href: "/companion/pool", label: COMPANION_POOL_PAGE_TITLE },
 ];
@@ -88,26 +95,49 @@ export const COMPANION_CONTACT_SERVICE_LABEL = "联系客服";
 /** 工作台不在底部 TabBar 里，两种提示页都要给一条明确的退路。 */
 export const COMPANION_BACK_TO_MINE_LABEL = "返回我的";
 
+// ——————————————————— 工作台 → 用户端（FIX-1，P0-6.1）———————————————————
+
+/**
+ * 从工作台回到**用户端主入口**的入口文案与目标（P0-6.1 FIX-1）。
+ *
+ * ## 这是界面导航，不是退出登录
+ *
+ * 打手用的就是用户账号（P0-4）：点它只是**换一个界面看**。
+ * 会话 Cookie、Mock 身份、护航资格、用户端资料**一个都不变**——
+ * 因此从用户端再走回 `/companion` 时**不需要重新登录**，也不会变成游客。
+ * 反过来说：如果这里点完变成了未登录，那就不是本入口，而是一个 bug。
+ *
+ * ## 为什么是 `/` 而不是 `router.back()`
+ *
+ * 目标必须**确定**：`components/common/NavBar.tsx` 的返回键走历史回退，
+ * 那适合「从列表进详情」；而工作台可以被**直接打开**（收藏、地址栏、微信里的分享），
+ * 历史里没有上一页时 `back()` 会把人留在一个空页面上。
+ * 这里要回答的是固定问题「用户端在哪」，所以给固定地址。
+ *
+ * ⚠️ `/` 就是用户端首页——底部 TabBar 的「首页」那一格指向同一个地址
+ * （`components/common/TabBar.tsx` 的 `TABS`），**不另立一个「用户端主入口」**。
+ *
+ * ## 为什么与 `COMPANION_BACK_TO_MINE_LABEL` 分成两条
+ *
+ * 那一条是**进不去**工作台时（还不是护航 / 资格已下架）的退路，去 `/mine` 看自己的资料；
+ * 这一条是**已经在工作台里**时的界面切换，去 `/` 继续逛。两句话的场景不同，
+ * 合并成一条会让「返回我的」出现在一个与「我的」无关的位置上。
+ */
+export const COMPANION_BACK_TO_USER_LABEL = "返回用户端";
+export const COMPANION_BACK_TO_USER_HREF = "/";
+
 // ——————————————————————————— 概览内容 ———————————————————————————
 
 /**
  * 本阶段工作台的边界说明。
  *
- * ⚠️ 这一句**必须跟着实际实现改**：写清楚「哪些还没开放」比让人对着一个空页面猜要好；
- * 而每开放一项就要同步删掉一句，否则它会变成一句阻止打手使用功能的假话。
+ * ⚠️ 这一句**必须跟着实际实现改**：写清楚「哪些已经能用、哪些还不能」比让人
+ * 对着一个空页面猜要好；每开放一项就要同步改一次，否则它会变成一句阻止打手
+ * 使用功能的假话——P0-9 之前它还写着「开始服务、完成材料与收益结算尚未开放」，
+ * 而那三件当时都已经开放了。
+ *
+ * ⚠️ 最后一句说的是**平台决定不做的那一件**（提现），照样要写出来：
+ * 与其让打手在收益页上找提现入口，不如在这里直接说清本阶段没有它。
  */
 export const COMPANION_SCOPE_NOTICE =
-  "本阶段已开放专属订单池、公共订单池与「我的订单」：可以查看并接单，也可以在开始服务前提交原因取消接单。开始服务、完成材料与收益结算尚未开放。";
-
-/**
- * 「后续开放」清单。⚠️ 只是**说明**，页面上没有任何一个对应的按钮或数据。
- *
- * ⚠️ P0-5 已把「订单池」与「接单」两项删掉，并且**不再出现「放弃接单」**：
- * 打手不想接单时什么都不用做，专属池十分钟到点自动转入公共池——
- * 把「放弃接单」留在「后续开放」里，等于承诺一个平台已经决定不做的功能。
- */
-export const COMPANION_COMING_SOON_TITLE = "后续开放";
-export const COMPANION_COMING_SOON_ITEMS: readonly string[] = [
-  "开始服务与提交完成材料",
-  "打手收益与分账明细",
-];
+  "本阶段已开放专属订单池、公共订单池、我的订单、开始服务、提交完成材料与我的收益。收益提现不在本阶段范围内。";

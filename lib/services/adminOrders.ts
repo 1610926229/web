@@ -17,6 +17,7 @@ import {
   type AdminOrderListQuery,
 } from "@/lib/constants/adminOrders";
 import { sweepExpiredDispatches } from "@/lib/data/companionDispatchTransaction";
+import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
 import { getDispatchRepository } from "@/lib/data/dispatchRepository";
 import { toOrderCompanionSnapshot } from "@/lib/constants/companions";
 import { getMessageRepository } from "@/lib/data/messageRepository";
@@ -178,6 +179,8 @@ export async function queryAdminOrderList(
   // 超时事实的惰性物化（幂等）：后台列表里的状态必须与业务事实一致，
   // 否则客服会对着一条「等待接单」的单去催一个已经不存在的接单
   sweepExpiredDispatches(new Date().toISOString());
+  // 完成材料到期自动通过的事实也一样（P0-8）
+  sweepCompletionAutoApprovals(new Date().toISOString());
 
   return withMockDebug(params, surface, async () => {
     const games = orderGameNames(await allOrdersForAdmin());
@@ -254,6 +257,8 @@ export async function getAdminOrderDetail(
   // 超时事实的惰性物化（幂等）：后台看到的订单状态必须与业务事实一致——
   // 一张在公共池里等到超时的单不该在后台还显示成「等待接单」
   sweepExpiredDispatches(new Date().toISOString());
+  // 完成材料到期自动通过的事实也一样（P0-8）
+  sweepCompletionAutoApprovals(new Date().toISOString());
 
   return withMockDebug(params, surface, async () => {
     const order = await getPaymentRepository().findOrderById(id);

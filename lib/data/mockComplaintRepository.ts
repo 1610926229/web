@@ -112,6 +112,12 @@ export const mockComplaintRepository: ComplaintRepository = {
     return { count: related.length, latest: related[0] ?? null };
   },
 
+  async listComplaintsByOrderId(orderId) {
+    return [...store().complaints.values()]
+      .filter((complaint) => complaint.orderId === orderId)
+      .sort(compareComplaintsNewestFirst);
+  },
+
   async queryComplaintsForAdmin(filter: AdminComplaintQueryFilter) {
     return [...store().complaints.values()]
       .filter((complaint) => filter.status === null || complaint.status === filter.status)

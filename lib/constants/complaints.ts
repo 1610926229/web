@@ -88,6 +88,49 @@ export const COMPLAINT_MAX_PAGE_SIZE = 20;
 /** 页码上限：与订单列表共用 `clampPage` 的默认上限。 */
 export const COMPLAINT_MAX_PAGE = 1000;
 
+// ——————————————————————————— 普通投诉窗口（P0-9）———————————————————————————
+
+/**
+ * 普通投诉窗口是否已经关闭。
+ *
+ * 窗口来自**订单自己的快照**（`Order.complaintDeadlineAt`），不是当前平台配置：
+ * 每张订单在进入 `completed` 时冻结当时的窗口，之后平台改配置不影响它
+ * （P0-9 `02-decisions.md` D16）。
+ *
+ * 三条语义，逐条刻意：
+ * 1. **`null` 表示「没有窗口」，不是「立刻关闭」**——`paid` / `accepted` / `serving`
+ *    的订单还没有完成，谈不上投诉窗口；P0-9 之前就 completed 的历史订单也没有快照。
+ *    把所有 `null` 都当成「已关闭」等于**顺带关掉在途订单与历史订单的投诉入口**，
+ *    而那是任何人没有要求过的行为变化。
+ * 2. 判据是 `deadline <= now`（含边界），与派单超时、自动审核同一口径：
+ *    到点即关闭，不接受「还差一毫秒」的争论。
+ * 3. 它**只回答普通投诉入口**。特殊人工申诉（如已完成很久之后的申诉）属于后续 TBD，
+ *    本阶段不实现——因此「窗口关闭」**不等于**「这件事永远没有人工处理的可能」，
+ *    接口文案与页面都不许把后者写成规则。
+ *
+ * 纯函数，不接触仓储：接口（服务层）与页面（`canSubmitComplaint`）用的是同一个它，
+ * 因此不存在「页面还显示按钮、接口却已经拒绝」的窗口期。
+ */
+export function isComplaintWindowClosed(
+  order: { complaintDeadlineAt: string | null },
+  at: string,
+): boolean {
+  if (!order.complaintDeadlineAt) return false;
+  return Date.parse(order.complaintDeadlineAt) <= Date.parse(at);
+}
+
+/**
+ * 普通投诉窗口关闭后，接口给用户的一句话。
+ *
+ * ⚠️ **不带具体小时数**：窗口是可配置的，而且**每一单用的是它自己完成时的快照**，
+ * 文案里印一个数字必然对某些订单是错的。具体时间由订单详情页显示。
+ *
+ * ⚠️ 必须留一句出路（「请联系客服」）：窗口关闭只是**普通入口**关闭，
+ * 把它写成「无法处理」会变成一句平台其实做不到的硬规则（见上面的第 3 条）。
+ */
+export const COMPLAINT_WINDOW_CLOSED_MESSAGE =
+  "该订单的投诉窗口已结束，无法再发起普通投诉；如有其他问题请联系客服。";
+
 /** 列表页 Tab：`all` 是查询条件，不是投诉真实状态。 */
 export type ComplaintTabKey = ComplaintStatus | "all";
 

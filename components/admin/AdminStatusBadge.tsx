@@ -4,6 +4,7 @@ import type { AdminCompanionStatusKey } from "@/lib/constants/adminCompanions";
 import type { AdminProductStatusKey } from "@/lib/constants/adminProducts";
 import type { ComplaintStatus } from "@/lib/types/complaint";
 import type { CompanionApplicationStatus } from "@/lib/types/companionApplication";
+import type { CompletionSubmissionStatus } from "@/lib/types/completion";
 import type { OrderStatus } from "@/lib/types/order";
 import type { RefundStatus } from "@/lib/types/refund";
 import type { AdminStaffState } from "@/lib/types/staff";
@@ -102,6 +103,19 @@ export const COMPLAINT_STATUS_TONE: Record<ComplaintStatus, AdminStatusTone> = {
   processing: "pending",
   resolved: "success",
   closed: "muted",
+};
+
+/**
+ * 完成材料（P0-8）：待审核是「在等」的进行中状态（橙），已通过是结论（绿），
+ * 已驳回需要被看见（红），已失效是「这一条不再参与审核」的终态（灰）。
+ *
+ * 状态文字始终由 `COMPLETION_STATUS_LABELS` 给出，这里只给语气。
+ */
+export const COMPLETION_STATUS_TONE: Record<CompletionSubmissionStatus, AdminStatusTone> = {
+  pending: "pending",
+  approved: "success",
+  rejected: "danger",
+  invalidated: "muted",
 };
 
 /**

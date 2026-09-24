@@ -58,9 +58,9 @@ app/
 │       ├── content/{agreements,announcements,banners,quick-entries}/
 │       └── platform-config/  customer-service/
 ├── staff/(console)/        客服工作台：complaints / conversations / refunds
-├── companion/(console)/    打手工作台：pool（公共池）/ exclusive（专属池）
-│                           TARGET：orders（我的订单）/ orders/[id]（订单详情）
-└── api/                    115 个 route.ts
+├── companion/(console)/    打手工作台：orders（我的订单）/ orders/[id]（订单详情）
+│                           / earnings（我的收益，P0-9）/ exclusive（专属池）/ pool（公共池）
+└── api/                    125 个 route.ts（admin 62 · staff 20 · companion 8 · 其余为用户端）
 ```
 
 ## 路由组（Route Group）说明 —— CURRENT，必读
@@ -283,14 +283,15 @@ public/
 > 旧文档用“P0-6 开始服务”作示例。2026-09-23 需求重排后编号已由用户重新分配：
 > **P0-6 = `accepted` 主动取消接单 + 重新进入公共池（含打手「我的订单」最小入口）**。
 >
-> **CURRENT（P0-6 落地）**：A 段的 `lib/types/order.ts`、`lib/constants/orders.ts`、
+> **CURRENT（P0-6 / P0-7 落地）**：A 段的 `lib/types/order.ts`、`lib/constants/orders.ts`、
 > `lib/data/mockPaymentRepository.ts`、`lib/services/companionOrders.ts`、
-> `lib/services/companionHttp.ts`、`app/api/companion/orders/**`（三件套）、
+> `lib/services/companionHttp.ts`、`app/api/companion/orders/**`（**四件套**）、
 > `app/companion/(console)/orders/**`、`components/companion/*Order*.tsx`、
 > `tests/companionOrders.test.mjs` 均已落地；伪事务落在
 > `lib/data/companionOrderTransaction.ts`（新增，A 段原文未列出该文件名，实现时新增）。
-> **TARGET — NOT IMPLEMENTED**：A 段的 `orders/[id]/start/route.ts`（`accepted → serving`）
-> 与完成材料提交；B 段（CompletionSubmission / 自动审核）、D 段（lifecycle 配置扩展）全部。
+> **TARGET — NOT IMPLEMENTED**：D 段（lifecycle 配置扩展）剩下的部分。
+> 完成材料提交（`orders/[id]/completion`）与 B 段（CompletionSubmission / 人工审核 / 自动审核）
+> **已于 P0-8 落地**——见下方 B 段。
 
 ### A. 打手“我的订单 / 取消接单 / 开始服务”
 
@@ -304,8 +305,12 @@ lib/services/companionHttp.ts                    ← 浏览器客户端可继续
 app/api/companion/orders/route.ts                 ← GET 我的订单；**已落地并已在 manifest**（P0-6）
 app/api/companion/orders/[id]/route.ts            ← GET 详情；**已落地并已在 manifest**（P0-6）
 app/api/companion/orders/[id]/cancel/route.ts     ← POST accepted 主动取消 + reason；**已落地并已在 manifest**（P0-6）
-app/api/companion/orders/[id]/start/route.ts      ← POST accepted → serving（TARGET — NOT IMPLEMENTED；
-                                                     同时是 P0-6 之后的**负向门禁**对象：不得入 manifest、不得存在文件）
+app/api/companion/orders/[id]/start/route.ts      ← POST accepted → serving；**已落地并已在 manifest**（P0-7）
+                                                     ⚠️ 它**不读请求体**（没有 reason、没有幂等键），
+                                                        因此该文件里不出现 `readJsonBody`
+app/api/companion/orders/[id]/completion/route.ts ← POST 提交完成材料；**已落地并已在 manifest**（P0-8）
+app/api/companion/earnings/route.ts               ← GET 我的收益；**已落地并已在 manifest**（P0-9）
+                                                     ⚠️ **只导出 GET**——收益的写入没有 HTTP 入口
 app/companion/(console)/orders/page.tsx
 app/companion/(console)/orders/[id]/page.tsx
 components/companion/*Order*.tsx
@@ -313,9 +318,16 @@ tests/companionOrders.test.mjs
 docs/02-tech-design/api-contract.md
 ```
 
-同一个 `/companion/orders/[id]` 详情页继续承载 `serving` 的“提交完成材料”，不得为 completion 再造第二套订单详情。
+同一个 `/companion/orders/[id]` 详情页继续承载 `serving` 的“提交完成材料”（`accepted` 的「开始服务」已于 P0-7 落在这个页面上），不得为 completion 再造第二套订单详情。
+**完成材料提交已于 P0-8 落在同一个详情页上**（`CompanionCompletionPanel`），没有第二套订单详情。
 
 ### B. CompletionSubmission + 自动审核
+
+> **已于 P0-8 落地。** 实际落点与下面的草图**基本一致**，差异只有三处，均为新增文件
+> （草图未列出而未违反草图）：`lib/constants/staffCompletions.ts`（客服端筛选 / 排序 /
+> 文案 / DTO 转换）、`lib/services/staffCompletionsHttp.ts`（客服浏览器客户端）、
+> 以及 `app/staff/(console)/completions/**` 四个页面文件。
+> 另外**没有**独立的「作废」原子区段——`invalidated` 按 P0-8 D3 保留类型但零写入路径。
 
 ```text
 lib/types/completion.ts
@@ -346,7 +358,8 @@ lib/data/mockCompanionReleaseRepository.ts
 
 它由以下事务消费，不自己拥有业务状态机：
 
-- 打手 accepted 主动取消 —— **CURRENT（P0-6）**：`lib/data/companionOrderTransaction.ts` 的 `cancelAcceptedOrder`；底层「写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 回 public → 通知」抽成一个**非导出**的私有出口，本轮只有 `cancelAcceptedOrder` 一个公开入口；
+- 打手 accepted 主动取消 —— **CURRENT（P0-6）**：`lib/data/companionOrderTransaction.ts` 的 `cancelAcceptedOrder`；底层「写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 回 public → 通知」抽成一个**非导出**的私有出口（`writeAcceptanceRelease`），只有 `cancelAcceptedOrder` 调用它。
+  同一个文件另有 P0-7 的 `startCompanionOrder`（`accepted → serving`，**不产生退出历史、不动派单、不发通知**）：两个动作同属「打手对自己这一单做什么」这一个域，因此共用文件与同一份原子性依据，该文件当前共**两个**公开入口；
 - Admin 封禁/移除当前打手 —— **TARGET — NOT IMPLEMENTED**（§十四 out of scope）；
 - Staff 直接换人 —— **TARGET — NOT IMPLEMENTED**（§十四 out of scope）。
 
@@ -355,6 +368,47 @@ lib/data/mockCompanionReleaseRepository.ts
 ### D. 平台 lifecycle 配置
 
 继续复用现有 `PlatformConfig` / `/api/admin/platform-config`，不要新建第二套配置域。TARGET 增加 exclusive timeout、Completion 自动审核时长、投诉窗口；进入对应生命周期阶段时冻结 snapshot/deadline。
+
+**进度**：`completionAutoApprovalMinutes`（Completion 自动审核时长）**已于 P0-8 落地**——
+加在同一个 `PlatformConfig` 上（`lib/types/platformConfig.ts`）、走同一个
+`/api/admin/platform-config` 的 PATCH 与同一份审计，**没有**新建第二套配置域。
+`AdminPlatformConfigPatch` 的三个字段都是**可选**的，PATCH 只带改动的那一项。
+`complaintWindowMinutes`（投诉窗口时长）**已于 P0-9 落地**，同样加在同一个实体上
+（默认 1440、取值 60~10080）。
+仍属 TARGET：`exclusivePoolTimeoutMinutes`。
+
+⚠️ **新增第四个参数时要动的地方（P0-9 的实际改动面）**：
+`lib/constants/platformConfig.ts`（默认值 / 上下界 / `isValidXxx` / 提示文案 / `PLATFORM_CONFIG_NOTICE`）、
+`lib/types/platformConfig.ts`、`lib/mocks/fixtures/platformConfigSeed.ts`、
+`lib/data/adminPlatformConfigTransaction.ts`（`PlatformConfigInput` + **`PATCHABLE_FIELDS`**——
+这个 `Record<keyof PlatformConfigInput, true>` 会让「忘了把字段加进 no-op 判定」变成 `tsc` 报错）、
+`lib/constants/adminAudit.ts`（审计快照）、`lib/services/adminPlatformConfig.ts`（输入解析）、
+`components/admin/AdminPlatformConfigConsole.tsx`（第三个独立保存的输入框）。
+**四处都要改，漏一处不会静默**——但漏掉审计快照不会有类型错误，那是唯一需要靠人记住的一处。
+
+### E. Earning / 结算域（P0-9 落地）
+
+```text
+lib/types/earning.ts                    ← Earning + 打手端 DTO（不含 clubNetIncome / reversedAmount / fineAmount）
+lib/constants/earnings.ts               ← 状态文案/颜色、isEarningMatured、无数字的说明文案
+lib/data/earningRepository.ts           ← **只读**接口（写入必须在伪事务里）
+lib/data/mockEarningRepository.ts       ← Mock Store（无种子数据）+ appendEarning / applyEarningRelease
+lib/data/earningTransaction.ts          ← settleOrderCompletion（唯一结算入口）+ sweepMaturedEarnings
+lib/services/companionEarnings.ts       ← DTO 拼装 + 两条 sweep 的惰性物化
+app/api/companion/earnings/route.ts     ← GET only（**不得出现任何写方法**）
+app/companion/(console)/earnings/**     ← 打手「我的收益」页
+tests/earning.test.mjs
+```
+
+**三条落点规则（本轮确认，后续沿用）：**
+
+1. **写入只能在伪事务里**，因此 `earningRepository` 是只读接口：如果仓储暴露 `createEarning`，
+   调用方就能绕开「订单必须已是 completed」这条路，直接造一笔收益。
+2. **结算入口只有一个** `settleOrderCompletion()`：P0-8 的两条完成路径都必须经它，
+   `approveCompletion` / `sweepCompletionAutoApprovals` **不允许**再自己调 `applyOrderCompletion`
+   （那会写出「订单 completed 了、快照和收益却没建」的一半状态）。
+3. **阻塞判据复用 `lib/data/orderBlocking.ts`**：它是 `isCompletionAutoApprovalBlocked`
+   的**唯一数据读取处**，P0-8 与 P0-9 共用。不要在收益域里再写一遍「有没有进行中的退款/投诉」。
 
 **⚠️ 不要为了一个功能把所有代码写进 `route.ts` 或 `page.tsx`。** Route Handler 仍只做 guard / 参数解析 / service / response；页面只做取数与渲染。
 

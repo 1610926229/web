@@ -1,9 +1,10 @@
 import { DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED } from "@/lib/constants/dispatch";
+import { canTransitionOrder } from "@/lib/constants/orders";
 import { parseNotificationInput } from "@/lib/constants/service";
 import type { CompanionReleaseRecord, CompanionReleaseSource } from "@/lib/types/companionRelease";
 import type { CompanionWriteContext } from "@/lib/types/dispatch";
 import type { Notification, NotificationInput } from "@/lib/types/notification";
-import type { CompanionCancelOutcome, Order } from "@/lib/types/order";
+import type { CompanionCancelOutcome, CompanionStartOutcome, Order } from "@/lib/types/order";
 import {
   appendCompanionRelease,
   bindCompanionReleaseKey,
@@ -12,17 +13,26 @@ import {
 } from "./mockCompanionReleaseRepository";
 import { applyDispatchToPublic, dispatchStore } from "./mockDispatchRepository";
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
-import { applyOrderAcceptanceReleased, paymentStore } from "./mockPaymentRepository";
+import {
+  applyOrderAcceptanceReleased,
+  applyOrderServing,
+  paymentStore,
+} from "./mockPaymentRepository";
 import { readPlatformConfig } from "./mockPlatformConfigRepository";
 
 /**
- * 打手订单域的伪事务（P0-6）—— 当前唯一的公开入口是「主动取消接单」。
+ * 打手订单域的伪事务（P0-6 / P0-7）—— 当前有**两个**公开入口：
+ * 「开始服务」（`startCompanionOrder`）与「主动取消接单」（`cancelAcceptedOrder`）。
+ *
+ * 两个动作是同一个域的两件事（都是「当前实际履约的打手对自己这一单做什么」），
+ * 因此共用本文件、共用同一份原子性依据；**没有**各自的伪事务文件
+ * （`02-decisions.md` D1 记录了理由）。
  *
  * ## 原子性是怎么成立的
  *
  * 与 `lib/data/companionDispatchTransaction.ts` 同一条依据：Node 是单线程的，
  * 「读—判断—写」之间只要不让出执行权，别的请求就插不进来。
- * **本文件里没有一个 `await`**（`cancelAcceptedOrder` 是 `async` 只是为了签名与
+ * **本文件里没有一个 `await`**（两个导出函数都是 `async` 只是为了签名与
  * `acceptDispatch` 一致，函数体会一路同步执行到底），因此整个函数体就是一段原子区段。
  *
  * ⚠️ **在标注的边界之后加一个 `await` 就是 bug**，哪怕加的是 `await Promise.resolve()`：
@@ -38,6 +48,17 @@ import { readPlatformConfig } from "./mockPlatformConfigRepository";
  * 少任何一件都会留下自相矛盾的状态：只有 2 是「订单没主了但派单还说被 A 接了」，
  * 只有 3 是「派单空着但订单还挂在 A 名下」，只有 1 是「历史里没有这次退出」（客服再也答不出
  * 「刚才那个人为什么走了」），只有 4 是「用户以为还有人给他做」。
+ *
+ * ## 一次「开始服务」只有一件事要写
+ *
+ * 与取消**刻意相反**：它不产生附属记录、不动派单、不发通知，只是在同一段同步代码里把
+ * 订单从 `accepted` 推进到 `serving` 并冻结 `servingAt`（`02-decisions.md` D6 记录了
+ * 「本轮不新增通知」的依据）。原子性的范围因此更窄，但要求不变——
+ * 「读到的还是 `accepted`、写的时候已经被改过」这个窗口同样必须关掉。
+ *
+ * ⚠️ 两者共用「先验证意图，再原子写入事实」这条裁决，但**判定顺序不同**，
+ * 因为幂等判据不同：取消靠幂等键（第 1 步查索引），开始服务靠**状态本身**
+ * （第 2 步判 `serving` 即重放，见 D2）。
  *
  * ## 为什么不用 `adminWriteSupport` 的 `operationId`
  *
@@ -278,6 +299,109 @@ export async function cancelAcceptedOrder(
     status: "paid",
     releaseRecordId: release.id,
     cancelledAt: ctx.at,
+    changed: true,
+  };
+}
+
+/**
+ * 当前实际履约的打手**开始服务**（`accepted → serving`，P0-7）。
+ *
+ * ## 判定顺序（先验证意图，再原子写入）
+ *
+ * ```
+ * 1. 订单不存在 / actualCompanionId ≠ 我   → not-found（对外 404，不泄露存在性）
+ * 2. status === "serving"                  → replayed（已经是我的服务中订单，一个字节都不写）
+ * 3. 结构校验 canTransitionOrder(…, serving) → false 则 not-startable（对外 400）
+ * 4. 领域 Guard：status 必须恰好是 accepted → false 则 not-startable（对外 400）
+ * 5. 原子写入（applyOrderServing）
+ * ```
+ *
+ * - **第 1 步先于第 2 步**：归属是**事实**，状态只是它的属性。先看状态的话，
+ *   别人就能拿一个订单 id 试探出「这一单已经开始服务了」。
+ * - **第 2 步必须早于第 3 步**：`serving → serving` **不在**中央状态表里，
+ *   先做结构校验会把一次重复点击判成「非法迁移」（400），而它本来只是一次重放。
+ * - **第 3、4 步语义不同，两道门都要留**（`01-prompt.md` §三）：
+ *   结构表回答「这条边存不存在」（将来状态表变了，它先知道），
+ *   领域 Guard 回答「这一单此刻就站在这条边的起点上吗」。
+ *   ⚠️ 走完第 2 步之后两者在同一个集合上成立，因此**看起来**重复——
+ *   但「状态机允许」不是权限，不得用其中一条替代另一条。
+ * - **不因状态表允许其它迁移而开放其它动作**：`serving → completed / refunded` 都在表里，
+ *   本轮一个都不开（`serving` 的普通主动取消也是明确的不做项）。
+ *
+ * ⚠️ **幂等判据是状态本身，不是幂等键**（D2）：这个动作没有附属记录要找回、
+ * 请求体也是空的，状态就是那次操作的结果。因此本函数**不接收** `idempotencyKey`，
+ * 客户端也不生成——发明一个服务端文档里不存在的必填字段，等于给调用方加规则。
+ *
+ * ⚠️ `ctx.companionId` **只允许**来自 `requireCompanion()` 返回的会话身份，
+ * 事务层不认识请求体、不认识 Cookie，因此「我是哪位打手」在结构上不可能由调用方声明。
+ */
+export async function startCompanionOrder(
+  ctx: CompanionWriteContext & { orderId: string },
+): Promise<CompanionStartOutcome> {
+  // 句柄在写之前取好。测试里的 resetMockStore() 会换掉整份存储，因此每次都现取
+  const payments = paymentStore();
+
+  // —— 原子区段开始（无 await）——
+
+  /* —— 第 1 步：订单存在，且**当前履约人就是我** —— */
+  const order = payments.orders.get(ctx.orderId);
+  if (!order || order.actualCompanionId !== ctx.companionId) return { kind: "not-found" };
+
+  /* —— 第 2 步：已经是我的服务中订单 → 重放 —— */
+  if (order.status === "serving") {
+    return {
+      kind: "replayed",
+      orderId: order.id,
+      orderNo: order.orderNo,
+      status: "serving",
+      // **第一次**开始的时刻，不是现在：重放不刷新任何时间。
+      // 正常路径下这里必然有值（写入器进入 serving 时一定写下它）；
+      // 若历史数据里是 null，就如实给出 null——「编一个开始时间」比空值更坏
+      servingAt: order.servingAt,
+      changed: false,
+    };
+  }
+
+  /* —— 第 3 步：结构校验（中央状态机）—— */
+  // 这条判定先于领域 Guard，为的是让「状态表里根本没有这条边」这件事由状态表自己回答：
+  // 它同时也是唯一一处「新增状态时该改哪里」的提示
+  if (!canTransitionOrder(order.status, "serving")) {
+    return { kind: "not-startable", status: order.status };
+  }
+
+  /* —— 第 4 步：领域 Guard —— */
+  // ⚠️ 与第 3 步并列存在，不是它的重复：能走到这里的状态今天恰好只剩 accepted，
+  // 但这句才是「这一单此刻允许开始服务吗」的答案。删掉它，将来状态表一变宽，
+  // 权限就跟着变宽了——那就成了「状态机即权限」
+  if (order.status !== "accepted") return { kind: "not-startable", status: order.status };
+
+  /* —— 第 5 步：原子写入（订单 → serving + servingAt）—— */
+  const written = applyOrderServing(order.id, ctx.at);
+  // 同一段同步代码里刚读到它，这里不可能为 null；真出现就按 404 回答，不编结果
+  if (!written) return { kind: "not-found" };
+
+  // 防御：第 2 步已经排除 serving，走到这里写入器必然真的改了。真出现「写入器说没变」
+  // （例如上面的判定顺序被改坏了），按重放回答——报一个与事实相反的 `changed: true`
+  // 会让调用方以为状态刚被推进过
+  if (!written.changed) {
+    return {
+      kind: "replayed",
+      orderId: written.updated.id,
+      orderNo: written.updated.orderNo,
+      status: "serving",
+      servingAt: written.updated.servingAt,
+      changed: false,
+    };
+  }
+
+  // —— 原子区段结束 ——
+
+  return {
+    kind: "ok",
+    orderId: written.updated.id,
+    orderNo: written.updated.orderNo,
+    status: "serving",
+    servingAt: written.updated.servingAt,
     changed: true,
   };
 }

@@ -81,8 +81,8 @@ allowBuilds:
 | **测试框架** | **无。使用 Node 内置 `node --test`** |
 | **命令** | `pnpm test` |
 | **完整命令** | `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/alias-hook.mjs --test "tests/*.test.mjs"` |
-| **测试文件数** | 51 |
-| **测试用例数** | 1011 |
+| **测试文件数** | 65 |
+| **测试用例数** | 1255（其中 132 条是 `APP_BASE_URL` 门控的 HTTP 套件，未起服务时跳过；生产模式跑满 1255/1255） |
 
 **`tests/alias-hook.mjs`** 是一个约 20 行的 ESM resolve hook，教会 Node 两条它原生不支持的规则：
 

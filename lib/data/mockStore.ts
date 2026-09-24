@@ -79,10 +79,24 @@ export type MockStoreName =
    */
   | "platformConfig"
   /**
+   * 完成材料（打手宣布护航完成、客服审核、到期自动通过）。P0-8 起由打手提交写入，
+   * **只增不改**（驳回后重提是新建一条）、没有预置数据。
+   * 见 `lib/data/mockCompletionRepository.ts`。
+   */
+  | "completion"
+  /**
    * 履约退出历史（谁曾经接过、为什么退出、何时退出）。P0-6 起由打手主动取消写入，
    * **只增不改**、没有预置数据。见 `lib/data/mockCompanionReleaseRepository.ts`。
    */
-  | "companionRelease";
+  | "companionRelease"
+  /**
+   * 打手收益（订单完成后生成、随投诉窗口冻结、到期释放）。P0-9 起由完成事务写入，
+   * 之后只被 `sweepMaturedEarnings` 改状态，**没有预置数据**
+   * （P0-9 之前就已经 completed 的历史订单不回溯补收益，见 `lib/types/order.ts`
+   * 的 `complaintWindowMinutesSnapshot` 注释）。
+   * 见 `lib/data/mockEarningRepository.ts`。
+   */
+  | "earning";
 
 const PREFIX = "__youmuMockStore__";
 

@@ -352,6 +352,13 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     // 还没有人接单。用户在下单时选的那位写在下面的派单记录里，不写在这里
     actualCompanionId: null,
     companion: null,
+
+    // —— 投诉窗口快照（P0-9）——
+    // 下单时**不冻结**：这一刻既没有 completed，也还不知道会不会有投诉窗口这回事
+    // （订单可能被退款、可能进了 completed 之后才谈得上窗口）。两者由
+    // `applyOrderCompletion` 在订单真正进入 completed 的同一段同步代码里一起写。
+    complaintWindowMinutesSnapshot: null,
+    complaintDeadlineAt: null,
   };
 
   // 与订单同一段、无 `await`：订单存在的那一刻，派单记录就必须已经存在

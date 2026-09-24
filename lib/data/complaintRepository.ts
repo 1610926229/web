@@ -65,6 +65,15 @@ export type ComplaintRepository = {
   summarizeComplaintsByOrder(orderId: string): Promise<ComplaintOrderStats>;
 
   /**
+   * 某一笔订单的**全部**投诉（跨状态，按提交时间倒序）。
+   *
+   * 供「判断有没有未完结投诉」这类需要看**全部状态**的场景用：`summarizeComplaintsByOrder`
+   * 只给最新一条，而「有没有还停在 pending / processing 的」必须逐条看（同一订单允许多条
+   * 投诉，最新一条已 resolved 不代表没有更早的未完结投诉）。
+   */
+  listComplaintsByOrderId(orderId: string): Promise<Complaint[]>;
+
+  /**
    * 管理端的**全量投诉**查询（P8C）：跨用户、按状态与类型筛选，按提交时间倒序返回全部命中记录。
    *
    * ⚠️ 与用户端的 `queryComplaints` 的关键区别：那个方法的 `userId` 是**查询条件**，

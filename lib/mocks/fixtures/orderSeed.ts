@@ -209,6 +209,17 @@ function build(input: PresetOrderInput): Order {
       // 订单快照的字段名保持 `name`（订单与评价的历史展示都按它读），值取陪玩唯一的昵称字段
       ? { id: companion.id, name: companion.displayName, avatarUrl: companion.avatarUrl }
       : null,
+
+    // —— 投诉窗口快照（P0-9）——
+    // ⚠️ 预置订单**一律为 null**，包括状态已经是 `completed` 的那几条。
+    // 它们是 P0-9 之前就存在的历史数据，从没有「在投诉窗口规则下完成」过：
+    // 补一个窗口等于拿今天的配置去套一张旧订单（EX-CONFIG-06 明令禁止的追溯），
+    // 而按它们各自早已过去的 `completedAt` 补出一个结论，还会连带产生
+    // 「这条收益现在就该解冻」的资金后果——那是**凭空造钱**，不属于本轮的授权范围。
+    // 因此旧订单留在模型之外，由人工处理；新完成的订单走
+    // `lib/data/mockPaymentRepository.ts` 的 `applyOrderCompletion` 正常冻结。
+    complaintWindowMinutesSnapshot: null,
+    complaintDeadlineAt: null,
   };
 }
 

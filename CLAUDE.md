@@ -11,10 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Fact | Value |
 |---|---|
 | Ends | **Four** — 用户端 `app/(mobile)/` · 管理后台 `app/admin/` · 客服工作台 `app/staff/` · 打手工作台 `app/companion/` |
-| Pages | 73 `page.tsx`, 8 `layout.tsx` |
-| API routes | 115 `route.ts` (`admin` 62 · `staff` 16 · rest user-facing) |
-| Repositories | 23 (interface + mock impl + `globalThis` store) |
-| Tests | 51 files, 1011 cases — `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm build` all green |
+| Pages | 78 `page.tsx`, 8 `layout.tsx` |
+| API routes | 125 `route.ts` (`admin` 62 · `staff` 20 · `companion` 8 · rest user-facing) |
+| Repositories | 26 (interface + mock impl + `globalThis` store) |
+| Tests | 65 files, 1255 cases — `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm build` all green |
 | Product name | **超哥电竞** — `lib/constants/site.ts:11` `PLATFORM_NAME`. The name "有目电竞" is **wrong** |
 
 The product is a mobile-first H5 storefront for esports companion/boosting services (陪玩 / 护航 / 打手), opened inside WeChat. Five-tab bottom nav — 首页 / 分类 / 订单 / 客服 / 我的. Design mobile-first; do not build desktop-first layouts and shrink them.
@@ -35,7 +35,7 @@ docs/01-requirements/                          ← 业务流程 / 用户权限 /
 docs/02-tech-design/architecture-rules.md      ← 分层职责、唯一真值源、金额规则、Observed Current vs 规范
 docs/02-tech-design/tech-stack.md              ← 技术选型与技术引入规则
 docs/02-tech-design/directory-structure.md     ← 每个目录的职责与「新功能放置规则」
-docs/02-tech-design/api-contract.md            ← 现有 115 个接口、约定、TARGET 与 TBD
+docs/02-tech-design/api-contract.md            ← 现有 125 个接口、约定、TARGET 与 TBD
 docs/02-tech-design/database-schema.md         ← 逻辑数据模型、TARGET 领域、未来 DB 迁移约束
 ```
 

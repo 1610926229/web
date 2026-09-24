@@ -20,8 +20,12 @@
 
 ## 概览
 
-**23 个 Mock store，23 个仓储。** 统一挂载方式：`lib/data/mockStore.ts` 的 `getMockStore<T>(name, create)`，
+**26 个 Mock store，26 个仓储。** 统一挂载方式：`lib/data/mockStore.ts` 的 `getMockStore<T>(name, create)`，
 挂在 `globalThis.__youmuMockStore__` 上（`PREFIX` 前缀）。
+
+**CURRENT（P0-9 更新）**：`earning`（打手收益）是第 26 个域。
+它的特别之处是**没有种子数据**：记录只由完成结算事务写入
+（见 §T2），且 P0-9 之前已完成的历史订单**刻意不回填**。
 
 **为什么挂 `globalThis`**：dev 模式热更新会重新执行模块，若存在模块作用域里，每次改文件都会清空联调数据。
 挂到 `globalThis` 后，同一 Node 进程内始终是同一个 store。
@@ -186,17 +190,53 @@
 **转移表本身已由产品负责人正式确认**（2026-09-19），逐行内容见 T3，本轮按原值落地、一字未改。
 **⚠️ 本轮只交付中央定义，不接入任何写入路径**：`applyOrderAccepted` / `applyOrderRefund` 行为不变，也没有新增调用点。
 
-**⚠️ 当前运行时的真实迁移只有三条**：`paid → accepted → refunded`。
-`accepted → serving` 与 `serving → completed` **尚未实现**；`serving` / `completed` 目前只存在于种子数据。
+**⚠️ 当前运行时的真实迁移**分两类，**别把它们混成一张表**：
+
+**（一）由订单生命周期动作产生，共四条**：
+`paid → accepted`（打手接单）/ `accepted → paid`（P0-6 打手主动取消接单 + 回公共池）/
+`accepted → serving`（P0-7 打手开始服务）/ `paid → refunded`（未开始服务直接全额退款）。
+
+**（二）由退款路径到达，三条**：`accepted → refunded` / `serving → refunded` / `completed → refunded`。
+这三条**不经过状态机的动作入口**，而是管理端批准退款申请时由
+`lib/data/adminRefundTransaction.ts` 调 `applyOrderRefund` 写入——**该写入器只看「是不是已经 `refunded`」，不校验起始状态**
+（`REFUNDABLE_ORDER_STATUSES` = `paid / accepted / serving / completed`，见 `lib/constants/refunds.ts:107`；
+`tests/refunds.test.mjs` 与 `tests/adminRefunds.test.mjs` 都跑过这几条）。因此**「退款只可能发生在 `paid`」是错的**。
+
+**尚未实现**：`serving → paid`（封禁回池 / 客服换人，批次明确不做）。
+（`serving → completed` **已于 P0-8 落地**，入口是完成材料的通过——人工 approve 与 System 自动通过
+两个来源共用同一条业务路径，写入器是 `applyOrderCompletion`。）
+⚠️ **不要**照 `ORDER_TRANSITIONS` 逐行对齐上面这一类——中央状态表是**结构许可**，
+它允许而运行时仍无入口的边（`serving → paid`）正需要这里分开写。
+入口清单以 `docs/02-tech-design/api-contract.md` §8 的 Companion API 清单为准（`orders/**` 下导出 `POST` 的路由恰好三个）。
 
 **TARGET — NOT IMPLEMENTED（2026-09-23）**：结构状态机需扩为 `accepted → paid`、`serving → paid` 的回池路径；对应当前履约绑定在回池时解除，历史由最小退出记录保存。`accepted` 终态直接退款则**保留** `actualCompanionId` 作为历史事实。具体见 T3。
 
-**订单写入点（CURRENT，恰好两处）**，都在 `lib/data/mockPaymentRepository.ts`：
+**订单写入点（CURRENT，恰好五处）**，都在 `lib/data/mockPaymentRepository.ts`。
+五个都是**同步**写入器，只负责写、不判断这次迁移合不合法（合法性由调用方的伪事务在同一个同步区段里判定）：
 
-| 函数 | 位置 | 写入 |
-|---|---|---|
-| `applyOrderAccepted` | `:213`（写 `:224`） | `status: "accepted"` |
-| `applyOrderRefund` | `:251`（写 `:275`） | `status: "refunded"` |
+| 函数 | 位置 | 写入 | 入口 |
+|---|---|---|---|
+| `applyOrderAccepted` | `:222`（写 `:241`） | `status: "accepted"` | 打手接单（P0-5 `acceptDispatch`） |
+| `applyOrderAcceptanceReleased` | `:273`（写 `:290`） | `status: "paid"` | 打手主动取消接单（P0-6 `cancelAcceptedOrder`） |
+| `applyOrderServing` | `:321`（写 `:341`） | `status: "serving"` + `servingAt` | 打手开始服务（P0-7 `startCompanionOrder`） |
+| `applyOrderCompletion` | `:373`（写 `:393`） | `status: "completed"` + `completedAt` | 完成材料通过——人工 approve 与 System 自动通过**共用**（P0-8） |
+| `applyOrderRefund` | `:412`（写 `:442`） | `status: "refunded"` | 退款（既有） |
+
+⚠️ **新增状态写入必须落在这里**，不得把 `status` 直接写在 `lib/services/` 或路由里——
+否则同一张 `Order.status` 就有了两个写入口，违反 `architecture-rules.md` 的唯一真值源。
+P0-8 的「完成材料审核通过 → `serving → completed`」已照 `applyOrderServing` 的形状落地为第五个同步写入器
+（`Order` 与 `CompletionSubmission` 的一致性由调用方的伪事务在同一同步区段内保证：
+`lib/data/completionTransaction.ts` 的 `approveCompletion` 与 `sweepCompletionAutoApprovals`）。
+
+⚠️ **`completedAt` 用 `order.completedAt ?? at` 写入**，不是直接赋值——重复调用不刷新既成事实的时刻
+（与 `servingAt` / `refundedAt` 同一写法）。P0-9 的 `complaintWindowMinutesSnapshot` / `complaintDeadlineAt`
+冻结**已加在这个写入器里**（`applyOrderCompletion` 的第三个入参 `complaintWindowMinutes`），
+因为它正是「订单进入 completed」这一个时刻——见上面 §T3.1。
+
+> 📌 **字段名是 `complaintWindowMinutesSnapshot`**（2026-09-24 更正，reviewer `m4`）。
+> 本文件与本段曾写作 `complaintWindowSnapshot`，与产品裁定的名字、实现、
+> `lib/types/order.ts` 都不一致。⚠️ `docs/03-dev/rounds/cmd_p0-9.md` 与
+> `P0-9/01-prompt.md` 里的旧名**不改**——那两份是原始开发指令的**逐字档案**，按协议原样保存。
 
 **⚠️ 订单初值 `status: "paid"` 不在 `lib/data/`**，而在 `lib/services/checkout.ts:316` 的 `buildOrderFromRequest`。
 
@@ -226,7 +266,23 @@ PaymentRequest ──(1:1，支付成功后)──> Order ──(1:1)──> Dis
 | Mock Store | `"dispatch"` → `{ dispatches: Map<string, DispatchRecord>; dispatchIdByOrder: Map<orderId, dispatchId> }` |
 | 主键 | `id` |
 | 状态 | `"exclusive"` \| `"public"` \| `"accepted"` \| `"timed_out"` |
-| 关键字段 | `id`、`orderId`、`state`、`exclusiveCompanionId`、`exclusiveEnteredAt`、`exclusiveDeadlineAt` |
+| 关键字段 | `id`、`orderId`、`state`、`exclusiveCompanionId`、`exclusiveEnteredAt`、`exclusiveDeadlineAt`、`publicPoolEnteredAt`、`publicTimeoutMinutesSnapshot`、`publicDeadlineAt`、`acceptedByCompanionId` |
+
+> ⚠️ **上表此前漏列了 public 侧三个字段**（`publicPoolEnteredAt` / `publicTimeoutMinutesSnapshot` /
+> `publicDeadlineAt`）与 `acceptedByCompanionId`（P0-6.1 补全）。它们一直是真实字段，
+> 只是没写进这一行；而 P0-6.1 的池子排序真值正是 `publicPoolEnteredAt`，
+> 一份「查不到这个字段」的数据模型文档会让人以为排序键不存在。
+
+**两组「进入时刻 + 到点时刻」**：`exclusiveEnteredAt` / `exclusiveDeadlineAt`（专属池）与
+`publicPoolEnteredAt` / `publicDeadlineAt`（公共池）。**当前**用哪一组由 `state` 决定。
+
+- 池子排序真值 = **当前池**的 `EnteredAt`（ASC，等待最久优先）；⚠️ 不是 `DeadlineAt`
+  （`publicPoolTimeoutMinutes` 自 P0-1 起后台可配置，改过后两者顺序会不同），
+  也不是 `Order.createdAt`。见 `api-contract.md` §8.1。
+- `EnteredAt` 会在**每一次进入该池**时被重写（首次进公共池 / 专属超时转入 / P0-6 取消回池），
+  因此它是「这一次等待的开始」，不是「订单的创建时间」。
+- `exclusiveCompanionId`（用户**指定**的人）与 `acceptedByCompanionId`（**实际**接单的人）
+  **永不互相覆盖**：前者是用户的选择，后者是既成事实。
 
 **唯一索引**：`dispatchIdByOrder` —— **一个订单同时只可能有一条派单记录**。
 
@@ -464,14 +520,22 @@ closed     → []
 | 仓储 | `lib/data/platformConfigRepository.ts` → `mockPlatformConfigRepository` |
 | Mock Store | `"platformConfig"` → `{ config: PlatformConfig }` |
 | 主键 | **单例**（不是集合） |
-| 关键字段 | `publicPoolTimeoutMinutes`、`updatedAt`、`updatedByAdminId` |
+| 关键字段 | `publicPoolTimeoutMinutes`（P0-1）、`completionAutoApprovalMinutes`（P0-8）、`complaintWindowMinutes`（P0-9）、`updatedAt`、`updatedByAdminId` |
 
 **⚠️ 单例且恒不为 null**：没有记录时用预置值，而不是让每个调用方处理「还没有配置」——
 那会让「参数缺失」变成一条到处都要判的空值路径。
 
 **⚠️ 改配置不动历史订单**：订单进入需要计时的环节时把自己那一刻的参数值冻结成快照。
 
-**TARGET — NOT IMPLEMENTED（V0.3）**：同一个 PlatformConfig 继续作为唯一平台配置真值源，后续至少扩展：exclusive pool timeout、CompletionSubmission 自动审核时长（默认 10 分钟）、投诉窗口时长。三个新参数都遵循“进入对应生命周期阶段时冻结 snapshot/deadline”的规则；不得新建第二套配置实体。
+**CURRENT（P0-9 落地）**：三项参数都已可配置，且都遵循「进入对应生命周期阶段时冻结快照」的规则——
+`publicPoolTimeoutMinutes`（订单进池时冻结到 `Dispatch.publicTimeoutMinutesSnapshot`）、
+`completionAutoApprovalMinutes`（提交完成材料时冻结到 `CompletionSubmission.autoApprovalMinutesSnapshot`）、
+`complaintWindowMinutes`（订单进入 completed 时冻结到 `Order.complaintWindowMinutesSnapshot`
+并算出 `complaintDeadlineAt`）。三项的取值区间**不共用**：前两项 1~1440，投诉窗口 60~10080
+（P0-9 `02-decisions.md` D17）。
+
+**TARGET — NOT IMPLEMENTED（V0.3）**：同一个 PlatformConfig 继续作为唯一平台配置真值源，后续仍可扩展
+（如 exclusive pool timeout）。新参数一律遵循上面同一条冻结规则；不得新建第二套配置实体。
 
 ---
 
@@ -539,25 +603,36 @@ closed     → []
 
 # 第二部分：TARGET — NOT IMPLEMENTED
 
-**以下领域已被规划文档明确确认，但当前代码中不存在。**
+**以下领域已被规划文档明确确认，但当前代码中大部分尚不存在。**
+⚠️ **本节并非全为「不存在」**：`T1`（CompletionSubmission）已于 P0-8 大部分落地、
+`T2`（Earning / Settlement）已于 P0-9 落地、`T4`（CompanionReleaseRecord）已于 P0-6 部分落地
+——这三节各自在标题下写明了「CURRENT / TARGET」的分界，
+**请以各节自己的标注为准，不要以本节的标题为准**。
 
-## T1. CompletionSubmission（完成材料）—— TARGET — NOT IMPLEMENTED
+## T1. CompletionSubmission（完成材料）—— 部分实现
+
+**CURRENT（P0-8 落地）**：本实体已实现（`lib/types/completion.ts`、
+`lib/data/completionRepository.ts` → `mockCompletionRepository`、`lib/data/completionTransaction.ts`），
+提交 / 人工通过 / 人工驳回 / 到期自动通过四条路径全部可运行。
+**TARGET — NOT IMPLEMENTED**：`invalidated` 只有类型占位，**没有任何写入路径**——
+封禁回池时作废旧 pending 属 P0-9，见 `api-contract.md` §3.2 末条。
 
 ```ts
 export type CompletionSubmissionStatus =
   | "pending"
   | "approved"
   | "rejected"
-  | "invalidated"; // 封禁/回池导致旧材料失效；名称可在实现时保持等价语义，但必须有明确终态
+  | "invalidated"; // 封禁/回池导致旧材料失效；P0-8 无写入路径，仅保留枚举兼容
 
 export type CompletionSubmissionReviewSource = "staff" | "system" | null;
 
 export type CompletionSubmission = {
-  id: string;
+  id: string;                          // `cs_${crypto.randomUUID()}`
   orderId: string;
-  companionId: string;
-  evidenceNames: string[];
-  summary: string;                    // 5~50 字
+  companionId: string;                 // 只来自 requireCompanion() 会话，不来自请求体
+  evidence: SupportEvidence[];         // ⚠️ 落地为复用售后凭证约定（P0-8 D2），
+                                       //    不是本表旧稿的 evidenceNames: string[]
+  summary: string;                     // 5~50 字（按字符数，Emoji 算 1）
   status: CompletionSubmissionStatus;
   submittedAt: string;
 
@@ -573,6 +648,10 @@ export type CompletionSubmission = {
 };
 ```
 
+⚠️ **`evidenceNames` → `evidence` 是等价命名调整**：`SupportEvidence`（`lib/types/evidence.ts`）
+是仓库既有的凭证结构（`id` / `url` 由服务端生成），复用它是为了不与退款 / 投诉的凭证约定分叉；
+本表旧稿的 `evidenceNames: string[]` 只是同义草图。
+
 **已确认业务语义：**
 
 - 只有 `serving` 且操作人是当前 actualCompanion 才能提交。
@@ -586,7 +665,7 @@ export type CompletionSubmission = {
 
 > 字段名属于技术设计；若实现 Round 发现已有仓库命名更合适，可做等价命名调整，但不得改变上面的业务语义。
 
-## T2. Earning / Settlement（打手收益）—— TARGET — NOT IMPLEMENTED
+## T2. Earning / Settlement（打手收益）—— CURRENT（P0-9 落地）
 
 ```ts
 export type EarningStatus = "frozen" | "available" | "withdrawn" | "reversed";
@@ -598,21 +677,34 @@ export type Earning = {
   incomeAmount: number;      // 来自订单快照
   status: EarningStatus;
   frozenAt: string;
-  availableAt: string | null; // TARGET：等于本单 complaintDeadlineAt，而不是写死 completed + 48h
+  availableAt: string | null; // = 本单 complaintDeadlineAt，而不是写死 completed + 48h
   withdrawnAt: string | null;
   reversedAmount: number;
   fineAmount: number;        // 自动罚款规则仍未定义；accepted 主动取消当前 P0 不处罚
 };
 ```
 
-**已确认业务语义：**
+**CURRENT（P0-9 落地）**：`lib/types/earning.ts` 声明类型，
+`lib/data/mockEarningRepository.ts` 是 Mock Store（`earning` 域，无种子数据），
+**唯一写入者**是 `lib/data/earningTransaction.ts` 的两个同步函数：
+
+- `settleOrderCompletion({ orderId, at })` —— 结算一次完成，同时写下「订单 completed + 投诉窗口快照 + 一条 frozen Earning」；
+- `sweepMaturedEarnings(at)` —— 到期解冻，挂在读取路径上（与 `sweepCompletionAutoApprovals` 同一条惰性物化机制）。
+  真实 Scheduler 上线后必须调用**同一个**函数，不是另写一套。
+
+`withdrawn` / `reversed` 两个取值目前**只有类型占位、没有写入路径**（提现与罚款仍是 TBD，见 api-contract 第四部分）。
+`status` 目前只会出现 `frozen | available`。
+
+**已确认业务语义（P0-9 全部落地）：**
 
 - 订单进入 completed（人工审核或系统自动审核）后，为当时实际履约打手生成一条 frozen Earning；`incomeAmount = Order.companionBaseIncome` 快照。
 - Order completed 时冻结 `complaintWindowMinutesSnapshot` / `complaintDeadlineAt`；Earning.availableAt 复用该 deadline。
-- deadline 到达且无投诉/有效售后冻结原因后 `frozen → available`。
+- deadline 到达且无投诉/有效售后冻结原因后 `frozen → available`（阻塞判据与 P0-8 自动通过**共用** `isCompletionAutoApprovalBlocked` + `readOrderBlockingFacts`）。
 - 平台之后修改投诉期不改变已 completed 订单的 deadline。
 - 提现、自动罚款、管理员余额调整/会费批扣的账本细节仍不在本实体本轮强行定义。
 - `sweepMaturedEarnings()` 同步、幂等、可重复调用；后台 Scheduler 必须复用它。
+- **不追溯**：P0-9 之前已完成的历史订单不回填 Earning（那会用历史 `completedAt` 造出一笔「已经该解冻」的钱）。
+- **无实际履约打手时不建记录**：没有 `actualCompanionId` 就没有收益可发，如实不建，而不是建一条 `companionId: ""` / 金额 0 的假记录。
 
 ## T3. Order 状态机表 —— CURRENT 旧实现 + TARGET 新转移
 
@@ -642,16 +734,27 @@ refunded  -> []
 
 `Order.status = "refunded"` 仍表达**已完成全额退款**；未来部分退款本身不得自动改成 refunded。
 
-### T3.1 Order 的 TARGET 生命周期 deadline 字段
+### T3.1 Order 的生命周期 deadline 字段 —— CURRENT（P0-9 落地）
 
-当前 Order 还没有投诉窗口快照字段。V0.3 TARGET 要求进入 completed 时冻结：
+两个字段**已实现**（`lib/types/order.ts`），进入 completed 时冻结：
 
 ```ts
 complaintWindowMinutesSnapshot: number | null;
 complaintDeadlineAt: string | null;
 ```
 
-这些字段只在 completed 生命周期建立后有值，平台配置后续变更不追溯修改历史订单。
+**CURRENT（P0-9 落地）**：
+
+- 两者由 `lib/data/mockPaymentRepository.ts` 的 `applyOrderCompletion()` 在**同一个写入点**写下，
+  `complaintDeadlineAt = completedAt + complaintWindowMinutesSnapshot` —— 这条等式是结构上的，
+  不是靠两处各算一遍对齐的；Earning 的 `availableAt` 再**搬**这个值（不重新加分钟数）。
+- 结算入口只有 `settleOrderCompletion()`（`lib/data/earningTransaction.ts`），
+  P0-8 的两条完成路径（客服人工通过、System 自动通过）都只经它。
+- **`null` 有两种含义**，都表示「没有窗口」，**不是**「已关闭」：
+  ① 尚未 completed 的在途订单；② P0-9 之前就 completed 的历史订单（**刻意不回填**）。
+  `isComplaintWindowClosed()` 对 `null` 返回 false，因此这两类订单的投诉入口与本轮之前完全一致。
+- 平台配置后续变更不追溯修改历史订单：判定只看订单自己的 `complaintDeadlineAt`，从不读当前配置。
+- 窗口取值 60 ~ 10080 分钟（默认 1440），见 §PlatformConfig 与本轮 `02-decisions.md` D17。
 
 ## T4. 最小 CompanionReleaseRecord（履约退出历史）—— 部分实现
 

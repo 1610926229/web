@@ -79,8 +79,8 @@ const COMPANION_API_MANIFEST = [
     service: "acceptDispatchForCompanion",
     serviceModule: "@/lib/services/companionDispatch",
   },
-  // —— P0-6：打手「我的订单」三件套 ——
-  // 三条都走同一个服务模块：列表、详情与取消接单对归属的判定必须是**同一件事**
+  // —— P0-6 / P0-7：打手「我的订单」四件套 ——
+  // 四条都走同一个服务模块：列表、详情、开始服务与取消接单对归属的判定必须是**同一件事**
   // （`Order.actualCompanionId`），拆成两个模块就迟早会有一边判成 `exclusiveCompanionId`。
   {
     route: "orders/route.ts",
@@ -99,15 +99,57 @@ const COMPANION_API_MANIFEST = [
     serviceModule: "@/lib/services/companionOrders",
   },
   {
-    // 全轮唯一的**写**入口（`accepted → paid`）。它出现在这里就意味着：
-    // 打手端从此有了一个能改订单状态的接口，因此 `orders/[id]` 下的写入口
-    // 必须与下面那条负向门禁一起看——多一个就是偷偷实现了后续 Round。
+    // P0-6 的**写**入口（`accepted → paid`）。
     route: "orders/[id]/cancel/route.ts",
     methods: ["POST"],
     guard: "requireCompanion",
     guardModule: "@/lib/api/companionRoute",
     service: "cancelCompanionOrder",
     serviceModule: "@/lib/services/companionOrders",
+  },
+  {
+    // P0-7 的**写**入口（`accepted → serving`）。
+    //
+    // ⚠️ 它**没有请求体**（没有原因、没有幂等键），因此它的接口里**不应该**出现
+    // `readJsonBody`：幂等的判据是状态本身（已经是 `serving` 且归本人就是重放）。
+    // 这条不在本文件的断言里，但它是「不许给这个接口发明必填字段」那件事的由来。
+    //
+    // 它出现在这里就意味着打手端多了一个能改订单状态的接口，因此 `orders/[id]` 下的
+    // 写入口必须与下面那条负向门禁一起看——多一个就是偷偷实现了后续 Round。
+    route: "orders/[id]/start/route.ts",
+    methods: ["POST"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "startCompanionOrder",
+    serviceModule: "@/lib/services/companionOrders",
+  },
+  {
+    // P0-8 的**写**入口：打手提交完成材料（`serving` → pending submission）。
+    //
+    // ⚠️ 它**不直接推进订单**——订单到 completed 是客服通过 / 到期自动通过的结果，
+    // 因此「提交完成材料」是完成材料线上的写动作，不是订单状态机的直接写入口。
+    // 它出现在这里意味着 `orders/[id]` 下多了一个 POST，负向门禁要跟着一起改。
+    route: "orders/[id]/completion/route.ts",
+    methods: ["POST"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "submitCompanionCompletion",
+    serviceModule: "@/lib/services/companionCompletions",
+  },
+  {
+    // P0-9：打手「我的收益」（**只读**，本阶段没有提现、没有余额调整）。
+    //
+    // ⚠️ 它**没有请求体、也不读查询参数**：`companionId` 只能来自
+    // `requireCompanion()` 的会话身份。多一个参数位就等于给「看别人的收益」留一扇门。
+    // 读取路径上必须先物化完成事实、再物化解冻（「先有完成、才有收益」），
+    // 因此这一条服务模块同时出现在 `sweepCompletionAutoApprovals` 的调用方白名单里
+    // （见 `tests/completions.test.mjs` 的门禁 23）。
+    route: "earnings/route.ts",
+    methods: ["GET"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "listCompanionEarnings",
+    serviceModule: "@/lib/services/companionEarnings",
   },
 ];
 
@@ -200,14 +242,14 @@ test("清单自己先自检：没有重复地址、每个地址至少声明一�
     );
   }
 
-  // 打手端当前恰好**五个**接口（P0-5.5 两条 + P0-6 三条）。
+  // 打手端当前恰好**八个**接口（P0-5.5 两条 + P0-6 三条 + P0-7 一条 + P0-8 一条 + P0-9 一条）。
   // 改这个数就要同步改清单，不能只是「多了一个」。
-  assert.equal(COMPANION_API_MANIFEST.length, 5);
+  assert.equal(COMPANION_API_MANIFEST.length, 8);
 });
 
 // ——————————————————————————— 二、清单与实际路由一致 ———————————————————————————
 
-test("打手接口清单固定：当前恰好五个接口，多一个 / 少一个 / 被改名都会在这里现形", () => {
+test("打手接口清单固定：当前恰好八个接口，多一个 / 少一个 / 被改名都会在这里现形", () => {
   const routeFiles = collectFiles(COMPANION_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   assert.deepEqual(
@@ -317,33 +359,39 @@ test("打手接口不会混进别的身份守卫：混进一个就等于开了�
 // ——————————————————————————— 四、不得提前落地未来的接口 ———————————————————————————
 
 /**
- * 负向门禁：`orders/[id]` 下**只有** cancel 一个写入口。
+ * 写入口集合门禁：`orders/**` 下**恰好三个**写入口。
  *
  * ## 这条挡的不是「以后不许做」，而是「现在别偷偷做」
  *
- * P0-6 真正新增的可执行迁移只有一条：`accepted → paid`（打手主动取消接单）。
- * 结构状态机里还有 `serving → paid`，而 `serving → completed` 更是 TARGET 里的主线——
- * 它们都是**后续 Round** 的内容（`01-prompt.md` §十四 明令 out of scope：
- * `accepted → serving`、CompletionSubmission、Earning…）。
+ * 到 P0-8 为止，`orders/[id]` 下导出 POST 的恰好三个：`cancel`（P0-6 主动取消，
+ * `accepted → paid`）、`start`（P0-7 开始服务，`accepted → serving`）、
+ * `completion`（P0-8 提交完成材料，`serving` → pending submission）。
  *
- * 轮次真正开始时，那一位会建文件、写服务、把地址加进上面的清单——
- * 那时本用例会红，提醒他同时更新档案与进度表；这正是它存在的意义。
+ * ⚠️ `completion` 与另两个**性质不同**：它不直接推进订单状态——订单到 `completed`
+ * 是客服通过 / 到期自动通过的结果，入口在客服端，不在打手端。但「一个 route 文件
+ * 导出了 POST」就是一个写入口，这条门禁按**行为性质**而不是业务语义数入口：
+ * 多一个 POST 就现形。
+ *
+ * P0-6 时这条断言写的是「只有 cancel 一个」，P0-7 改成「就这两个」，P0-8 改成
+ * 「就这三个」——每一次都**在轮次里显式改一次**，这正是它存在的意义：下一位要落地
+ * `serving → completed` 的直接写入口（或任何新写动作）时会先看到它变红。
  *
  * ## 为什么断言「写入口集合」而不是只断言某个具体名字
  *
- * 只断言 `start` 这个名字的话，把接口叫 `begin` / `serve` / `complete` 就绕过去了，
- * 而「打手点一下就能把订单推进到服务中」这件事与名字无关。因此判据是**行为性质**：
- * 一个 route 文件导出了 `POST`，它就是一个写入口，而 P0-6 只允许有一个。
+ * 只断言 `start` 这个名字的话，把接口叫 `begin` / `serve` / `submit` 就绕过去了，
+ * 而「打手点一下就能把订单推进到下一步」这件事与名字无关。因此判据是**行为性质**：
+ * 一个 route 文件导出了 `POST`，它就是一个写入口。
  */
-test("负向门禁：orders/[id] 下只有 cancel 一个写入口——「开始服务」（accepted → serving）仍未落地", () => {
-  // (1) 具名地址不存在。`hasAppFile` 已忽略路由组，因此换个目录层级也躲不过去
+test("写入口门禁：orders 下恰好三个写入口——completion（P0-8）、start（P0-7）与 cancel（P0-6），再多就是偷偷实现了后续 Round", () => {
+  // (1) P0-8 的地址必须**在**（它已从 TARGET 变成 CURRENT）。
+  //     `hasAppFile` 已忽略路由组，因此换个目录层级也躲不过去
   assert.equal(
-    hasAppFile("api/companion/orders/[id]/start/route.ts"),
-    false,
-    "「开始服务」属于后续 Round（01-prompt.md §十四），不得提前落地",
+    hasAppFile("api/companion/orders/[id]/completion/route.ts"),
+    true,
+    "「提交完成材料」已在 P0-8 落地：地址必须存在（缺了上面那条清单一致性也会红）",
   );
 
-  // (2) 不点名任何具体动词：`orders/**` 下导出 POST 的只能有一个，且必须是 cancel
+  // (2) 不点名任何具体动词：`orders/**` 下导出 POST 的只能有这三个
   const writeEntries = collectFiles(path.join(COMPANION_API_DIR, "orders"))
     .filter((file) => file.endsWith("route.ts"))
     .filter((file) => exportedMethods(readSource(file)).includes("POST"))
@@ -352,13 +400,42 @@ test("负向门禁：orders/[id] 下只有 cancel 一个写入口——「开始
 
   assert.deepEqual(
     writeEntries,
-    ["orders/[id]/cancel/route.ts"],
-    "orders 下多了一个写入口：P0-6 只有「主动取消接单」，其余写动作都是后续 Round 的范围",
+    ["orders/[id]/cancel/route.ts", "orders/[id]/completion/route.ts", "orders/[id]/start/route.ts"],
+    "orders 下多了一个写入口：到 P0-8 为止打手只有「主动取消接单」「开始服务」「提交完成材料」三个写动作，其余（确认完成等）都是后续 Round 的范围",
   );
 
-  // (3) 清单里也不许为未实现的接口背书：登记进去而磁盘上没有，是最难被发现的一种不一致
+  // (3) 清单与上面这份集合必须是同一件事：登记进去而磁盘上没有，是最难被发现的一种不一致
   const startEntries = COMPANION_API_MANIFEST.filter((entry) =>
     entry.route.split("/").includes("start"),
   );
-  assert.deepEqual(startEntries, [], "清单不得登记任何 start 段：它是 TARGET，不是 CURRENT");
+  assert.deepEqual(
+    startEntries.map((entry) => entry.route),
+    ["orders/[id]/start/route.ts"],
+    "P0-7 起清单里必须有且只有一条 start 段——它不再是 TARGET",
+  );
+});
+
+/**
+ * 「开始服务」接口**不读请求体**。
+ *
+ * 这个动作没有原因、没有幂等键（幂等判据是状态本身），因此它的接口里不该出现
+ * `readJsonBody`：调了它，一个空的 POST 体就会变成 400「请求体格式无效」——
+ * 等于给这个接口发明了一条服务端文档里并不存在的必填体规则。
+ *
+ * 反过来读它就是另一件更糟的事：一旦有了 body，下一位就可能从里面取 `companionId`
+ * 当身份用。这条断言把「身份只能来自 `requireCompanion()`」这句注释变成可执行的。
+ */
+test("开始服务接口不读请求体：没有原因、没有幂等键，身份与参数都不可能来自调用方", () => {
+  const code = stripComments(readSource(path.join(COMPANION_API_DIR, "orders/[id]/start/route.ts")));
+
+  assert.equal(
+    code.includes("readJsonBody"),
+    false,
+    "开始服务没有请求体：调 readJsonBody 会把「空体」判成非法，也会给「从 body 取身份」留一扇门",
+  );
+  assert.equal(
+    code.includes("request.json("),
+    false,
+    "开始服务不解析请求体：解析一定是为了让某个字段生效，而这个接口一个字段都不该有",
+  );
 });

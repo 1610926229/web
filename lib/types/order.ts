@@ -16,6 +16,7 @@
  */
 
 import type { CompanionReleaseRecord } from "./companionRelease";
+import type { CompanionCompletionInfo } from "./completion";
 import type { OrderComplaintSummary } from "./complaint";
 import type { ConversationStats } from "./message";
 import type { RefundSummary } from "./refund";
@@ -158,6 +159,32 @@ export type Order = {
   actualCompanionId: string | null;
   /** 实际接单打手的公开信息快照；还没有人接时为 null */
   companion: OrderCompanionSnapshot | null;
+
+  // —— 投诉窗口快照（P0-9）——
+  /**
+   * **进入 `completed` 那一刻**冻结的投诉窗口时长（分钟）。
+   *
+   * 取的是当时的 `PlatformConfig.complaintWindowMinutes`；未 completed 时为 null。
+   * 冻结之后**永不重算**：后台之后改配置，已经 completed 的历史订单的窗口不变
+   * （EX-CONFIG-06「改配置不追溯」）。这与 `companionRateSnapshot` /
+   * `publicTimeoutMinutesSnapshot` 是同一条快照语义。
+   *
+   * ⚠️ 与 `Dispatch.publicTimeoutMinutesSnapshot` 的一处差别：这里**允许为 null**，
+   * 而 P0-9 之前就已经 completed 的历史订单**不会被回溯补写**（补写要么凭空编一个
+   * 窗口、要么拿今天的配置去套一张旧订单，后者正是被禁止的追溯）。因此 null 的含义是
+   * 「这一单不是在投诉窗口规则下完成的」——那时它的普通投诉入口按原有规则处理。
+   */
+  complaintWindowMinutesSnapshot: number | null;
+  /**
+   * 普通投诉入口的截止时刻 = `completedAt + complaintWindowMinutesSnapshot`（P0-9）。
+   *
+   * 两件事都由它回答，且**必须是同一个时刻**：
+   * - 用户在这一单上还能不能发起**普通投诉**（`deadline <= now` 之后入口关闭）；
+   * - 打手这一单的收益什么时候能解冻（`Earning.availableAt` 就等于它）。
+   *
+   * 未 completed 时为 null。
+   */
+  complaintDeadlineAt: string | null;
 };
 
 /**
@@ -342,6 +369,21 @@ export type CompanionOrderListItem = {
    * 这里只是**诚实性**提示，真正的保护在 `cancelAcceptedOrder` 的原子区段里。
    */
   canCancel: boolean;
+  /**
+   * 此刻能不能开始服务（P0-7）。
+   *
+   * ⚠️ **与 `canCancel` 同一条契约**：**由服务端算好**（就是 `status === "accepted"`），
+   * 前端不得自己用状态推断。两个旗标成对存在，是因为它们回答的是同一件事的
+   * 两个方向——「这一单此刻允许我做什么」；把它们拆到两个类型上，第一次有人
+   * 只改一处时就会分叉，而分叉的那一天页面上会出现一个点下去必然失败的按钮。
+   *
+   * ⚠️ 列表卡片不渲染它（与 `canCancel` 一样，按钮长在详情页上），但仍然放在这个
+   * **共享**项上：详情就是「列表项 + 若干字段」，动作旗标属于两者共同的那一层。
+   *
+   * 它只是**诚实性**提示，真正的保护在 `startCompanionOrder` 的原子区段里
+   * （同一段代码里再判一次归属与状态）。
+   */
+  canStart: boolean;
 };
 
 /**
@@ -358,6 +400,17 @@ export type CompanionOrderListItem = {
  * 那会让页面读到一个永远为空的字段，而真正有内容的 `remark` 反而没人看。
  */
 export type CompanionOrderDetail = CompanionOrderListItem & {
+  /**
+   * 开始服务的时刻（P0-7）；还没开始为 null。
+   *
+   * ⚠️ 它是**展示**字段，因此**只进详情、不进列表项**：列表卡片只显示下单与接单
+   * 两个节点，`serving` 那一单在列表里已经由状态名「护航中」说清楚了
+   * （与 `gameAccountId` / `remark` 同一条 DTO 最小化取舍）。
+   *
+   * 与 `acceptedAt` 一样是**历史事实**：进入 `serving` 不会抹掉接单时间，
+   * 页面把两个节点都显示出来——打手要能回答「我是几点接的、几点开始的」。
+   */
+  servingAt: string | null;
   gameAccountId: string;
   remark: string;
   addons: OrderAddonSnapshot[];
@@ -377,6 +430,14 @@ export type CompanionOrderDetail = CompanionOrderListItem & {
    * 用户记录查不到时给空串，而不是让整页报错——订单本身是有效的。
    */
   customerNickname: string;
+  /**
+   * 这一单的完成材料摘要（P0-8）。
+   *
+   * 只回答「提交过没有、此刻能不能提交、待审核到什么时候、被驳回了什么」，
+   * **由服务端算好**（`buildCompanionCompletionInfo`）：页面不得自己用订单状态
+   * 推断能不能提交——那会把「serving 但已有 pending」这类情况算错。
+   */
+  completion: CompanionCompletionInfo;
 };
 
 /** 打手「我的订单」一次要显示的全部内容。 */
@@ -438,6 +499,60 @@ export type CompanionCancelOutcome =
     }
   | { kind: "not-found" }
   | { kind: "not-accepted"; status: OrderStatus };
+
+/**
+ * 开始服务的结果（事务层，P0-7）。
+ *
+ * 与 `CompanionCancelOutcome` **刻意有一处不对称**：这里**没有幂等键**，
+ * 因此也没有「键命中」这种失败路径——幂等的判据是**状态本身**
+ * （已经是 `serving` 且是我的单就是重放），理由见 `startCompanionOrder` 的头部。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的开始服务了 | 200 |
+ * | `replayed` | 这一单**已经是** `serving` 且归本人（重复点击、网络重试） | 200，`changed: false` |
+ * | `not-found` | 订单不存在，**或**不是本人实际履约 | 404（不泄露存在性） |
+ * | `not-startable` | 是本人的单，但状态不是 `accepted` | 400 |
+ *
+ * ⚠️ 两种失败**必须用不同的状态码**，与取消同一条理由：`not-found` 是
+ * 「这一单与你无关」，`not-startable` 是「你点了一个此刻不该存在的按钮」——
+ * 后者不是重放（`paid` / `completed` / `refunded` 都不该被拉进 `serving`），
+ * 因此必须失败而不是幂等成功。
+ *
+ * ⚠️ 两个成功分支的 `status` 都是字面量 `"serving"`，含义是
+ * **「这次开始服务把订单置成了什么状态」**，而**不是**「订单此刻的状态」。
+ * 与取消的 `"paid"` 同一条约定：重放返回与第一次完全相同的响应
+ * （`api-contract.md` §2.8），去读实时状态反而会让同一个请求两次到达给出不同答案。
+ *
+ * `servingAt` 在两个成功分支里都是**第一次写入的那一刻**（重放不刷新它）——
+ * 这正是「重复点击不改变开始时间」这句话对调用方的表达。
+ *
+ * ⚠️ 它**允许为 null**，与 `Order.servingAt` 一致，但 null 只可能出现在重放分支上：
+ * 一张状态已经是 `serving`、而 `servingAt` 从未写下的历史记录（种子数据 / 迁移遗留）。
+ * 那时如实给出 null，而不是**编一个开始时间**——「这一单是几点开始的」如果不知道，
+ * 说不知道才是对的。正常路径（本次真的推进）写入器一定把它写下来，因此不会是 null。
+ */
+export type CompanionStartOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      status: "serving";
+      /** 本次写入的开始服务时刻 */
+      servingAt: string | null;
+      changed: true;
+    }
+  | {
+      kind: "replayed";
+      orderId: string;
+      orderNo: string;
+      status: "serving";
+      /** **第一次**开始服务的时刻（重放不刷新它）；见上面关于 null 的说明 */
+      servingAt: string | null;
+      changed: false;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-startable"; status: OrderStatus };
 
 /* ───────────────────────── 管理端订单 DTO（P8C） ───────────────────────── */
 

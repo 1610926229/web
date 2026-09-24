@@ -74,9 +74,35 @@ export type AdminPlatformConfigWriteOutcome =
     }
   | { kind: "operation-conflict" };
 
-/** 本模块能改的字段（**白名单**）。没有 `updatedAt` / `updatedByAdminId`：那两个由事务写。 */
+/**
+ * 本模块能改的字段（**白名单**）。没有 `updatedAt` / `updatedByAdminId`：那两个由事务写。
+ *
+ * ⚠️ 三个字段都**可选**（PATCH 只带要改的那一项），但**至少一个**——空 PATCH 不算
+ * 改动，这个「至少一个」由服务层校验（`PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE`）。
+ * 事务层按「没带的字段保持现状」合并，而不是清空。
+ */
 export type PlatformConfigInput = {
-  publicPoolTimeoutMinutes: number;
+  publicPoolTimeoutMinutes?: number;
+  completionAutoApprovalMinutes?: number;
+  complaintWindowMinutes?: number;
+};
+
+/**
+ * 本模块能改的字段清单，**只用于「这次到底改没改」的判定**。
+ *
+ * ⚠️ 它存在的理由是让「加第四个参数时忘记更新判定」变成**编译错误**：
+ * 类型是 `Record<keyof PlatformConfigInput, true>`，少写一个键就通不过 `tsc`。
+ * 写成手写的 `next.x !== previous.x && next.y !== previous.y` 链则不会——
+ * 那种写法漏掉一个字段时，改**只有那个字段**的请求会走进「值没变」分支，
+ * 返回 `changed: false` 且**什么都不写**，管理员看到「未变化」而配置其实没保存。
+ *
+ * ⚠️ 合并（上面那个 `next` 字面量）不靠这份清单：`PlatformConfig` 的字段都是必填的，
+ * 少写一个同样是编译错误。两边因此各有各的编译期保险，不依赖人的记性。
+ */
+const PATCHABLE_FIELDS: Record<keyof PlatformConfigInput, true> = {
+  publicPoolTimeoutMinutes: true,
+  completionAutoApprovalMinutes: true,
+  complaintWindowMinutes: true,
 };
 
 // ——————————————————————————— 写入 ———————————————————————————
@@ -106,9 +132,25 @@ export async function updatePlatformConfig(
 
   const previous = { ...store.config };
 
-  // 两种「什么都没发生」：重放，或提交的值与现状相同。
+  // PATCH 合并：没带的字段保持现状，带了的字段用新值。合并结果就是「这次若写、会写成什么」。
+  // 用展开 `...previous` 而不是逐字段列：三个字段的 `updatedAt` / `updatedByAdminId`
+  // 覆盖写在后面，其余值原样带过来——将来加第四个参数时这里**不需要**改一行。
+  const next: PlatformConfig = {
+    ...previous,
+    publicPoolTimeoutMinutes: input.publicPoolTimeoutMinutes ?? previous.publicPoolTimeoutMinutes,
+    completionAutoApprovalMinutes:
+      input.completionAutoApprovalMinutes ?? previous.completionAutoApprovalMinutes,
+    complaintWindowMinutes: input.complaintWindowMinutes ?? previous.complaintWindowMinutes,
+    updatedAt: ctx.at,
+    updatedByAdminId: ctx.actorId,
+  };
+
+  // 两种「什么都没发生」：重放，或提交的值与现状相同（所有可改字段都没变）。
   // 都不写数据、不写审计、不刷新时间戳，且**都不是错误**
-  if (replay?.kind === "replay" || previous.publicPoolTimeoutMinutes === input.publicPoolTimeoutMinutes) {
+  const nothingChanged = (Object.keys(PATCHABLE_FIELDS) as (keyof PlatformConfigInput)[])
+    .every((field) => next[field] === previous[field]);
+
+  if (replay?.kind === "replay" || nothingChanged) {
     return {
       kind: "ok",
       // 两份互不相关的副本，而不是同一个对象的两个别名
@@ -118,11 +160,7 @@ export async function updatePlatformConfig(
     };
   }
 
-  const written = writePlatformConfig({
-    publicPoolTimeoutMinutes: input.publicPoolTimeoutMinutes,
-    updatedAt: ctx.at,
-    updatedByAdminId: ctx.actorId,
-  });
+  const written = writePlatformConfig(next);
 
   writeAudit({
     ctx,

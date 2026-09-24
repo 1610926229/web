@@ -268,28 +268,35 @@ P0-5.5 **有意不收敛它**——那属于改动 Companion 模块，超出该�
 
 `deadline` 驱动的超时（派单转公共池、超时退款）目前**只在有人读取时被推进**，没有定时器。
 
-## 5.3 TARGET（NOT IMPLEMENTED）—— 生命周期 deadline 统一使用“配置 + snapshot + 同一 domain service”
+## 5.3 生命周期 deadline 统一使用“配置 + snapshot + 同一 domain service”
 
 **这是硬约束，不是建议。** 2026-09-23 后，P0 至少存在四类 deadline：
 
-| 生命周期 | 配置/来源 | snapshot 时点 |
-|---|---|---|
-| public Dispatch timeout | `PlatformConfig.publicPoolTimeoutMinutes`（CURRENT 已有） | 真正进入 public 时 |
-| exclusive Dispatch timeout | TARGET：后台可配置 | 真正进入 exclusive 时 |
-| CompletionSubmission 自动审核 | TARGET：后台可配置，默认 **10 分钟** | 每次 submission 进入 pending 时；驳回后重提重新计时 |
-| completed 投诉窗口 | TARGET：后台可配置 | Order 真正进入 completed 时 |
+| 生命周期 | 配置/来源 | snapshot 时点 | 状态 |
+|---|---|---|---|
+| public Dispatch timeout | `PlatformConfig.publicPoolTimeoutMinutes` | 真正进入 public 时 | CURRENT |
+| exclusive Dispatch timeout | 后台可配置 | 真正进入 exclusive 时 | TARGET — NOT IMPLEMENTED（当前仍是写死的常量） |
+| CompletionSubmission 自动审核 | `PlatformConfig.completionAutoApprovalMinutes`，默认 **10 分钟** | 每次 submission 进入 pending 时；驳回后重提重新计时 | CURRENT（P0-8） |
+| completed 投诉窗口 | `PlatformConfig.complaintWindowMinutes`，默认 **24 小时（1440 分钟）**，取值 **60 ~ 10080** 分钟 | Order 真正进入 completed 时 | CURRENT（P0-9） |
 
 已经冻结的 deadline **不被后续平台配置修改追溯改变**。
+⚠️ 三个 `isValidXxx` 校验器**区间不共用**（前两项 1~1440，投诉窗口 60~10080），
+因此**不能**用其中一个去校验另一个字段——见 P0-9 `02-decisions.md` D17。
 
-将来接入后台定时调度器时，调度器**必须**调用同一套同步、幂等、可重复调用的业务入口，例如：
+将来接入后台定时调度器时，调度器**必须**调用同一套同步、幂等、可重复调用的业务入口：
 
 ```
 sweepExpiredDispatches(now)          // CURRENT domain 入口
-sweepCompletionAutoApprovals(now)    // TARGET
-sweepMaturedEarnings(now)             // TARGET
+sweepCompletionAutoApprovals(now)    // CURRENT（P0-8）
+sweepMaturedEarnings(now)            // CURRENT（P0-9）
 ```
 
 自动完成审核必须再次检查 submission 仍为 `pending`、Order 仍为 `serving`、deadline 已到、无投诉/有效售后阻塞；客服人工审核、封禁回池等并发动作一旦先成功，后续 sweep 必须安全 no-op。
+
+**收益解冻的阻塞判据只有一份**：`sweepMaturedEarnings` 与 `sweepCompletionAutoApprovals`
+共用 `isCompletionAutoApprovalBlocked()` + `readOrderBlockingFacts()`
+（后者是 `lib/data/orderBlocking.ts` 里唯一的那次数据读取）。
+分成两份的那天，「被投诉挡住了却照样放款」就会成为可能，而页面上看不出来。
 
 **严禁**在调度器里另写第二套超时退款、自动完成或收益释放逻辑。
 
@@ -306,11 +313,11 @@ sweepMaturedEarnings(now)             // TARGET
 |---|---|---|---|
 | 1 | **Order 方法位于 `PaymentRepository`**（`lib/data/paymentRepository.ts:61-142`） | ❌ **不是规范** | 不存在 `OrderRepository`。这是历史形成，**不表示 Order 必须永远属于 PaymentRepository** |
 | 2 | `lib/services/adminHttp.ts` 1163 行 / 84 export，承载全部管理端浏览器客户端 | ❌ **不是规范** | 用户端拆成约 20 个 `*Http.ts`。**新接口不必须继续往这一个文件里塞** |
-| 3 | `lib/data/source.ts` 的 `DataSource` 门面只覆盖 11 个读方法 | ❌ **不是规范** | 与 23 个 `getXxxRepository()` 并存，是**两个惯用法**。不要因为它存在就认为新增读取必须走它 |
+| 3 | `lib/data/source.ts` 的 `DataSource` 门面只覆盖 11 个读方法 | ❌ **不是规范** | 与 26 个 `getXxxRepository()` 并存，是**两个惯用法**。不要因为它存在就认为新增读取必须走它 |
 | 4 | 三套会话模块（`session.ts` / `adminSession.ts` / `staffSession.ts`）近乎复制 | ❌ **不是规范** | 是 Mock 阶段的现状。**不表示第四种身份要再复制一套** |
 | 5 | 18 个测试文件各有一份逐字节相同的 `stripComments` | ❌ **不是规范** | 重复，但只在测试内，不产生业务错误 |
 | 6 | 400–600 行的表单组件与种子文件 | ❌ **不是规范** | 大文件本身不是问题，见 §八 |
-| 7 | `lib/data/mockStore.ts` 的 23 个 store 名没有任何 schema 声明 | ❌ **不是规范** | Mock 阶段的现状 |
+| 7 | `lib/data/mockStore.ts` 的 26 个 store 名没有任何 schema 声明 | ❌ **不是规范** | Mock 阶段的现状 |
 
 **判据**：一条规则只有在「不遵守就会产生业务错误」时才升级为规范。
 「仓库里已经这样」不构成理由。
@@ -322,6 +329,9 @@ sweepMaturedEarnings(now)             // TARGET
 ## 7.1 TARGET — NOT IMPLEMENTED
 
 > 2026-09-23 需求重排后，旧的 P0-6 / P0-7 / P0-8 编号不再作为未来开发顺序真值；**具体 Round 由 `docs/03-dev/总需求进度表.md` 与 Round Protocol 重新分配**。下表只描述已经确认的目标能力。
+>
+> ⚠️ **本表混有已落地行**（P0-6 / P0-7 / P0-8 / P0-9 各占若干条），
+> 「当前差距」列已逐行标注「已实现（Px-y）」。**判据是那一列，不是本节标题。**
 
 | 项 | 已确认目标 | 当前差距 |
 |---|---|---|
@@ -329,15 +339,15 @@ sweepMaturedEarnings(now)             // TARGET
 | accepted 主动取消 | actualCompanion 可在未 serving 前提交原因取消；通知用户；当前不处罚；回 public；保留最小退出历史 | **已实现（P0-6）**，**本行无遗留缺口**：退出历史管理端（`/admin/orders/[id]`）与客服端（会话 / 投诉 / 退款三个只读详情）**两半都可看**。客服侧**没有为此新增任何接口**，见 `rounds/P0-6/02-decisions.md` D6 **V3** |
 | 未服务直接退款 | `paid/accepted` 用户直接全额退款；accepted 打手收益 0、通知打手、保留终态 `actualCompanionId` | 当前 `/refunds` 仍按旧人工申请链路，需要整改 |
 | Companion 我的订单 | `/companion/orders` + `/companion/orders/[id]`，只允许 actualCompanion 查看 | **已实现（P0-6）** |
-| 开始服务 | actualCompanion 显式 `accepted → serving`，不得由时间/备注/聊天自动触发 | 未实现 |
-| CompletionSubmission | 截图 + 5~50 字；同一订单最多 1 个 pending；驳回可重提并重新计时 | 未实现 |
-| 完成自动审核 | 默认 10 分钟、后台可配置；pending 时冻结 snapshot/deadline；无投诉/售后阻塞时 System 自动通过 | 未实现 |
-| completed 投诉窗口 | 后台可配置；进入 completed 时冻结本单 deadline；Earning 解冻消费该 deadline | 未实现 |
+| 开始服务 | actualCompanion 显式 `accepted → serving`，不得由时间/备注/聊天自动触发 | **已实现（P0-7）**：`POST /api/companion/orders/[id]/start`，接口不读请求体（幂等判据是状态本身） |
+| CompletionSubmission | 截图 + 5~50 字；同一订单最多 1 个 pending；驳回可重提并重新计时 | **已实现（P0-8）**：`lib/data/completionTransaction.ts`；`invalidated` 仍只有类型占位、无写入路径 |
+| 完成自动审核 | 默认 10 分钟、后台可配置；pending 时冻结 snapshot/deadline；无投诉/售后阻塞时 System 自动通过 | **已实现（P0-8）**：`sweepCompletionAutoApprovals()` 挂在读取路径上；真实 Scheduler 仍是上线前阻塞项 |
+| completed 投诉窗口 | 后台可配置；进入 completed 时冻结本单 deadline；Earning 解冻消费该 deadline | **已实现（P0-9）**：`complaintWindowMinutes`（默认 1440、取值 60~10080）；`applyOrderCompletion()` 一处写完 snapshot 与 deadline |
 | Companion 封禁联动 | accepted/serving 均解除当前履约并回 public；通知用户；旧 pending completion 作废 | 当前 Companion disable 尚未联动这些实体 |
 | 客服直接换人 | 客服无需管理员批准；P0 不设次数上限；涉及退款资金仍由管理员最终决定 | 权限已确认，最小回池实现尚未落地 |
 | 最小履约退出历史 | 不引入复杂 Assignment 聚合；只保留“订单、原打手、退出来源/原因、时间、操作者”满足追溯 | 未实现 |
-| Earning / 结算域 | completed 后生成 frozen；到本单 complaint deadline 且无阻塞后 available | 未实现 |
-| 后台 Scheduler | 必须复用同一 domain sweep 入口 | 不存在 |
+| Earning / 结算域 | completed 后生成 frozen；到本单 complaint deadline 且无阻塞后 available | **已实现（P0-9）**：`lib/data/earningTransaction.ts` 的 `settleOrderCompletion()` / `sweepMaturedEarnings()`；`withdrawn` / `reversed` 两态仍只有类型占位 |
+| 后台 Scheduler | 必须复用同一 domain sweep 入口 | **仍不存在**。当前三条 sweep（派单超时 / 完成自动审核 / 收益解冻）全部挂在读取路径上惰性触发——这是**临时**推进方式，不是规范；上线前必须换成调度器调用**同一批**函数 |
 
 ## 7.2 TBD — DO NOT INVENT
 

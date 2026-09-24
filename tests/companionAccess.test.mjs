@@ -268,6 +268,9 @@ test("不是护航 / 已下架时不读第二次：一次判定同样只读一�
  * 两页都由 URL 里的订单 id 或当前会话打手 id 取数，因此同样要拿会话身份——
  * 清单随之从三个变五个。清单**不是**「只准三处」的配额，而是
  * 「每多一处都必须有人确认它走的是同一份 `React.cache` 结果」。
+ *
+ * ⚠️ P0-9 修订：「我的收益」（`earnings/`）与「我的订单」同一个取舍——
+ * 它要拿当前打手的 id 去查自己那份收益，因此同样必须走同一份缓存结果，清单从五个变六个。
  */
 test("结构约束：资格判定必须缓存包装，工作台的调用点是显式清单", () => {
   const consoleDir = path.join(ROOT, "app", "companion");
@@ -280,6 +283,7 @@ test("结构约束：资格判定必须缓存包装，工作台的调用点是�
   assert.deepEqual(
     callSites,
     [
+      "app/companion/(console)/earnings/page.tsx",
       "app/companion/(console)/exclusive/page.tsx",
       "app/companion/(console)/layout.tsx",
       "app/companion/(console)/orders/[id]/page.tsx",
@@ -290,7 +294,7 @@ test("结构约束：资格判定必须缓存包装，工作台的调用点是�
   );
 
   // 一次请求一份结果靠的是 React.cache，因此这条包装本身就是约束的一部分：
-  // 去掉它，上面那五个调用点就会变成五次独立的仓储读取
+  // 去掉它，上面那六个调用点就会变成六次独立的仓储读取
   const access = stripComments(
     readFileSync(path.join(ROOT, "lib", "services", "companionAccess.ts"), "utf8"),
   );

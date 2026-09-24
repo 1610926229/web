@@ -1,8 +1,13 @@
 import { ApiError } from "@/lib/api/ApiError";
 import {
+  PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE,
+  PLATFORM_CONFIG_INVALID_COMPLAINT_WINDOW_MESSAGE,
+  PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE,
   PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE,
   PLATFORM_CONFIG_OPERATION_CONFLICT_MESSAGE,
+  isValidComplaintWindowMinutes,
+  isValidCompletionAutoApprovalMinutes,
   isValidPublicPoolTimeoutMinutes,
 } from "@/lib/constants/platformConfig";
 import { readIdempotencyKey } from "@/lib/constants/writes";
@@ -22,7 +27,8 @@ import type { AdminPlatformConfigWriteResult, PlatformConfig } from "@/lib/types
  * （`lib/api/adminRoute.ts`，理由见那里的注释）。
  *
  * 这一层负责三件事，多一件都不做：
- * 1. 解析与校验入参（**白名单**：客户端能改的字段只有 `publicPoolTimeoutMinutes`）；
+ * 1. 解析与校验入参（**白名单**：客户端能改的字段只有 `publicPoolTimeoutMinutes` /
+ *    `completionAutoApprovalMinutes` / `complaintWindowMinutes`，其余字段没有进入路径）；
  * 2. 把伪事务的失败翻译成明确的接口错误；
  * 3. 决定 DTO —— 本模块的 DTO 就是配置记录本身（它没有需要裁剪的字段）。
  *
@@ -89,10 +95,43 @@ function writeContext(adminId: string, operationId: string): AdminWriteContext {
  * 看起来成功了，而实际生效的是另一个数字——管理员随后看到的页面会显示
  * 默认值，但他以为那是他刚填的。
  */
-function readTimeoutMinutes(body: Record<string, unknown>): number {
+function readTimeoutMinutes(body: Record<string, unknown>): number | undefined {
+  // PATCH：字段没出现表示「不改这一项」，返回 undefined 交给事务层保持现状
+  if (!("publicPoolTimeoutMinutes" in body)) return undefined;
   const raw = body.publicPoolTimeoutMinutes;
   if (!isValidPublicPoolTimeoutMinutes(raw)) {
     throw new ApiError("BAD_REQUEST", PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE, 400);
+  }
+  return raw;
+}
+
+/**
+ * 从请求体里读完成材料自动审核时长（P0-8）。字段没出现表示不改这一项。
+ *
+ * 与 `readTimeoutMinutes` 同一套「不做隐式转换、非法值一律拒绝」的规则。
+ */
+function readCompletionAutoApprovalMinutes(body: Record<string, unknown>): number | undefined {
+  if (!("completionAutoApprovalMinutes" in body)) return undefined;
+  const raw = body.completionAutoApprovalMinutes;
+  if (!isValidCompletionAutoApprovalMinutes(raw)) {
+    throw new ApiError("BAD_REQUEST", PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE, 400);
+  }
+  return raw;
+}
+
+/**
+ * 从请求体里读投诉窗口时长（P0-9）。字段没出现表示不改这一项。
+ *
+ * ⚠️ 上下限是 **60 ~ 10080** 分钟，与上面两项的 1 ~ 1440 **不是同一组**
+ * （P0-9 `02-decisions.md` D17：语义不同，量级不同，不共用常量）。
+ * 这里必须调用 `isValidComplaintWindowMinutes` 而不是 `isValidPublicPoolTimeoutMinutes`——
+ * 用错会把 7 天的投诉窗口判成非法。
+ */
+function readComplaintWindowMinutes(body: Record<string, unknown>): number | undefined {
+  if (!("complaintWindowMinutes" in body)) return undefined;
+  const raw = body.complaintWindowMinutes;
+  if (!isValidComplaintWindowMinutes(raw)) {
+    throw new ApiError("BAD_REQUEST", PLATFORM_CONFIG_INVALID_COMPLAINT_WINDOW_MESSAGE, 400);
   }
   return raw;
 }
@@ -129,9 +168,24 @@ export async function updateAdminPlatformConfig(
 ): Promise<AdminPlatformConfigWriteResult> {
   const operationId = requireIdempotencyKey(body);
   const publicPoolTimeoutMinutes = readTimeoutMinutes(body);
+  const completionAutoApprovalMinutes = readCompletionAutoApprovalMinutes(body);
+  const complaintWindowMinutes = readComplaintWindowMinutes(body);
+
+  // 空 PATCH：一个字段都没带，不算一次改动，也谈不上「保持现状」——直接拒绝，
+  // 免得调用方以为保存成功了
+  if (
+    publicPoolTimeoutMinutes === undefined &&
+    completionAutoApprovalMinutes === undefined &&
+    complaintWindowMinutes === undefined
+  ) {
+    throw new ApiError("BAD_REQUEST", PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE, 400);
+  }
 
   return toWriteResult(
-    await updatePlatformConfig({ publicPoolTimeoutMinutes }, writeContext(adminId, operationId)),
+    await updatePlatformConfig(
+      { publicPoolTimeoutMinutes, completionAutoApprovalMinutes, complaintWindowMinutes },
+      writeContext(adminId, operationId),
+    ),
   );
 }
 

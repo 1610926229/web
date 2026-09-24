@@ -4,15 +4,23 @@ import { useRef, useState } from "react";
 import { AdminField } from "@/components/admin/AdminFormField";
 import AdminPageHeading from "@/components/admin/AdminPageHeading";
 import {
+  COMPLAINT_WINDOW_MAX_MINUTES,
+  COMPLAINT_WINDOW_MIN_MINUTES,
+  COMPLETION_AUTO_APPROVAL_MAX_MINUTES,
+  COMPLETION_AUTO_APPROVAL_MIN_MINUTES,
+  PLATFORM_CONFIG_INVALID_COMPLAINT_WINDOW_MESSAGE,
+  PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE,
   PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_NOTICE,
   PUBLIC_POOL_TIMEOUT_MAX_MINUTES,
   PUBLIC_POOL_TIMEOUT_MIN_MINUTES,
+  isValidComplaintWindowMinutes,
+  isValidCompletionAutoApprovalMinutes,
   isValidPublicPoolTimeoutMinutes,
 } from "@/lib/constants/platformConfig";
 import { ADMIN_PLATFORM_CONFIG_PAGE_TITLE } from "@/lib/constants/admin";
 import { saveAdminPlatformConfig } from "@/lib/services/adminHttp";
-import type { PlatformConfig } from "@/lib/types/platformConfig";
+import type { AdminPlatformConfigPatch, PlatformConfig } from "@/lib/types/platformConfig";
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
@@ -22,25 +30,37 @@ import { formatDateTime } from "@/lib/utils/format";
  *
  * 改的是**规则**，不是某一条数据。因此页面必须把两件事说清楚，否则管理员会误判：
  *
- * 1. **改了之后只影响此后进入公共池的订单。** 已经进入公共池的订单在进入那一刻
- *    就把当时的分钟数冻结成了快照，界面上的数字变化**不会**动到它们。
- *    不说这一点，管理员改完去看在途订单发现没变化，会以为没保存再改一次。
+ * 1. **改了之后只影响之后发生的事。** 公共池超时只影响此后进入公共池的订单；
+ *    完成材料自动审核时长只影响此后提交的完成材料。已经在途的订单与已在审核中的
+ *    完成材料各自在「进入 / 提交那一刻」把当时的分钟数冻结成了快照，界面上的数字
+ *    变化**不会**动到它们。
  * 2. **「值没变」不是「保存成功」。** 服务端对「提交的值与现状完全相同」不写数据、
  *    不写审计、也不刷新最后修改时间。页面据此显示「没有变化，未写入」——
  *    显示成「已保存」会让管理员相信一个并不存在的时间戳变动。
  *
+ * ⚠️ 投诉窗口（P0-9）也要写清「只影响之后」，而且它影响的是**两件事**：
+ * 用户可投诉的期限，以及打手该单收益的冻结期限。只提投诉会让管理员以为
+ * 调小它只改变投诉策略，而实际上它提前放款——一次看不出来的资金规则改动。
+ *
+ * ## 三个字段独立保存
+ *
+ * `AdminPlatformConfigPatch` 的三个字段都是**可选**的，PATCH 只带改了的那一项：
+ * 只改公共池超时、不动另外两项，照样能保存（不能因为别的字段没动就拦下提交）。
+ * 提交时只把「草稿与现状不同」的字段放进 patch，其余字段保持现状。
+ *
  * ## 校验用的是服务端那一份
  *
- * `isValidPublicPoolTimeoutMinutes()` 与服务端接口调用的是**同一个函数**、
- * 错误文案也是同一个常量。这里不重写一遍「1~1440 的整数」——复制一份规则
- * 就等于给将来留一个分叉：表单说合法、接口说非法，或者反过来。
+ * `isValidPublicPoolTimeoutMinutes()` / `isValidCompletionAutoApprovalMinutes()` /
+ * `isValidComplaintWindowMinutes()` 与
+ * 服务端接口调用的是**同一个函数**、错误文案也是同一个常量。这里不重写一遍
+ * 「1~1440 的整数」——复制一份规则就等于给将来留一个分叉。
+ *
+ * ⚠️ 三个函数的区间**各不相同**（投诉窗口是 60~10080）：提示文案与 `min`/`max`
+ * 一律从常量取，不在这里写数字。写错一处会让表单把合法的 7 天判成非法。
  *
  * ⚠️ 不做隐式转换：`Number("60abc")` 是 `NaN`、`parseInt("60abc")` 是 `60`，
  * 因此解析只走 `Number()`，非整数一律拒。这与服务端的口径一致（`"60"` 也会被拒，
  * 因为这里先转成了数字再发出去）。
- *
- * ⚠️ 这里**没有**「启用 / 停用」：参数只有取值，没有上架下架。要回到默认值
- * 是把它**改成默认值**，那仍然是一次普通的修改，会留下审计。
  */
 export default function AdminPlatformConfigConsole({
   initialConfig,
@@ -55,8 +75,16 @@ export default function AdminPlatformConfigConsole({
 }) {
   const [config, setConfig] = useState(initialConfig);
   /** 输入框里的**文本**，不是数字：用户正在输入的 `""` 或 `"6a"` 都要能如实显示出来 */
-  const [draft, setDraft] = useState(String(initialConfig.publicPoolTimeoutMinutes));
-  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [draftTimeout, setDraftTimeout] = useState(String(initialConfig.publicPoolTimeoutMinutes));
+  const [draftCompletion, setDraftCompletion] = useState(
+    String(initialConfig.completionAutoApprovalMinutes),
+  );
+  const [draftComplaint, setDraftComplaint] = useState(
+    String(initialConfig.complaintWindowMinutes),
+  );
+  const [timeoutError, setTimeoutError] = useState<string | null>(null);
+  const [completionError, setCompletionError] = useState<string | null>(null);
+  const [complaintError, setComplaintError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -64,33 +92,88 @@ export default function AdminPlatformConfigConsole({
   /**
    * 幂等键。**同一份输入重试时沿用同一个键**：上一次点击已经把请求发出去了，
    * 只是回执没回来；换一个键就等于让服务端把它当成第二次写入。
-   * 只要输入变了就作废它（那已经是另一次用户意图）。
+   * 只要任一输入变了就作废它（那已经是另一次用户意图）。
    */
   const keyRef = useRef<string | null>(null);
 
-  const changed = String(config.publicPoolTimeoutMinutes) !== draft;
+  const changed =
+    String(config.publicPoolTimeoutMinutes) !== draftTimeout ||
+    String(config.completionAutoApprovalMinutes) !== draftCompletion ||
+    String(config.complaintWindowMinutes) !== draftComplaint;
 
-  function handleDraftChange(value: string) {
-    setDraft(value);
+  function invalidateKey() {
     keyRef.current = null;
-    setFieldError(null);
     setMessage(null);
     setSubmitError(null);
+  }
+
+  function handleTimeoutChange(value: string) {
+    setDraftTimeout(value);
+    setTimeoutError(null);
+    invalidateKey();
+  }
+
+  function handleCompletionChange(value: string) {
+    setDraftCompletion(value);
+    setCompletionError(null);
+    invalidateKey();
+  }
+
+  function handleComplaintChange(value: string) {
+    setDraftComplaint(value);
+    setComplaintError(null);
+    invalidateKey();
   }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (busy) return;
 
-    const next = Number(draft);
-    if (!isValidPublicPoolTimeoutMinutes(next)) {
-      setFieldError(PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE);
-      setMessage(null);
-      setSubmitError(null);
+    // 只把「草稿与现状不同」的字段放进 patch：只改一个字段也必须能保存。
+    const patch: AdminPlatformConfigPatch = {};
+
+    if (draftTimeout !== String(config.publicPoolTimeoutMinutes)) {
+      const next = Number(draftTimeout);
+      if (!isValidPublicPoolTimeoutMinutes(next)) {
+        setTimeoutError(PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE);
+        setMessage(null);
+        setSubmitError(null);
+        return;
+      }
+      patch.publicPoolTimeoutMinutes = next;
+    }
+
+    if (draftCompletion !== String(config.completionAutoApprovalMinutes)) {
+      const next = Number(draftCompletion);
+      if (!isValidCompletionAutoApprovalMinutes(next)) {
+        setCompletionError(PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE);
+        setMessage(null);
+        setSubmitError(null);
+        return;
+      }
+      patch.completionAutoApprovalMinutes = next;
+    }
+
+    if (draftComplaint !== String(config.complaintWindowMinutes)) {
+      const next = Number(draftComplaint);
+      if (!isValidComplaintWindowMinutes(next)) {
+        setComplaintError(PLATFORM_CONFIG_INVALID_COMPLAINT_WINDOW_MESSAGE);
+        setMessage(null);
+        setSubmitError(null);
+        return;
+      }
+      patch.complaintWindowMinutes = next;
+    }
+
+    // 按钮在 `changed === false` 时已禁用，这里只是防御：一个字段都没带就不是一次写入
+    if (Object.keys(patch).length === 0) {
+      setMessage("取值没有变化，未写入。最后修改时间也没有变动。");
       return;
     }
 
-    setFieldError(null);
+    setTimeoutError(null);
+    setCompletionError(null);
+    setComplaintError(null);
     setMessage(null);
     setSubmitError(null);
     setBusy(true);
@@ -98,26 +181,28 @@ export default function AdminPlatformConfigConsole({
     if (keyRef.current === null) keyRef.current = crypto.randomUUID();
 
     try {
-      const result = await saveAdminPlatformConfig(keyRef.current, {
-        publicPoolTimeoutMinutes: next,
-      });
+      const result = await saveAdminPlatformConfig(keyRef.current, patch);
 
       // 以**服务端返回的那份记录**为新基准，而不是本地拼出来的状态：
       // `updatedAt` 与 `updatedByAdminId` 只有服务端知道
       setConfig(result.config);
-      setDraft(String(result.config.publicPoolTimeoutMinutes));
+      setDraftTimeout(String(result.config.publicPoolTimeoutMinutes));
+      setDraftCompletion(String(result.config.completionAutoApprovalMinutes));
+      setDraftComplaint(String(result.config.complaintWindowMinutes));
       keyRef.current = null;
       setMessage(
         result.changed
-          ? `已保存。此后进入公共订单池的订单按 ${result.config.publicPoolTimeoutMinutes} 分钟判定超时；` +
-              "已经进入公共池的订单沿用进入时的快照，不受这次修改影响"
-          : "取值没有变化，未写入。服务端记录的仍是 " +
-              `${result.config.publicPoolTimeoutMinutes} 分钟，最后修改时间也没有变动`,
+          ? `已保存：公共订单池超时 ${result.config.publicPoolTimeoutMinutes} 分钟，` +
+              `完成材料自动审核时长 ${result.config.completionAutoApprovalMinutes} 分钟，` +
+              `投诉窗口 ${result.config.complaintWindowMinutes} 分钟。` +
+              "此后新发生的事按新值判定；已在途的订单、已在审核中的完成材料与已完成的订单" +
+              "沿用各自冻结的快照，不受这次修改影响。"
+          : "取值没有变化，未写入。最后修改时间也没有变动。",
       );
     } catch (cause) {
       // ⚠️ 失败时**保留幂等键**：上一次请求可能已经到达服务端，只是回执丢了。
       // 沿用同一个键重试，服务端会把它当成重放并返回第一次的结果，
-      // 而不是按新的一次写入再写一遍（§九）。换键只发生在输入变化时。
+      // 而不是按新的一次写入再写一遍。换键只发生在输入变化时。
       setSubmitError(cause instanceof Error ? cause.message : "保存失败，请稍后重试");
     } finally {
       setBusy(false);
@@ -137,7 +222,7 @@ export default function AdminPlatformConfigConsole({
           label="公共订单池超时（分钟）"
           htmlFor="platform-config-timeout"
           hint={`可填 ${PUBLIC_POOL_TIMEOUT_MIN_MINUTES}~${PUBLIC_POOL_TIMEOUT_MAX_MINUTES} 之间的整数分钟。超时后订单停止被接取，并自动全额退款。`}
-          error={fieldError}
+          error={timeoutError}
           errorId="platform-config-timeout-error"
         >
           <input
@@ -148,21 +233,87 @@ export default function AdminPlatformConfigConsole({
             step={1}
             min={PUBLIC_POOL_TIMEOUT_MIN_MINUTES}
             max={PUBLIC_POOL_TIMEOUT_MAX_MINUTES}
-            value={draft}
+            value={draftTimeout}
             disabled={busy}
-            onChange={(event) => handleDraftChange(event.target.value)}
-            aria-invalid={fieldError ? true : undefined}
-            aria-describedby={fieldError ? "platform-config-timeout-error" : undefined}
+            onChange={(event) => handleTimeoutChange(event.target.value)}
+            aria-invalid={timeoutError ? true : undefined}
+            aria-describedby={timeoutError ? "platform-config-timeout-error" : undefined}
             className={`h-9 w-40 rounded-lg border px-3 text-[13px] text-ink outline-none ${
-              fieldError ? "border-status-danger" : "border-admin-line focus:border-admin-accent"
+              timeoutError ? "border-status-danger" : "border-admin-line focus:border-admin-accent"
+            }`}
+          />
+        </AdminField>
+
+        <AdminField
+          label="完成材料自动审核时长（分钟）"
+          htmlFor="platform-config-completion"
+          hint={`可填 ${COMPLETION_AUTO_APPROVAL_MIN_MINUTES}~${COMPLETION_AUTO_APPROVAL_MAX_MINUTES} 之间的整数分钟。` +
+            "打手提交完成材料后，等待该时长仍未处理且无阻塞时由系统自动通过。" +
+            "只影响之后提交的完成材料，已经在审核中的材料沿用提交时冻结的时长。"}
+          error={completionError}
+          errorId="platform-config-completion-error"
+        >
+          <input
+            id="platform-config-completion"
+            name="completionAutoApprovalMinutes"
+            type="number"
+            inputMode="numeric"
+            step={1}
+            min={COMPLETION_AUTO_APPROVAL_MIN_MINUTES}
+            max={COMPLETION_AUTO_APPROVAL_MAX_MINUTES}
+            value={draftCompletion}
+            disabled={busy}
+            onChange={(event) => handleCompletionChange(event.target.value)}
+            aria-invalid={completionError ? true : undefined}
+            aria-describedby={completionError ? "platform-config-completion-error" : undefined}
+            className={`h-9 w-40 rounded-lg border px-3 text-[13px] text-ink outline-none ${
+              completionError ? "border-status-danger" : "border-admin-line focus:border-admin-accent"
+            }`}
+          />
+        </AdminField>
+
+        <AdminField
+          label="投诉窗口（分钟）"
+          htmlFor="platform-config-complaint"
+          hint={`可填 ${COMPLAINT_WINDOW_MIN_MINUTES}~${COMPLAINT_WINDOW_MAX_MINUTES} 之间的整数分钟。` +
+            "订单完成后，用户在窗口内仍可发起投诉，打手该单收益同时处于冻结状态；" +
+            "窗口到期且无退款 / 投诉阻塞时收益转为可提现。" +
+            "⚠️ 它同时决定打手收益冻结多久：调小它会提前放款。" +
+            "只影响之后完成的订单，已完成的订单沿用完成时冻结的窗口。"}
+          error={complaintError}
+          errorId="platform-config-complaint-error"
+        >
+          <input
+            id="platform-config-complaint"
+            name="complaintWindowMinutes"
+            type="number"
+            inputMode="numeric"
+            step={1}
+            min={COMPLAINT_WINDOW_MIN_MINUTES}
+            max={COMPLAINT_WINDOW_MAX_MINUTES}
+            value={draftComplaint}
+            disabled={busy}
+            onChange={(event) => handleComplaintChange(event.target.value)}
+            aria-invalid={complaintError ? true : undefined}
+            aria-describedby={complaintError ? "platform-config-complaint-error" : undefined}
+            className={`h-9 w-40 rounded-lg border px-3 text-[13px] text-ink outline-none ${
+              complaintError ? "border-status-danger" : "border-admin-line focus:border-admin-accent"
             }`}
           />
         </AdminField>
 
         <dl className="flex flex-wrap gap-x-6 gap-y-1 text-[12px] leading-5 text-ink-3">
           <div className="flex gap-1">
-            <dt>当前生效值：</dt>
+            <dt>公共池超时当前值：</dt>
             <dd className="text-ink-2">{config.publicPoolTimeoutMinutes} 分钟</dd>
+          </div>
+          <div className="flex gap-1">
+            <dt>完成材料自动审核当前值：</dt>
+            <dd className="text-ink-2">{config.completionAutoApprovalMinutes} 分钟</dd>
+          </div>
+          <div className="flex gap-1">
+            <dt>投诉窗口当前值：</dt>
+            <dd className="text-ink-2">{config.complaintWindowMinutes} 分钟</dd>
           </div>
           <div className="flex gap-1">
             <dt>最后修改：</dt>
@@ -199,7 +350,11 @@ export default function AdminPlatformConfigConsole({
           <button
             type="button"
             disabled={busy || !changed}
-            onClick={() => handleDraftChange(String(config.publicPoolTimeoutMinutes))}
+            onClick={() => {
+              handleTimeoutChange(String(config.publicPoolTimeoutMinutes));
+              handleCompletionChange(String(config.completionAutoApprovalMinutes));
+              handleComplaintChange(String(config.complaintWindowMinutes));
+            }}
             className="rounded-lg border border-admin-line px-4 py-2 text-[13px] text-ink-2 hover:bg-page disabled:opacity-60"
           >
             放弃修改

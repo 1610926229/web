@@ -3,7 +3,9 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import CompanionCompletionPanel from "@/components/companion/CompanionCompletionPanel";
 import CompanionOrderCancelPanel from "@/components/companion/CompanionOrderCancelPanel";
+import CompanionOrderStartPanel from "@/components/companion/CompanionOrderStartPanel";
 import PriceText from "@/components/common/PriceText";
 import { getSessionUser } from "@/lib/auth/session";
 import {
@@ -18,7 +20,12 @@ import type { CompanionOrderDetail } from "@/lib/types/order";
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
- * 订单详情（P0-6，`/companion/orders/[id]`）—— 履约所需的全部信息 + 取消接单入口。
+ * 订单详情（P0-6 / P0-7，`/companion/orders/[id]`）—— 履约所需的全部信息 +
+ * 「开始服务」与「取消接单」两个动作入口。
+ *
+ * ⚠️ 两个入口长在**同一个**详情页上：`api-contract.md` 明确要求不得为后续阶段
+ * 复制第二套订单详情。今天是「`accepted` 显示两个按钮、`serving` 一个都不显示」，
+ * 后续阶段（提交完成材料）继续加在这一页上。
  *
  * ## 取不到就是 404，而不是「查不到」
  *
@@ -39,9 +46,10 @@ import { formatDateTime } from "@/lib/utils/format";
  * 金额只显示商品与增值服务（`unitPrice` / `itemsAmount` / `addonsAmount` / `totalAmount`）
  * ——打手端 DTO 上**没有**平台净收入、分账比例、护航收益与已退金额，这一页也就无从显示。
  *
- * ⚠️ 能不能取消**不在这里判断**：`detail.canCancel` 由服务端算好（就是
- * `status === "accepted"`），页面只按它显示或隐藏入口。前端拿状态自己推一遍，
- * 就是在页面这一层再写一份规则，而真正的保护在 `cancelAcceptedOrder` 的原子区段里。
+ * ⚠️ 能不能开始 / 能不能取消**都不在这里判断**：`detail.canStart` 与
+ * `detail.canCancel` 都由服务端算好（今天都是 `status === "accepted"`），
+ * 页面只按它们显示或隐藏入口。前端拿状态自己推一遍，就是在页面这一层再写一份规则，
+ * 而真正的保护在两个伪事务的原子区段里（`startCompanionOrder` / `cancelAcceptedOrder`）。
  *
  * ## 为什么这一页自己读资格
  *
@@ -75,8 +83,19 @@ export default async function CompanionOrderDetailPage({
       <CustomerSection detail={detail} />
 
       {/*
-        取消接单入口。**只有 `canCancel` 为真时才有那个按钮**（`serving` 不显示普通
-        取消按钮）；不能取消时留一句解释，而不是让那一块凭空消失——按钮不见了而
+        开始服务入口（P0-7）。**只有 `canStart` 为真时才有那个按钮**（`accepted` 之外
+        一律不显示）；`serving` 时它与下面的取消入口一起消失，这正是「开始服务之后
+        两个按钮都不在」那条验收要求。
+
+        ⚠️ 不显示的三种状态（`serving` / `completed` / `refunded`）**不需要**再补一句
+        「当前状态不能开始服务」：那些状态下本节由下面的取消说明承担解释，而状态名本身
+        （「护航中」）已经说明服务已经开始了。多一段提示只会把同一件事说两遍。
+      */}
+      {detail.canStart ? <CompanionOrderStartPanel orderId={detail.id} /> : null}
+
+      {/*
+        取消接单入口（P0-6）。**只有 `canCancel` 为真时才有那个按钮**（`serving` 不显示
+        普通取消按钮）；不能取消时留一句解释，而不是让那一块凭空消失——按钮不见了而
         没有任何说明，打手只会以为页面坏了。
       */}
       {detail.canCancel ? (
@@ -88,6 +107,13 @@ export default async function CompanionOrderDetailPage({
           </p>
         </section>
       )}
+
+      {/*
+        完成材料入口（P0-8）。**入口显隐只看服务端给的 `completion` 摘要**（`canSubmit` /
+        `status`），页面不拿订单状态自己推断——「serving 但已有 pending」时 `canSubmit`
+        是 false，前端推断会算错。不能提交时面板自己给一句人话原因，不静默消失。
+      */}
+      <CompanionCompletionPanel orderId={detail.id} completion={detail.completion} />
 
       <div className="flex justify-center pb-2">
         <Link
@@ -118,6 +144,15 @@ function StatusSection({ detail }: { detail: CompanionOrderDetail }) {
           label="接单时间"
           value={detail.acceptedAt ? formatDateTime(detail.acceptedAt) : ""}
         />
+        {/*
+          开始服务时间（P0-7）。**只在已经发生过时才有这一行**——与上面两行不同，
+          `servingAt` 为 null 在打手端是**常态**（`accepted` 的单就是还没开始），
+          显示成一行「—」会让人以为缺了数据。订单模型对这几个节点的约定正是
+          「未发生时为 null，详情页只展示已存在的节点」（`Order.servingAt`）。
+        */}
+        {detail.servingAt ? (
+          <DetailRow label="开始服务时间" value={formatDateTime(detail.servingAt)} />
+        ) : null}
       </div>
     </section>
   );

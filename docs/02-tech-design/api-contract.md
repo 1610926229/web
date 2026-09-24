@@ -2,7 +2,7 @@
 
 > 状态标签：**CURRENT** / **TARGET**（`NOT IMPLEMENTED`）/ **TBD**（`DO NOT INVENT`）。
 >
-> CURRENT 部分由扫描 `app/api/**/route.ts` 生成，共 **115 个 route.ts**。
+> CURRENT 部分由扫描 `app/api/**/route.ts` 生成，共 **125 个 route.ts**（`admin` 62 · `staff` 20 · `companion` 8 · 其余为面向用户的接口）。
 
 > **2026-09-23 需求重校准说明**：CURRENT 路由数量与现有行为保持不变；第三部分 TARGET 已按 `docs/01-requirements/` V0.3 更新。旧 P0-6/P0-7/P0-8 仅是历史计划编号，未来 Round 需重新分配。
 
@@ -190,6 +190,33 @@
 清单契约（`GET` / `POST`、`requireCompanion()` 为第一动作、引用的服务层函数）由
 `tests/companion.test.mjs` 强制，且该文件**扫描磁盘上的真实 route 文件**与清单做双向
 `deepEqual`，见 §2.11。
+
+### 8.1 `GET /api/companion/dispatches` 的**返回顺序**（P0-6.1）
+
+**两张池子的顺序是接口契约的一部分，服务端是唯一真值源。**
+
+| 池子 | 排序真值 | 方向 |
+|---|---|---|
+| 专属池 `exclusive` | `DispatchRecord.exclusiveEnteredAt` | ASC（等待最久优先） |
+| 公共池 `public` | `DispatchRecord.publicPoolEnteredAt` | ASC（等待最久优先） |
+
+- **顶部 = 在**当前这个池子**里等得最久的一单**；越往下 = 越晚进入当前池。
+- **`EnteredAt` 取「当前池」的那一个**：由 `record.state` 决定
+  （`exclusive` 取 `exclusiveEnteredAt`，其余取 `publicPoolEnteredAt`），
+  与 `companionDispatchTransaction.currentDeadlineAt` **同形状**。
+  ⚠️ 不能按 `exclusiveCompanionId` 取：`public` 记录可以带**非空**的
+  `exclusiveCompanionId` / `exclusiveEnteredAt`（用户指定过、对方超时转池），
+  那是历史事实，不是当前池。
+- **禁止**以 `publicDeadlineAt` / `exclusiveDeadlineAt`（到点时刻）、`Order.createdAt`、
+  Map / 数组插入顺序作为排序依据。前者在「公共池时长被后台改过」后与 `EnteredAt` 序**不同**
+  （P0-1 起该时长可配置），后者在 P0-6 取消回池后会**倒挂**。
+- **重新回池按新时刻**：`cancel` 回 public 会**重写** `publicPoolEnteredAt`
+  （见本节上表 `cancel` 一条与 §3.1 共同约束），因此一张很早创建的订单在取消回池后
+  按**这次进入**的时刻参与排序。
+- **并列**：时刻完全相同时按 **`dispatchId` ASC**（稳定、确定性、与请求顺序无关）。
+- **顺序只在服务端算一次**：调用方（页面 / HTTP 测试 / 将来的客户端）**不得再 `.sort(...)`**。
+  排序键不进入 DTO——`CompanionPoolItem` 的字段集合**不因此变更**（见 §2.5 DTO 最小化）。
+- 回归测试：`tests/companionPoolOrder.test.mjs`。
 
 ---
 
@@ -409,15 +436,27 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 
 ## 2.8 幂等（idempotency）
 
-**三种机制并存，按场景选择**：
+**四种机制并存，按场景选择**：
 
 | 机制 | 实现位置 | 用于 |
 |---|---|---|
 | **幂等键索引** | 各 store 的 `${userId}:${idempotencyKey}` → 记录 id | 用户侧创建类接口（支付请求 / 退款 / 投诉 / 评价 / 反馈 / 领券 / 消息） |
 | **业务唯一键索引** | 如 `${userId}:${orderId}`（一单一评）、`orderId`（一单一退款） | 天然唯一的业务关系 |
 | **`operationId` 重放** | `lib/data/adminWriteSupport.ts` 的 `takeReplay` / `takeReplayForAction` / `takeCreateReplay` | 管理端 / 客服端写操作 |
+| **状态本身即判据** | 动作伪事务的原子区段内先判「结果状态是否已经成立」 | **只有结果状态可作判据的推进类动作**：`acceptDispatch`（P0-5）/ `startCompanionOrder`（P0-7）/ `approveCompletion` · `rejectCompletion`（P0-8）。**有没有请求体不是判据**——`rejectCompletion` 带 `reviewNote`，但重放判据仍是「这份材料是否已经是 `rejected`」 |
+
+**⚠️ 选哪种，先问「这个动作有没有天然的状态判据」。** 有（「这一单已经是我的 `serving` 了吗」）就用第四种——
+它不引入需要客户端生成、传输、保存的键，因此也不需要一条「键必填」的校验规则；没有（用户侧创建类，
+同一用户可能合法地连提两次）才需要幂等键。
 
 **⚠️ 幂等的关键性质**：**同一个幂等键第二次到达时，既不重复写业务数据，也不写第二条审计。**
+**⚠️ 状态判据式的重放还要求**：不刷新已经写入的时间戳（`start` 的 `servingAt`、`completion` 通过后的
+`completedAt`、以及审核结果首次落地的 `reviewedAt` 都必须停在第一次那一刻——三处都写成
+`xxx ?? at`；`rejectCompletion` 的重放**不覆盖**第一次的驳回原因）。
+**⚠️ 第四种机制的一个已知边界**：完成材料的 `applyCompletionReview` 只按调用方给的目标状态写入，
+**它自己不校验起始状态**——合法性由伪事务在调用它之前判定。因此「作废一份 pending」这类新动作
+（P0-9 的封禁回池）**不能**图省事复用它，那会写出状态机不允许的边，并且会让
+「同一订单最多一份 pending」的索引与记录状态脱钩。
 **⚠️ 实现细节（Observed Current，不是规范）**：`operationId` 重放是靠**扫描内存中的审计条目**（`auditIdByOperationId` Map），**不是数据库唯一索引**。映射到真实数据库时必须改为 unique constraint，见 `database-schema.md`。
 
 ## 2.9 资源归属
@@ -445,20 +484,24 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 | 门禁 | 位置 | 当前条数 |
 |---|---|---|
 | 管理端 | `tests/admin.test.mjs` | 62 |
-| 客服端 | `tests/staff.test.mjs` | 16 |
-| 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`；P0-6 扩充） | 5 |
+| 客服端 | `tests/staff.test.mjs` | 20 |
+| 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`；P0-6 / P0-7 / P0-8 / P0-9 扩充） | 8 |
 
 **打手端门禁：已确认建立（产品裁定 2026-09-19），属 P0-5.5，本轮落地。**
 建立与 Admin / Staff 类似的 Companion API route manifest / route gate，扫描 `app/api/companion/**` 并与预期清单比对：
 
-- 清单**逐条列出**（不是只断言数量）。**P0-6 起共五条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`（P0-5.5），`GET /api/companion/orders`、`GET /api/companion/orders/[id]`、`POST /api/companion/orders/[id]/cancel`（P0-6）；
+- 清单**逐条列出**（不是只断言数量）。**P0-9 起共八条**：`GET /api/companion/dispatches`、`POST /api/companion/dispatches/[id]/accept`（P0-5.5），`GET /api/companion/orders`、`GET /api/companion/orders/[id]`、`POST /api/companion/orders/[id]/cancel`（P0-6），`POST /api/companion/orders/[id]/start`（P0-7），`POST /api/companion/orders/[id]/completion`（P0-8），`GET /api/companion/earnings`（P0-9）；
 - 每个路由**导出的 HTTP 方法**要与清单一致（多一个方法也要现形），第一动作必须是 `requireCompanion()`，且不出现其它身份的守卫；引用的服务层函数也要与清单一致；
-- **不得**把**尚未实现**的 TARGET 路由登记进清单。**P0-6 之后的负向门禁是 `/companion/orders/[id]/start`**（`accepted → serving`，仍属后续 Round）：它既不能出现在清单里，磁盘上也不能存在该 route 文件，且 `orders/[id]` 下**只允许 `cancel` 一个 `POST` 写入口**——门禁按「导出 `POST` 的文件集合」判定，因此把接口改名成 `begin` / `serve` / `complete` 也绕不过去；
+- 同时 `orders/**` 下的 `POST` 写入口**恰好三个**（`cancel` / `start` / `completion`）且集合逐字相等——门禁按「导出 `POST` 的文件集合」判定，因此把接口改名成 `begin` / `serve` / `submit` 也绕不过去；
+- **不得**把**尚未实现**的 TARGET 路由登记进清单。这条由「清单与实际路由**逐字相等** + 数量**恰好**」两条断言共同强制：`app/api/companion/**` 下多出任何一个 `route.ts`（当前最可能的是提现入口 `/companion/withdrawals`——它的入口 / 流程 / 渠道 / 最小金额全部仍是 TBD，见第四部分）都会让数量断言失败，因此**不需要**为每个未来路径各写一条具名负向断言。⚠️ 该机制的前提是**数量断言与清单长度同批更新**——只改清单不改数量，就等于把门禁关掉；
+- **P0-9 新增的负向约束**：`earnings` 是**只读**接口，`app/api/companion/earnings/route.ts` 只允许导出 `GET`。收益的任何写入（生成 / 解冻）都发生在服务端伪事务里，接口层没有写入入口——因此「打手自己把自己的收益改成可提现」在结构上不存在；
+- 另一条只属于 `start` 的门禁：**它的接口不读请求体**（这个动作没有原因、没有幂等键，幂等判据是状态本身）。一旦有人给它加上 `readJsonBody`，一个空体 POST 就会变成 400，等于发明了一条服务端文档里没有的必填体规则；
+- **「不读请求体」不是 `start` 独有**：`POST /api/staff/completions/[id]/approve`（P0-8）同样不读体（通过没有原因，幂等判据是状态本身）。**反例是 `reject`**——它必须读 `reviewNote` 且必填。判据是「这个动作有没有必须由人填写的输入」，不是「它属不属于推进类动作」；
 - **未来真正新增 Companion 订单接口时同步扩充清单**；
 - **新增、删除、误改路径时测试必须失败**；
 - **沿用现有 tests 的源码扫描 / 路由门禁方式，不新建测试框架**；文件名遵循仓库现有命名风格，不为了名字本身新增抽象。
 
-**`tests/companion.test.mjs` 已于 P0-5.5 建立，P0-6 扩充至 5 条路由 / 7 条用例**（全绿）；上列清单即该文件里的 `COMPANION_API_MANIFEST`，「第一动作必须是 `requireCompanion()`」由位置断言强制（比较前先剥掉 import，否则该断言恒为真）。
+**`tests/companion.test.mjs` 已于 P0-5.5 建立，P0-6 扩充至 5 条路由 / 7 条用例，P0-7 扩充至 6 条路由 / 8 条用例，P0-8 扩充至 7 条路由 / 8 条用例，P0-9 扩充至 8 条路由**（全绿）；上列清单即该文件里的 `COMPANION_API_MANIFEST`，「第一动作必须是 `requireCompanion()`」由位置断言强制（比较前先剥掉 import，否则该断言恒为真）。
 
 ---
 
@@ -468,39 +511,51 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 
 ## 3.1 Companion 我的订单、主动取消与开始服务
 
-> ⚠️ **「我的订单 + 主动取消」三条已实现（P0-6）**，它们属 CURRENT，
-> 清单**只在 §8 列出一次**，本节不重复——同一份文档里放两张 CURRENT 表，
+> ⚠️ **本节四条全部已实现**：`GET /api/companion/orders`、`GET /api/companion/orders/[id]`、
+> `POST /api/companion/orders/[id]/cancel`（P0-6）与 `POST /api/companion/orders/[id]/start`（P0-7）。
+> 它们属 CURRENT，清单**只在 §8 列出一次**，本节不重复——同一份文档里放两张 CURRENT 表，
 > 迟早会有一张先改、另一张被当成还没实现。
-> 本节只保留**尚未实现**的部分。
 
 ### TARGET — NOT IMPLEMENTED
 
-| Method | URL | Guard | Service | 作用 |
-|---|---|---|---|---|
-| POST | `/api/companion/orders/[id]/start` | `requireCompanion`（预期） | `companionOrders` | `accepted → serving`；必须由当前 actualCompanion 显式点击触发 |
+（无。`start` 已于 P0-7 落地，见 §8；后续阶段是 §3.2 的 CompletionSubmission。）
 
-**共同约束：**
+**共同约束（四条 CURRENT 接口都适用）：**
 
 - `exclusiveCompanionId` 不授予我的订单详情/动作权限；资源归属看 `actualCompanionId`。
 - `cancel` 只允许 `accepted`；`serving` 后没有普通主动取消入口。
 - `cancel` 回 public 时必须重新冻结 `publicPoolEnteredAt / publicTimeoutMinutesSnapshot / publicDeadlineAt`，并清除“当前履约绑定”；历史由最小退出记录保留。
 - `start` 只有 `accepted` 合法，且不存在任何根据时间 / 备注 / 聊天自动进入 serving 的路径。
 - 幂等/并发下只允许一次真实状态推进，不重复通知、不刷新已经成功写入的时间。
+  两条接口的重放判据不同：`cancel` 用幂等键，`start` 用**状态本身**（已经是 `serving` 且归本人）。
 - 新增 Companion API 落地时必须同步扩充 `tests/companion.test.mjs` 的 manifest；未实现前不得预登记（见第二部分末的负向门禁）。
 
 **打手端页面入口**：`/companion/orders`、`/companion/orders/[id]`（P0-6 已实现）。
 
-同一个详情页继续承载 `accepted` 的“开始服务”和 `serving` 的“提交完成材料”，不得为后续阶段复制第二套订单详情。
+同一个详情页继续承载 `accepted` 的“开始服务”（**P0-7 已落地**）和 `serving` 的“提交完成材料”（**P0-8 已落地**，见 §3.2），不得为后续阶段复制第二套订单详情。
 
 ## 3.2 CompletionSubmission：人工审核 + 10 分钟默认自动审核
 
+> ⚠️ **本节五条已于 P0-8 全部实现**（`POST /api/companion/orders/[id]/completion`、
+> `GET /api/staff/completions`、`GET /api/staff/completions/[id]`、
+> `POST /api/staff/completions/[id]/approve`、`POST /api/staff/completions/[id]/reject`），
+> 因此它们属 **CURRENT**。
+>
+> **下表不是第二份清单**——**条数的唯一真值源是 §2.11 的门禁**（客服端 20 条见
+> `tests/staff.test.mjs`，打手端 **8** 条见 `tests/companion.test.mjs` 的 `COMPANION_API_MANIFEST`）。
+> 保留这张表是为了记录这五条的**契约形状**（Guard / Service / 语义），
+> 它是本文件里唯一一处写出「哪条路由归哪个服务模块」的地方；**增删路由时改的是清单数组，
+> 不是这张表**。§3.1 能直接删表，是因为那四条打手路由在 §2.11 里已逐条列出。
+>
+> 本节剩下的 TARGET 只有最后一条（封禁回池时作废 pending），见下方标注。
+
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| POST | `/api/companion/orders/[id]/completion` | `requireCompanion`（预期） | `companionCompletions` | 当前实际打手在 `serving` 提交截图 + 5~50 字说明 |
-| GET | `/api/staff/completions` | `requireStaff`（预期） | `staffCompletions` | 待审列表 |
-| GET | `/api/staff/completions/[id]` | `requireStaff`（预期） | `staffCompletions` | 详情 |
-| POST | `/api/staff/completions/[id]/approve` | `requireStaff`（预期） | `staffCompletions` | 人工通过 → Order `completed` |
-| POST | `/api/staff/completions/[id]/reject` | `requireStaff`（预期） | `staffCompletions` | 驳回 → Order 保持 `serving`；允许重新提交 |
+| POST | `/api/companion/orders/[id]/completion` | `requireCompanion` | `companionCompletions` | 当前实际打手在 `serving` 提交截图 + 5~50 字说明 |
+| GET | `/api/staff/completions` | `requireStaff` | `staffCompletions` | 待审列表 |
+| GET | `/api/staff/completions/[id]` | `requireStaff` | `staffCompletions` | 详情 |
+| POST | `/api/staff/completions/[id]/approve` | `requireStaff` | `staffCompletions` | 人工通过 → Order `completed`；**不读请求体** |
+| POST | `/api/staff/completions/[id]/reject` | `requireStaff` | `staffCompletions` | 驳回 → Order 保持 `serving`；允许重新提交；**读 `reviewNote` 且必填** |
 
 **已确认约束：**
 
@@ -508,9 +563,9 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 - 自动审核配置默认 **10 分钟**，后台可修改。
 - 每次 submission 进入 pending 时冻结 `autoApprovalMinutesSnapshot` 与 `autoApprovalDeadlineAt`；后台之后改配置不追溯改变该份材料。
 - rejected 后重新提交时重新读取当前配置并重新计时。
-- `sweepCompletionAutoApprovals(now)`（名称可在实现 Round 按现有命名规范落地）只在：仍 pending、Order 仍 serving、deadline 已到、无投诉/有效售后阻塞、尚未被人工处理时自动通过。
+- `sweepCompletionAutoApprovals(at)`（P0-8 落地名，同步、幂等）只在：仍 pending、Order 仍 serving、deadline 已到、无投诉/有效售后阻塞、尚未被人工处理时自动通过。它挂在读取路径上做惰性物化（与 `sweepExpiredDispatches` 同形），真实 Scheduler 上线后必须复用**同一个**函数。
 - 自动通过与客服通过都产生 `Order.status = completed`，但必须记录审核来源为 System，**不得伪装成 Staff**。
-- Companion 被封禁/移除导致订单回池时，其旧 pending CompletionSubmission 必须先作废并退出自动审核资格。
+- **TARGET（P0-9）：** Companion 被封禁/移除导致订单回池时，其旧 pending CompletionSubmission 必须先作废并退出自动审核资格。⚠️ 实现时注意 `applyCompletionReview` **不校验起始状态**，且「同一订单最多一份 pending」的索引只在它内部清除——见 §2.8 的已记录边界。
 - 人工通过、自动通过、人工驳回、封禁作废之间必须并发安全；先成功的一方决定事实，后续动作安全失败/no-op。
 
 ## 3.3 用户退款：未服务直接全额退款，已服务进入售后
@@ -533,7 +588,7 @@ CURRENT `/api/admin/platform-config` 继续复用，不新增第二个平台配�
 
 - `exclusivePoolTimeoutMinutes`（或与现有命名规范等价的字段）：进入 exclusive 时冻结本单 snapshot/deadline；
 - `completionAutoApprovalMinutes`：默认 **10**；每次 completion 进入 pending 时冻结 snapshot/deadline；
-- `complaintWindowMinutes`：进入 completed 时冻结本单 snapshot/deadline；
+- `complaintWindowMinutes`：默认 **1440**（24 小时），取值 **60 ~ 10080** 分钟；进入 completed 时冻结本单 snapshot/deadline；
 - 现有 `publicPoolTimeoutMinutes` 保持同样 snapshot 语义。
 
 PATCH 必须走既有 Admin 守卫、校验、审计与平台配置事务；修改配置只影响未来进入对应生命周期阶段的业务事实。
@@ -556,17 +611,28 @@ PATCH 必须走既有 Admin 守卫、校验、审计与平台配置事务；修�
 
 ## 3.7 Earning / Settlement
 
+**状态：CURRENT（P0-9 落地）。**
+
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
-| GET | `/api/companion/earnings` | `requireCompanion`（预期） | `companionEarnings` | 打手收益（总收入 / 冻结 / 可提现；罚款自动规则仍未定义） |
+| GET | `/api/companion/earnings` | `requireCompanion` | `companionEarnings` | 打手收益列表 + 汇总（冻结 / 可提现；只读） |
 
-**已确认目标语义：**
+**已确认目标语义（P0-9 全部落地）：**
 
 - Order completed → 为当时实际履约打手生成 frozen Earning，金额取订单 `companionBaseIncome` 快照；
 - 解冻时点不再硬编码 `completedAt + 48h`，而是消费本单冻结的 `complaintDeadlineAt`；
 - deadline 到达且无投诉/售后冻结原因后 `frozen → available`；
 - `sweepMaturedEarnings(now)` 同步、幂等、可重复调用；Scheduler 必须复用它；
 - 提现、自动罚款、余额桶细节仍按 TBD 处理。
+
+**实现要点（可据此核对，落点在 `lib/data/earningTransaction.ts` 与 `lib/services/companionEarnings.ts`）：**
+
+- **结算只有一个入口**：`settleOrderCompletion()` 一次写完「订单 → completed + 冻结 `complaintWindowMinutesSnapshot` / `complaintDeadlineAt` + 生成 frozen Earning」。P0-8 的两条完成路径（客服人工通过、System 到期自动通过）都只调用它，不允许任何一处自己再算一次 deadline 或再建一条收益；
+- **金额不重算**：`incomeAmount` 直接搬 `Order.companionBaseIncome`（下单时的分账快照），不查商品现价、不查当前分账比例；
+- **`availableAt` = 本单 `complaintDeadlineAt`**，不另加一次分钟数；
+- **不追溯**：P0-9 之前已完成的历史订单**不回填**窗口与收益（回填等于用今天的配置去改历史订单，或用历史 `completedAt` 凭空造出一笔「早该解冻」的钱）；
+- **接口只读**：`GET` 是唯一导出方法，收益写入没有 HTTP 入口；
+- **DTO 隐私**：打手收益 DTO 不含 `clubNetIncome` / `companionId` / `reversedAmount` / `fineAmount` / `withdrawnAt`。
 
 ## 3.8 计划存在但本次不提前实现
 

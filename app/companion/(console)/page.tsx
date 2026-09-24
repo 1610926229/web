@@ -1,6 +1,4 @@
 import {
-  COMPANION_COMING_SOON_ITEMS,
-  COMPANION_COMING_SOON_TITLE,
   COMPANION_IDENTITY_NOTICE,
   COMPANION_SCOPE_NOTICE,
 } from "@/lib/constants/companionConsole";
@@ -24,9 +22,12 @@ import {
  * 概览页不需要、也不允许为了「顺便显示几条待接单」去读一次资格与池子——
  * 那就等于把「一次渲染只有一份资格结果」重新拆成两份。
  *
- * ⚠️ 剩下的内容全部是「还没开放什么」。**没有一个按钮是能点出订单的**——
- * 开始服务、完成材料、打手收益都属于后续批次，在这里放一个「敬请期待」的假按钮
- * 比什么都不放更糟。
+ * ⚠️ 页面上只有**两句说明**：这个界面是谁的（`COMPANION_IDENTITY_NOTICE`）与
+ * 本阶段能做什么（`COMPANION_SCOPE_NOTICE`）。这里**没有任何一个按钮**，
+ * 也不再有「后续开放」清单——P0-9 起工作台的每一项能力都有自己的页面
+ * （入口在顶栏导航里），概览页再列一遍只会是一份迟早过期的副本。
+ * ⚠️ 尤其**不要**在这里放一个「敬请期待」的假按钮（比如提现）：那比什么都不放更糟，
+ * 它承诺的是一个平台已经决定本阶段不做的功能。
  */
 export default function CompanionConsolePage() {
   return (
@@ -35,17 +36,9 @@ export default function CompanionConsolePage() {
         {COMPANION_IDENTITY_NOTICE}
       </p>
 
-      <section className="flex flex-col gap-2 rounded-2xl border border-line px-4 py-4">
-        <h2 className="text-[14px] font-semibold text-ink">{COMPANION_COMING_SOON_TITLE}</h2>
-        <ul className="flex flex-col gap-1.5">
-          {COMPANION_COMING_SOON_ITEMS.map((item) => (
-            <li key={item} className="flex items-center gap-2 text-[13px] text-ink-3">
-              <span className="h-1 w-1 shrink-0 rounded-full bg-ink-3" aria-hidden />
-              {item}
-            </li>
-          ))}
-        </ul>
-        <p className="pt-1 text-[12px] leading-5 text-ink-3">{COMPANION_SCOPE_NOTICE}</p>
+      {/* 本阶段范围。与上面那句一样是**纯说明**，没有对应的按钮或数据 */}
+      <section className="rounded-2xl border border-line px-4 py-4">
+        <p className="text-[12px] leading-5 text-ink-3">{COMPANION_SCOPE_NOTICE}</p>
       </section>
     </>
   );

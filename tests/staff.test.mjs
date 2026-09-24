@@ -1247,7 +1247,7 @@ test("客服账号不进用户名单，也不参与消费：它是独立的第�
 
 // ——————————————————————————— 六、源码门禁 ———————————————————————————
 
-test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + 投诉五件", () => {
+test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + 投诉五件 + 完成材料四件", () => {
   const routeFiles = collectFiles(STAFF_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -1260,6 +1260,9 @@ test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + �
   //    接口不存在，因此谁也无法从客服端把它调出来。
   // ⚠️ 投诉五个：列表、详情，加三个处理动作（开始处理 / 解决 / 关闭）——
   //    投诉不写订单、不写退款、不动金额，因此三个动作都归客服。
+  // ⚠️ 完成材料四个：列表、详情，加两个审核动作（通过 / 驳回）。
+  //    通过会同时把订单推进到 completed——那是「完成材料审核」的业务结果，不是「改订单」的入口；
+  //    驳回只改完成材料、订单保持 serving。因此两个审核动作都归客服。
   assert.deepEqual(
     routeFiles.map((file) => path.relative(STAFF_API_DIR, file).replace(/\\/g, "/")).sort(),
     [
@@ -1271,6 +1274,10 @@ test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + �
       "complaints/[id]/route.ts",
       "complaints/[id]/start-processing/route.ts",
       "complaints/route.ts",
+      "completions/[id]/approve/route.ts",
+      "completions/[id]/reject/route.ts",
+      "completions/[id]/route.ts",
+      "completions/route.ts",
       // 详情与发送共用一个地址段（GET 读、POST 发），因此只有这一个 route.ts
       "conversations/[orderId]/messages/route.ts",
       "conversations/[orderId]/read/route.ts",

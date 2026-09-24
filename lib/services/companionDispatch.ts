@@ -75,6 +75,13 @@ import type { Order } from "@/lib/types/order";
  * 「清扫用什么时刻」与「剩余时间按什么时刻算」必须是同一个时刻，
  * 否则会出现「刚被清扫掉、剩余时间却还是正数」这种自相矛盾的显示。
  * 测试也因此能传入确定的时间，不依赖真实执行日期。
+ *
+ * ## 顺序：等待最久优先（P0-6.1 FIX-2）
+ *
+ * 两张池子都是**顶部 = 在各自池子里等得最久的一单**，排序真值分别是
+ * `publicPoolEnteredAt` / `exclusiveEnteredAt`（见 `compareByWaitingSince`）。
+ * 业务目的是把已经等了较久的老板订单优先暴露给打手。排序**在这里完成**，
+ * 页面与接口都不再自己排一次。
  */
 export async function listCompanionPools(
   companionId: string,
@@ -98,8 +105,12 @@ export async function listCompanionPools(
   const orders = await getPaymentRepository().listAllOrders();
   const orderById = new Map(orders.map((order) => [order.id, order]));
 
-  const exclusive: CompanionPoolItem[] = [];
-  const publicPool: CompanionPoolItem[] = [];
+  // ⚠️ 这里收的是 `{ item, waitingSince }` 而不是裸的条目：排序真值
+  // （进入**当前这个池子**的时刻）在派单记录上，而池子 DTO **刻意不含**它
+  // ——打手不需要看到「这单是什么时候进的池子」。因此排序键必须在映射成 DTO
+  // **之前**就带上，排完再取出 DTO：接口契约一个字段都不用动。
+  const exclusive: PoolEntry[] = [];
+  const publicPool: PoolEntry[] = [];
 
   for (const record of open) {
     // 暂停接单：公共池一条都不给。⚠️ 只挡公共池——专属池那一份是历史事实，照常返回
@@ -136,17 +147,22 @@ export async function listCompanionPools(
     if (!progress) continue;
 
     const item = toCompanionPoolItem(record, order, progress);
-    (progress.pool === "exclusive" ? exclusive : publicPool).push(item);
+    const entry: PoolEntry = { item, waitingSince: currentPoolEnteredAt(record) };
+    (progress.pool === "exclusive" ? exclusive : publicPool).push(entry);
   }
 
-  // 快到点的排在前面：打手看这张表是为了决定「先接哪一单」，
-  // 而马上就要溜走的那一单正是最该先看到的
-  exclusive.sort(compareByDeadline);
-  publicPool.sort(compareByDeadline);
+  // **等待最久优先**（oldest waiting first）：顶部 = 在**当前这个池子**里等得最久的一单。
+  // 两张池子用的是**同一个**比较函数，因为规则是同一条；不同的只是「进入当前池的时刻」
+  // 该取哪个字段——那由 `currentPoolEnteredAt` 按记录当前所在的池决定，不在这里各写一份。
+  exclusive.sort(compareByWaitingSince);
+  publicPool.sort(compareByWaitingSince);
 
   return {
-    exclusive,
-    public: publicPool,
+    // 排完序再取出 DTO：顺序是**服务端的结论**，调用方（页面 / 接口 / HTTP 测试 /
+    // 将来的客户端）拿到什么顺序就显示什么顺序，**不再自己 `.sort()`**。
+    // 两份排序逻辑迟早会分叉，而分叉的那一天，接口测试与页面看到的是两个不同的池子。
+    exclusive: exclusive.map((entry) => entry.item),
+    public: publicPool.map((entry) => entry.item),
     notice: canAccept ? COMPANION_POOL_NOTICE : COMPANION_POOL_PAUSED_NOTICE,
     canAccept,
   };
@@ -180,10 +196,66 @@ function toCompanionPoolItem(
   };
 }
 
-/** 截止时间升序。同一时刻的两条按派单 id 排，保证顺序稳定、可复现。 */
-function compareByDeadline(a: CompanionPoolItem, b: CompanionPoolItem): number {
-  if (a.deadlineAt !== b.deadlineAt) return a.deadlineAt < b.deadlineAt ? -1 : 1;
-  return a.dispatchId < b.dispatchId ? -1 : a.dispatchId > b.dispatchId ? 1 : 0;
+/**
+ * 一张池子条目 + 它的排序键。排序键**不进 DTO**（见收集处的注释）。
+ */
+type PoolEntry = {
+  item: CompanionPoolItem;
+  /**
+   * 进入**当前这个池子**的时刻，池子排序的唯一真值。
+   *
+   * `null` 只可能来自「进入池子时没把时刻冻结下来」这种数据异常，见比较函数的处理。
+   */
+  waitingSince: string | null;
+};
+
+/**
+ * 这条派单**当前**所在的池子的进入时刻——池子排序的唯一真值。
+ *
+ * ⚠️ 形状刻意与 `companionDispatchTransaction.ts` 的 `currentDeadlineAt` 一致
+ * （按记录当前所在的池取对应的那个字段），因为它们是同一个问题的两个答案：
+ * 「这一单现在在哪个池、什么时候进的、什么时候到点」。
+ * 在这里另写一套「先看 exclusiveCompanionId 再看 state」之类的判断，就会
+ * 在「用户指定过 A、A 没接、已转入公共池」这种记录上和那一处分叉——
+ * 那种记录的 `exclusiveEnteredAt` 是**非空**的（历史事实），但它的池子已经是 public。
+ * 取错了就是拿「当初进专属池的时刻」去排公共池，一张早就超时转过来的单会插到最前面。
+ */
+function currentPoolEnteredAt(record: DispatchRecord): string | null {
+  return record.state === "exclusive" ? record.exclusiveEnteredAt : record.publicPoolEnteredAt;
+}
+
+/**
+ * **等待最久优先**（oldest waiting first）：`waitingSince` 升序。
+ *
+ * ## 为什么不是 `deadlineAt`（本函数的前身 `compareByDeadline`）
+ *
+ * 两者在「公共池超时时长没被后台改过」时**恰好同序**——因为
+ * `publicDeadlineAt = publicPoolEnteredAt + 当次冻结的时长快照`，同一批单的时长一样。
+ * 但那是巧合，不是规则：P0-1 起这个时长**后台可配置**，改过之后
+ * 一张**更晚**进入池子的订单反而**更早**到点，按 deadline 排就会把它顶到最上面，
+ * 「等待最久优先」在配置被改的那一天悄悄失效，而页面上看不出任何异常。
+ * 专属池同理（时长虽固定，但规则要的是「谁先进专属池」）。
+ *
+ * ## 为什么不是 `Order.createdAt`
+ *
+ * 一张很早创建、被 A 接单、A 又主动取消、今天重新进入公共池的订单（P0-6），
+ * 它的等待时间从**这一次**重新进入算起（`applyDispatchToPublic` 会重写
+ * `publicPoolEnteredAt`）。用创建时间会把它重新顶到那些真正等了很久的单前面。
+ *
+ * ## 并列
+ *
+ * 时刻完全相同（同一毫秒批量写入）时按**派单 id** 排。id 是既有规则，
+ * 确定性、不随请求变化、测试可稳定复现——沿用本文件原有的 tie-break，
+ * 不引入随机顺序或第二套优先级。
+ *
+ * `waitingSince` 为 `null`（数据异常）时按**最旧**处理，排在前面而不是丢掉：
+ * 丢掉等于让一张确实在池子里的订单从列表上凭空消失，那比顺序不对更难查。
+ */
+function compareByWaitingSince(a: PoolEntry, b: PoolEntry): number {
+  const left = a.waitingSince ?? "";
+  const right = b.waitingSince ?? "";
+  if (left !== right) return left < right ? -1 : 1;
+  return a.item.dispatchId < b.item.dispatchId ? -1 : a.item.dispatchId > b.item.dispatchId ? 1 : 0;
 }
 
 /**

@@ -476,6 +476,8 @@ export function toAgreementAuditSnapshot(agreement: Agreement): AdminAuditSnapsh
 export function toPlatformConfigAuditSnapshot(config: PlatformConfig): AdminAuditSnapshot {
   return {
     publicPoolTimeoutMinutes: config.publicPoolTimeoutMinutes,
+    completionAutoApprovalMinutes: config.completionAutoApprovalMinutes,
+    complaintWindowMinutes: config.complaintWindowMinutes,
     updatedAt: config.updatedAt,
     updatedByAdminId: config.updatedByAdminId,
   };
