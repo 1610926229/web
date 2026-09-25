@@ -297,13 +297,31 @@ export function toProductAuditSnapshot(record: CatalogProductRecord): AdminAudit
  * 于是「这一条审计同时对应两次写入」这件事在记录里是看得见的，
  * 不必再去比对时间戳猜「订单是不是被这次操作改的」。
  *
- * `amount` 也进快照：它是这次操作的标的，而且**后台改不了**（见 `lib/constants/adminRefunds.ts`）。
- * 留一份在这里，是为了让「当时退的是多少钱」在审计里有个可核对的数。
+ * `amount` 也进快照：它是这次操作的标的，**申请时由服务端取快照**，后台改不了。
+ * ⚠️ P0-13 起它不是「退了多少」——那是下面六项决策字段里的 `refundAmount`。
+ * 留着它是为了让「这一单当时申请的是什么金额」在审计里有据可查。
+ *
+ * ## P0-13 新增的六项决策字段
+ *
+ * 产品裁定的原话是：平台承担的部分「必须留下明确、可审计的业务记录，
+ * 不能仅通过『没有 reversal』间接推断」（Q1-c）。审计是这句话最主要的落点——
+ * 光看「打手收益没动」永远分不清「平台承担」与「压根没决策」。
+ *
+ * 六项与 `RefundDecision` 一一对应，**一个不少、一个不多**：
+ * `refundRateBp` / `refundAmount` / `responsibility` / `companionLiabilityRateBp` /
+ * `companionReversalAmount` / `platformBorneAmount`。
+ *
+ * ⚠️ 记的是**基点**（存储值）而不是界面的百分比，与上面
+ * `companionRateBp` 的取舍同一条理由：审计要能回答「当时存的是哪个数」。
+ *
+ * ⚠️ 未决策时六项一律为 `null`（不是 0）：`null` 是「没有这件事」，
+ * 0 是「决策了，金额/比例是 0」，两者在审计里必须分得开。
  */
 export function toRefundAuditSnapshot(
   refund: RefundRequest,
   orderStatus: OrderStatus,
 ): AdminAuditSnapshot {
+  const decision = refund.decision;
   return {
     status: refund.status,
     refundNo: refund.refundNo,
@@ -317,6 +335,12 @@ export function toRefundAuditSnapshot(
     reviewedByRole: refund.reviewedByRole,
     reviewedAt: refund.reviewedAt,
     reviewNote: truncateAuditText(refund.reviewNote, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
+    refundRateBp: decision ? decision.refundRateBp : null,
+    refundAmount: decision ? decision.refundAmount : null,
+    responsibility: decision ? decision.responsibility : null,
+    companionLiabilityRateBp: decision ? decision.companionLiabilityRateBp : null,
+    companionReversalAmount: decision ? decision.companionReversalAmount : null,
+    platformBorneAmount: decision ? decision.platformBorneAmount : null,
     updatedAt: refund.updatedAt,
   };
 }

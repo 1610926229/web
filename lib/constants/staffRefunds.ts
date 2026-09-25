@@ -58,7 +58,8 @@ export const STAFF_REFUND_LIST_NOTICE =
 
 /** 退款金额不可修改的说明（客服端）。 */
 export const STAFF_REFUND_AMOUNT_NOTE =
-  "退款金额取申请创建时的订单实付快照，由系统记录，客服不可修改。";
+  "「申请金额」是申请创建时的订单实付快照；实际退款金额由管理员按退款比例与责任归属核定，" +
+  "由系统计算，客服不可修改、也不参与核定。";
 
 /**
  * 客服遇到「应该退」的申请时该做什么。
@@ -67,8 +68,9 @@ export const STAFF_REFUND_AMOUNT_NOTE =
  * 最终划拨，客服的正确做法是把它留在审核中并向上报备，而不是替平台把钱批出去。
  */
 export const STAFF_REFUND_REPORT_NOTE =
-  "客服没有「通过」入口：通过会在同一次写入里把订单改成「已退款」，涉及资金最终划拨，" +
-  "只在管理员侧。处理完一笔申请后如果结论是「应该退」，请把它留在审核中并向上报备。";
+  "客服没有「通过」入口：通过会写入退款金额、打手收益冲回（累计退满时还包括订单转为「已退款」），" +
+  "涉及资金最终划拨，只在管理员侧。处理完一笔申请后如果结论是「应该退」，" +
+  "请把它留在审核中并向上报备——退多少、由谁承担，也都由管理员认定。";
 
 /** 列表为空时的提示。 */
 export const STAFF_REFUND_EMPTY_MESSAGE = "当前筛选下没有退款申请。";
@@ -270,6 +272,9 @@ export function toStaffRefundListItem(
     statusLabel: REFUND_STATUS_LABELS[refund.status],
     // 只读展示值：它来自申请创建时的服务端快照，客服没有入口能改
     amount: refund.amount,
+    // ⚠️ 只给**结果金额**，不给责任归属与平台承担额：那两项是管理员的决策依据
+    // （产品裁定 Q1-b：客服只能调查、记录、提出处理意见）
+    decidedAmount: refund.decision?.refundAmount ?? null,
     createdAt: refund.createdAt,
     updatedAt: refund.updatedAt,
     user,

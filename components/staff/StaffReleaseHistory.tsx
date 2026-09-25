@@ -72,8 +72,12 @@ export default function StaffReleaseHistory({
             />
             <div className="mt-2">
               {/* 原因是打手自己写的一句话：原样展示、保留换行、不截断。
-                  为空（系统侧来源，本轮还没有写入路径）时 `FieldBlock` 显示「—」——
-                  那是「没写」，不是「没查」，所以不编一句出来。 */}
+                  为空时 `FieldBlock` 显示「—」——那是「没写」，不是「没查」，
+                  所以不编一句出来。
+                  ⚠️ 空**不是**不可能情况，兜底文案必须留着：P0-11 之后有两条
+                  释放来源不带原因（客服直换 `staff_reassign`、封禁回池
+                  `companion_disabled` 用的是固定文案），只有打手主动取消
+                  （`companion_cancel`）才有用户写下的一句话。 */}
               <FieldBlock title={STAFF_RELEASE_HISTORY_REASON_LABEL} content={entry.reason ?? ""} />
             </div>
           </li>

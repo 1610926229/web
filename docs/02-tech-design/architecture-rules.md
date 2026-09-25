@@ -165,6 +165,9 @@ refunded  -> []
 - `paid/accepted → refunded`：用户未开始服务直接全额退款；`accepted` 情况打手收益为 0、不生成 Earning、通知打手，终态退款保留 `actualCompanionId` 历史事实。
 - `serving → completed`：可以由客服人工审核通过，**也可以**由 System 在 pending 到 `autoApprovalDeadlineAt`、仍未人工处理且无投诉/有效售后阻塞时自动通过。
 - `completed → refunded`：仍只能通过合法投诉 / 售后 / 退款流程进入。
+  ⚠️ **P0-13 起这条迁移的触发条件收窄为「累计退满」**：部分退款发生在 `completed` 订单上时，
+  订单**留在 `completed`**、继续计入消费与榜单的当前口径，只有累计退满才转 `refunded`。
+  同理 `serving → refunded` 也只由「累计退满」触发；部分退款的 `serving` 单继续履约。
 
 **⚠️ 状态机表永远只表达“结构上允许”**，不能替代动作级 Guard。回池、退款、自动审核、封禁与客服换人都必须各自校验权限、资源归属、当前状态、deadline、幂等和跨实体一致性。
 
@@ -184,12 +187,29 @@ refunded  -> []
 6. **显示**：统一走 `lib/utils/format.ts` 的 `formatYuan` 与 `components/common/PriceText.tsx`。
    CURRENT 的唯一显示层 `/100` 在 `components/admin/AdminSpecEditor.tsx:42`，是纯展示。
 7. **`refundedAmount` = 该订单累计实际已经退还给用户的金额**（已正式定义，2026-09-19）。
-   当前只有全额退款，故 `refundedAmount === actualPaidAmount`；
-   管理员批准退款时**必须**把 `actualPaidAmount` 写入 `refundedAmount`
-   （P0-5.5 已落地：金额取自**订单字段**，不取退款申请上的 `amount` 快照）。
-   未来部分退款上线后扩展为**累计**金额。
+   **P0-13 起它是真正的累计值**：管理员批准退款时**必须**显式传**本次**退款额，
+   由 `applyOrderRefund` 累加（P0-5.5 已落地：金额取自**订单的冻结经济快照**，
+   不取退款申请上的 `amount` 快照）。因此部分退款下 `refundedAmount < actualPaidAmount` 是常态。
 8. **⚠️ 部分退款不得自动把 `Order.status` 改成 `refunded`。**
-   `status === "refunded"` 的正式含义是**该订单已经全额退款**。
+   `status === "refunded"` 的正式含义是**该订单已经全额退款**；
+   **只有累计退满才转**，判据单点在 `lib/constants/refunds.ts` 的 `isFullyRefunded`。
+9. **退款金额由服务端按比例算，金额公式只许有一份**（P0-13 D15，2026-09-25 由 D19 重新表述）。
+   管理员只输入**退款比例**（与责任归属），三个金额全部由
+   `computeRefundDecisionAmounts` → `resolveFinalDecisionAmounts` 按 §17 的冻结公式算：
+   「管理员只输入退款比例，金额由系统计算」。请求体里**没有任何字段能传金额进来**。
+
+   ⚠️ **这条纪律禁止的是「第二份公式」，不是「把服务端算出的数显示给人看」。**
+   确认框**会实时显示预计金额**（验收整改 D19 取代了 D15 的「不预览」），
+   但那是 `previewRefundDecisionAmounts()`（`lib/constants/adminRefunds.ts`）调用
+   **服务端写入路径上的同一对函数**算出来的，并且把服务端的金额闸
+   `assertRefundAmountWithinPaid` 问了一遍。
+   **验收方式**：组件文件（`components/**`）里搜不到金额运算符——
+   出现 `× 比例`、`/ 10000`、`Math.floor` 就是违规。
+   界面上的字一律是「预计」，提交后以响应里的 `decidedAmount` 为准。
+10. **退款的钱怎么在平台与打手之间分，责任认定权属于管理员**（P0-13 Q1-b）。
+    客服只能调查、记录、提出处理意见。`platform` / `companion` / `shared` 三种归属的冲回公式见
+    `database-schema.md` §9.1 与 §T2.1；`0 <= Earning.reversedAmount <= incomeAmount` 是硬不变式。
+    **六项决策字段只给管理端**——客服与用户只拿得到 `decidedAmount`（实退金额）。
 
 > 资金公式的完整定义与验算表见 `docs/superpowers/plans/2026-09-17-order-lifecycle-alignment.md` §2.6。
 > **该公式已正式冻结**，改动需产品负责人确认。
@@ -337,14 +357,15 @@ sweepMaturedEarnings(now)            // CURRENT（P0-9）
 |---|---|---|
 | Order 结构状态机整改 | 新增 `accepted → paid`、`serving → paid`，并保留五状态主枚举 | **已实现（P0-6）**：`lib/constants/orders.ts` 的 `ORDER_TRANSITIONS` 已含两条回池边；`serving → paid` 目前**没有**入口，是给后续「封禁回池」预留的表能力 |
 | accepted 主动取消 | actualCompanion 可在未 serving 前提交原因取消；通知用户；当前不处罚；回 public；保留最小退出历史 | **已实现（P0-6）**，**本行无遗留缺口**：退出历史管理端（`/admin/orders/[id]`）与客服端（会话 / 投诉 / 退款三个只读详情）**两半都可看**。客服侧**没有为此新增任何接口**，见 `rounds/P0-6/02-decisions.md` D6 **V3** |
-| 未服务直接退款 | `paid/accepted` 用户直接全额退款；accepted 打手收益 0、通知打手、保留终态 `actualCompanionId` | 当前 `/refunds` 仍按旧人工申请链路，需要整改 |
+| 未服务直接退款 | `paid/accepted` 用户直接全额退款；accepted 打手收益 0、通知打手、保留终态 `actualCompanionId` | **已实现（P0-12）**：`POST /api/orders/[id]/direct-refund`（免审批、不读请求体、幂等）。与人工申请入口由两个不相交的状态集合保证互斥；用户注册后不可再对这两档提交申请 |
+| 退款按比例 + 资金责任联动 | 管理员按比例决定退款额；认定责任归属（平台 / 打手 / 按比例分担）；按 §17 公式冲回打手收益并留明细 | **已实现（P0-13）**：`RefundDecision` 六项、`EarningAdjustment`、`backfillRefundReversals`（D9）。Q3（已提现收益的追偿）仍 **DEFER** |
 | Companion 我的订单 | `/companion/orders` + `/companion/orders/[id]`，只允许 actualCompanion 查看 | **已实现（P0-6）** |
 | 开始服务 | actualCompanion 显式 `accepted → serving`，不得由时间/备注/聊天自动触发 | **已实现（P0-7）**：`POST /api/companion/orders/[id]/start`，接口不读请求体（幂等判据是状态本身） |
 | CompletionSubmission | 截图 + 5~50 字；同一订单最多 1 个 pending；驳回可重提并重新计时 | **已实现（P0-8）**：`lib/data/completionTransaction.ts`；`invalidated` 仍只有类型占位、无写入路径 |
 | 完成自动审核 | 默认 10 分钟、后台可配置；pending 时冻结 snapshot/deadline；无投诉/售后阻塞时 System 自动通过 | **已实现（P0-8）**：`sweepCompletionAutoApprovals()` 挂在读取路径上；真实 Scheduler 仍是上线前阻塞项 |
 | completed 投诉窗口 | 后台可配置；进入 completed 时冻结本单 deadline；Earning 解冻消费该 deadline | **已实现（P0-9）**：`complaintWindowMinutes`（默认 1440、取值 60~10080）；`applyOrderCompletion()` 一处写完 snapshot 与 deadline |
 | Companion 封禁联动 | accepted/serving 均解除当前履约并回 public；通知用户；旧 pending completion 作废 | 当前 Companion disable 尚未联动这些实体 |
-| 客服直接换人 | 客服无需管理员批准；P0 不设次数上限；涉及退款资金仍由管理员最终决定 | 权限已确认，最小回池实现尚未落地 |
+| 客服直接换人 | 客服无需管理员批准；P0 不设次数上限；涉及退款资金仍由管理员最终决定 | **已实现（P0-11）**：最小 direct-replace（`accepted → paid → accepted` / `serving → paid → accepted`），客服端一键执行、不限次数、无管理员审批环节。⚠️ 本行**不覆盖**「封禁回池」（下一行的 Companion 封禁联动仍未落地） |
 | 最小履约退出历史 | 不引入复杂 Assignment 聚合；只保留“订单、原打手、退出来源/原因、时间、操作者”满足追溯 | 未实现 |
 | Earning / 结算域 | completed 后生成 frozen；到本单 complaint deadline 且无阻塞后 available | **已实现（P0-9）**：`lib/data/earningTransaction.ts` 的 `settleOrderCompletion()` / `sweepMaturedEarnings()`；`withdrawn` / `reversed` 两态仍只有类型占位 |
 | 后台 Scheduler | 必须复用同一 domain sweep 入口 | **仍不存在**。当前三条 sweep（派单超时 / 完成自动审核 / 收益解冻）全部挂在读取路径上惰性触发——这是**临时**推进方式，不是规范；上线前必须换成调度器调用**同一批**函数 |

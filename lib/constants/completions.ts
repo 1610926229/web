@@ -80,15 +80,29 @@ export const COMPLETION_STATUS_LABELS: Record<CompletionSubmissionStatus, string
 /**
  * 完成材料状态迁移表。**这是 `CompletionSubmission` 状态机唯一的定义处。**
  *
- * `pending` 可以走向 `approved`（人工或 System）与 `rejected`（人工驳回）；
- * `approved` / `rejected` / `invalidated` 都是终态。`invalidated` 本轮没有任何
- * 写入路径（封禁回池属 P0-9），保留在表里只是为了承接 §T1 的完整枚举。
+ * `pending` 可以走向 `approved`（人工或 System）、`rejected`（人工驳回）
+ * 与 `invalidated`（P0-11：当前履约被打手**之外**的力量解除时立即作废）；
+ * `approved` / `rejected` / `invalidated` 都是终态。
+ *
+ * ## `pending → invalidated`（P0-11 新增，本轮第一次有写入路径）
+ *
+ * 它此前只在表里占位、零调用。本轮补上这条边，是因为**作废必须走中央状态机**
+ * （`P0-9/02-decisions.md` D15 的既定约束：不得复用 `applyCompletionReview`），
+ * 而补之前那条边根本不存在，作废在结构上就是非法的。
+ *
+ * ⚠️ **它只由释放路径触发**（封禁回池 / 客服换人），入口只有一个：
+ * `invalidatePendingCompletionForOrder()`（`lib/data/completionTransaction.ts`）。
+ * 「不提供按钮」这条在这里是靠**没有第二个调用方**成立的，不是靠注释。
+ *
+ * ⚠️ 补上这条边**不会**让 `invalidated` 变成可审核状态：
+ * `approveCompletion` / `rejectCompletion` 的领域 Guard 要求恰好 `pending`，
+ * `sweepCompletionAutoApprovals` 的白名单也只认 `pending`。三道门都不看这条边。
  */
 export const COMPLETION_TRANSITIONS: Record<
   CompletionSubmissionStatus,
   readonly CompletionSubmissionStatus[]
 > = {
-  pending: ["approved", "rejected"],
+  pending: ["approved", "rejected", "invalidated"],
   approved: [],
   rejected: [],
   invalidated: [],

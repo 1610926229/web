@@ -3,7 +3,7 @@ import EmptyState from "@/components/common/EmptyState";
 import PriceText from "@/components/common/PriceText";
 import { EARNING_STATUS_CLASS, EARNING_STATUS_HINTS } from "@/lib/constants/earnings";
 import type { CompanionEarningItem } from "@/lib/types/earning";
-import { formatDateTime } from "@/lib/utils/format";
+import { formatDateTime, formatYuan } from "@/lib/utils/format";
 
 /**
  * 「我的收益」列表（P0-9）—— 打手**自己**的每一笔收益。
@@ -82,6 +82,25 @@ function EarningCard({ item }: { item: CompanionEarningItem }) {
         {/* 金额走 `PriceText`（内部即 `formatYuan`）：两位小数的口径全站一处 */}
         <PriceText cents={item.incomeAmount} className="text-[16px] text-ink" />
       </div>
+
+      {/* 有冲回才多出这两行：没冲回的记录多两行「0.00」只是噪声。
+          ⚠️ 但在有冲回时**三个数必须一起出现**（原值 / 冲回 / 实际可得）：
+          只显示原值，打手会以为这笔钱还能全提；只显示净额，他又对不上
+          「订单上明明写着挣了 40」。三个数都由服务端算好（`netAmount` 不在页面做减法） */}
+      {item.reversedAmount > 0 ? (
+        <>
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <span className="shrink-0 text-[12px] text-ink-3">退款冲回</span>
+            <span className="text-[14px] tabular-nums text-brand-red">
+              −¥{formatYuan(item.reversedAmount)}
+            </span>
+          </div>
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <span className="shrink-0 text-[12px] text-ink-3">实际可得</span>
+            <PriceText cents={item.netAmount} className="text-[16px] text-ink" />
+          </div>
+        </>
+      ) : null}
 
       {/* 一句话说清「这笔钱现在能不能用」，而不是只报流程到了哪一步 */}
       <p className="mt-1 text-[12px] leading-5 text-ink-3">

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { COMPANION_RELEASE_SOURCE_LABELS, plusMinutes } from "../lib/constants/dispatch.ts";
 import { toStaffCompanionReleaseEntry } from "../lib/constants/staff.ts";
 import { acceptDispatch } from "../lib/data/companionDispatchTransaction.ts";
-import { cancelAcceptedOrder } from "../lib/data/companionOrderTransaction.ts";
+import { cancelAcceptedOrder, startCompanionOrder } from "../lib/data/companionOrderTransaction.ts";
 import { getCompanionReleaseRepository } from "../lib/data/companionReleaseRepository.ts";
 import { getCompanionRepository } from "../lib/data/companionRepository.ts";
 import { getComplaintRepository } from "../lib/data/complaintRepository.ts";
@@ -273,6 +273,24 @@ test("三处读出同一条历史：真实取消的条目在会话 / 投诉 / �
 
   // 三个客服入口各需要一份自己的前置数据：一条消息（会话）、一条投诉、一条退款申请。
   // 全部走用户侧的真实服务，因此这三处 DTO 里的订单确实是同一张单。
+  //
+  // ⚠️ 退款申请这一步有个 P0-12 带来的前置：**已付款 / 已接单不能申请退款**
+  // （那两档「尚未开始服务」，改为免审批直接全额退款）。两次取消之后订单回到了
+  // 已付款，所以必须先把这一单推到护航中——第三次接单 + 打手点击开始服务，
+  // 走的仍是真实链路，而不是往 store 里塞一条申请记录。
+  // 这两步**不产生退出历史**，下面「退出过两次就是两条」的断言因此不受影响。
+  const thirdAcceptedAt = plusMinutes(secondAt, 1);
+  const third = await acceptDispatch(dispatch.id, {
+    companionId: COMPANION_B,
+    at: thirdAcceptedAt,
+  });
+  assert.equal(third.kind, "ok", "这一条用例需要订单能重新被接走");
+  const started = await startCompanionOrder({
+    companionId: COMPANION_B,
+    orderId: order.id,
+    at: plusMinutes(thirdAcceptedAt, 1),
+  });
+  assert.equal(started.kind, "ok", "这一条用例需要订单进入护航中，申请退款才走得通");
   await sendMessageForUser(user, order.id, { body: "这一单怎么又没人了？", idempotencyKey: key() }, undefined, "server");
   const complaint = await createComplaintForUser(
     user,
@@ -767,8 +785,10 @@ test("空历史的两种相反取舍：客服侧整段不渲染，管理端写�
   }
 });
 
-test("唯一转换点：sourceLabel 只来自 COMPANION_RELEASE_SOURCE_LABELS，三个服务都不自己拼条目", () => {
-  for (const name of ["staffConversations", "staffComplaints", "staffRefunds"]) {
+test("唯一转换点：sourceLabel 只来自 COMPANION_RELEASE_SOURCE_LABELS，四个服务都不自己拼条目", () => {
+  // P0-10 新增第四个调用方（客服订单详情也要显示退出历史）。
+  // 这个清单**必须跟着涨**：少登记一个，就有一个服务可以偷偷自己拼条目而不被这条门禁拦住。
+  for (const name of ["staffConversations", "staffComplaints", "staffRefunds", "staffOrders"]) {
     const code = stripComments(readSource(path.join(ROOT, "lib", "services", `${name}.ts`)));
     assert.ok(
       code.includes("toStaffCompanionReleaseEntry"),

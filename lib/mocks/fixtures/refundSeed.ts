@@ -1,4 +1,9 @@
-import { REFUND_REASON_LABELS, isOrderRefundable } from "@/lib/constants/refunds";
+import {
+  REFUND_REASON_LABELS,
+  computeRefundDecisionAmounts,
+  hasRefundPath,
+  type RefundDecisionInput,
+} from "@/lib/constants/refunds";
 import type { EvidenceKind } from "@/lib/types/evidence";
 import type { RefundReasonKey, RefundRequest, RefundStatus } from "@/lib/types/refund";
 import { MOCK_ADMIN_LOGIN_ID } from "./adminSeed";
@@ -14,14 +19,23 @@ import { orderSeed } from "./orderSeed";
  *
  * 1. **已通过（approved）必须对应一笔已退款（refunded）的订单**——审核通过就是订单变
  *    已退款的原因，两者不能各说各话；
- * 2. **待审核 / 审核中（pending / reviewing）不得改变订单状态**——订单必须仍是可退款的
- *    业务状态（已付款 / 已接单 / 护航中 / 已完成），这正是「退款审核中」要证明的事；
+ * 2. **待审核 / 审核中（pending / reviewing）不得改变订单状态**——订单必须仍**有退款路径可走**
+ *    （`hasRefundPath`：已付款 / 已接单 / 护航中 / 已完成），这正是「退款审核中」要证明的事；
  * 3. **已拒绝 / 已撤销（rejected / cancelled）同样不改变订单状态**，且订单绝不能是已退款。
  *
- * 金额一律取自**订单自己的实付金额**（`order.totalAmount`）并按分存储，
- * 不在这里手写数字——手写的金额迟早会和订单对不上。
+ * ⚠️ 不变量 2 判的是「订单没有变成终态」，**不是**「这条申请此刻还能再提交一次」：
+ * P0-12 起已付款 / 已接单改为免审批直接退款，那两档**开不出新的申请**，但
+ * **存量**的申请可以存在（`rf-seed-1001-01` 挂在一张已接单的订单上、
+ * `rf-seed-1002-01` 挂在一张已付款的订单上，两条都是有意留着的）。
+ * 用 `isOrderRefundable` 去判会在这两条上抛错，那等于让预置数据去否认一段真实的
+ * 业务历史——`tests/directRefund.test.mjs` 专门有用例钉住这两条存量的处置方式。
  *
- * ⚠️ 仅服务端使用：本文件不会被任何客户端组件引用。接入真实后端后随 lib/mocks 一并移除。
+ * 金额一律取自**订单自己的实付金额**（`order.actualPaidAmount`，即 §17 的退款基数）
+ * 并按分存储，不在这里手写数字——手写的金额迟早会和订单对不上。
+ *
+ * ⚠️ **P0-13 起多一条自洽要求：`approved` 必须有资金决策**（见 `build` 的不变量 4）。
+ * 决策的三个金额同样**由公式算出来**，不手写：决策里的比例与责任归属是「当时谁批的、
+ * 按什么比例批的」这个历史事实，必须由种子作者显式写出，而金额是它的推论。
  */
 
 /** 预置凭证：只写类型与文件名，地址统一由 `EVIDENCE_PLACEHOLDER_URL` 占位。 */
@@ -43,6 +57,14 @@ type PresetRefundInput = {
   /** 撤销时间：cancelled 必填 */
   cancelledAt?: string;
   evidence?: PresetEvidence[];
+  /**
+   * 资金决策的**输入**（比例与责任归属）：`approved` 必填、其余状态**禁止填写**。
+   *
+   * ⚠️ 只给输入，不给金额：三个金额由 `computeRefundDecisionAmounts` 按 §17 算，
+   * 与运行时那条路径**走的是同一个函数**。手写金额的话，预置数据里的
+   * 「退款 = 打手冲回 + 平台承担」就会是一份没人验证过的算术。
+   */
+  decide?: RefundDecisionInput;
 };
 
 function requireOrder(id: string) {
@@ -61,9 +83,9 @@ function build(input: PresetRefundInput): RefundRequest {
   if (input.status !== "approved" && order.status === "refunded") {
     throw new Error(`预置退款 ${input.id} 是「${input.status}」，对应订单 ${order.id} 不能是「已退款」`);
   }
-  if ((input.status === "pending" || input.status === "reviewing") && !isOrderRefundable(order.status)) {
+  if ((input.status === "pending" || input.status === "reviewing") && !hasRefundPath(order.status)) {
     throw new Error(
-      `预置退款 ${input.id} 处于审核中，对应订单 ${order.id} 必须是可退款的业务状态（已付款 / 已接单 / 护航中 / 已完成）`,
+      `预置退款 ${input.id} 处于审核中，对应订单 ${order.id} 必须是仍可退款的业务状态（已付款 / 已接单 / 护航中 / 已完成）`,
     );
   }
   if (input.createdAt < order.paidAt) {
@@ -75,8 +97,27 @@ function build(input: PresetRefundInput): RefundRequest {
   if (!input.reviewingAt && (input.status === "approved" || input.status === "rejected")) {
     throw new Error(`预置退款 ${input.id} 已审核完成，必须有开始审核的时间`);
   }
+  // 不变量 4（P0-13）：决策与状态必须成对出现——已通过**必须**有决策，
+  // 其余状态**必须没有**。少了一半，页面上就会出现「已通过但退了多少不知道」
+  // 或「还没批却写着退了多少」这两种互相矛盾的展示。
+  if (input.status === "approved" && !input.decide) {
+    throw new Error(`预置退款 ${input.id} 已通过，必须给出资金决策（比例与责任归属）`);
+  }
+  if (input.status !== "approved" && input.decide) {
+    throw new Error(`预置退款 ${input.id} 不是「已通过」，不能带资金决策`);
+  }
 
   const settled = input.status === "approved" || input.status === "rejected";
+  const decidedAt = input.reviewedAt ?? input.createdAt;
+  const amounts = input.decide
+    ? computeRefundDecisionAmounts({
+        actualPaidAmount: order.actualPaidAmount,
+        companionBaseIncome: order.companionBaseIncome,
+        // 预置数据里一个订单最多一条已通过申请，因此没有既往冲回
+        reversedSoFar: 0,
+        input: input.decide,
+      })
+    : null;
 
   return {
     id: input.id,
@@ -84,8 +125,21 @@ function build(input: PresetRefundInput): RefundRequest {
     userId: order.userId,
     orderId: order.id,
     status: input.status,
-    // 整单退款：金额就是订单实付金额，不手写
-    amount: order.totalAmount,
+    // 申请时的实付快照，不手写
+    amount: order.actualPaidAmount,
+    decision:
+      input.decide && amounts
+        ? {
+            refundRateBp: input.decide.refundRateBp,
+            refundAmount: amounts.refundAmount,
+            responsibility: input.decide.responsibility,
+            companionLiabilityRateBp: input.decide.companionLiabilityRateBp,
+            companionReversalAmount: amounts.companionReversalAmount,
+            platformBorneAmount: amounts.platformBorneAmount,
+            decidedBy: MOCK_ADMIN_LOGIN_ID,
+            decidedAt,
+          }
+        : null,
 
     reasonKey: input.reasonKey,
     reasonLabel: REFUND_REASON_LABELS[input.reasonKey] ?? input.reasonKey,
@@ -156,6 +210,11 @@ export const refundSeed: RefundRequest[] = [
     reviewingAt: "2026-09-09T12:00:00.000Z",
     reviewedAt: "2026-09-09T13:30:00.000Z",
     reviewNote: "已核实本次服务未开始，退款申请通过，款项按原支付渠道退回。",
+    // 资金决策：服务未开始，全额退、平台承担。
+    // ⚠️ 预置数据里**没有 Earning**（收益只在运行时由订单完成产生），因此这里也不能写
+    // 「已从打手收益冲回多少」的责任归属——那会造出一条有冲回金额、却没有对应
+    // 冲回明细的历史决策，而 P0-13 要求平台承担与打手承担都必须可审计（Q1-c）。
+    decide: { refundRateBp: 10000, responsibility: "platform", companionLiabilityRateBp: null },
   }),
   // 已拒绝：订单保持「已付款」，不会因为被拒绝而变动
   build({
@@ -193,3 +252,30 @@ export const refundSeed: RefundRequest[] = [
     createdAt: "2026-09-12T09:40:00.000Z",
   }),
 ];
+
+/**
+ * 跨记录不变量（P0-13）：任一订单上**已通过**申请的退款金额之和，
+ * 不得超过该订单的 `refundedAmount`。
+ *
+ * 为什么必须在这里再查一遍：「一条申请自洽」不代表「一单的账自洽」。
+ * 部分退款上线后，同一订单可以有多条已通过申请，而每条各自都算对的情况下，
+ * 它们的**和**仍然可能超过订单实付——那正是「累计退款不得超过实付」这条规则
+ * （`cmd_p0-13.md`）被破坏的样子。这条校验让预置数据一旦越界就在启动时抛错，
+ * 而不是等到某个页面显示出一个退不完的账。
+ *
+ * ⚠️ 只能查「≤」不能查「=」：订单也可能由**免审批直接退款**那条路径退掉
+ * （P0-12），那条路径不产生任何退款申请记录，因此 `refundedAmount` 有值而
+ * 「已通过申请之和」为 0 是完全正常的。
+ */
+for (const order of orderSeed) {
+  const approvedTotal = refundSeed
+    .filter((refund) => refund.orderId === order.id && refund.status === "approved")
+    .reduce((total, refund) => total + (refund.decision?.refundAmount ?? 0), 0);
+
+  if (approvedTotal > order.refundedAmount) {
+    throw new Error(
+      `预置退款数据不自洽：订单 ${order.id} 的已通过申请合计 ${approvedTotal} 分，` +
+        `超过该订单累计已退 ${order.refundedAmount} 分`,
+    );
+  }
+}

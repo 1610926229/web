@@ -36,12 +36,28 @@ export function plusMinutes(iso: string, minutes: number): string {
 
 // ——————————————————————————— 状态与池 ———————————————————————————
 
-/** 派单状态在后台与日志里使用的名称。 */
+/**
+ * 派单状态在后台与日志里使用的名称。
+ *
+ * ⚠️ `timed_out` 的名字是**中性**的「已关闭」，不写「超时关闭」：这个状态有**两种**
+ * 来路，而它们给客服的答案完全不同——
+ *
+ * 1. **公共池到点仍无人接**（P0-5 的 `sweepExpiredDispatches`）：平台按规则自动全额退款；
+ * 2. **订单在开始服务前被用户直接退款**（P0-12 的 `directRefundOrder`）：是用户取消了这一单。
+ *
+ * 写成「超时关闭」会把第 2 种说成第 1 种，而客服正是照着这一行向用户解释
+ * 「你的单为什么结束了」。而且那两句话都能被旁边的行直接反驳：
+ * 一张被接单之后再退款的派单，`acceptedAt` 是有值的——「接单时间」有值、
+ * 状态却是「超时无人接单」，客服只会以为页面坏了。
+ *
+ * 这个状态本身只回答一件事：**这张派单已经关闭，不能再被接单**。
+ * 「为什么关闭」要看订单状态与退款记录，不在这里用一个词下结论。
+ */
 export const DISPATCH_STATE_LABELS: Record<DispatchState, string> = {
   exclusive: "专属池等待",
   public: "公共池等待",
   accepted: "已被接单",
-  timed_out: "已超时关闭",
+  timed_out: "已关闭",
 };
 
 /** 打手端看到的池子名。两页共用，避免一页写「专属单」另一页写「指定单」。 */
@@ -169,6 +185,16 @@ export const COMPANION_CANCEL_REASON_REQUIRED_MESSAGE = "请填写取消接单�
  * 说成 404 会让他以为订单丢了。
  */
 export const COMPANION_ORDER_NOT_CANCELLABLE_MESSAGE = "当前订单状态不允许取消接单";
+
+/**
+ * 订单数据不自洽时的提示（500，P0-11）。
+ *
+ * ⚠️ 与上面两句**必须分开**，也与 400 那句分开：这一句说的不是「你不能做这件事」，
+ * 而是「平台这边数据对不上，什么也没发生」。把它合并进 400 / 404 的任何一句，
+ * 都会让使用者以为自己操作错了，从而重试一件永远不会成功的事。
+ * 措辞与 `staffCompletions.ts` 的 `order-missing` 那句同一条口径（有问题找技术支持）。
+ */
+export const ORDER_DATA_INCONSISTENT_MESSAGE = "订单数据异常，请联系技术支持";
 
 // ——— 「我的订单」页面（P0-6）———
 
@@ -310,9 +336,11 @@ export const COMPANION_START_SUCCESS_LABEL =
 /**
  * 履约退出动作的显示名（`CompanionReleaseSource`），管理端订单详情用它。
  *
- * ⚠️ 本轮**只有 `companion_cancel` 有写入路径**。另外两个是 `database-schema.md` T4
- * 已定义的 TARGET 占位（封禁回池 / 客服换人，都属于后续 Round），这里给出名称
- * 只是为了 `Record` 完整——漏掉一个会直接编译不过，而不是为了让它们看起来已有入口。
+ * ⚠️ **P0-11 起三个 source 都有真实写入路径**（此前只有 `companion_cancel`）：
+ * `companion_cancel` 来自打手主动取消，`companion_disabled` 来自封禁时的事务内清扫，
+ * `staff_reassign` 同时覆盖客服「退回公共池」与「直接指定新打手」两种换人——
+ * 它们对订单与派单做的事完全一样，只在通知文案与是否重新指派上不同
+ * （`02-decisions.md` D3 记录了不因此新增第四个 source 的理由）。
  * 这也是 `DISPATCH_STATE_LABELS` 的写法：后台/日志用的名称与状态定义放在一起。
  */
 export const COMPANION_RELEASE_SOURCE_LABELS: Record<CompanionReleaseSource, string> = {
@@ -320,6 +348,17 @@ export const COMPANION_RELEASE_SOURCE_LABELS: Record<CompanionReleaseSource, str
   companion_disabled: "打手资格下架",
   staff_reassign: "客服改派",
 };
+
+/**
+ * 资格下架导致退出履约时，写进退出历史的固定原因（P0-11）。
+ *
+ * ⚠️ 与「客服换人」那条不同，这里**没有可填的原因**：触发者是管理员，
+ * 而他给的那句话属于**审计**（记在 `AdminAuditEntry` 上，与这位打手相关），
+ * 不属于**这一单为什么退出**。EX-COMP-01 要求历史里保留「原因」，
+ * 这一单的原因就是「他不能继续履约了」——那是一句常量，不是一段自由文本。
+ * 把管理员的备注抄进每一张订单的退出历史，等于把审计内容复制到业务事实上。
+ */
+export const COMPANION_RELEASE_REASON_DISABLED = "打手资格已被平台下架，无法继续履约";
 
 // ——————————————————————————— 通知文案 ———————————————————————————
 
@@ -368,4 +407,52 @@ export const DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED = {
   title: "护航已取消接单",
   summary: "你的订单已重新进入公共订单池",
   body: "接单的护航在开始服务前取消了这一单，订单已重新进入公共订单池，等待其他护航接取。订单不会被取消，金额也不变。",
+} as const;
+
+/**
+ * 客服把这一单**退回公共池**换人（P0-11，`staff_reassign` 的换人分支）。
+ *
+ * ⚠️ 与上面那条（打手自己取消）**必须是两句不同的话**：用户接下来要做的事不一样。
+ * 打手取消是「那个人不做了」，客服换人是「平台已经介入处理」——后者再套用
+ * 「接单的护航取消了这一单」，就等于把平台的处理说成打手的个人行为，
+ * 而用户下一次问客服时，客服看到的是自己刚做的操作。
+ *
+ * ⚠️ 仍然不写「已为你重新派单」：回到公共池之后是「等待**其他**护航接取」。
+ */
+export const DISPATCH_NOTIFICATION_STAFF_REASSIGNED = {
+  title: "护航已更换",
+  summary: "客服已为你更换护航，订单已重新进入公共订单池",
+  body: "客服已为你更换护航，这一单重新进入公共订单池，等待其他护航接取。订单不会被取消，金额也不变。",
+} as const;
+
+/**
+ * 客服**直接指定新打手**接替这一单（P0-11，`staff_reassign` 的直换分支）。
+ *
+ * ⚠️ 与上面的「退回公共池」**必须分开**：这一条里新打手**已经确定**，
+ * 用户不需要等待有人接单（等待与已确定的下一步动作不同）。两句合成一句，
+ * 用户会以为订单还在池子里空等。
+ *
+ * ⚠️ 不写新打手的昵称：通知是只读展示，要看细节顺着 `href` 进订单详情页
+ * （那里会重新校验归属）。也不写「已与你联系」——联系还没有发生。
+ */
+export const DISPATCH_NOTIFICATION_STAFF_REPLACED = {
+  title: "护航已更换",
+  summary: "客服已为这一单指定新的护航",
+  body: "客服已为这一单指定了新的护航接替服务。订单不会被取消，金额也不变，具体进度可在订单详情中查看。",
+} as const;
+
+/**
+ * 打手资格被下架（封禁）导致他手上的单退回公共池（P0-11，`companion_disabled`）。
+ *
+ * ⚠️ **不透露平台对该打手做了什么**：对用户而言「平台在处置这位打手」是内部事务，
+ * 说出来等于把一次资格管理公开成一条对个人的指控，而他是否真的违规、违规到什么程度，
+ * 平台并没有向用户承诺过会说明。只说与**订单**有关的事实：原护航不能继续，订单已重新匹配。
+ *
+ * ⚠️ 也不写「账号已被停用」这类字眼（同上），与 `DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED`
+ * 保持同一口径：只说对用户有影响的那部分。
+ */
+export const DISPATCH_NOTIFICATION_COMPANION_DISABLED = {
+  title: "订单已重新匹配护航",
+  summary: "原护航已无法继续履约，订单已重新进入公共订单池",
+  body: "为你服务的护航已无法继续履约，这一单重新进入公共订单池，等待其他护航接取。订单不会被取消，金额也不变。",
 } as const;

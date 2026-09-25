@@ -27,9 +27,14 @@ import type {
  * - 提现入口、可用余额、钱包流水：本阶段不做（§十三）。
  *
  * ⚠️ DTO 是显式挑字段拼出来的，**不是**把 `Earning` 原样返回：
- * `reversedAmount` / `fineAmount` / `withdrawnAt` 目前在类型上是恒定的初始值，
- * 带上去只会让三个永远为空的字段顺着响应流到浏览器，而将来它们有值时
- * 「该不该给打手看」还需要单独判断一次——那时才发现它们早就在响应里了。
+ * `fineAmount` / `withdrawnAt` 目前是恒定的初始值，带上去只会让两个永远为空的字段
+ * 顺着响应流到浏览器，而将来它们有值时「该不该给打手看」还需要单独判断一次——
+ * 那时才发现它们早就在响应里了。
+ *
+ * ⚠️ **P0-13 起 `reversedAmount` 不在「恒定初始值」那一组里了**（退款会写它），
+ * 因此它**必须**给打手看：一笔收益被部分冲回后只显示原金额，
+ * 打手会以为那笔钱还能全提，而页面上没有任何解释。同时给出**净额**
+ * （服务端算好，页面不做减法——金额算术只有一处）。
  */
 
 /**
@@ -55,13 +60,21 @@ function materializeCompletionAutoApprovals(): void {
   sweepCompletionAutoApprovals(new Date().toISOString());
 }
 
-/** `Earning` + 订单号 → 打手端列表项。 */
+/**
+ * `Earning` + 订单号 → 打手端列表项。
+ *
+ * ⚠️ `netAmount` 在这里算，**页面不算**（`architecture-rules.md` §三 禁止客户端做金额算术）。
+ * 它不落在 `Earning` 上：`incomeAmount - reversedAmount` 是一个可以从两个存储字段
+ * 唯一推出来的数，存第三份只会多一个可能对不上的地方。
+ */
 function toCompanionEarningItem(earning: Earning, orderNo: string): CompanionEarningItem {
   return {
     id: earning.id,
     orderNo,
     orderId: earning.orderId,
     incomeAmount: earning.incomeAmount,
+    reversedAmount: earning.reversedAmount,
+    netAmount: earning.incomeAmount - earning.reversedAmount,
     status: earning.status,
     // 文案由服务端给：页面不自己维护一份状态名映射
     statusLabel: EARNING_STATUS_LABELS[earning.status],
@@ -114,12 +127,17 @@ export async function listCompanionEarnings(companionId: string): Promise<Compan
 /**
  * 按状态累计金额（分）。
  *
- * ⚠️ `withdrawn` / `reversed` **不计入任何一个桶**：本阶段它们不可达，
- * 而真到了可达的那一天，「已提现的钱算不算我的收益」是一个需要产品回答的问题，
- * 不该在这里顺手决定。
+ * ⚠️ **累计的是 `netAmount` 而不是 `incomeAmount`**（P0-13）：这两个合计回答的是
+ * 「我现在有多少钱能提」，那就必须是能提的数。用冲回前的原值求和，
+ * 页面顶部会显示一个点不出来的数字。原值与冲回额在每条记录上各自可见，
+ * 需要解释「为什么少了」时看得到原因。
+ *
+ * ⚠️ `reversed`（整笔冲销）**不计入任何一个桶**——它的净额本来就是 0；
+ * `withdrawn` 同理不计入：本阶段不可达，而真到了可达的那一天，
+ * 「已提现的钱算不算我的收益」是一个需要产品回答的问题，不该在这里顺手决定。
  */
 function sumByStatus(items: CompanionEarningItem[], status: "frozen" | "available"): number {
   return items
     .filter((item) => item.status === status)
-    .reduce((total, item) => total + item.incomeAmount, 0);
+    .reduce((total, item) => total + item.netAmount, 0);
 }

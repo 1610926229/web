@@ -2,7 +2,7 @@
 
 > 状态标签：**CURRENT** / **TARGET**（`NOT IMPLEMENTED`）/ **TBD**（`DO NOT INVENT`）。
 >
-> CURRENT 部分由扫描 `app/api/**/route.ts` 生成，共 **125 个 route.ts**（`admin` 62 · `staff` 20 · `companion` 8 · 其余为面向用户的接口）。
+> CURRENT 部分由扫描 `app/api/**/route.ts` 生成，共 **131 个 route.ts**（`admin` 62 · `staff` **25** · `companion` 8 · 其余为面向用户的接口）。
 
 > **2026-09-23 需求重校准说明**：CURRENT 路由数量与现有行为保持不变；第三部分 TARGET 已按 `docs/01-requirements/` V0.3 更新。旧 P0-6/P0-7/P0-8 仅是历史计划编号，未来 Round 需重新分配。
 
@@ -87,7 +87,8 @@
 |---|---|---|---|---|
 | GET | `/api/orders` | `requireUser` | `orders` | 我的订单列表（状态 tab / 关键词 / 分页） |
 | GET | `/api/orders/[id]` | `requireUser` | `orders` | 订单详情（DTO 裁剪，不含 `clubNetIncome`） |
-| POST | `/api/orders/[id]/refunds` | `requireUser` | `refunds` | 对订单发起退款申请（幂等键） |
+| POST | `/api/orders/[id]/refunds` | `requireUser` | `refunds` | 对订单发起退款申请（幂等键，**仅 `serving` / `completed`**） |
+| POST | `/api/orders/[id]/direct-refund` | `requireUser` | `refunds` | **未开始服务的订单直接全额退款**（`paid` / `accepted`，免审批、幂等、**不读请求体**；P0-12） |
 | POST | `/api/orders/[id]/reviews` | `requireUser` | `reviews` | 对已完成订单提交评价（幂等键） |
 | GET | `/api/orders/[id]/messages` | `requireUser` | `conversations` | 订单会话消息列表 |
 | POST | `/api/orders/[id]/messages` | `requireUser` | `conversations` | 发送消息（幂等键） |
@@ -104,6 +105,10 @@
 | GET | `/api/refunds/[id]` | `requireUser` | `refunds` | 退款详情（含时间轴、可执行动作） |
 | POST | `/api/refunds/[id]/cancel` | `requireUser` | `refunds` | 撤销退款申请（仅 `pending` 可撤） |
 
+> 📌 **直接全额退款**（`paid` / `accepted` 的免审批直退，P0-12）的地址前缀是 `/api/orders/...`，
+> 因此登记在 **§5 订单（用户端）**：`POST /api/orders/[id]/direct-refund`。本节不重复列它——
+> 同一行出现在两张表里，按文档数接口时会**多算一条**。
+
 ### 管理端
 
 | Method | URL | Guard | Service | 作用 |
@@ -111,17 +116,58 @@
 | GET | `/api/admin/refunds` | `requireAdmin` | `adminRefunds` | 退款列表（状态 / 关键词筛选） |
 | GET | `/api/admin/refunds/[id]` | `requireAdmin` | `adminRefunds` | 退款详情 |
 | POST | `/api/admin/refunds/[id]/start-review` | `requireAdmin` | `adminRefunds` | `pending → reviewing` |
-| POST | `/api/admin/refunds/[id]/approve` | `requireAdmin` | `adminRefunds` | 审核通过。**联动把订单置为 `refunded` 且写入 `refundedAmount`** |
+| POST | `/api/admin/refunds/[id]/approve` | `requireAdmin` | `adminRefunds` | 审核通过。**按比例算金额、累计写入 `refundedAmount`，退满才置订单为 `refunded`；按责任归属冲回打手收益** |
 | POST | `/api/admin/refunds/[id]/reject` | `requireAdmin` | `adminRefunds` | 驳回（必填意见） |
 
-**⚠️ `approve` 的退款金额口径（已由产品负责人裁定，2026-09-19）**：
+**⚠️ `approve` 的退款金额口径 —— P0-13 起已被取代（产品负责人裁定，2026-09-25）**
 
-- 当前阶段人工退款审批**只有「拒绝 / 全额退款」两种结果**，部分退款尚未实现。
-- 批准时**必须**把 `order.actualPaidAmount` 作为实际退款金额写入 `order.refundedAmount`。
-- **`refundedAmount` = 该订单累计实际已经退还给用户的金额**；未来部分退款上线后扩展为累计值。
-- **曾经的缺陷（P0-5.5 已修复）**：`lib/data/adminRefundTransaction.ts` 调用 `applyOrderRefund` 时**省略了第三个参数**，会出现「已退款但 `refundedAmount` 为 0」。裁定为**修 Bug，不通过隐藏字段规避**——现显式传 `order.actualPaidAmount`（`adminRefundTransaction.ts:247`）。
-- 金额取自**被修改的那张订单**，不取退款申请上的 `amount` 快照；`applyOrderRefund` 对已 `refunded` 的订单短路返回 `changed: false`，因此重复批准不会重复累计、也不刷新 `refundedAt`。
-- **回归测试断言**：管理员全额退款后 `Order.status === "refunded"` **且** `refundedAmount === actualPaidAmount`。详见 `database-schema.md` §9。
+下面三条是 **P0-13 之前**的口径，现已**作废**，保留在此仅为解释历史：
+
+- ~~人工退款审批只有「拒绝 / 全额退款」两种结果，部分退款尚未实现。~~
+  → **已取代**：`approve` 现在接受**退款比例**，部分退款与全额退款走同一个接口。
+- ~~批准时必须把 `order.actualPaidAmount` 作为实际退款金额写入 `order.refundedAmount`。~~
+  → **已取代**：本次退多少 = `floor(order.actualPaidAmount × 退款比例)`，
+  且 `refundedAmount` 是**累计**（`applyOrderRefund` 的第三个参数由「覆盖成多少」改为「这一次退多少」）。
+  **只有累计退满才把订单置为 `refunded`**（部分退款不改订单状态，订单继续履约）。
+- ~~未来部分退款上线后扩展为累计值。~~ → **已落地**（本轮）。
+- **曾经的缺陷（P0-5.5 已修复）**：`lib/data/adminRefundTransaction.ts` 调用 `applyOrderRefund` 时**省略了第三个参数**，会出现「已退款但 `refundedAmount` 为 0」。裁定为**修 Bug，不通过隐藏字段规避**——现显式传金额（`adminRefundTransaction.ts:460`）。这条修复在 P0-13 之后仍然有效，只是现在传的是**本次增量**。
+- 金额取自**被修改的那张订单**（`actualPaidAmount` / `companionBaseIncome` 两个冻结快照），不取退款申请上的 `amount` 快照；`applyOrderRefund` 对**已退满**（`status === "refunded"` **或** `refundedAmount >= actualPaidAmount`）的订单短路返回 `changed: false`，因此重复批准不会重复累计、也不刷新 `refundedAt`。
+
+**⚠️ `approve` 的请求体（P0-13）**
+
+请求体携带**两个比例与一个责任归属**，**没有任何金额字段**——三个金额一律由服务端按
+`业务流程表.md` §17 的冻结公式算（管理员只输入比例，金额由系统计算）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `refundRatePercent` | 字符串 | 本次退款比例（整数百分比 `0~100`）。**必填**；空字符串或缺失是「没填」，不是「0%」 |
+| `responsibility` | `"platform"` / `"companion"` / `"shared"` | 资金责任归属。**必填**；由**管理员**认定（客服只能调查、记录、提出意见） |
+| `companionLiabilityRatePercent` | 字符串 | 打手责任比例。**只有 `shared` 允许出现**——其余两种带上它是 `400`，**不是静默忽略**（金额字段宁可报错） |
+
+冲回公式与派生字段（`RefundDecision` 六项，详见 `database-schema.md` §9）：
+
+| 责任归属 | `companionReversalAmount` |
+|---|---|
+| `platform` | 恒为 `0` |
+| `companion` | `floor(companionBaseIncome × refundRateBp / 10000)` |
+| `shared` | `floor(companionBaseIncome × refundRateBp × companionLiabilityRateBp / 10000 / 10000)` |
+
+- `platformBorneAmount = refundAmount − companionReversalAmount`，**用减法构造**（恒等式在定义上成立），**允许为负**（§17）。
+- 冲回额**钳制**在「该单剩余可冲回额」以内，保证 `0 <= 累计冲回 <= incomeAmount`。
+- **六项决策字段只出现在管理端响应**。客服与用户只拿得到 `decidedAmount`（本次实退金额），
+  拿不到责任归属与平台承担额——见 D13。
+- `GET /api/admin/refunds/[id]` 的响应带 **`orderMoney`**（P0-13 验收整改 D19）：
+  `{ originalAmount, couponDiscountAmount, actualPaidAmount, refundedAmount,
+    remainingRefundableAmount, companionBaseIncome, clubNetIncome,
+    reversedSoFarAmount, companionEarningStatus }`。
+  全部是**订单冻结快照**，读取时不重算；`remainingRefundableAmount = actualPaidAmount − refundedAmount`。
+  **只给管理端**——它是「这个退款比例是谁的百分之几」的唯一数据来源。
+- `approve` 的响应带 `decidedAmount`：**即使确认框已经会显示预计金额，这个字段也必须带**
+  （D19）——界面上那个数是页面加载时的数据算的预计值，响应里这个才是**真正写下去**的数。
+  成功提示报的是后者。
+- **回归测试**：`tests/refundMoneyChain.test.mjs`（公式 / 钳制 / 冲回 / 边界 /
+  订单金额快照 / 预览与落库一致）、`tests/adminRefunds.test.mjs`（状态机 / 幂等 / 审计 / 白名单）。
+  详见 `database-schema.md` §9。
 
 ### 客服端
 
@@ -260,7 +306,7 @@
 
 ---
 
-## 11. 客服工作台（staff）—— 16 条
+## 11. 客服工作台（staff）—— 25 条
 
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
@@ -268,11 +314,43 @@
 | GET | `/api/staff/conversations/[orderId]` | `requireStaff` | `staffConversations` | 单个会话详情 |
 | POST | `/api/staff/conversations/[orderId]/messages` | `requireStaff` | `staffConversations` | 客服发消息 |
 | POST | `/api/staff/conversations/[orderId]/read` | `requireStaff` | `staffConversations` | 标记客服侧已读（按 `staffId` 独立） |
+| GET | `/api/staff/orders` | `requireStaff` | `staffOrders` | 全量订单查询（状态 / 游戏 / 日期 / 关键词筛选，P0-10） |
+| GET | `/api/staff/orders/[id]` | `requireStaff` | `staffOrders` | 订单只读详情（P0-10） |
+| POST | `/api/staff/orders/[id]/release` | `requireStaff` | `staffOrderActions` | 退回公共池。`reason` 必填，`accepted` / `serving` 均可（P0-11） |
+| POST | `/api/staff/orders/[id]/replace` | `requireStaff` | `staffOrderActions` | 指定新护航（direct replace）。不再需要管理员批准（P0-11） |
+| GET | `/api/staff/orders/[id]/replace-candidates` | `requireStaff` | `staffOrderActions` | 换人候选名单。服务端已按资格筛过（P0-11） |
 
-投诉 5 条 + 退款 4 条见上文 §6 / §7。auth 3 条见 §1。
+完成材料 4 条见 §3.2，投诉 5 条见 §7，退款 4 条见 §6，auth 3 条见 §1。
 
 **⚠️ 客服侧已读与用户侧已读是两份独立状态**，刻意不合并：
 客服读完一个会话不能把用户的未读角标清零，反之亦然。键里带 `staffId`，因为两位客服同时值班时，一位读过的会话不该从另一位的工作台上消失。
+
+**⚠️ 客服端订单段的五个地址分成两组，写的那三个写的不是「订单记录」**（P0-10 开只读两个，
+P0-11 开处置三个）：
+
+- **两个只读**（`/api/staff/orders` · `/api/staff/orders/[id]`）——一个写方法都没有。
+- **三个处置**——改的是这一单**当前的履约绑定**（退回公共池 / 指定新护航），
+  **不改金额、不改商品、不写退款、不动护航收益**，也不引入 `OrderStatus` 之外的新状态：
+  退回落到 `paid`，换人落到 `accepted`。因此 §`staffOrderActions` 里**没有任何
+  `refundRepository` / `earningRepository` 依赖**（有测试门禁钉住这一条）。
+  资金最终划拨仍然留在管理员侧（理由见 §6）。
+
+唯一的例外是两个**读取路径上的惰性物化**（`sweepExpiredDispatches` /
+`sweepCompletionAutoApprovals`），`/api/staff/orders` 与 `/api/staff/orders/[id]` 各调用一次。
+它们是幂等的、与业务动作无关的既有惯例（`adminOrders` / `orders` / `companionOrders` /
+`staffCompletions` 挂在同一处，**同一个函数，不是第二套实现**），作用是让这一页显示的
+派单与完成材料状态与业务事实一致——不挂的话客服会对着一条 `publicDeadlineAt` 早已过去的
+「等待接单」去催一个不存在的接单。**它们不是客服可以触发的东西**：客服没有任何输入能
+决定物化哪一个、物化几次。
+
+⚠️ **但 P0-11 起客服**确实**有一条能间接改变完成材料状态的动作**：退回公共池 / 换人会让
+该单 `pending` 的完成材料转成 `invalidated`（`invalidatePendingCompletionForOrder()`，
+与惰性物化**不是一回事**——它由业务动作触发、且只作用于一单）。因此「客服侧完全不能写」
+这句话在 P0-11 之后不再成立；准确的说法是**客服不能改订单的金额与状态机之外的字段**。
+
+**⚠️ 客服端订单 DTO 与管理端是两份字段表**（`StaffOrderListItem` / `StaffOrderDetail` vs
+`AdminOrderListItem` / `AdminOrderDetail`）：客服侧**刻意不含**平台净收入、分账比例、
+护航收益、游戏账号与备注。客服看的是「用户侧的钱」（应付 / 实付 / 已退），不是「分账与平台的账」。
 
 ---
 
@@ -413,13 +491,14 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 
 **接口从不返回仓储记录整体，一律显式挑字段。**
 
-**已明确执行的三条**：
+**已明确执行的四条**：
 
 | 接口 | 刻意不返回 |
 |---|---|
 | `/api/admin/auth/session` | 密码、密钥、`enabled`、`lastLoginAt` |
 | `/api/companion/dispatches`（池卡片） | `gameAccountId`、`remark`、`userId`、金额明细 |
 | `/api/orders/[id]`（用户侧订单） | `clubNetIncome` |
+| `/api/staff/orders`、`/api/staff/orders/[id]`（客服侧订单，P0-10） | `clubNetIncome`、`companionRateSnapshot`、`companionBaseIncome`、`gameAccountId`、`remark`、内部 `userId` |
 
 **理由**：字段是**显式挑出来的**，因此将来给实体加字段**不会自动顺着接口流出去**。
 
@@ -441,7 +520,7 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 | 机制 | 实现位置 | 用于 |
 |---|---|---|
 | **幂等键索引** | 各 store 的 `${userId}:${idempotencyKey}` → 记录 id | 用户侧创建类接口（支付请求 / 退款 / 投诉 / 评价 / 反馈 / 领券 / 消息） |
-| **业务唯一键索引** | 如 `${userId}:${orderId}`（一单一评）、`orderId`（一单一退款） | 天然唯一的业务关系 |
+| **业务唯一键索引** | 如 `${userId}:${orderId}`（一单一评）、`orderId` → 退款申请 id **列表**（`refundIdsByOrder`，**P0-13 起为多值**） | 天然唯一的业务关系。⚠️ 「一单一退款」**不再是这条索引的含义**：部分退款要求同一单能退第二次，因此它现在回答的是「这一单有哪些申请」，而「同一时刻最多一条进行中」由 `isActiveRefundStatus` 单独判定 |
 | **`operationId` 重放** | `lib/data/adminWriteSupport.ts` 的 `takeReplay` / `takeReplayForAction` / `takeCreateReplay` | 管理端 / 客服端写操作 |
 | **状态本身即判据** | 动作伪事务的原子区段内先判「结果状态是否已经成立」 | **只有结果状态可作判据的推进类动作**：`acceptDispatch`（P0-5）/ `startCompanionOrder`（P0-7）/ `approveCompletion` · `rejectCompletion`（P0-8）。**有没有请求体不是判据**——`rejectCompletion` 带 `reviewNote`，但重放判据仍是「这份材料是否已经是 `rejected`」 |
 
@@ -484,7 +563,7 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 | 门禁 | 位置 | 当前条数 |
 |---|---|---|
 | 管理端 | `tests/admin.test.mjs` | 62 |
-| 客服端 | `tests/staff.test.mjs` | 20 |
+| 客服端 | `tests/staff.test.mjs` | 25（P0-10 扩充：+2 全量订单查询；P0-11 扩充：+3 订单处置） |
 | 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`；P0-6 / P0-7 / P0-8 / P0-9 扩充） | 8 |
 
 **打手端门禁：已确认建立（产品裁定 2026-09-19），属 P0-5.5，本轮落地。**
@@ -541,7 +620,7 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 > `POST /api/staff/completions/[id]/approve`、`POST /api/staff/completions/[id]/reject`），
 > 因此它们属 **CURRENT**。
 >
-> **下表不是第二份清单**——**条数的唯一真值源是 §2.11 的门禁**（客服端 20 条见
+> **下表不是第二份清单**——**条数的唯一真值源是 §2.11 的门禁**（客服端 25 条见
 > `tests/staff.test.mjs`，打手端 **8** 条见 `tests/companion.test.mjs` 的 `COMPANION_API_MANIFEST`）。
 > 保留这张表是为了记录这五条的**契约形状**（Guard / Service / 语义），
 > 它是本文件里唯一一处写出「哪条路由归哪个服务模块」的地方；**增删路由时改的是清单数组，
@@ -570,17 +649,37 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 
 ## 3.3 用户退款：未服务直接全额退款，已服务进入售后
 
-**复用 CURRENT `POST /api/orders/[id]/refunds` 作为用户退款入口，不新增第二套 Refund 系统。TARGET 行为按 Order 状态分流：**
+**按 Order 状态分流，`paid` / `accepted` 已于 P0-12 落地（CURRENT），`serving` / `completed` 的售后链路仍是 TARGET：**
 
-| Order.status | TARGET 行为 |
-|---|---|
-| `paid` | 直接全额退款成功；不需要客服/管理员审批 |
-| `accepted` | 直接全额退款成功；打手收益为 0，不生成 Earning；通知已接单打手；终态保留 `actualCompanionId` 历史事实 |
-| `serving` | 创建/进入人工售后退款链路，由客服调查，管理员最终决定资金 |
-| `completed` | 仅在本单 `complaintDeadlineAt` 前按投诉/售后规则处理 |
-| `refunded` | 不允许再次退款，幂等返回既有结果或业务拒绝 |
+| Order.status | 行为 | 状态 |
+|---|---|---|
+| `paid` | 直接全额退款成功；不需要客服/管理员审批 | ✅ **CURRENT**（P0-12） |
+| `accepted` | 直接全额退款成功；打手收益为 0，不生成 Earning；通知已接单打手；终态保留 `actualCompanionId` 历史事实 | ✅ **CURRENT**（P0-12） |
+| `serving` | 创建退款申请 → 客服调查 → 管理员最终决定资金 | ✅ **CURRENT**（P0-13）：按比例退款、责任归属认定、Earning 冲回全部落地；退款时还没有收益的单（护航中）在**结算时补记**冲回（D9） |
+| `completed` | 仅在本单 `complaintDeadlineAt` 前按投诉/售后规则处理 | 🟡 **同上** |
+| `refunded` | 不允许再次退款，幂等返回既有结果或业务拒绝 | ✅ **CURRENT** |
 
-**重要**：CURRENT `/api/orders/[id]/refunds` 仍是旧“创建退款申请”行为；上表是 TARGET，不得在文档中假装已经实现。
+### ⚠️ 与原文的一处**有意偏离**（P0-12，2026-09-24）
+
+本节原文要求「**复用 CURRENT `POST /api/orders/[id]/refunds` 作为用户退款入口，不新增第二套 Refund 系统**」。
+P0-12 落地时**新增了一个路由** `POST /api/orders/[id]/direct-refund`，因此必须说明清楚：
+
+- **没有**新增第二套 Refund 系统：仓储、状态机、`applyOrderRefund` 原语、通知设施**全部复用**，
+  零新增 Repository / Mock Store / `RefundStatus`；
+- 分出独立路由的理由是**两条路回答两个不同的问题**：一条是「**审不审**这笔申请」（写
+  `RefundRequest` 的状态与审核人，请求体里有原因 / 说明 / 凭证 / 幂等键，订单一动不动），
+  一条是「**当场把这一单退掉**」（没有申请、没有审核人、没有请求体，订单立刻 `refunded`）。
+  合成一个接口就只能靠「请求体里有没有 `reasonKey`」来分辨意图——那是把「走哪条业务路径」
+  变成一个**可被伪造的字段**；
+- 两条路的**订单状态集合不相交**（`REFUNDABLE_ORDER_STATUSES` = `serving` / `completed`；
+  `DIRECT_REFUNDABLE_ORDER_STATUSES` = `paid` / `accepted`），因此**不存在**同一张单两条路都能走的情形。
+  这条互斥由**集合本身**保证，并有断言钉住（`tests/refunds.test.mjs`）；
+- 权限依据：`01-requirements/用户权限表.md:448` 明文「**客服不得把「未开始服务直接退款」强行转成人工审批**」，
+  因此让这两档走人工审核**本身**就是违规的——两条路**必须**分开。
+
+**核对方式**：本节的每一条都可在 `lib/constants/refunds.ts`（两个状态集合）、
+`lib/data/directRefundTransaction.ts`（直退伪事务）、`lib/data/adminRefundTransaction.ts`（审核那条，**一字未改**）
+与 `tests/directRefund.test.mjs`（21 条）中逐条对照。
 
 ## 3.4 平台生命周期配置
 

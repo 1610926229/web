@@ -135,18 +135,32 @@ function SummarySection({ refund }: { refund: StaffRefundDetail }) {
 /**
  * 退款金额。**只读**。
  *
- * 本阶段退款一律整单退款，因此 `amount`（申请退多少）与 `orderTotalAmount`
- * （这一单原价多少）在构造上相等。两个都写出来，是让读者确认它们本来就是一回事。
+ * ⚠️ **P0-13 起退款可以是部分的**，「申请金额」与「实际退款金额」因此不再必然相等，
+ * 两块都必须写出来：只给申请金额，客服会照着它回答用户「退了多少」；
+ * 只给实退金额，又答不出用户问的「我申请的是多少、为什么只退了这些」。
+ *
+ * ⚠️ **只给金额，不给责任归属与平台承担额**（产品裁定 D13）：公司内部怎么分摊
+ * 与用户无关，客服也不需要它来履职——那是管理端的决策记录。
  */
 function AmountSection({ refund }: { refund: StaffRefundDetail }) {
   return (
     <Section title="退款金额">
       <div className="flex items-baseline justify-between">
-        <span className="text-[13px] text-ink-3">整单退款金额</span>
+        <span className="text-[13px] text-ink-3">申请金额（申请时的订单实付快照）</span>
         <span className="text-[20px] font-semibold tabular-nums text-ink">
           ¥{formatYuan(refund.amount)}
         </span>
       </div>
+
+      {refund.decidedAmount === null ? null : (
+        <div className="mt-4 flex items-baseline justify-between border-t border-admin-line pt-3">
+          <span className="text-[13px] text-ink-3">实际退款金额</span>
+          <span className="text-[20px] font-semibold tabular-nums text-ink">
+            ¥{formatYuan(refund.decidedAmount)}
+          </span>
+        </div>
+      )}
+
       <div className="mt-2 flex items-baseline justify-between">
         <span className="text-[13px] text-ink-3">原订单实付金额</span>
         <span className="text-[13px] tabular-nums text-ink-2">

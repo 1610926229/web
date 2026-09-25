@@ -14,7 +14,14 @@ import type { StaffUserSummary } from "./staff";
  * **不**进 `OrderStatus`）；只有通过才把订单推进到 `completed`。
  */
 
-/** 完成材料状态。`invalidated` 由最新技术设计（§T1）保留兼容，P0-8 **没有写入路径**。 */
+/**
+ * 完成材料状态。
+ *
+ * `invalidated`（已失效）在 P0-8 只是 §T1 的枚举占位、**零写入路径**；
+ * P0-11 起它有了**唯一一个**写入路径——当前履约被打手之外的力量解除时
+ * （封禁回池 / 客服换人），该打手那份 pending 材料立即作废，防止回池后
+ * 被自动通过（`特殊情况与异常处理表.md` EX-COMP-02）。
+ */
 export type CompletionSubmissionStatus = "pending" | "approved" | "rejected" | "invalidated";
 
 /**
@@ -62,7 +69,13 @@ export type CompletionSubmission = {
   reviewedAt: string | null;
   /** 驳回原因；pending / approved / invalidated 时为 null，rejected 时必填 */
   rejectReason: string | null;
-  /** 封禁回池时 pending 作废的时间。P0-8 不实现封禁，恒为 null（见 D3） */
+  /**
+   * pending 被作废的时间；非 `invalidated` 时为 null。
+   *
+   * ⚠️ P0-11 起**有写入路径**了（封禁回池 / 客服换人时该打手那份 pending 立即作废，
+   * 见 `COMPLETION_TRANSITIONS` 与 `applyCompletionInvalidation`），
+   * 不再是「恒为 null」的占位字段。
+   */
   invalidatedAt: string | null;
 };
 
@@ -200,6 +213,31 @@ export type StaffCompletionDetail = StaffCompletionListItem & {
    */
   autoApprovalBlockedReason: string | null;
 };
+
+/**
+ * 作废「某订单当前那份 pending 完成材料」的结果（P0-11，**同步**，供释放路径在原子区段内调用）。
+ *
+ * ⚠️ 它**不是**一个对外动作：没有任何接口暴露它。它的**唯一调用方**是订单释放
+ * （封禁回池 / 客服换人）——「当前履约被解除」时，那份还没审完的材料必须先失效，
+ * 否则它会在回池后被自动通过，把一张已经换了人的订单判成已完成
+ * （`特殊情况与异常处理表.md` EX-COMP-02）。
+ *
+ * | kind | 含义 | 调用方该怎么做 |
+ * |---|---|---|
+ * | `invalidated` | 真的作废了一条 | 继续 |
+ * | `none` | 这一单**没有** pending 材料 | 继续（不是错误：绝大多数释放都没有 pending） |
+ * | `not-pending` | 索引指向的记录状态已经不是 `pending` | **整件事失败**：数据不自洽 |
+ * | `missing-record` | 索引悬空（指向一条不存在的记录） | **整件事失败**：同上 |
+ *
+ * 后两种是**不可能状态**（`applyCompletionReview` 与 `appendCompletionSubmission`
+ * 都在同一段同步代码里维护索引），真出现时**宁可整件事失败**：继续释放会留下
+ * 一份「状态不是 pending、却还占着 pending 索引」的材料，而那一单已经换了人。
+ */
+export type CompletionInvalidationOutcome =
+  | { kind: "invalidated"; submissionId: string; changed: true }
+  | { kind: "none" }
+  | { kind: "not-pending"; status: CompletionSubmissionStatus }
+  | { kind: "missing-record" };
 
 /** 客服完成材料写操作（通过 / 驳回）的接口返回。 */
 export type StaffCompletionWriteResult = {

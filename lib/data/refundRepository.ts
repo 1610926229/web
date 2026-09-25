@@ -21,22 +21,31 @@ export type AdminRefundQueryFilter = {
  *
  * 两条约束由本层负责，不能靠调用方自觉：
  *
- * 1. **一笔订单只能有一条退款申请**（本阶段不开放重复申请）。「检查是否已存在」与
- *    「写入新记录」在同一段同步代码里完成，因此快速连点不会产生两条。
+ * 1. **一笔订单同一时刻最多一条进行中的退款申请**。⚠️ **P0-13 起不再是「一笔订单
+ *    只能有一条申请」**（那会让部分退款永远只能退一次）：已批准 / 已拒绝 / 已撤销的
+ *    记录不再挡着新申请。「检查有没有进行中的」与「写入新记录」在同一段同步代码里完成，
+ *    因此快速连点不会产生两条进行中的。
  * 2. **撤销只能发生在待审核（pending）**。状态判断与写入同样是原子的——
  *    否则「审核中」的申请在极端时序下会被用户撤销掉。
  *
- * ⚠️ 本层**不判断**「这笔订单能不能退款」「这个订单是不是你的」：那是业务规则，
- * 在 `lib/services/refunds.ts` 里做。仓储只保证自己这份数据的一致性。
+ * ⚠️ 本层**不判断**「这笔订单能不能退款」「这个订单是不是你的」「还能退多少钱」：
+ * 那是业务规则，在 `lib/services/refunds.ts` 与伪事务里做。
+ * 仓储只保证自己这份数据的一致性。
  *
- * 当前实现是进程内内存存储，将来由数据库的唯一索引与事务替换——
+ * 当前实现是进程内内存存储，将来由数据库的（部分）唯一索引与事务替换——
  * 替换时这份契约不变（`orders/create` 服务不用改）。
  */
 
-/** 创建结果：要么成功（含幂等命中），要么这笔订单已经有退款申请了。 */
+/**
+ * 创建结果：要么成功（含幂等命中），要么这笔订单已经有一条**进行中**的申请了。
+ *
+ * ⚠️ `reason` 由 `order_already_has_refund` 改名为 `order_has_active_refund`（P0-13）：
+ * 拒绝的理由变了——不是「已经有记录了」，而是「已经有一条还在走流程」。
+ * 名字不改会让调用方按旧语义去理解这个失败（以为「有记录」就该报重复申请）。
+ */
 export type CreateRefundOutcome =
   | { ok: true; refund: RefundRequest; created: boolean }
-  | { ok: false; reason: "order_already_has_refund"; existing: RefundRequest };
+  | { ok: false; reason: "order_has_active_refund"; existing: RefundRequest };
 
 /** 撤销结果。非法状态与不存在分开报，但**对外都是同一个错误**（见服务层）。 */
 export type CancelRefundOutcome =
@@ -50,8 +59,23 @@ export type RefundRepository = {
   /** 按「用户 + 幂等键」查已提交过的申请；不存在返回 null。 */
   findRefundByKey(userId: string, idempotencyKey: string): Promise<RefundRequest | null>;
 
-  /** 按订单取退款申请（一单一申请，所以最多一条）；不存在返回 null。 */
+  /**
+   * 按订单取退款申请，返回**最新的一条**；一单都没退过时返回 null。
+   *
+   * ⚠️ P0-13 起一个订单可以有多条申请，因此「最新」是本方法的**契约的一部分**，
+   * 不是实现细节：它服务的是「这一单的退款现在走到哪了」这个单点问题
+   * （订单详情上的退款卡）。要「全部」用 `listRefundsByOrderId`。
+   */
   findRefundByOrderId(orderId: string): Promise<RefundRequest | null>;
+
+  /**
+   * 某订单的**全部**退款申请，按创建先后排列；没退过是空数组。
+   *
+   * ⚠️ 与 `findRefundByOrderId` 并存不是重复：一个回答「现在到哪了」（最新一条），
+   * 一个回答「一共退过几次、每次都退了多少」（全部）。部分退款上线后，
+   * 后一个问题才有意义，而它在只返回一条的旧方法里**根本问不出来**。
+   */
+  listRefundsByOrderId(orderId: string): Promise<RefundRequest[]>;
 
   /**
    * 创建退款申请。
@@ -59,9 +83,9 @@ export type RefundRepository = {
    * 幂等：同「用户 + 幂等键」已存在时返回既有记录并把 `created` 置为 false，
    * 快速连点或网络重试都不会多出第二条。
    *
-   * 同一订单已有申请（无论什么状态、也无论幂等键是否相同）时**拒绝创建**，
-   * 并把已存在的那条返回给调用方——服务层据此区分「已有进行中的申请」与
-   * 「已有退款记录，本阶段不支持重复申请」两种提示。
+   * **同一订单已有进行中的申请**时拒绝创建（`order_has_active_refund`），
+   * 并把已存在的那条返回给调用方。已结束（已批准 / 已拒绝 / 已撤销）的记录不挡——
+   * 部分退款要求同一单能退第二次（P0-13）。
    */
   createRefundRequest(refund: RefundRequest, idempotencyKey: string): Promise<CreateRefundOutcome>;
 

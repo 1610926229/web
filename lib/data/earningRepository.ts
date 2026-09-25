@@ -1,4 +1,4 @@
-import type { Earning } from "@/lib/types/earning";
+import type { Earning, EarningAdjustment } from "@/lib/types/earning";
 import { mockEarningRepository } from "./mockEarningRepository";
 
 /**
@@ -37,6 +37,18 @@ export type EarningRepository = {
    * 这条约束的读取侧入口。**不做归属判断**：归属由调用方校验。
    */
   findEarningByOrderId(orderId: string): Promise<Earning | null>;
+
+  /**
+   * 一笔收益的全部**调整明细**（P0-13），按发生时间正序；没有调整过是空数组。
+   *
+   * ⚠️ 它是 `Earning.reversedAmount` 这个**总数**背后的**明细**，两者关系是
+   * 「读用总数、审计用明细」（见 `lib/types/earning.ts` 的 `EarningAdjustment`）。
+   * 页面上谁都不需要它——读的都是 `reversedAmount`；它服务的是对账与测试：
+   * 「这 3000 是哪一笔退款冲的、当时认定谁的责任」只能由明细回答。
+   *
+   * **不做归属判断**：与 `findEarningByOrderId` 同一条约定，归属由调用方校验。
+   */
+  listAdjustmentsForEarning(earningId: string): Promise<EarningAdjustment[]>;
 };
 
 export function getEarningRepository(): EarningRepository {

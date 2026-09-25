@@ -41,17 +41,18 @@ export function readOrderBlockingFacts(orderId: string): {
   const refunds = refundStore();
   const complaints = complaintStore();
 
-  // 退款是「一单一条」：索引直接给出 id，不遍历
-  const refundId = refunds.refundIdByOrder.get(orderId);
-  const refund = refundId ? refunds.refunds.get(refundId) : undefined;
+  // 退款与投诉一样，都是「一单可以有多条」：P0-13（D10）起同一单允许重复申请退款，
+  // 索引给出的是 id 列表。**只要还有一条在进行中就算阻塞**——只看最近一条，
+  // 会让「前一笔已驳回、后一笔仍在审核」这种单被放过去。
+  const hasActiveRefund = (refunds.refundIdsByOrder.get(orderId) ?? []).some((refundId) => {
+    const refund = refunds.refunds.get(refundId);
+    return refund ? isActiveRefundStatus(refund.status) : false;
+  });
 
-  // 投诉是「一单可以有多条」：必须遍历并只要有一条未完结就算阻塞
+  // 投诉同样必须遍历，只要有一条未完结就算阻塞
   const hasUnresolvedComplaint = [...complaints.complaints.values()].some(
     (complaint) => complaint.orderId === orderId && isUnresolvedComplaintStatus(complaint.status),
   );
 
-  return {
-    hasActiveRefund: refund ? isActiveRefundStatus(refund.status) : false,
-    hasUnresolvedComplaint,
-  };
+  return { hasActiveRefund, hasUnresolvedComplaint };
 }

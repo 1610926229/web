@@ -13,10 +13,16 @@ import { formatAuditActorLabel } from "@/lib/constants/adminAudit";
 import {
   ADMIN_REFUND_AMOUNT_NOTE,
   ADMIN_REFUND_CONSUMPTION_NOTICE,
+  ADMIN_REFUND_DECISION_PENDING_NOTE,
+  ADMIN_REFUND_DECISION_QUESTIONS,
+  ADMIN_REFUND_DECISION_RATE_BASE_NOTE,
+  ADMIN_REFUND_DECISION_SHARED_NOTE,
   ADMIN_REFUND_DETAIL_TITLE,
   ADMIN_REFUND_LIST_TITLE,
 } from "@/lib/constants/adminRefunds";
+import { EARNING_STATUS_LABELS } from "@/lib/constants/earnings";
 import { EVIDENCE_KIND_LABELS } from "@/lib/constants/evidence";
+import { REFUND_RESPONSIBILITY_LABELS, formatRefundRatePercent } from "@/lib/constants/refunds";
 import { getAdminRefundDetail } from "@/lib/services/adminRefunds";
 import type { AdminRefundDetail } from "@/lib/types/refund";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
@@ -31,7 +37,15 @@ import { toSearchParams } from "@/lib/utils/query";
  * ⚠️ **本页只有一处写入口**（`AdminRefundConsole`），而且按钮完全由服务端的
  * `allowedActions` 决定；终态下那一块显示的是「没有可执行的动作」而不是三个灰按钮。
  *
- * ⚠️ **金额是只读展示值**：取申请创建时的订单实付快照，页面上没有任何输入框能改它。
+ * ⚠️ **金额本身仍然是只读的**（P0-13 起口径微调）：申请金额取申请创建时的订单实付快照，
+ * 页面上没有任何输入框能改它；`AdminRefundConsole` 里新增的两个输入框是
+ * **退款比例**与**责任归属**，三个金额由服务端按订单冻结快照算出来（§16.B）。
+ *
+ * ⚠️ **P0-13 验收整改（D19）**：确认框里现在**会实时显示预计金额**了。
+ * 原先 D15 的「不做预览」被显式取代——它答不出管理员真正要问的问题（见
+ * `02-decisions.md` §十一）。取代的只是「不显示」：预计金额由
+ * `previewRefundDecisionAmounts()` 调用**服务端同一个公式函数**算出，
+ * 界面上没有任何第二份金额公式。本页新增的「订单金额」一段给出基准与口径。
  *
  * ⚠️ **本路由上下都没有 `loading.tsx`**：加载边界一旦罩住它，外壳会先以 200 发出，
  * 迟到的 `notFound()` 只能改内容、改不了状态码。兄弟目录 `(list)` 存在的理由正是这个。
@@ -55,6 +69,7 @@ export default async function AdminRefundDetailPage({
       />
 
       <SummarySection refund={refund} />
+      <OrderMoneySection refund={refund} />
       <AmountSection refund={refund} />
       <UserSection refund={refund} />
       <ContentSection refund={refund} />
@@ -102,23 +117,156 @@ function SummarySection({ refund }: { refund: AdminRefundDetail }) {
         <DetailRow label="更新时间" value={formatDateTime(refund.updatedAt)} />
       </div>
       <p className="mt-2 text-[12px] leading-4 text-ink-3">
-        开始审核与拒绝只改退款申请，订单按原进度继续；只有通过会同时把订单改成「已退款」。
+        开始审核与拒绝只改退款申请，订单按原进度继续；通过会同时写入资金决策与打手收益冲回，
+        只有累计退满时订单才变成「已退款」，部分退款不改订单状态。
       </p>
     </Section>
   );
 }
 
-/** 退款金额。**只读**，且把「不可修改」与「通过后消费侧会怎样」都写在旁边。 */
+/**
+ * **订单金额**：这一笔退款比例的基准（P0-13 验收整改 C）。
+ *
+ * ⚠️ 它与下面那两块**不是一回事**，因此单独一段，不合并：
+ * - 这一段是**整张订单**的钱（原价 / 实付 / 累计已退 / 还能退多少 / 双方收益）；
+ * - 下面「申请金额」是**这笔申请**创建时的实付快照；
+ * - 再下面「实际退款金额」是**这笔决策**最终退出去的钱。
+ *
+ * 合并成一个数的话，管理员就答不出「这一单还能再退多少」——而部分退款允许
+ * 同一单退多次，那个问题从 P0-13 起才真正存在。
+ *
+ * ⚠️ 口径说明与「五个问题」挂在这里（而不是只放在确认框里）：确认框是**动手时**
+ * 才打开的，而「这个比例乘的是谁」是**看数之前**就该知道的事。
+ *
+ * ⚠️ 全部数字照抄订单冻结快照，页面**不重算**（`architecture-rules.md` §三 第 4 条）。
+ */
+function OrderMoneySection({ refund }: { refund: AdminRefundDetail }) {
+  const { orderMoney } = refund;
+
+  return (
+    <Section title="订单金额（退款比例的基准）">
+      <div className="flex flex-col gap-1">
+        <DetailRow
+          label="用户实付"
+          value={`¥${formatYuan(orderMoney.actualPaidAmount)}`}
+        />
+        <DetailRow
+          label="订单原价"
+          value={`¥${formatYuan(orderMoney.originalAmount)}（优惠券抵扣 ¥${formatYuan(
+            orderMoney.couponDiscountAmount,
+          )}）`}
+        />
+        <DetailRow
+          label="累计已退款"
+          value={`¥${formatYuan(orderMoney.refundedAmount)}`}
+        />
+        {/* 部分退款允许一单退多次，因此「还能退多少」是本页最要紧的一个数 */}
+        <DetailRow
+          label="剩余可退款"
+          value={`¥${formatYuan(orderMoney.remainingRefundableAmount)}`}
+        />
+        <DetailRow
+          label="打手收益"
+          value={`¥${formatYuan(orderMoney.companionBaseIncome)}（已冲回 ¥${formatYuan(
+            orderMoney.reversedSoFarAmount,
+          )}）`}
+        />
+        <DetailRow label="平台收益" value={`¥${formatYuan(orderMoney.clubNetIncome)}`} />
+        <DetailRow
+          label="打手收益状态"
+          value={
+            orderMoney.companionEarningStatus === null
+              ? "还没有收益（订单尚未结算）"
+              : EARNING_STATUS_LABELS[orderMoney.companionEarningStatus]
+          }
+        />
+      </div>
+
+      <div className="mt-3 flex flex-col gap-1 border-t border-admin-line pt-3">
+        <p className="text-[12px] leading-4 text-ink-3">{ADMIN_REFUND_DECISION_RATE_BASE_NOTE}</p>
+        <p className="text-[12px] leading-4 text-ink-3">{ADMIN_REFUND_DECISION_SHARED_NOTE}</p>
+      </div>
+
+      <div className="mt-3 border-t border-admin-line pt-3">
+        <p className="text-[13px] text-ink-3">这笔退款怎么算</p>
+        <dl className="mt-2 flex flex-col gap-2">
+          {ADMIN_REFUND_DECISION_QUESTIONS.map((item) => (
+            <div key={item.q}>
+              <dt className="text-[13px] text-ink">{item.q}</dt>
+              <dd className="mt-0.5 break-words text-[12px] leading-4 text-ink-3">{item.a}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </Section>
+  );
+}
+
+/**
+ * 退款金额：**申请金额**（申请时的订单实付快照）与**资金决策**（P0-13）两块。
+ *
+ * ⚠️ 两块**都要有**，而且不能合成一个数：P0-13 起退款可以是部分的，
+ * 「这一单本来涉及多少钱」与「这笔申请最后退了多少」是两个不同的问题。
+ * 只显示前者，管理员会以为申请多少就退了多少；只显示后者，又答不出比例是从哪来的。
+ *
+ * ⚠️ 决策的六项在这里**全给管理员**（产品裁定 Q1-c：平台承担部分必须留下明确、
+ * 可审计的记录，不能仅通过「没有 reversal」间接推断）——这一页就是那个记录的可读形态。
+ * 客服端与用户端看不到责任归属与平台承担额（D13）。
+ */
 function AmountSection({ refund }: { refund: AdminRefundDetail }) {
+  const { decision } = refund;
+
   return (
     <Section title="退款金额">
       <div className="flex items-baseline justify-between">
-        <span className="text-[13px] text-ink-3">整单退款金额</span>
+        <span className="text-[13px] text-ink-3">申请金额（申请时的订单实付快照）</span>
         <span className="text-[20px] font-semibold tabular-nums text-ink">
           ¥{formatYuan(refund.amount)}
         </span>
       </div>
-      <p className="mt-2 text-[12px] leading-4 text-ink-3">{ADMIN_REFUND_AMOUNT_NOTE}</p>
+
+      {decision ? (
+        <>
+          <div className="mt-4 flex items-baseline justify-between border-t border-admin-line pt-3">
+            <span className="text-[13px] text-ink-3">实际退款金额</span>
+            <span className="text-[20px] font-semibold tabular-nums text-ink">
+              ¥{formatYuan(decision.refundAmount)}
+            </span>
+          </div>
+
+          <div className="mt-2 flex flex-col gap-1">
+            <DetailRow label="退款比例" value={`${formatRefundRatePercent(decision.refundRateBp)}%`} />
+            <DetailRow
+              label="责任归属"
+              value={REFUND_RESPONSIBILITY_LABELS[decision.responsibility]}
+            />
+            {/* 只有按比例分担才有打手责任比例；其余两种显示「—」，不显示 0%
+                （0% 与「这一项不适用」是两件事） */}
+            <DetailRow
+              label="打手责任比例"
+              value={
+                decision.companionLiabilityRateBp === null
+                  ? ""
+                  : `${formatRefundRatePercent(decision.companionLiabilityRateBp)}%`
+              }
+            />
+            <DetailRow
+              label="打手收益冲回"
+              value={`¥${formatYuan(decision.companionReversalAmount)}`}
+            />
+            {/* 平台承担额**允许为负**（§17 原文）：打手按原价分账、券由平台承担时，
+                冲回额可能大于实际退给用户的钱。照实显示，不夹到 0 */}
+            <DetailRow label="平台承担" value={`¥${formatYuan(decision.platformBorneAmount)}`} />
+            <DetailRow label="决策时间" value={formatDateTime(decision.decidedAt)} />
+          </div>
+        </>
+      ) : (
+        <p className="mt-4 border-t border-admin-line pt-3 text-[13px] leading-5 text-ink-3">
+          {ADMIN_REFUND_DECISION_PENDING_NOTE}
+        </p>
+      )}
+
+      <p className="mt-3 text-[12px] leading-4 text-ink-3">{ADMIN_REFUND_AMOUNT_NOTE}</p>
       <p className="mt-1 text-[12px] leading-4 text-ink-3">{ADMIN_REFUND_CONSUMPTION_NOTICE}</p>
     </Section>
   );

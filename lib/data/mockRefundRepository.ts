@@ -1,7 +1,8 @@
 import { compareRefundsForAdmin } from "@/lib/constants/adminRefunds";
+import { isActiveRefundStatus } from "@/lib/constants/refunds";
 import { refundSeed } from "@/lib/mocks/fixtures/refundSeed";
 import type { ActorRole } from "@/lib/types/actor";
-import type { RefundRequest, RefundStatus } from "@/lib/types/refund";
+import type { RefundDecision, RefundRequest, RefundStatus } from "@/lib/types/refund";
 import { getMockStore } from "./mockStore";
 import type {
   AdminRefundQueryFilter,
@@ -29,22 +30,30 @@ type MockRefundStore = {
   refunds: Map<string, RefundRequest>;
   /** `${userId}:${idempotencyKey}` → 退款申请 id */
   refundIdByKey: Map<string, string>;
-  /** orderId → 退款申请 id。一单一申请，所以是单值索引而不是列表 */
-  refundIdByOrder: Map<string, string>;
+  /**
+   * orderId → 该订单的退款申请 id **列表**，按创建先后排列。
+   *
+   * ⚠️ **P0-13 起由单值改为多值**：部分退款要求同一订单能有多条申请
+   * （「一次退不完、之后再退一次」），而原来的单值索引 + 创建时的
+   * `order_has_active_refund` 拒绝路径让这件事根本不可能发生。
+   * 未来数据库上它不再是唯一索引，而是一条普通索引 + 「同一订单同一时刻
+   * 最多一条进行中」的部分唯一索引。
+   */
+  refundIdsByOrder: Map<string, string[]>;
 };
 
 function createStore(): MockRefundStore {
   const refunds = new Map(refundSeed.map((refund) => [refund.id, refund]));
-  const refundIdByOrder = new Map<string, string>();
+  const refundIdsByOrder = new Map<string, string[]>();
   for (const refund of refundSeed) {
-    // 预置数据同样要满足「一单一申请」，重复的种子在这里就会暴露出来
-    if (refundIdByOrder.has(refund.orderId)) {
-      throw new Error(`预置退款数据重复关联同一订单：${refund.orderId}`);
-    }
-    refundIdByOrder.set(refund.orderId, refund.id);
+    // ⚠️ 这里**不再**检查「一个订单只有一条退款」——P0-13 起那是合法数据。
+    // 保留的只有「同一条种子不能出现两次」这个 trivial 事实，它由上面的 Map 保证。
+    const list = refundIdsByOrder.get(refund.orderId) ?? [];
+    list.push(refund.id);
+    refundIdsByOrder.set(refund.orderId, list);
   }
 
-  return { refunds, refundIdByKey: new Map(), refundIdByOrder };
+  return { refunds, refundIdByKey: new Map(), refundIdsByOrder };
 }
 
 function store(): MockRefundStore {
@@ -68,6 +77,24 @@ function keyOf(userId: string, idempotencyKey: string): string {
   return `${userId}:${idempotencyKey}`;
 }
 
+/**
+ * 某订单的**全部**退款申请，按创建先后排列（**同步读，无 `await`**）。
+ *
+ * ⚠️ 给伪事务用的：审批时要读「这一单此前已批准退款的冲回额之和」，
+ * 而那个读取必须与后面的写入在同一段同步代码里（`adminRefundTransaction`）。
+ * 因此它不能用 `getRefundRepository()` 的异步方法。
+ *
+ * 走索引而不是遍历 `refunds`：索引是「哪些申请属于这一单」这份事实的唯一表达，
+ * 遍历 Map 再按 `orderId` 过滤等于把同一份事实重新推导一遍。
+ */
+export function listRefundsForOrderSync(orderId: string): RefundRequest[] {
+  const current = store();
+  const ids = current.refundIdsByOrder.get(orderId) ?? [];
+  return ids
+    .map((id) => current.refunds.get(id))
+    .filter((refund): refund is RefundRequest => refund !== undefined);
+}
+
 export const mockRefundRepository: RefundRepository = {
   async findRefundById(id) {
     return store().refunds.get(id) ?? null;
@@ -79,8 +106,15 @@ export const mockRefundRepository: RefundRepository = {
   },
 
   async findRefundByOrderId(orderId) {
-    const id = store().refundIdByOrder.get(orderId);
-    return id ? (store().refunds.get(id) ?? null) : null;
+    // P0-13：一单可以有多条申请，这里给**最新的一条**（列表尾）。
+    // 「最新」是页面要的那个：订单详情上的那张退款卡回答的是
+    // 「这一单的退款现在走到哪了」，而不是「历史上退过几次」。
+    const list = listRefundsForOrderSync(orderId);
+    return list.length > 0 ? list[list.length - 1] : null;
+  },
+
+  async listRefundsByOrderId(orderId) {
+    return listRefundsForOrderSync(orderId);
   },
 
   async createRefundRequest(refund, idempotencyKey): Promise<CreateRefundOutcome> {
@@ -95,16 +129,23 @@ export const mockRefundRepository: RefundRepository = {
       if (existing) return { ok: true, refund: existing, created: false };
     }
 
-    // 2) 一单一申请：这一单已经有退款记录（不论状态）就不再创建
-    const orderRefundId = current.refundIdByOrder.get(refund.orderId);
-    if (orderRefundId) {
-      const existing = current.refunds.get(orderRefundId);
-      if (existing) return { ok: false, reason: "order_already_has_refund", existing };
+    // 2) **同一时刻只能有一条进行中**（P0-13 起）。
+    //    ⚠️ 判据是「进行中」而不是「有任何记录」：部分退款要求同一单能退第二次，
+    //    因此已批准 / 已拒绝 / 已撤销的记录**不再挡**。这一处与
+    //    `canRequestRefund(status, hasActiveRefund)` 是同一个判断的两处落点，
+    //    而这里是**真正生效**的那一处（服务层那次只是提前给出好一点的提示）。
+    const existingForOrder = listRefundsForOrderSync(refund.orderId).find((item) =>
+      isActiveRefundStatus(item.status),
+    );
+    if (existingForOrder) {
+      return { ok: false, reason: "order_has_active_refund", existing: existingForOrder };
     }
 
     current.refunds.set(refund.id, refund);
     current.refundIdByKey.set(key, refund.id);
-    current.refundIdByOrder.set(refund.orderId, refund.id);
+    const list = current.refundIdsByOrder.get(refund.orderId) ?? [];
+    list.push(refund.id);
+    current.refundIdsByOrder.set(refund.orderId, list);
     // —— 原子区段结束 ——
 
     return { ok: true, refund, created: true };
@@ -155,8 +196,17 @@ export const mockRefundRepository: RefundRepository = {
  *   （拒绝对应的意见由服务层校验为非空；通过时传既有意见，通常是空串）。
  *
  * `amount`、`reasonKey`、`description`、`evidence`、`orderId`、`userId` **一个都不碰**：
- * 这张表里没有任何一个字段是平台侧可改的，金额尤其——它是申请创建时的订单实付快照。
+ * 这张表里没有任何一个字段是平台侧可改的，`amount` 尤其——它是申请创建时的订单实付快照。
  * 客服身份的加入没有改变这一点：客服看得到金额，但同样改不了（没有写它的参数）。
+ *
+ * ⚠️ **P0-13：`decision` 是唯一新增的可写字段**，而且它**只在 `to === "approved"` 时写**。
+ * 这不是把上面那条「平台侧不可改金额」放宽了——`amount` 仍然一个字节都不动。
+ * 决策是**另一个字段**：它记的是「这一次退多少、谁承担」，
+ * 而「这一单申请时实付多少」是历史事实，两者回答不同的问题（见 `RefundDecision` 的注释）。
+ * 把决策写进 `amount` 才是真的违规。
+ *
+ * ⚠️ `decision` 由伪事务算好后传进来（**同步写入器不做金额算术**）：
+ * 算金额要读订单与既往申请，那是伪事务在原子区段里做的事。
  *
  * ⚠️ 又是**同步**的：它只在 `adminRefundTransaction` 的原子区段里被调用。
  */
@@ -169,6 +219,12 @@ export function applyRefundReview(
     actorId: string;
     actorRole: ActorRole;
     actorName: string | null;
+    /**
+     * 这一次退款的资金决策。只有 `to === "approved"` 时才会被写入；
+     * 其余两个目标状态一律**保持原值不变**（拒绝一条申请不该抹掉它的历史决策，
+     * 而实际上被拒的申请从来没有决策，因此保持原值就是保持 null）。
+     */
+    decision?: RefundDecision | null;
   },
 ): { previous: RefundRequest; updated: RefundRequest } | null {
   const current = store();
@@ -177,11 +233,13 @@ export function applyRefundReview(
 
   const previous = { ...refund };
   const settled = to === "approved" || to === "rejected";
+  const approved = to === "approved";
 
   const updated: RefundRequest = {
     ...refund,
     status: to,
     updatedAt: input.at,
+    decision: approved ? (input.decision ?? null) : refund.decision,
     // 只有「开始审核」这一步写 reviewingAt。`pending → approved` 是合法迁移（§退款审核），
     // 那条路径上平台没有单独走「开始审核」，因此**不替它补一个时间**——
     // 补了会让进度时间轴凭空多出一个没人做过的节点。

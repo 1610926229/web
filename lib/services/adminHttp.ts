@@ -598,11 +598,14 @@ export function fetchAdminRefund(id: string): Promise<AdminRefundDetail> {
 /**
  * 三个审核动作。都是 POST，请求体只有幂等键（通过与被拒绝另加审核意见）。
  *
- * ⚠️ **请求体里没有金额**，类型上也加不进来：退款金额取申请创建时的服务端订单实付快照，
- * 管理端不可修改（§退款审核）。
+ * ⚠️ **请求体里没有金额**（P0-13 起口径微调：通过动作传的是**比例**，仍然不是金额）。
+ * 管理员填写退款比例与责任归属，三个金额由服务端按订单冻结的经济快照算出来
+ * （`业务流程表.md` §16.B：「管理员只输入退款比例，金额由系统计算」）。
+ * 类型上也没有任何字段能传金额进来。
  *
  * ⚠️ 三个动作是**三个接口**，不是一个「把状态改成 X」的接口：通过会在同一次写入里
- * 把订单也改成 `refunded`，与「开始审核」这种只改一个状态的动作用途完全不同，
+ * 写入资金决策、订单累计退款额与打手收益冲回（累计退满时才改订单状态），
+ * 与「开始审核」这种只改一个状态的动作用途完全不同，
  * 合成一个接口就会出现「点错按钮直接把款退了」这种后果很重的错误。
  *
  * ⚠️ 通过是 **Mock 审核**：不调用真实微信退款、不生成微信退款单号、不代表款项已退回。
@@ -617,15 +620,52 @@ export function startReviewRefund(
   );
 }
 
-/** 审核通过：退款与订单在同一次写入里改到位。`reviewNote` 选填。 */
+/**
+ * 资金决策三件套（P0-13）—— 通过动作的必填入参。
+ *
+ * ⚠️ **比例用字符串、不用数字**：`"0"` 与「没填」在数字口径下都是 `0` 或 `undefined`，
+ * 而它们是完全不同的两件事（填了 0% 是「不退钱」，没填是「还没决定」）。
+ * 服务端按整数字符串解析，`"33.5"` 一律 400（金额字段不做静默取整）。
+ *
+ * ⚠️ **责任比例只在分担制下存在于类型上**（判别联合，不是可选字段）：
+ * `platform` / `companion` 传了责任比例会被服务端 400 拒绝，而不是被静默忽略
+ * ——金额字段「填了但没生效」比报错危险得多。类型上就写不出来，比运行时再拦一道更早。
+ */
+export type AdminRefundDecisionRequest =
+  | {
+      /** 0~100 的整数字符串（0% 会被服务端按「退款金额为 0」拒绝） */
+      refundRatePercent: string;
+      responsibility: "shared";
+      /** 0~100 的整数字符串 */
+      companionLiabilityRatePercent: string;
+    }
+  | {
+      refundRatePercent: string;
+      responsibility: "platform" | "companion";
+      companionLiabilityRatePercent?: never;
+    };
+
+/**
+ * 审核通过：资金决策、退款记录、订单与打手收益在同一次写入里改到位。`reviewNote` 选填。
+ *
+ * ⚠️ **页面不做金额预览**（`architecture-rules.md` §三：客户端不做金额算术）：
+ * 按钮只说「按 X% 退款，金额由系统计算」，实际金额读响应里的 `decidedAmount`。
+ */
 export function approveRefund(
   id: string,
   idempotencyKey: string,
   reviewNote: string,
+  decision: AdminRefundDecisionRequest,
 ): Promise<AdminRefundWriteResult> {
   return apiPost<AdminRefundWriteResult>(`/api/admin/refunds/${encodeURIComponent(id)}/approve`, {
     idempotencyKey,
     reviewNote,
+    refundRatePercent: decision.refundRatePercent,
+    responsibility: decision.responsibility,
+    // 只有分担制才带上责任比例：其余两种传了会 400（服务端刻意不静默忽略）
+    ...(decision.responsibility === "shared"
+      ? { companionLiabilityRatePercent: decision.companionLiabilityRatePercent }
+      : {}),
   });
 }
 

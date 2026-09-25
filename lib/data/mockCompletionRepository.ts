@@ -113,6 +113,60 @@ export function applyCompletionReview(
   return { previous, updated };
 }
 
+/**
+ * 把一条**尚在 `pending`** 的完成材料作废（**同步写原语**，无 `await`），P0-11。
+ *
+ * ## 为什么不能复用 `applyCompletionReview`
+ *
+ * 那个函数写的是**审核结论**（`approved` / `rejected`，带审核人三个字段）；
+ * 作废不是审核结论——没有任何人审过它，写进去的审核人只能是编的。
+ * `P0-9/02-decisions.md` 的 **D15** 已经把这条件记录下来：作废需要一个
+ * **走中央状态机**、并**明确处理 `pendingSubmissionIdByOrder` 索引**的新入口。
+ * 本函数与 `invalidatePendingCompletionForOrder()` 合起来就是那个入口。
+ *
+ * ## 它写什么、不写什么
+ *
+ * | 字段 | 动不动 | 为什么 |
+ * |---|---|---|
+ * | `status` | 写成 `"invalidated"` | 这就是这次变更本身 |
+ * | `invalidatedAt` | 第一次写入时写 | 「什么时候作废的」是这条记录唯一的新事实 |
+ * | 审核人三个字段 / `rejectReason` | **不动** | 从未有人审过它。留 null 是事实，填一个值是伪造 |
+ * | `summary` / `evidence` / `submittedAt` / 两个自动审核时间字段 | **不动** | **不删历史**（cmd 明文）：打手当时交了什么、交的哪一刻，原样保留 |
+ *
+ * ⚠️ **不删除记录**：作废是状态变化。删掉它，「这份材料提交过、后来为什么没被通过」
+ * 就再也答不出来，而客服恰恰要回答这个。
+ *
+ * ⚠️ **索引与状态必须同段变**：离开 `pending` 就要从 `pendingSubmissionIdByOrder`
+ * 里移除。否则会出现「记录已失效、索引还占着 pending 额度」——新打手提交新材料时
+ * 会被 `submitCompletion` 的第 3 步判成「已有 pending」而永久提交不上来。
+ *
+ * ⚠️ **只负责写**：合法性（这条记录是不是 `pending`、作废是不是该发生）由伪事务
+ * 在调用它之前判定。
+ */
+export function applyCompletionInvalidation(
+  id: string,
+  at: string,
+): { previous: CompletionSubmission; updated: CompletionSubmission } | null {
+  const current = store();
+  const submission = current.submissions.get(id);
+  if (!submission) return null;
+
+  const previous = { ...submission };
+  const updated: CompletionSubmission = {
+    ...submission,
+    status: "invalidated",
+    // 与 `applyOrderCompletion` 的 `completedAt ?? at` 同一写法：已经作废过就不刷新时间
+    invalidatedAt: submission.invalidatedAt ?? at,
+  };
+  current.submissions.set(id, updated);
+
+  if (current.pendingSubmissionIdByOrder.get(submission.orderId) === id) {
+    current.pendingSubmissionIdByOrder.delete(submission.orderId);
+  }
+
+  return { previous, updated };
+}
+
 export const mockCompletionRepository: CompletionRepository = {
   async findCompletionById(id) {
     return store().submissions.get(id) ?? null;

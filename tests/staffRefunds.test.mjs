@@ -319,6 +319,12 @@ test("列表 DTO 只有摘要：没有原因 / 说明 / 凭证 / 审核意见 / 
     "status",
     "statusLabel",
     "amount",
+    /*
+      P0-13：客服看得到**实退金额**（`decidedAmount`），但看不到责任归属与平台承担额
+      ——那两项是管理员的决策依据。这里把这个边界一起钉住：加了 `decidedAmount`
+      不等于把 `decision` 也带出来（下面的 forbidden 列表里有它）。
+    */
+    "decidedAmount",
     "createdAt",
     "updatedAt",
     "user",
@@ -333,6 +339,14 @@ test("列表 DTO 只有摘要：没有原因 / 说明 / 凭证 / 审核意见 / 
     assert.deepEqual(new Set(Object.keys(item)), allowed, "列表项字段集合变了");
     // 客服端用户摘要只有三样：id / 昵称 / 头像，**没有**平台展示 ID
     assert.deepEqual(new Set(Object.keys(item.user)), new Set(["id", "nickname", "avatarUrl"]));
+
+    // 决策状态与实退额必须一致：没决策是 null，不是 0
+    if (item.status === "approved") {
+      assert.notEqual(item.decidedAmount, null, `已通过的 ${item.refundNo} 必须带实退额`);
+      assert.ok(item.decidedAmount > 0);
+    } else {
+      assert.equal(item.decidedAmount, null, `未决策的 ${item.refundNo} 的实退额必须是 null`);
+    }
   }
 
   const serialized = JSON.stringify(data);
@@ -357,6 +371,18 @@ test("列表 DTO 只有摘要：没有原因 / 说明 / 凭证 / 审核意见 / 
     "openId",
     "unionId",
     "cookie",
+    /*
+      P0-13：**管理员的决策依据**不进客服响应。
+      客服只该知道「这笔退了多少」，不该知道「这钱是平台担的还是打手担的、
+      打手被冲回多少」——那是责任认定，产品裁定它属于管理员。
+      字符串匹配用字段名而不是值：`0` 这种值会出现无数次，钉不住任何东西。
+    */
+    "decision",
+    "responsibility",
+    "refundRateBp",
+    "companionLiabilityRateBp",
+    "companionReversalAmount",
+    "platformBorneAmount",
   ]) {
     assert.equal(serialized.includes(forbidden), false, `列表 DTO 出现了 ${forbidden}`);
   }
@@ -609,12 +635,21 @@ test("跨主体：客服带键 K 驳回 → 管理员带同一个 K 通过 → �
   assert.equal(rejected.status, "rejected");
   assert.equal(await auditCount(), 1);
 
-  // 管理员带着**同一个**键请求「通过」：绝不能因为 (targetType, targetId) 都匹配
-  // 就被判成重放而静默回 200——那是「管理员以为通过了，实际上没有」。
+  /*
+    管理员带着**同一个**键请求「通过」：绝不能因为 (targetType, targetId) 都匹配
+    就被判成重放而静默回 200——那是「管理员以为通过了，实际上没有」。
+
+    ⚠️ 请求体里必须把 P0-13 的资金决策一起写全（比例 + 责任归属）。
+    这一段验的是**幂等键冲突**，而口径是「先解析入参、再判冲突」：
+    少写决策字段的话，这条用例会因为「请填写退款比例」而变绿，
+    看着像通过，实际上面那条冲突规则一次都没被执行到。
+  */
   await expectApiError(
     approveAdminRefund(PENDING_REFUND, "admin-1", {
       idempotencyKey: operationId,
       reviewNote: "管理员通过",
+      refundRatePercent: "100",
+      responsibility: "platform",
     }),
     "BAD_REQUEST",
     ADMIN_REFUND_OPERATION_CONFLICT_MESSAGE,

@@ -249,6 +249,35 @@ export type OrderTimelineEntry = {
  */
 export type OrderAllowedActions = {
   canRequestRefund: boolean;
+  /**
+   * 能不能**直接退款**（P0-12）：`paid` / `accepted` 这两档「尚未开始服务」的订单，
+   * 由订单本人一点即退，**不需要客服或管理员审批**。
+   *
+   * 与 `canRequestRefund` **互斥**，而且必须互斥：两者同时为真就意味着同一档订单
+   * 有两条退款路径（一条当场退钱、一条等审核）。
+   *
+   * ⚠️ **这条路退的是「剩余可退额」，不再是恒定的实付全额**（P0-13 整改）：
+   * 部分退款**不改订单状态**，因此一张被部分退款过的订单可以经 P0-11 回池
+   * 回到 `paid`，此时它仍是 `paid`、仍然该有直退入口，但可退的只剩差额。
+   * 金额由 `directRefundAmountCents` / `alreadyRefundedAmountCents` 给出。
+   */
+  canDirectRefund: boolean;
+  /**
+   * 直接退款**这一次会退回多少**（分）。`canDirectRefund` 为假时是 `null`。
+   *
+   * 服务端算好（`实付 − 累计已退`）再给页面：客户端**不做金额算术**
+   * （`architecture-rules.md` §三）。按钮的文案必须说这个数，
+   * 而不是说订单实付——否则在「已部分退过」的单上会报一个到不了账的金额。
+   */
+  directRefundAmountCents: number | null;
+  /**
+   * 这一单在此**之前**已经退回过多少（分）。`canDirectRefund` 为假时是 `null`。
+   *
+   * 为 `0` 表示这是第一次退款，文案不必提「已退过」。
+   * 单独给出来是为了让确认区能解释「为什么不是实付全额」——
+   * 而不是让页面拿 `实付 − 本次可退` 自己减一遍。
+   */
+  alreadyRefundedAmountCents: number | null;
   canCancelRefund: boolean;
   canOpenConversation: boolean;
   canSubmitComplaint: boolean;
@@ -498,7 +527,15 @@ export type CompanionCancelOutcome =
       changed: false;
     }
   | { kind: "not-found" }
-  | { kind: "not-accepted"; status: OrderStatus };
+  | { kind: "not-accepted"; status: OrderStatus }
+  /**
+   * 这一单当前那份 `pending` 完成材料的索引与记录对不上（P0-11 起这条路径也会作废材料）。
+   *
+   * **不可能状态**：存储已经被写坏。它是唯一一处「解除履约」可能失败的地方，
+   * 而且发生在任何写入之前，因此这时**什么也没写**——如实报 500，
+   * 不编一个「已取消」的结果出来（文案见 `cancelCompanionOrder`）。
+   */
+  | { kind: "inconsistent"; orderId: string };
 
 /**
  * 开始服务的结果（事务层，P0-7）。
@@ -553,6 +590,124 @@ export type CompanionStartOutcome =
     }
   | { kind: "not-found" }
   | { kind: "not-startable"; status: OrderStatus };
+
+/* ───────────────── 解除当前履约：客服换人 / 封禁回池（P0-11） ───────────────── */
+
+/**
+ * 客服「退回公共池」的结果（事务层，P0-11）。
+ *
+ * 与打手主动取消（`CompanionCancelOutcome`）是**同一件事的另一个触发者**：
+ * 两者都写退出历史、都清履约绑定、都把派单送回公共池、都通知用户。
+ * 因此这里是**独立的类型**而不是复用：打手那条带幂等键（连点两次要能重放），
+ * 客服这条没有键——幂等的判据是**状态本身**（订单已经不在履约中就是重复点击），
+ * 与 `StaffCompletionApproveOutcome` 同一口径。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的解除了 | 200 |
+ * | `not-found` | 订单不存在 | 404 |
+ * | `not-releasable` | 订单存在，但当前没有打手在履约 | 400 |
+ * | `dispatch-missing` | 订单说有人在履约、派单记录却不见了 | 500（数据不自洽） |
+ * | `inconsistent` | 完成材料的 pending 索引与记录对不上 | 500（不可能状态，见下） |
+ *
+ * ⚠️ **没有 `replayed` 分支**：客服点第二次时订单已经不在履约中，走到的是
+ * `not-releasable`。那里给出的当前状态正好回答了「你点了一个此刻不该存在的按钮」，
+ * 比一个假装成功的重放更诚实——与打手取消的 `not-accepted` 同一条裁决（D5）。
+ *
+ * ⚠️ 两个 500 分支都是**不可能状态**（同一段无 `await` 的代码里既读到订单绑着人、
+ * 又发现派单 / 完成材料对不上）。它们存在是为了**宁可整件事失败**，
+ * 而不是把订单写回 `paid` 却留下一个没回池的派单、或一份回池后还会被自动通过的完成材料。
+ */
+export type StaffOrderReleaseOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      /** 解除**之前**这一单处于哪个状态。两个状态都会被退回公共池 */
+      previousStatus: "accepted" | "serving";
+      /** 本次写入的退出历史 id */
+      releaseRecordId: string;
+      releasedAt: string;
+      changed: true;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-releasable"; status: OrderStatus }
+  | { kind: "dispatch-missing" }
+  | { kind: "inconsistent"; orderId: string };
+
+/**
+ * 客服**直接指定新打手**接替这一单的结果（事务层，P0-11）。
+ *
+ * 与原单状态无关的那部分动作与「退回公共池」完全一样（同一段原子区段、
+ * 同一个写入器），差别只有两处：**派单不回公共池**（直接改绑给新打手）、
+ * 订单在同一段同步代码里 `serving → paid → accepted`。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的换人了 | 200 |
+ * | `not-found` | 订单不存在 | 404 |
+ * | `not-replaceable` | 订单存在，但当前没有打手在履约 | 400 |
+ * | `companion-not-found` | 要指定的打手不存在 | 400 |
+ * | `companion-unavailable` | 要指定的打手此刻不能接单 | 400 |
+ * | `self-order` | 要指定的人就是下单用户本人 | 400 |
+ * | `same-companion` | 要指定的人就是此刻正在履约的那位 | 400 |
+ * | `dispatch-missing` / `inconsistent` | 数据不自洽 | 500 |
+ *
+ * ⚠️ **`ok` 分支只代表「换人这件事写完了」**：新打手此刻处于 `accepted`，
+ * 与他自己点「接单」拿到的状态完全一样（`acceptedAt` = 本次时刻）。他不被跳过任何步骤——
+ * 「开始服务」仍然要他本人点，完成材料仍然要他本人交。
+ *
+ * ⚠️ **没有 `replayed` 分支**：换人的幂等判据是 `same-companion`
+ * （已经换成他了，再点一次就是在做同一件事）——它按 400 回答而不是假装成功，
+ * 与「退回公共池」的 `not-releasable` 同一条理由。
+ */
+export type StaffOrderReplaceOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      /** 解除**之前**这一单处于哪个状态 */
+      previousStatus: "accepted" | "serving";
+      /** 被解除的那位打手（退出历史里的那位） */
+      previousCompanionId: string;
+      /** 新指定的打手 */
+      newCompanionId: string;
+      /** 本次写入的退出历史 id */
+      releaseRecordId: string;
+      replacedAt: string;
+      changed: true;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-replaceable"; status: OrderStatus }
+  | { kind: "companion-not-found" }
+  | { kind: "companion-unavailable" }
+  | { kind: "self-order" }
+  | { kind: "same-companion" }
+  | { kind: "dispatch-missing" }
+  | { kind: "inconsistent"; orderId: string };
+
+/**
+ * 打手被下架（`enabled = false`）时，把他**手上所有还在履约的订单**退回公共池的结果
+ * （事务层，P0-11，**同步**）。
+ *
+ * ⚠️ 它**不是一个接口**，没有对外入口：唯一调用方是
+ * `adminCompanionTransaction.ts` 的 `setCompanionFlags()`，且必须在那一段
+ * 无 `await` 的原子区段里被调用（「资格下架」与「手上的单被解除」一旦分开，
+ * 就会出现「他已经被停用、订单却还挂在他名下」的中间状态——
+ * 而那正是 EX-COMP-01 要禁止的那一瞬）。
+ *
+ * ⚠️ `ok` 的 `releasedOrderIds` **允许为空**：绝大多数的停用都没有在履约的订单，
+ * 那不是错误，也不该写任何一条退出历史。
+ *
+ * ⚠️ 两个失败分支都是**不可能状态**：调用方已经在同一段同步代码里确认过这位打手
+ * 存在且未移除，而订单与派单 / 完成材料在同一段代码里不会各自变化。
+ * 出现时**整件事失败**（连同那次停用一起不写）——留下「人已停用、单还在他名下」
+ * 比让管理员重试一次坏得多。
+ */
+export type CompanionOrdersReleaseOutcome =
+  | { kind: "ok"; companionId: string; releasedOrderIds: string[] }
+  | { kind: "dispatch-missing"; orderId: string }
+  | { kind: "inconsistent"; orderId: string };
 
 /* ───────────────────────── 管理端订单 DTO（P8C） ───────────────────────── */
 

@@ -826,16 +826,22 @@ test("取消 14：Admin 订单详情含 releaseHistory，而用户端整个 DTO 
  * 于是权限表 §7.1 给客服的「查看打手 accepted 后主动取消的原因、时间与原打手记录」
  * 实际没有兑现。
  *
- * P0-6 的 D6 **V3**（2026-09-23 用户裁定）补上了这一半：**不新增任何 Staff API 路由**，
- * 而是把退出历史挂到客服已经在用的三个只读详情 DTO 上。因此这条用例现在守的是
- * 「这一半不许再掉回去」，以及「不许用新增接口的方式补」——后者是为了让
- * 权限矩阵（`requireStaff()` 一处判定）继续是唯一入口，而不是多出一组需要各自
- * 复查越权的路由。
+ * P0-6 的 D6 **V3**（2026-09-23 用户裁定）补上了这一半：把退出历史挂到客服已经在用的
+ * 三个只读详情 DTO 上，并**不为此新增任何 Staff API 路由**。因此这条用例守的是
+ * 「这一半不许再掉回去」。
  *
- * 四个事实：客服仍进不了 /admin、客服端仍没有 orders 段接口、
- * 客服端恰好这三处页面渲染退出历史、管理端那一处也还在。
+ * ⚠️ **P0-10（2026-09-24）取代了那条「不开新路由」的表述**：本批指令明确要求新增
+ * `/staff/orders` 与 `/staff/orders/[id]` 两个**只读**查询地址（`cmd_p0-10.md`）。
+ * 按协议 §十三 的优先级（**用户最新裁定 > 现有代码行为**），新指令胜出。
+ * 被取代的是**手段**（「靠不开路由来守住唯一入口」），不是**目的**：客服端仍然
+ * 只有一个 `requireStaff()` 入口、仍然**没有任何改订单的能力**。所以这里改成断言
+ * 「订单段接口恰好是那两个只读地址、且不导出任何写方法」——比原来的
+ * 「一个都不能有」更贴近那条规则真正要守的东西。
+ *
+ * 四个事实：客服仍进不了 /admin、客服端订单段只有两个只读地址、
+ * 客服端恰好这四处页面渲染退出历史、管理端那一处也还在。
  */
-test("§十一.23 两半都在：客服在三个既有详情页看得到取消历史，且没有为此新增任何 Staff 订单接口", () => {
+test("§十一.23 两半都在：客服在四个详情页看得到取消历史，订单段接口仍全是只读", () => {
   // 事实一：两个后台是**两套账号**，客服进不了 /admin（这条规则没变，客服侧
   // 的可见性因此必须落在工作台自己的三个详情页上，而不是靠跳转 /admin）
   assert.equal(canEnterAdminConsole("admin"), true);
@@ -845,16 +851,70 @@ test("§十一.23 两半都在：客服在三个既有详情页看得到取消�
     "客服进不了管理后台：这条规则在 lib/constants/admin.ts 里冻结，本用例只是引用它",
   );
 
-  // 事实二：客服端**仍然没有**订单接口——退出历史是挂在既有详情 DTO 上的，
-  // 不是新开的一组需要各自复查权限矩阵的路由
-  const staffApiRoutes = collectFiles(path.join(ROOT, "app", "api", "staff"))
+  // 事实二：客服端的订单段有**五个**地址——两个只读（列表 / 详情）与
+  // **三个 P0-11 的处置入口**（退回公共池 / 换人 / 换人候选名单）。
+  // ⚠️ P0-6 时这里断言的是「一个都没有」（当时的做法是只挂既有详情 DTO）；
+  // P0-10 按要求开了两个只读地址；P0-11 又开了三个写地址。
+  // ⚠️ 那三个写的**不是订单记录**：它们改的是这一单**当前的履约绑定**
+  // （退回公共池 / 指定新护航），不改金额、不改商品、不写退款，也不改订单状态本身
+  // 除「回到 paid」或「回到 accepted」之外的东西。逐条列出而不是只数数量：
+  // 多出任何一个地址都要先回答「它写什么」。
+  const staffOrderRoutes = collectFiles(path.join(ROOT, "app", "api", "staff"))
     .map((file) => path.relative(path.join(ROOT, "app"), file).replace(/\\/g, "/"))
-    .filter((route) => route.split("/").includes("orders"));
-  assert.deepEqual(staffApiRoutes, [], "客服端不该有订单接口：退出历史随三个既有详情接口下发");
+    .filter((route) => route.split("/").includes("orders"))
+    .sort();
+  assert.deepEqual(
+    staffOrderRoutes,
+    [
+      "api/staff/orders/[id]/release/route.ts",
+      "api/staff/orders/[id]/replace-candidates/route.ts",
+      "api/staff/orders/[id]/replace/route.ts",
+      "api/staff/orders/[id]/route.ts",
+      "api/staff/orders/route.ts",
+    ],
+    "客服端订单段只有这五个地址；多出任何一个都要先回答「它写什么」",
+  );
 
-  // 事实三：客服工作台**恰好**这三处页面渲染退出历史。
+  // 两个只读的：一个写方法都不许有
+  for (const route of ["api/staff/orders/[id]/route.ts", "api/staff/orders/route.ts"]) {
+    // 上一步的路径是相对 `app/` 的，读文件要补回去
+    assert.equal(
+      /export\s+(async\s+)?function\s+(POST|PATCH|PUT|DELETE)\b/.test(
+        readSource(path.join(ROOT, "app", route)),
+      ),
+      false,
+      `${route} 是只读接口，不该导出任何写方法`,
+    );
+  }
+
+  // P0-11 的三个：两个写入的只有 POST，候选名单只有 GET；
+  // 三个都不导出 PATCH / PUT / DELETE——「处置」只有「退回」与「换人」两种动作，
+  // 没有「改这一单的其它东西」这种入口
+  for (const [route, expectedMethod] of [
+    ["api/staff/orders/[id]/release/route.ts", "POST"],
+    ["api/staff/orders/[id]/replace/route.ts", "POST"],
+    ["api/staff/orders/[id]/replace-candidates/route.ts", "GET"],
+  ]) {
+    const source = stripComments(readSource(path.join(ROOT, "app", route)));
+    const methods = [...source.matchAll(/export\s+(?:async\s+)?function\s+([A-Z]+)\b/g)].map(
+      (match) => match[1],
+    );
+    assert.deepEqual(methods, [expectedMethod], `${route} 只应导出 ${expectedMethod}`);
+    for (const forbidden of ["PATCH", "PUT", "DELETE"]) {
+      assert.equal(
+        source.includes(`function ${forbidden}`),
+        false,
+        `${route} 不得导出 ${forbidden}：订单处置没有「就地改字段」这种动作`,
+      );
+    }
+  }
+
+  // 事实三：客服工作台**恰好**这四处页面渲染退出历史。
   // 按路由组无关的方式收集（`(console)` 不产生 URL 段），因此断言的是源码位置，
   // 与 URL 无关——这一层要防的是「渲染点悄悄少了一个」。
+  // ⚠️ 第四处是 P0-10 的全量订单详情（`cmd_p0-10.md` 的详情必列项里有
+  // `CompanionReleaseRecord` 历史）。前三处**不许因此被删掉**：同一个事实在
+  // 客服顺手打开的那个页面上缺一块，比它压根没有更糟。
   const staffPagesWithHistory = collectFiles(path.join(ROOT, "app", "staff"))
     .filter((file) => file.endsWith(".tsx"))
     .filter((file) => readSource(file).includes("releaseHistory"))
@@ -863,8 +923,9 @@ test("§十一.23 两半都在：客服在三个既有详情页看得到取消�
   assert.deepEqual(staffPagesWithHistory, [
     "app/staff/(console)/complaints/[id]/page.tsx",
     "app/staff/(console)/conversations/[orderId]/page.tsx",
+    "app/staff/(console)/orders/[id]/page.tsx",
     "app/staff/(console)/refunds/[id]/page.tsx",
-  ], "客服的三个详情页各自有订单区，退出历史必须同时出现在这三处；少一处就有客服看到的与别人不一致");
+  ], "客服的四个详情页各自有订单区，退出历史必须同时出现在这四处；少一处就有客服看到的与别人不一致");
 
   // 事实四：管理端那一处也还在——两半同时在线，不许按下葫芦浮起瓢
   assert.ok(
@@ -933,23 +994,33 @@ test("兼容：P0-5 的派单规则不回归——自己不能接自己下的单
 });
 
 /**
- * 取某个导出函数的函数体（从它的 `export async function NAME` 到下一个导出函数之前）。
+ * 取某个导出函数的函数体（从它的 `export ... function NAME` 到下一个导出函数之前）。
  *
- * 这个文件里两个导出函数都要单独看「自己那条路径上有没有领域 Guard」，
+ * 这个文件里每个导出函数都要单独看「自己那条路径上有没有领域 Guard」，
  * 因此不能只在整个文件的源码串上 `includes`——那会让 A 函数的 Guard 替 B 函数背书。
+ *
+ * ⚠️ 边界曾经只认 `export async function`。P0-11 新增的
+ * `releaseOrdersForCompanion` 是**同步**导出（它必须在 `setCompanionFlags` 的
+ * 原子区段里被直接调用），于是「下一个 export async function」会跳过它，
+ * 把它的函数体算进上一个函数的边界里——切片一长，别人的 Guard 就又替它背书了。
+ * 所以边界改成认 **任意** `export`：这不改变 `cancelAcceptedOrder` /
+ * `startCompanionOrder` 两个既有切片的范围（它们后面的邻居都是 async 导出），
+ * 但把新来的同步函数关在自己的范围里。
  */
 function functionBody(code, name) {
-  const start = code.indexOf(`export async function ${name}`);
-  assert.notEqual(start, -1, `找不到 ${name}：结构约束无法判定`);
+  const start = code.indexOf(`export function ${name}`);
+  const asyncStart = code.indexOf(`export async function ${name}`);
+  const from = start === -1 ? asyncStart : asyncStart === -1 ? start : Math.min(start, asyncStart);
+  assert.notEqual(from, -1, `找不到 ${name}：结构约束无法判定`);
 
-  const next = code.indexOf("export async function", start + 1);
-  return next === -1 ? code.slice(start) : code.slice(start, next);
+  const next = code.indexOf("\nexport ", from + 1);
+  return next === -1 ? code.slice(from) : code.slice(from, next);
 }
 
 /** 领域 Guard 的**字面**判据：动作必须自己看订单此刻的状态，而不是只问状态机表。 */
 const STATUS_GUARD = 'order.status !== "accepted"';
 
-test("结构约束：打手订单伪事务全程无 await，且取消 / 开始服务两条路径各自保留领域 Guard", () => {
+test("结构约束：打手订单伪事务全程无 await，四个动作路径各自保留领域 Guard，对外只有五个入口", () => {
   const code = stripComments(readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")));
 
   // 原子性不是靠运气：区段里出现任何一个 `await`，就等于把「读—判断—写」拆到两个 tick 上，
@@ -1012,15 +1083,55 @@ test("结构约束：打手订单伪事务全程无 await，且取消 / 开始�
     "结构校验必须在领域 Guard 之前：先问「这条边存在吗」，再问「这一单站在它的起点上吗」",
   );
 
-  // 回池写入能力（`writeAcceptanceRelease`）**不导出**：另外两个 source（封禁回池 /
-  // 客服换人）是后续 Round，提前导出一个「谁都能调的回池函数」等于给它们留一扇没有 Guard 的门。
-  // 本文件对外的**只有这两个动作**——多一个就是给后续 Round 提前开了入口
+  // —— 对外导出的动作入口：**恰好这五个** ——
+  //
+  // ⚠️ P0-6 时这里是一条禁令：「回池写入能力不导出，另外两个 source（封禁回池 /
+  // 客服换人）是后续 Round，提前导出一个『谁都能调的回池函数』等于给它们留一扇
+  // 没有 Guard 的门」。P0-11 把这两扇门正式装上了，因此那条禁令**不是被删掉**，
+  // 而是被换成正面断言：每扇门自己带 Guard，且各自的调用条件能被单独看见。
+  //
+  // 五个入口：打手侧两个（取消接单 / 开始服务）+ 客服侧两个（退回公共池 / 指定换人）
+  // + 封禁回池一个（同步）。逐条列出而不是只数数量——多一个就要先回答「它的 Guard 是什么」。
   const exported = [...code.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)]
     .map((match) => match[1])
     .sort();
-  assert.deepEqual(exported, ["cancelAcceptedOrder", "startCompanionOrder"]);
-  for (const notYet of ["companion_disabled", "staff_reassign"]) {
-    assert.equal(code.includes(notYet), false, `${notYet} 还没有任何写入路径，不该出现在这里`);
+  assert.deepEqual(exported, [
+    "cancelAcceptedOrder",
+    "releaseOrderByStaff",
+    "releaseOrdersForCompanion",
+    "replaceOrderCompanionByStaff",
+    "startCompanionOrder",
+  ]);
+
+  // 客服的两个入口：**自己**直接看 `order.status`（与打手侧同一条领域 Guard）。
+  // 「订单不在履约中」既不该被退回公共池，也不该被换人——状态机表管不了这件事，
+  // 因为客服退回走的是 `accepted → paid` 这个表里本来就有的边。
+  for (const name of ["releaseOrderByStaff", "replaceOrderCompanionByStaff"]) {
+    assert.ok(
+      functionBody(code, name).includes(STATUS_GUARD),
+      `${name} 缺少直接看 ${STATUS_GUARD} 的领域 Guard：客服也不该照着一张表就把单退回或换人`,
+    );
+  }
+
+  // 封禁回池**必须是同步函数**：它被 `setCompanionFlags` 的原子区段直接调用，
+  // 写成 `async` 之后正确性就只剩「调用方记得不要 await」这一条口头约定，
+  // 而这条约定没有任何东西在守
+  assert.equal(
+    /export async function releaseOrdersForCompanion/.test(code),
+    false,
+    "封禁回池必须同步导出：它跑在 setCompanionFlags 的原子区段里，async 等于把原子性交给调用方的自觉",
+  );
+  assert.ok(
+    code.includes("export function releaseOrdersForCompanion"),
+    "封禁回池要真的导出，否则 setCompanionFlags 没法在同一段同步代码里调用它",
+  );
+
+  // 三个新 source 的**触发原因**都要在文件里留下字面痕迹：
+  // 封禁回池（companion_disabled）、客服退回公共池与客服换人（staff_reassign）。
+  // P0-6 时禁令断言的是「这两个词不该出现」——那时它们确实是「还没有写入路径」的
+  // 未来词。现在反过来了：**出现**才是对的，因为它们各自真的有一条写入路径。
+  for (const source of ["companion_disabled", "staff_reassign"]) {
+    assert.ok(code.includes(source), `${source} 已有写入路径，退出历史的 source 应当记下它`);
   }
 });
 

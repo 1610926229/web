@@ -11,6 +11,7 @@ import {
   STAFF_CONSOLE_NAME,
   STAFF_CONVERSATIONS_PAGE_TITLE,
   STAFF_LOGOUT_LABEL,
+  STAFF_ORDERS_PAGE_TITLE,
   STAFF_OVERVIEW_PAGE_TITLE,
   STAFF_REFUNDS_PAGE_TITLE,
 } from "@/lib/constants/staff";
@@ -24,9 +25,15 @@ import type { StaffSessionUser } from "@/lib/types/staff";
  * 退款与投诉是 P8D-2 新加的入口，与会话并排：三者都是客服工作台的「待办」，
  * 会话是沟通，退款 / 投诉是处理。放在同一层而不是某个二级菜单里，
  * 客服不用记「哪个模块藏在哪个角落」。
+ *
+ * ⚠️「订单」（P0-10）**排在「工作台」之后、其余待办之前**：它回答的是
+ * 「这一单是什么情况」，是客服接到任何问题时要先看的那一页；
+ * 会话 / 退款 / 投诉 / 完成材料都是**从某一单出发**才能处理的，排在它后面。
+ * 顺序是按「先看事实、再看待办」排的，不是按功能上线时间排的。
  */
 const NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/staff", label: STAFF_OVERVIEW_PAGE_TITLE },
+  { href: "/staff/orders", label: STAFF_ORDERS_PAGE_TITLE },
   { href: "/staff/conversations", label: STAFF_CONVERSATIONS_PAGE_TITLE },
   { href: "/staff/refunds", label: STAFF_REFUNDS_PAGE_TITLE },
   { href: "/staff/complaints", label: STAFF_COMPLAINTS_PAGE_TITLE },

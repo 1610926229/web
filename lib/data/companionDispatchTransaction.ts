@@ -401,12 +401,18 @@ export function sweepExpiredDispatches(at: string): DispatchSweepResult {
         continue;
       }
 
-      // 公共池到点：停止接取 + **自动全额退款**。不是售后、不是等客服审核、不是等管理员点一下
+      // 公共池到点：停止接取 + **自动退到实付为止**。不是售后、不是等客服审核、不是等管理员点一下
+      //
+      // ⚠️ 传的是**本次应退的增量**（实付 − 累计已退），不是实付全额（P0-13 整改）：
+      //    `applyOrderRefund` 的第三个参数现在是增量语义，而一张被部分退款过的订单
+      //    完全可能回到公共池（部分退款不改状态，P0-11 的回池也不碰 `refundedAmount`）。
+      //    传实付会把它加成「已退 + 实付」，超过实付。
+      //    在**计划阶段**就把差值捕获进 `plan`——原子区段里不能再读存储。
       plan.push({
         kind: "timed-out",
         dispatchId: record.id,
         orderId: order.id,
-        refundedAmount: order.actualPaidAmount,
+        refundedAmount: order.actualPaidAmount - order.refundedAmount,
         timedOutAt: atDeadline,
       });
       // 已经被退过的订单不再发一条重复的退款通知——它当初退款时的通知已经发过了。

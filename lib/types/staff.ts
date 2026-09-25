@@ -1,5 +1,10 @@
 import type { CompanionReleaseSource } from "./companionRelease";
+import type { StaffCompletionListItem } from "./completion";
+import type { StaffComplaintListItem } from "./complaint";
+import type { DispatchState } from "./dispatch";
 import type { MessageSenderRole } from "./message";
+import type { OrderAddonSnapshot, OrderStatus, OrderTimelineEntry } from "./order";
+import type { StaffRefundListItem } from "./refund";
 
 /**
  * 客服账号、客服端会话与客服工作台 DTO。
@@ -261,6 +266,25 @@ export type StaffUserSummary = {
 };
 
 /**
+ * 客服**订单页**的用户摘要 = `StaffUserSummary` + `displayId`（P0-10 整改）。
+ *
+ * ⚠️ **为什么是另一个类型，而不是给 `StaffUserSummary` 加一个字段**：
+ * 那个类型被会话、退款、投诉、完成材料四处共用，而它们的检索口径里都没有
+ * `displayId` 这一路。给它加字段，等于让那四处**同时**多出一个字段——正是
+ * `StaffUserSummary` 自己的注释反对的那种「顺手扩大暴露面」。
+ * 产品负责人只要求改 `/staff/orders`（`P0-10/02-decisions.md` §九 A9-11，方案 B）。
+ *
+ * ⚠️ `displayId` **不是新增暴露**：它就是用户资料页上那串「ID: …」，
+ * 用户打电话来报的正是它；客服拿它对人属于「履职需要的信息」（用户权限表 §10）。
+ * 管理端订单 DTO 早就给了同一个值（`AdminUserSummary.displayId`），
+ * 客服订单页与管理端订单页在这里是**同一套口径**。
+ *
+ * `id` 仍是内部用户标识（客服会话页给的是同一个值），保留是为了不砍掉既有搜索路径：
+ * 两个标识在客服端**都看得见、都能搜**（`orderMatchesKeyword` 的两个字段）。
+ */
+export type StaffOrderUserSummary = StaffUserSummary & { displayId: string };
+
+/**
  * 一条履约退出历史，**客服视野里的版本**（P0-6）。
  *
  * 打手在开始服务前主动取消接单之后，订单上的 `actualCompanionId` / `companion`
@@ -372,5 +396,319 @@ export type StaffConversationMetrics = {
   /** 待处理投诉数。口径同上：`pending` 与 `processing` 都算，两个终态都不算。 */
   pendingComplaintCount: number;
   generatedAt: string;
+  notice: string;
+};
+
+/* ───────────────────────── 客服工作台 · 全量订单查询（P0-10） ───────────────────────── */
+
+/**
+ * 客服工作台「订单」列表项（P0-10）。
+ *
+ * 这是**全平台订单的只读查询入口**：客服要回答「用户报的这个订单号现在是什么状态、
+ * 是谁在跟」，因此筛选与排序的口径必须与订单列表一致（`createdAt` 的北京时间自然日、
+ * 创建时间倒序），而不是按会话有没有消息。
+ *
+ * ## 刻意不含什么，为什么
+ *
+ * ⚠️ **`gameAccountId`（游戏账号）与 `remark`（用户备注）不在列表上**：
+ * 这是 `StaffConversationListItem` / `StaffOrderSummary` 已经确立的同一条边界——
+ * 数据最小化（用户权限表 §10「只开放履职需要的信息」）。列表一次返回多条，
+ * 把别人的游戏账号与备注带进响应，等于让「谁进得了工作台」直接等于「看得到全部隐私」。
+ * 它们连**详情**也不给（见 `StaffOrderDetail`）。
+ *
+ * ⚠️ **一个平台 / 分账字段都没有**：`clubNetIncome`（平台净收入）、
+ * `companionRateSnapshot`（分账比例快照）、`companionBaseIncome`（护航收益）
+ * 全部不在这里，也不在详情里。用户权限表 §7.2 明确禁止客服查看分账比例；
+ * 而三者的任一个都足以把分账算回来（后两者与比例是同一个数的三种写法）。
+ *
+ * ⚠️ **不暴露内部用户主键**：对外只给 `StaffUserSummary`——它早就是
+ * 「客服能看到的用户身份」（`StaffConversationDetail.user` 给的是同一个值）。
+ * 订单上的 `Order.userId` 本身不进任何 DTO。
+ *
+ * ⚠️ 也**不含**支付内部字段（幂等键、支付请求快照）与售后摘要：
+ * 前者从来不进任何对外 DTO，后者只在详情页可见（同 `ADMIN_ORDER_LIST_FIELDS_NOTE` 的口径）。
+ */
+export type StaffOrderListItem = {
+  id: string;
+  orderNo: string;
+  status: OrderStatus;
+  /** 状态中文名（`ORDER_STATUS_LABELS`）。服务端给，页面不自己维护一份文案 */
+  statusLabel: string;
+  /** 下单（支付成功）时间。列表按它倒序，时间筛选也按它算——两处必须是同一个字段 */
+  createdAt: string;
+  paidAt: string;
+  /**
+   * 游戏名快照（下单那一刻的名称）。它同时是**筛选依据**：
+   * 订单里没有游戏 id，而且游戏改名 / 下架都不该让历史订单换个游戏。
+   */
+  gameName: string;
+  productTitle: string;
+  specName: string;
+  quantity: number;
+  /** 单位：分。渠道实收（商品 + 增值服务）的订单快照。只读展示，客服不能改 */
+  totalAmount: number;
+  /**
+   * 下单用户摘要（`StaffOrderUserSummary`：id / 昵称 / 头像 / `displayId`）。
+   *
+   * ⚠️ 它进列表**不是**顺手带的：`keyword` 支持按用户昵称与两个平台标识搜索，
+   * 命中理由必须看得见，否则会出现「搜到了但看不出来为什么搜到」。
+   */
+  user: StaffOrderUserSummary;
+};
+
+/** 客服工作台订单列表页一次取回的全部数据。 */
+export type StaffOrderListData = {
+  items: StaffOrderListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  /**
+   * 游戏筛选项：取自在库订单里出现过的游戏名（去重排序）。
+   *
+   * ⚠️ 与管理端同规则、同一个纯函数：**不用当前商品目录**。目录里新加了游戏但一单没有时，
+   * 放进筛选栏只会得到一次必然为空的查询；游戏下架后历史订单仍要能筛出来。
+   */
+  games: string[];
+  notice: string;
+};
+
+/**
+ * 派单进度摘要（P0-10）：这一单在哪个池子里等人接、等到什么时候、结果是什么。
+ *
+ * ## 刻意不含什么，为什么
+ *
+ * ⚠️ **`exclusiveCompanionId` 与 `acceptedByCompanionId` 都不给**：
+ * 「用户当初指定了谁」不在 `cmd_p0-10.md` 的详情必列清单里，而「**实际**是谁在履约」
+ * 已经由订单快照回答（`StaffOrderSummary.companionSummary`）——
+ * 两个 id 都只是内部记录，给出来只多两条泄漏路径。
+ * 「谁曾经接过又退出」由**履约退出历史**回答（`StaffOrderSummary.releaseHistory`），
+ * 那才是客服要核对的事实。
+ *
+ * ⚠️ **`publicTimeoutMinutesSnapshot` 不给**：那是平台参数的内部快照，
+ * 客服需要的是「截止到几点」（`publicDeadlineAt`），不是「当时配置是多少分钟」。
+ *
+ * ⚠️ 也**不含** `id` / `orderId` / `createdAt` / `updatedAt`：仓储主键与内部时间戳
+ * 都不是客服履职要用的东西（`DTO 最小化`：少一个字段就少一条泄漏路径）。
+ *
+ * ⚠️ 这里**没有** `state` 之外的可执行判断（没有 `canAccept` 一类字段）：
+ * 派单进度只回答「这一单在哪个池子里等过、结果如何」，它**不回答**「客服能做什么」——
+ * 那是 `StaffOrderDetail.allowedActions` 的事（P0-11），而它的判据是**订单状态**，
+ * 与派单此刻在哪个池子里无关。两者混在一起会出现「派单已超时关闭、订单却还显示可换人」
+ * 这类由两个字段各自推断出来的矛盾。
+ */
+export type StaffOrderDispatchSummary = {
+  state: DispatchState;
+  /** 状态中文名（`DISPATCH_STATE_LABELS`）。服务端给，页面不自己映射 */
+  stateLabel: string;
+  /** 进入专属池的时刻；用户没指定打手时为 null */
+  exclusiveEnteredAt: string | null;
+  /** 专属池的截止时刻；未进过专属池时为 null */
+  exclusiveDeadlineAt: string | null;
+  /** 进入公共池的时刻；未进过公共池时为 null */
+  publicPoolEnteredAt: string | null;
+  /** 公共池的截止时刻；未进过公共池时为 null */
+  publicDeadlineAt: string | null;
+  /** 被接单的时刻；还没有人接时为 null */
+  acceptedAt: string | null;
+  /**
+   * **派单关闭的时刻**；没有关闭过时为 null。
+   *
+   * ⚠️ 不叫「超时关闭时刻」：这个状态有两种来路（公共池到点无人接 / 订单在开始服务前
+   * 被用户直接退款，P0-12），写死成「超时」会让客服把用户取消的单说成无人接单。
+   */
+  timedOutAt: string | null;
+};
+
+/**
+ * 客服工作台订单详情（P0-10）。
+ *
+ * 在列表项之上补齐「这一单长什么样」与「这一单做过什么」。四份摘要都是**摘要**：
+ * 退款 / 投诉 / 完成材料的正文、凭证与审核意见各自留在它们的详情页，
+ * 这里只回答「有没有、到哪一步了」。
+ *
+ * ## 刻意不含什么，为什么（这就是边界）
+ *
+ * | 排除字段 | 理由 |
+ * |---|---|
+ * | `clubNetIncome` | **平台净收入**。`Order` 的注释已确立它「不进任何 DTO」；`cmd_p0-10.md` 明令不得暴露平台净利润 |
+ * | `companionRateSnapshot` | **分账比例快照**。用户权限表 §7.2 禁止客服查看分账比例 |
+ * | `companionBaseIncome` | **护航收益**。它与比例是同一个数的两种写法——给了它等于给了比例；而本轮金额裁决在 Admin（`cmd_p0-13.md`），客服不需要它 |
+ * | `gameAccountId` | 游戏账号。既有客服 DTO 已确立其不进客服视野（数据最小化 §10），本轮只读查询不需要它 |
+ * | `remark` | 用户备注。同上，而且备注里可能有用户写的隐私内容 |
+ * | `userId`（内部主键） | 对外只给 `StaffUserSummary.id`（平台标识），内部主键不进响应 |
+ * | `exclusiveCompanionId` | 用户当初指定的人。「原打手是谁」由退出历史回答，不额外暴露指定对象 |
+ * | 支付内部字段 | `idempotencyKey` / `PaymentRequest.snapshot` 等本就不在任何对外 DTO 里 |
+ *
+ * ⚠️ **金额口径**：客服看的是「**用户侧的钱**」——原价 / 优惠 / 实付 / 已退
+ * （`originalAmount` / `couponDiscountAmount` / `actualPaidAmount` / `refundedAmount`），
+ * 因为客服要判断「这单还能退多少」就必须知道实付与已退。
+ * 客服**不看**「分账与平台的账」（比例 / 护航收益 / 平台净收入）。
+ * 这里**不做任何金额计算**：四个数都是下单时冻结的订单快照，原样展示。
+ *
+ * ⚠️ 本类型是**显式挑字段**的，绝不是 `{ ...order }`：
+ * 给 `Order` 新增字段不会自动出现在客服响应里。新增字段必须在这里再写一行，
+ * 而那正是「该不该给客服看」被重新判断一次的地方。
+ */
+export type StaffOrderDetail = {
+  /**
+   * 这一单此刻**客服可以点的动作**（P0-11）。由服务端算好，页面只按值渲染。
+   *
+   * ⚠️ 放在这里是**刻意的**：客服看到的按钮不该由前端用订单状态自己推断
+   * （`components/staff/StaffCompletionConsole.tsx` 已确立同一条：`allowedActions`
+   * 从服务端来）。前端推断等于把权限规则抄到浏览器里，而浏览器里的那份改不改、
+   * 对不对，服务端一无所知。
+   */
+  allowedActions: StaffOrderAllowedActions;
+  /** 订单只读摘要（复用既有类型）：订单身份 / 状态 / 商品 / 打手 / 履约退出历史 */
+  order: StaffOrderSummary;
+  /** 下单用户摘要（`StaffOrderUserSummary`：比列表多一个 `displayId`，两处同一份） */
+  user: StaffOrderUserSummary;
+  /** 商品封面快照 */
+  productCoverUrl: string;
+  /** 游戏名快照 */
+  gameName: string;
+  /** 大区快照 */
+  region: string;
+  /** 单位：分。单价 × 数量 = `itemsAmount` */
+  unitPrice: number;
+  /** 单位：分。商品小计 */
+  itemsAmount: number;
+  /** 单位：分。增值服务合计（按单计费，不随数量变化） */
+  addonsAmount: number;
+  /** 增值服务快照（下单时的名称与价格，之后目录改名改价不影响历史订单） */
+  addons: OrderAddonSnapshot[];
+  /** 单位：分。优惠前的应付总额。下单时冻结，改商品配置不影响历史订单 */
+  originalAmount: number;
+  /** 单位：分。优惠券抵扣金额（P0 恒为 0） */
+  couponDiscountAmount: number;
+  /** 单位：分。用户实付 = `originalAmount − couponDiscountAmount` */
+  actualPaidAmount: number;
+  /** 单位：分。**累计已退**给用户的金额。客服据此判断这一单还能退多少 */
+  refundedAmount: number;
+  /** 已发生的状态节点，按时间先后排列（复用 `buildOrderTimeline`，与用户端 / 管理端同一口径） */
+  timeline: OrderTimelineEntry[];
+  /** 派单进度摘要；订单没有派单记录时为 null（历史数据） */
+  dispatch: StaffOrderDispatchSummary | null;
+  /**
+   * 这一单的退款申请摘要；没有申请过为 null。
+   *
+   * ⚠️ 复用**客服退款列表项**类型，而不是另写一份摘要：退款在这两个页面上是同一件事，
+   * 两份摘要迟早会出现「退款列表说审核中、订单详情说待审核」。
+   * 完整内容（原因、说明、凭证、审核意见）要去退款详情页看。
+   */
+  refund: StaffRefundListItem | null;
+  /**
+   * 这一单的投诉摘要，按提交时间排列。
+   *
+   * ⚠️ **数组而不是单条或 null**：一单可以有多条投诉（不同时间、不同问题），
+   * 服务端按订单查全部；**没有投诉时是空数组 `[]`，不是 null**——
+   * 「一条都没有」是正常情况，用 null 只会让页面多出一条空值分支。
+   */
+  complaints: StaffComplaintListItem[];
+  /**
+   * 这一单最新的完成材料摘要；没有提交过为 null。
+   *
+   * 只回答「提交过没有、到哪一步了」——审核通过是订单进入 `completed` 的唯一入口，
+   * 客服要能看出这一单为什么已经完成。凭证与审核意见在完成材料页看。
+   */
+  completion: StaffCompletionListItem | null;
+};
+
+/* ─────────────────── 客服工作台 · 订单处置：换人 / 退回公共池（P0-11） ─────────────────── */
+
+/**
+ * 客服在订单详情页可以执行的动作（P0-11）。
+ *
+ * ⚠️ **两个布尔值今天是同一个值**（都由「这一单有人正在履约」推出），但它们**不合并**：
+ * 这是两个独立的能力，将来任何一条的准入条件单独变化时（例如给某类订单禁用换人），
+ * 合并过的那个字段就必须拆开，而拆开意味着前端要跟着改。
+ *
+ * ⚠️ 与 `StaffCompletionAllowedActions` 同一取舍：**只有 `true` 才代表按钮该出现**，
+ * 页面不自己用 `order.status` 推断。反过来也成立——这个字段是 `false` 时，
+ * 接口也一定会拒绝，两边用的是同一个判断（`staffOrderAllowedActions`）。
+ *
+ * ⚠️ 这里**没有** `canRefund`：退款是另一个域的动作（P0-12 及以后），
+ * 它的准入条件与履约无关（`completed` 也能退），塞进同一个布尔组只会让两套规则看起来是一套。
+ */
+export type StaffOrderAllowedActions = {
+  canRelease: boolean;
+  canReplace: boolean;
+};
+
+/**
+ * 客服「退回公共池」的接口返回（P0-11）。
+ *
+ * ⚠️ `status` 是字面量 `"paid"`，含义与 `CompanionCancelOutcome` 完全一致：
+ * **「这次操作把订单置成了什么状态」**，不是「订单此刻的状态」。
+ * 界面在写成功之后要重新拉详情，因此它只用于即时反馈。
+ */
+export type StaffOrderReleaseResult = {
+  orderId: string;
+  orderNo: string;
+  status: "paid";
+  statusLabel: string;
+  /** 本次写入的退出历史 id */
+  releaseRecordId: string;
+  releasedAt: string;
+  /** `true` = 本次真的解除了。这个动作没有重放分支（订单已不在履约中会直接 400） */
+  changed: true;
+};
+
+/**
+ * 客服「直接指定新打手」的接口返回（P0-11）。
+ *
+ * ⚠️ `status` 是 `"accepted"`：换人之后这一单**仍然有人在履约**，
+ * 只是换了一位。新打手拿到的状态与他自己点接单完全一样（见
+ * `StaffOrderReplaceOutcome` 的说明）——他没有跳过任何一步。
+ */
+export type StaffOrderReplaceResult = {
+  orderId: string;
+  orderNo: string;
+  status: "accepted";
+  statusLabel: string;
+  /** 被解除的那位打手 */
+  previousCompanionId: string;
+  /** 新指定的打手 */
+  newCompanionId: string;
+  releaseRecordId: string;
+  replacedAt: string;
+  changed: true;
+};
+
+/**
+ * 换人候选（P0-11）：客服在这一单上可以指定哪些打手。
+ *
+ * ⚠️ **资格过滤在服务端完成**（`enabled` / 未移除 / 当前可接单 / 不是下单用户本人 /
+ * 不是此刻正在履约的那位），因此这个列表里出现的每一项都是**指定一定会成功**的。
+ * 让前端拿着全量护航列表自己判断，就等于把资格规则抄进浏览器——
+ * 那份副本与 `isCompanionAcceptingOrders()` 迟早会对同一位打手给出不同答案。
+ *
+ * ## 刻意不含什么
+ *
+ * ⚠️ 没有手机号、微信号、真实姓名等任何联系方式，也没有分账比例与收益：
+ * 客服要挑的是「谁能接这一单」，不是「这个人赚多少」（用户权限表 §7.2）。
+ * 也**没有** `userId`（内部主键）——「是不是下单用户本人」这件事已经在服务端判完了。
+ */
+export type StaffOrderReplaceCandidate = {
+  companionId: string;
+  displayName: string;
+  avatarUrl: string;
+  /**
+   * 这位打手**手上正在履约**的订单数（`accepted` + `serving`）。
+   *
+   * ⚠️ 它进列表是为了让「换给谁」这件事可判断：把一单换给一个已经压了五单的人，
+   * 是把问题从一位打手挪到另一位身上。这个数**不是新暴露**——
+   * 客服本来就能在订单列表里按打手逐条查到这些单。
+   *
+   * 它**不含** `completed` / `refunded`：那些不是他手上的活。
+   */
+  activeOrderCount: number;
+};
+
+/** 换人候选列表接口一次返回的全部数据。 */
+export type StaffOrderReplaceCandidateListData = {
+  items: StaffOrderReplaceCandidate[];
+  /** 候选为空时页面上要说的话；非空时是一句口径说明。服务端给，页面不自己拼 */
   notice: string;
 };

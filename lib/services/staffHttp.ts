@@ -3,6 +3,10 @@ import { STAFF_PAGE_SIZE, type StaffOrderStatusFilter } from "@/lib/constants/st
 import type {
   StaffConversationDetail,
   StaffConversationListData,
+  StaffOrderListData,
+  StaffOrderReleaseResult,
+  StaffOrderReplaceCandidateListData,
+  StaffOrderReplaceResult,
   StaffSessionUser,
 } from "@/lib/types/staff";
 
@@ -136,3 +140,118 @@ export function markStaffConversationRead(orderId: string): Promise<{ orderId: s
  * 聚合在服务端直接算好（`getStaffOverviewMetrics()`），刷新走 `router.refresh()`
  * 让服务端重新渲染。少一个接口就少一条「谁都能读全站聚合」的路径。
  */
+
+// ——————————————————————————— 订单（P0-10，只读） ———————————————————————————
+
+/** 客服全量订单列表的查询条件。**全部是可选的**：不传即默认第一页、不筛选。 */
+export type StaffOrderListRequest = {
+  status?: StaffOrderStatusFilter;
+  keyword?: string;
+  game?: string;
+  /** YYYY-MM-DD（含当天，北京时间自然日）。空串表示不限 */
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 全量订单列表（只读查询）。
+ *
+ * 空值**不拼进地址**（与 `fetchStaffConversations` 同一条规则）：筛选项为空就是「不筛」，
+ * 拼一个 `status=` 上去只会让服务端多解析一次空串。
+ *
+ * ⚠️ 本函数不做任何筛选、排序或金额计算，那全在服务端
+ * （`lib/services/staffOrders.ts`）。浏览器侧只知道「要哪一页、按什么条件」，
+ * 因此「哪些订单该出现在结果里」不可能被前端改掉。
+ *
+ * ⚠️ 关键字**只去空白，不截断、不设上限**：搜索框不该在用户打字时把内容吞掉。
+ */
+export function fetchStaffOrders(
+  input: StaffOrderListRequest = {},
+): Promise<StaffOrderListData> {
+  const params = new URLSearchParams();
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.status && input.status !== "all") params.set("status", input.status);
+  if (input.game) params.set("game", input.game);
+  if (input.from) params.set("from", input.from);
+  if (input.to) params.set("to", input.to);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? STAFF_PAGE_SIZE));
+
+  return apiGet<StaffOrderListData>(`/api/staff/orders?${params.toString()}`);
+}
+
+/**
+ * ⚠️ 这里**刻意没有** `fetchStaffOrderDetail`。
+ *
+ * 订单详情页是**服务端组件**（`app/staff/(console)/orders/[id]/page.tsx` 直接调
+ * `getStaffOrderDetail()`），浏览器侧没有任何地方需要取它。写一个当前没人调用的
+ * 取数函数，等于给同一份详情留**第二条读取路径**——将来有人顺手用了它，
+ * 就会出现「页面上看到的详情」与「接口返回的详情」两处口径。
+ *
+ * 对照：会话详情有 `fetchStaffConversation()`，因为那边的详情确实由客户端组件用
+ * （`StaffConversationConsole` 发送消息后要重新拉取）。判断标准是「有没有调用方」，
+ * 不是「列表与详情对称」。将来若出现需要客户端刷新的订单详情场景，那时再加，
+ * 而不是现在先占一个位置。
+ */
+
+// ——————————————————————————— 订单处置（P0-11） ———————————————————————————
+
+/**
+ * 换人候选名单：这一单此刻可以指定哪几位护航。
+ *
+ * ⚠️ **资格过滤在服务端**（`listStaffOrderReplaceCandidates`），浏览器侧拿到的是
+ * 一个「点了就会成功」的名单。前端不拿全量护航列表自己筛——那等于把
+ * `isCompanionAcceptingOrders()` 抄进浏览器，两份副本迟早会对同一位护航给出不同答案。
+ *
+ * ⚠️ 这一单不该有换人动作时服务端回 **400**，由调用方按错误处理
+ * （面板只在 `allowedActions.canReplace` 为真时才请求）。
+ */
+export function fetchStaffOrderReplaceCandidates(
+  orderId: string,
+): Promise<StaffOrderReplaceCandidateListData> {
+  return apiGet<StaffOrderReplaceCandidateListData>(
+    `/api/staff/orders/${encodeURIComponent(orderId)}/replace-candidates`,
+  );
+}
+
+/**
+ * 把订单退回公共池。**原因必填**（服务端 trim 后为空即 400）。
+ *
+ * ⚠️ **没有幂等键、没有 operationId**：这个动作的幂等判据是**状态本身**——
+ * 订单已经不在履约中时服务端回 400（而不是重放），那正好回答了
+ * 「这一单现在是什么状态」。给它编一个键等于替服务端发明一条它并不要求的规则，
+ * 与完成材料审核（`staffCompletionsHttp`）同一条机制。
+ *
+ * ⚠️ 触发者（谁写下了这条退出历史）不在请求体里，也没有位置：
+ * 服务端从客服会话推导。
+ */
+export function releaseStaffOrder(
+  orderId: string,
+  body: { reason: string },
+): Promise<StaffOrderReleaseResult> {
+  return apiPost<StaffOrderReleaseResult>(
+    `/api/staff/orders/${encodeURIComponent(orderId)}/release`,
+    body,
+  );
+}
+
+/**
+ * 直接指定新护航接替这一单。
+ *
+ * ⚠️ 与退回公共池一样**没有幂等键**，也**不需要管理员审批**：
+ * 客服的会话身份就是全部授权。
+ *
+ * ⚠️ 请求体里**只有要指定的人**：原护航是谁由服务端从订单上读——
+ * 让调用方声明「我正在换掉谁」是错的，「谁正在履约」是订单的事实，不是请求的参数。
+ */
+export function replaceStaffOrderCompanion(
+  orderId: string,
+  body: { companionId: string },
+): Promise<StaffOrderReplaceResult> {
+  return apiPost<StaffOrderReplaceResult>(
+    `/api/staff/orders/${encodeURIComponent(orderId)}/replace`,
+    body,
+  );
+}

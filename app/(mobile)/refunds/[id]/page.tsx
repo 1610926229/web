@@ -69,13 +69,22 @@ async function RefundDetailBody({ refundId, userId }: { refundId: string; userId
         </div>
       </section>
 
-      {/* 退款金额 */}
+      {/* 退款金额：**申请金额**与**实际退款金额**是两个数（P0-13 起退款可以是部分的）。
+          ⚠️ 只显示申请金额，用户会以为钱按那个数退回来了；只显示实退金额，
+          他又对不上「我申请的时候写的明明是全额」。两个数都在，才答得清「为什么少了」。 */}
       <section className="mt-2 bg-surface px-4 py-3">
         <div className="flex items-center justify-between">
-          <span className="text-[14px] text-ink">退款金额</span>
+          <span className="text-[14px] text-ink">申请金额</span>
           <PriceText cents={detail.amount} className="text-[18px] text-brand-red" />
         </div>
-        <p className="mt-1.5 text-[12px] leading-4 text-ink-3">整单退款，金额为申请时的订单实付金额</p>
+        <p className="mt-1.5 text-[12px] leading-4 text-ink-3">申请时的订单实付金额</p>
+
+        {detail.decidedAmount === null ? null : (
+          <div className="mt-3 flex items-center justify-between border-t border-line pt-3">
+            <span className="text-[14px] text-ink">实际退款金额</span>
+            <PriceText cents={detail.decidedAmount} className="text-[18px] text-brand-red" />
+          </div>
+        )}
       </section>
 
       {/* 关联订单：同时展示订单**当前**的业务状态，退款审核不影响它 */}

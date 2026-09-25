@@ -174,7 +174,19 @@ export function applyDispatchToPublic(
   return updated;
 }
 
-/** 公共池到点仍无人接 → 关闭（**同步写入器**，无 `await`）。订单退款不在这里。 */
+/**
+ * **关闭派单**（`state → timed_out`，**同步写入器**，无 `await`）。订单退款不在这里。
+ *
+ * 名字来自第一位调用方，但现在有**两位**，它们关闭派单的原因不同：
+ *
+ * 1. `sweepExpiredDispatches`（P0-5）——公共池到点仍无人接；
+ * 2. `directRefundOrder`（P0-12）——订单在开始服务前被用户直接退款。
+ *
+ * 两者要做的事一样：**让这张派单不再能被接单**，因此共用这一个写入器
+ * （展示名也已改成中性的「已关闭」，见 `DISPATCH_STATE_LABELS`）。
+ * 刻意**不做**成两个函数：那会变成两条独立的「关闭」路径，而
+ * 「关闭之后就接不了单」这条性质必须只有一处在保证。
+ */
 export function applyDispatchTimedOut(id: string, timedOutAt: string): DispatchRecord | null {
   const current = store();
   const record = current.dispatches.get(id);

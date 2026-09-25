@@ -17,9 +17,12 @@ export const EARNING_STATUSES: readonly EarningStatus[] = [
 /**
  * 状态的显示名。
  *
- * ⚠️ `withdrawn` / `reversed` 在本阶段**不可达**（没有提现、没有冲正），
- * 但它们仍然要有显示名：类型上存在却在映射表里缺席，将来第一个用到它们的页面
- * 会显示成 `undefined`，而那种缺口的来源只是「当时没人写」。
+ * ⚠️ `withdrawn` **在本阶段仍不可达**（不做提现），但它仍然要有显示名：
+ * 类型上存在却在映射表里缺席，将来第一个用到它的页面会显示成 `undefined`，
+ * 而那种缺口的来源只是「当时没人写」。
+ *
+ * ⚠️ `reversed` **P0-13 起可达**：退款把一笔收益整笔冲销就进这个状态
+ * （部分冲回**不改状态**，见 `lib/types/earning.ts` 的 `EarningStatus` 注释）。
  */
 export const EARNING_STATUS_LABELS: Record<EarningStatus, string> = {
   frozen: "冻结中",
@@ -56,7 +59,9 @@ export const EARNING_STATUS_HINTS: Record<EarningStatus, string> = {
   frozen: "订单已完成，收益正在冻结期内，到期自动转为可提现。",
   available: "收益已解冻，可以提现。",
   withdrawn: "这笔收益已提现。",
-  reversed: "这笔收益已被冲正。",
+  // 「已冲正」是账务口径的词，打手看不懂。这里说清**是谁退的款**：
+  // 这一单被全额退款冲掉了，不是平台罚了他
+  reversed: "这一单已全额退款，这笔收益已被全部冲回，不可提现。",
 };
 
 // ——————————————————————————— 释放判据 ———————————————————————————

@@ -594,7 +594,9 @@ test("解冻 14：有进行中的退款 / 未完结的投诉 → 仍 frozen（�
     const rs = refundStore();
     const refundId = unique("refund");
     rs.refunds.set(refundId, { id: refundId, orderId, status: "pending" });
-    rs.refundIdByOrder.set(orderId, refundId);
+    // P0-13（D10）：索引由单值改为**多值**——同一订单可以有多条申请
+    // （已终结的不再挡，进行中的才挡），因此这里维护的是一个列表
+    rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
     const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
     assert.deepEqual(swept.releasedEarningIds, [], "进行中的退款必须挡住放款");
@@ -713,7 +715,7 @@ test("收益读取 18：打手只能看到自己的收益，合计数只统计�
   assert.equal(forA.items[0].statusLabel, EARNING_STATUS_LABELS.frozen);
 });
 
-test("收益读取 19：DTO 恰好八个键——不泄露平台净收入 / 冲正 / 罚款 / 提现 / companionId", async () => {
+test("收益读取 19：DTO 恰好十个键——不泄露平台净收入 / 罚款 / 提现 / companionId", async () => {
   const { orderId } = await completedOrder({
     companionId: COMPANION_A,
     completedAt: plusMinutes(now(), 62),
@@ -737,7 +739,18 @@ test("收益读取 19：DTO 恰好八个键——不泄露平台净收入 / 冲�
   const item = (await listCompanionEarnings(COMPANION_A)).items[0];
   assert.deepEqual(
     Object.keys(item).sort(),
-    ["availableAt", "frozenAt", "id", "incomeAmount", "orderId", "orderNo", "status", "statusLabel"],
+    [
+      "availableAt",
+      "frozenAt",
+      "id",
+      "incomeAmount",
+      "netAmount",
+      "orderId",
+      "orderNo",
+      "reversedAmount",
+      "status",
+      "statusLabel",
+    ],
     "DTO 是显式挑字段拼出来的：给 Earning 新增字段不该自动出现在响应里",
   );
 
@@ -747,10 +760,15 @@ test("收益读取 19：DTO 恰好八个键——不泄露平台净收入 / 冲�
   // 四个住在**订单**上、`Earning` 里根本没有——点名它们不是「今天漏了」，而是钉住
   // 「这一份响应不许开始捎带订单的金额域」：一个把订单 join 进来、或直接展开订单对象
   // 拼出来的 DTO 会让它们悄悄出现，而打手端本来就不该看到平台抽成与用户实付
+  //
+  // ⚠️ `reversedAmount` **不在**下面的禁用名单里，是 P0-13 刻意的改动：
+  // 它以前「恒为初始值 0」，带上只是噪音；现在退款真的会冲回打手的钱，
+  // 只给原金额会让打手以为那笔还能全提（`lib/types/earning.ts:199`）。
+  // **存储层有、DTO 也有**的字段只剩它一个，因此这一条必须显式出现在上面的键列表里，
+  // 而不是靠「新增字段不会自动泄露」那条规则兜着。
   for (const forbidden of [
     "companionId",
     "clubNetIncome",
-    "reversedAmount",
     "fineAmount",
     "withdrawnAt",
     "totalAmount",
@@ -760,6 +778,10 @@ test("收益读取 19：DTO 恰好八个键——不泄露平台净收入 / 冲�
   ]) {
     assert.equal(forbidden in item, false, `打手端收益 DTO 不得带 ${forbidden}`);
   }
+
+  // 净额是服务端算好的，且三者自洽：页面上不做减法
+  assert.equal(item.reversedAmount, 0, "没有退款的单，冲回额必须是 0 而不是 undefined");
+  assert.equal(item.netAmount, item.incomeAmount - item.reversedAmount);
 });
 
 test("收益读取 20：金额一律是整数分", async () => {

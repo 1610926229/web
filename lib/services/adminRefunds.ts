@@ -9,6 +9,7 @@ import {
   adminRefundTransitionMessage,
   buildAdminRefundListQuery,
   normalizeAdminReviewNote,
+  readAdminRefundDecisionInput,
   readAdminRefundStatusFilter,
   refundMatchesAdminKeyword,
   toAdminRefundDetail,
@@ -16,7 +17,7 @@ import {
   type AdminRefundListQuery,
 } from "@/lib/constants/adminRefunds";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
-import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
+import { REFUND_STATUS_LABELS, sumApprovedCompanionReversal } from "@/lib/constants/refunds";
 import { IDEMPOTENCY_KEY_PATTERN, readIdempotencyKey, readTrimmedString } from "@/lib/constants/writes";
 import {
   approveRefund,
@@ -25,6 +26,7 @@ import {
   type AdminRefundWriteFailure,
   type AdminWriteContext,
 } from "@/lib/data/adminRefundTransaction";
+import { getEarningRepository } from "@/lib/data/earningRepository";
 import { ADMIN_ORDER_UNFILTERED_QUERY, getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getUserRepository } from "@/lib/data/userRepository";
@@ -45,13 +47,16 @@ import type { AdminUserSummary } from "@/lib/types/user";
  * ⚠️ 本文件**只服务管理端**，每一个调用它的接口都先经过 `requireAdmin()`。
  * 服务本身不再做一次角色判断：权限判断只有一处（`lib/api/adminRoute.ts`）。
  *
- * ⚠️ **本文件接收不到金额**。三个动作的入参只有幂等键与审核意见两个字符串；
- * 退款金额是申请创建时的服务端订单实付快照，管理端**没有任何入口**能改它
- * （写入侧 `applyRefundReview` 也没有接收金额的位置）。这不是靠调用方自觉，
- * 是类型上就没有那个字段。
+ * ⚠️ **本文件接收不到金额**（P0-13 起口径微调：接收的是**比例**，仍然不是金额）。
+ * 通过动作的入参是幂等键、审核意见与资金决策三件套
+ * （`refundRatePercent` / `responsibility` / `companionLiabilityRatePercent`），
+ * 三个金额一律由数据层的 `computeRefundDecisionAmounts` 按订单冻结快照算出来
+ * （`业务流程表.md` §16.B：「管理员只输入退款比例，金额由系统计算」）。
+ * 请求体里没有任何字段能传金额进来，写入侧也没有接收金额的位置。
  *
  * ⚠️ **三个动作的业务规则不在这里判断**：合法迁移在 `lib/constants/adminRefunds.ts`
- * 的状态机里，原子写入在 `lib/data/adminRefundTransaction.ts` 的伪事务里。
+ * 的状态机里，金额公式与金额闸在 `lib/constants/refunds.ts`，原子写入在
+ * `lib/data/adminRefundTransaction.ts` 的伪事务里。
  * 这里只做三件事：解析入参、把失败翻译成明确的接口错误、把成功翻译成 DTO。
  */
 
@@ -194,6 +199,17 @@ export async function queryAdminRefundList(
  *
  * 详情里补齐原因、说明、凭证、审核信息、进度时间轴与**服务端判定的** `allowedActions`：
  * 页面不拿状态自己写 `if`，终态三项都是 false。
+ *
+ * ## 订单金额快照（P0-13 验收整改 C）
+ *
+ * 除了订单自己冻结的六个金额，还要查两样东西：
+ *
+ * 1. **既往已冲回额**：该订单全部已批准退款的 `companionReversalAmount` 之和。
+ *    它由 `sumApprovedCompanionReversal()` 算——与写入路径
+ *    （`lib/data/adminRefundTransaction.ts`）是**同一个函数**，因此界面上算出来的
+ *    「本次预计退款金额」与提交后真正写下去的数不可能不一致。
+ * 2. **收益状态**：`withdrawn` 时 D17 规定本轮不冲回，界面必须据此改写预计金额与说明。
+ *    收益可能不存在（`serving` 订单还没结算，D9），那种情况传 `null`。
  */
 export async function getAdminRefundDetail(
   id: string,
@@ -211,10 +227,20 @@ export async function getAdminRefundDetail(
 
     const users = await adminUserIndex();
 
+    // 两处额外查询并发：它们互不依赖，串行只是白等
+    const [refundsOfOrder, earning] = await Promise.all([
+      getRefundRepository().listRefundsByOrderId(order.id),
+      getEarningRepository().findEarningByOrderId(order.id),
+    ]);
+
     return toAdminRefundDetail(
       refund,
       order,
       users.get(refund.userId) ?? missingUser(refund.userId),
+      {
+        reversedSoFarAmount: sumApprovedCompanionReversal(refundsOfOrder),
+        companionEarningStatus: earning?.status ?? null,
+      },
     );
   });
 }
@@ -298,6 +324,9 @@ function toWriteResult(
     orderStatus: order.status,
     orderStatusLabel: ORDER_STATUS_LABELS[order.status],
     reviewedAt: refund.reviewedAt,
+    // 决策挂在退款记录上（D7），因此这里读出来的就是这次审核算出的退给用户的金额。
+    // 未决策的两个动作（开始审核 / 拒绝）拿到的是 null——不是 0
+    decidedAmount: refund.decision?.refundAmount ?? null,
     changed,
     orderChanged,
   };
@@ -315,6 +344,9 @@ function toApiError(outcome: AdminRefundWriteFailure): ApiError {
     case "order-missing":
       // 退款申请挂着的订单不见了，属于服务端数据问题，报 500 而不是 404
       return new ApiError("SERVER_ERROR", "退款申请对应的订单不存在，请联系技术支持", 500);
+    case "decision-invalid":
+      // 文案由常量层的规则函数给出（单次 0 / 累计超过实付），这里只把它变成 400
+      return new ApiError("BAD_REQUEST", outcome.message, 400);
   }
 }
 
@@ -339,12 +371,18 @@ export async function startReviewAdminRefund(
 }
 
 /**
- * 通过：`pending | reviewing → approved`，并**在同一次写入里**把订单改成 `refunded`。
+ * 通过：`pending | reviewing → approved`，并**在同一次写入里**写入资金决策、
+ * 累计订单退款额、打手收益冲回与（累计退满时）订单状态。
  *
- * 四件事（退款状态、审核人 / 意见 / 时间、订单状态、审计）由伪事务在同一段无 `await`
- * 的同步区段里完成，因此不会出现「退款已通过但订单未退款」或相反的半完成状态。
+ * 那几件事（退款状态、审核人 / 意见 / 时间、资金决策、订单、收益、审计）由伪事务
+ * 在同一段无 `await` 的同步区段里完成，因此不会出现「退款已通过但订单未退款」
+ * 或「退款批了但打手的钱没冲回」这类半完成状态。
  *
  * 审核意见选填，见 `normalizeOptionalReviewNote`。
+ *
+ * ⚠️ **金额闸（单次 > 0、累计不超过实付）不在这一层判**：它要读订单当前的累计已退额，
+ * 与后面的写入必须同段（见 `AdminRefundWriteFailure` 的 `decision-invalid`）。
+ * 这一层判的是**请求体的形状**——比例与责任归属填得对不对，判完才进数据层。
  */
 export async function approveAdminRefund(
   id: string,
@@ -356,7 +394,17 @@ export async function approveAdminRefund(
 
   const reviewNote = normalizeOptionalReviewNote(readTrimmedString(body, "reviewNote"));
 
-  const outcome = await approveRefund(id, reviewNote, writeContext(adminId, operationId));
+  // 决策三件套：百分比字符串 → 基点整数。形状与范围在这里一次判完，
+  // 因此数据层永远只面对合法的 `RefundDecisionInput`
+  const decision = readAdminRefundDecisionInput(body);
+  if (!decision.ok) throw new ApiError("BAD_REQUEST", decision.message, 400);
+
+  const outcome = await approveRefund(
+    id,
+    reviewNote,
+    decision.input,
+    writeContext(adminId, operationId),
+  );
   if (outcome.kind !== "ok") throw toApiError(outcome);
 
   return toWriteResult(

@@ -1247,13 +1247,23 @@ test("客服账号不进用户名单，也不参与消费：它是独立的第�
 
 // ——————————————————————————— 六、源码门禁 ———————————————————————————
 
-test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + 投诉五件 + 完成材料四件", () => {
+test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + 退款四件 + 投诉五件 + 完成材料四件", () => {
   const routeFiles = collectFiles(STAFF_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
   // ⚠️ 这里没有「管理客服账号」的地址：那在 `/api/admin/staff/**`，
   // 两者的鉴权是两套（`requireAdmin()` 与 `requireStaff()`），不能合成一个地址段。
   // ⚠️ **仍然没有**「改订单」的地址：客服不能改订单状态、金额、商品（P8D-2 也没有放开）。
+  //    P0-10 加的是**两个只读地址**：列表与详情。全量订单查询因此不等于「客服能改订单」——
+  //    两个地址都是 GET，且服务层没有任何写订单的路径。
+  // ⚠️ P0-11 在订单段下加了**三个地址**：两个写（`release` 回池 / `replace` 直接换人）、
+  //    一个只读（`replace-candidates` 候选名单）。它们**不是**「改订单」——
+  //    改的是**当前履约人**：`release` 把订单退回 `paid` 并重进公共池，`replace` 换成另一位护航，
+  //    两者都不改金额、不改商品、不退款。金额与商品仍然没有写地址。
+  // ⚠️ 订单因此是**五个**地址：列表、详情、回池、换人、候选名单。
+  //    **没有**「退款」「售后」「改金额」的地址——它们属于后续 Round 或别的动作，边界到这里为止。
+  // ⚠️ 候选名单是 GET 而不是塞进详情 DTO：详情每次翻页都会取，而候选名单只在客服按下
+  //    「更换护航」时才需要（要读全部护航再筛一遍）。塞进去等于给每次详情读取都加一次全表扫描。
   // ⚠️ 退款**只有四个**地址：列表、详情、开始审核、驳回。
   //    **没有 `approve`**：通过会在同一次写入里把订单改成「已退款」，属于资金最终划拨，
   //    留在管理员侧。这个「少一个地址」就是那条边界在代码里的样子——
@@ -1283,6 +1293,13 @@ test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + �
       "conversations/[orderId]/read/route.ts",
       "conversations/[orderId]/route.ts",
       "conversations/route.ts",
+      // 全量订单查询（P0-10）：列表与详情两个只读地址
+      // 订单处置（P0-11）：退回公共池 + 直接换人 + 换人候选名单
+      "orders/[id]/release/route.ts",
+      "orders/[id]/replace-candidates/route.ts",
+      "orders/[id]/replace/route.ts",
+      "orders/[id]/route.ts",
+      "orders/route.ts",
       "refunds/[id]/reject/route.ts",
       "refunds/[id]/route.ts",
       "refunds/[id]/start-review/route.ts",
@@ -1342,7 +1359,12 @@ test("客服工作台不复用用户端壳层，也不进管理员侧栏", () =>
   }
 
   // 工作台页面按地址找得到，且登录页在壳层之外（否则会转成一个死循环）
-  for (const route of ["staff/page.tsx", "staff/login/page.tsx", "staff/conversations/page.tsx"]) {
+  for (const route of [
+    "staff/page.tsx",
+    "staff/login/page.tsx",
+    "staff/conversations/page.tsx",
+    "staff/orders/page.tsx",
+  ]) {
     assert.ok(findAppFile(route).length > 0, `缺少 ${route}`);
   }
   assert.equal(
@@ -1351,12 +1373,35 @@ test("客服工作台不复用用户端壳层，也不进管理员侧栏", () =>
     "登录页不该待在需要登录的壳层里",
   );
 
-  // 详情页不能有加载边界：外壳先以 200 发出之后，迟到的 notFound() 只能改内容、改不了状态码
-  const detailDir = path.dirname(findAppFile("staff/conversations/[orderId]/page.tsx"));
-  assert.equal(
-    readdirSync(detailDir).some((name) => /^loading\.(tsx|js)$/.test(name)),
-    false,
-    "订单沟通页不该有 loading.tsx：加载边界会把真 404 变成 200",
+  // 详情页不能有加载边界：外壳先以 200 发出之后，迟到的 notFound() 只能改内容、改不了状态码。
+  // ⚠️ 逐条列出而不是只查一个：这条约束是**每一条客服详情路由**都要满足的，
+  // 漏登记一条就等于那条路由的 404 悄悄退化成 200。
+  // ⚠️ 而且要**逐级上溯到 `app/`**，不能只看详情页自己那一层：把 `loading.tsx` 放到
+  // `orders/` 或 `(console)/` 一层，它同样会成为详情页的加载边界，
+  // 而那时「所在目录里没有 loading.tsx」这条断言仍然成立——红不了，等于没守。
+  const APP_ROOT = path.join(ROOT, "app");
+  for (const detailRoute of [
+    "staff/conversations/[orderId]/page.tsx",
+    "staff/orders/[id]/page.tsx",
+  ]) {
+    for (let dir = path.dirname(findAppFile(detailRoute)); ; dir = path.dirname(dir)) {
+      assert.equal(
+        readdirSync(dir).some((name) => /^loading\.(tsx|js)$/.test(name)),
+        false,
+        `${path.relative(ROOT, dir).replace(/\\/g, "/")} 里有 loading.tsx，它会把 ${detailRoute} 罩进加载边界：外壳先以 200 发出，迟到的 notFound() 改不了状态码`,
+      );
+      if (dir === APP_ROOT) break;
+    }
+  }
+
+  // ⚠️ 列表页的 loading.tsx **必须收在 `(list)` 段内**：放到 `orders/` 或 `(console)/`
+  // 一层，它就会成为详情页的加载边界，上面那条约束会被从旁边绕过去。
+  // 按路由找而不是按目录名找：`findAppFile` 会剥掉全部路由组段，
+  // 所以 `(list)` 不出现在入参里，返回值才落在真正的那个目录上。
+  const listDir = path.dirname(findAppFile("staff/orders/page.tsx"));
+  assert.ok(
+    readdirSync(listDir).some((name) => /^loading\.(tsx|js)$/.test(name)),
+    "全量订单列表页缺少 loading.tsx（列表本身仍需要骨架屏）",
   );
 });
 

@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { isComplaintWindowClosed } from "@/lib/constants/complaints";
 import {
   parseEvidenceInput,
   toStoredEvidence,
@@ -6,6 +7,9 @@ import {
 } from "@/lib/constants/evidence";
 import { ORDER_STATUS_LABELS, isOrderStatus } from "@/lib/constants/orders";
 import {
+  DIRECT_REFUND_ALREADY_REFUNDED_MESSAGE,
+  DIRECT_REFUND_NOT_ALLOWED_MESSAGE,
+  DIRECT_REFUND_NOT_STARTED_MESSAGE,
   REFUND_ALREADY_ACTIVE_MESSAGE,
   REFUND_AMOUNT_INVALID_MESSAGE,
   REFUND_DESCRIPTION_EMPTY_MESSAGE,
@@ -15,14 +19,16 @@ import {
   REFUND_ORDER_NOT_ALLOWED_MESSAGE,
   REFUND_REASON_LABELS,
   REFUND_REASON_REQUIRED_MESSAGE,
-  REFUND_RECORD_EXISTS_MESSAGE,
   REFUND_STATUS_LABELS,
+  REFUND_WINDOW_CLOSED_MESSAGE,
   canCancelRefund,
+  canDirectRefund,
   canRequestRefund,
   isActiveRefundStatus,
   isRefundReason,
 } from "@/lib/constants/refunds";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
+import { directRefundOrder } from "@/lib/data/directRefundTransaction";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
@@ -40,14 +46,25 @@ import type {
  *
  * 四条硬规则，本文件是它们唯一的落点：
  *
- * 1. **能不能退由服务端判断**。`canRequestRefund` 同时看订单状态与这一单有没有退款记录，
- *    接口再校验一次，按钮只是提示。
- * 2. **金额由服务端算**。请求体里没有任何金额字段（白名单解析），金额取订单实付金额，
- *    整单退款，用户填不了也改不了。
- * 3. **提交退款不改订单状态**。这里只写退款申请，绝不碰订单；订单进入 `refunded`
- *    只能由将来的审核流程完成。这是本阶段最重要的一条：两条状态线不能互相推导。
- * 4. **写入幂等**。同「用户 + 幂等键」只产生一条申请，「一笔订单一条申请」由仓储保证，
- *    不依赖前端按钮禁用。
+ * 1. **能不能退由服务端判断**。`canRequestRefund` 同时看订单状态与这一单有没有
+ *    **进行中**的退款申请，接口再校验一次，按钮只是提示。
+ * 2. **金额由服务端算，用户一个金额字段都没有**。请求体里没有金额（白名单解析）；
+ *    P0-13 起**管理员也只输入比例**，金额由
+ *    `computeRefundDecisionAmounts()` 按 §17 的冻结公式从订单快照算出来。
+ *    用户这一侧连比例都填不了——他只提交原因、说明与凭证。
+ * 3. **提交退款申请不改订单状态**（`createRefundForOrder`）。这里只写退款申请，绝不碰订单；
+ *    订单进入 `refunded` 只能由审核流程完成。这是本阶段最重要的一条：两条状态线不能互相推导。
+ *    ⚠️ **P0-12 起这条规则只约束「申请」这一条路径**：`paid` / `accepted` 走
+ *    `directRefundOrderForUser`，那条路径**本来就必须当场改订单状态**——免审批的全额退款
+ *    没有「等审核」这一步，也不产生任何退款申请记录。两条路径各自内部自洽，
+ *    因此规则 3 不是被放宽了，而是它从来只管申请那条线。
+ *    ⚠️ **P0-13 起多一条例外，而它其实也在规则之内**：申请被批准时订单**只在累计退满时**
+ *    才转 `refunded`（部分退款不改状态）。批准那条路径本来就在「审核流程」里，
+ *    因此规则 3 说的是「**申请**这一步不碰订单」，不是「没有任何东西能碰订单」。
+ * 4. **写入幂等**。申请按「用户 + 幂等键」去重；**同一订单可以有多条申请**，
+ *    但同一时刻只允许一条**进行中**（P0-13 起，见 `canRequestRefund`）；
+ *    直接退款按**订单状态与已退金额**去重（见 `directRefundOrder` 的说明），
+ *    两者都不依赖前端按钮禁用。
  */
 
 // ——————————————————————————— 输入解析 ———————————————————————————
@@ -173,6 +190,10 @@ export function toRefundDetail(refund: RefundRequest, order: Order): RefundDetai
     description: refund.description,
     evidence: refund.evidence,
 
+    // ⚠️ 只给**结果金额**：平台与打手之间怎么分（责任归属、冲回额、平台承担额）
+    // 是平台财务，用户端没有任何展示位置（P0-13 D13）
+    decidedAmount: refund.decision?.refundAmount ?? null,
+
     updatedAt: refund.updatedAt,
     reviewedAt: refund.reviewedAt,
     reviewNote: refund.reviewNote,
@@ -221,14 +242,54 @@ export async function getOrderRefundSummary(orderId: string): Promise<RefundSumm
   return refund ? toRefundSummary(refund) : null;
 }
 
-/** 撤销申请需要展示的权限：这一单有没有退款申请、能不能撤销。 */
+/**
+ * 退款相关的权限值与金额，一次算清：申请（人工审核）· 直接退款（免审批）· 撤销申请 ·
+ * **这一次直退会退回多少**。
+ *
+ * ⚠️ 前两个**互斥**，而互斥关系由 `lib/constants/refunds.ts` 里两个状态集合
+ * **不相交**来保证，不在这里写 `!canDirectRefund` 之类的补丁——
+ * 那种写法会让「两条路径不能同时存在」变成某一处的判断，而不是集合本身的性质。
+ *
+ * ⚠️ 与 `canRequestRefund` 一样，`canDirectRefund` **不能只看状态就想完**：
+ * 它还要看**已退金额**（退满了就不该再出现按钮）。金额那一半由
+ * `directRefundOrder` 的原子区段兜底。
+ *
+ * ⚠️ **P0-13 整改**：上面那句「兜底」原先只兜「**退满**」，兜不住「**部分已退**」——
+ * `directRefundOrder` 的第三道判据是 `refundedAmount >= actualPaidAmount`，
+ * 而一张退了 30% 的订单在这一句上是不成立的。真正的缺口在**金额**：
+ * `applyOrderRefund` 的第三个参数是「本次增量」，传实付会把它加成「已退 + 实付」。
+ * 因此这条路径改成退**剩余可退额**，并在这里把两个金额一并交给页面——
+ * 页面照报，不做减法。
+ *
+ * ⚠️ **P0-13：传进来的 `refund` 是「该订单最新一条」**（`findRefundByOrderId` 的口径），
+ * 而 `canRequestRefund` 问的是「有没有**进行中**的」——因此这里要再判一次状态，
+ * 不能只写 `refund !== null`。这两件事在今天**恰好等价**（有进行中的那条一定是最新的，
+ * 因为进行中的记录存在时不允许再开一条），但不能靠「恰好」：
+ * 写成 `refund !== null` 的话，等哪天并发的第二条被放进来，
+ * 已结束的最新一条会挡住一个本该可用的入口。
+ */
 export function buildRefundActions(
   order: Order,
   refund: RefundRequest | null,
-): { canRequestRefund: boolean; canCancelRefund: boolean } {
+): {
+  canRequestRefund: boolean;
+  canDirectRefund: boolean;
+  canCancelRefund: boolean;
+  directRefundAmountCents: number | null;
+  alreadyRefundedAmountCents: number | null;
+} {
+  const hasActiveRefund = refund !== null && isActiveRefundStatus(refund.status);
+  const directRefundAllowed = canDirectRefund(order.status);
+  // 可退额 = 实付 − 累计已退。这里**不是**复制 `directRefundOrder` 的算法，
+  // 而是同一个事实的展示面：两处都由 `refundedAmount <= actualPaidAmount` 这条
+  // 冻结约束兜着（写入器还会再钳一次），因此页面报的数与真正到账的数不会分叉
+  const refundableAmount = Math.max(0, order.actualPaidAmount - order.refundedAmount);
   return {
-    canRequestRefund: canRequestRefund(order.status, refund !== null),
+    canRequestRefund: canRequestRefund(order.status, hasActiveRefund),
+    canDirectRefund: directRefundAllowed,
     canCancelRefund: refund !== null && canCancelRefund(refund.status),
+    directRefundAmountCents: directRefundAllowed ? refundableAmount : null,
+    alreadyRefundedAmountCents: directRefundAllowed ? order.refundedAmount : null,
   };
 }
 
@@ -243,8 +304,14 @@ export function buildRefundActions(
  * 2. **快速路径**：这个键提交过就返回上一次的结果，连校验都不重来
  *    （重试要的是「和上次一样的结果」，而不是「按现在的状态重新算一遍」）；
  * 3. 订单不存在 / 不属于当前用户 → 404（对外与「不存在」无差别）；
- * 4. 业务校验：订单状态可退、这一单没有退款记录；
+ * 4. 业务校验：订单状态可退、这一单没有**进行中**的申请、**售后窗口未过**；
  * 5. 金额取订单实付金额，写入申请。**不修改订单**。
+ *
+ * ⚠️ **P0-13 起同一订单可以有多条申请**（部分退款必须能退第二次）。
+ * 因此第 4 步从「没有任何记录」改成「没有进行中的记录」，
+ * 「已拒绝 / 已撤销过也能再申请」是这次放宽的**已知后果**，产品已裁定接受（D10）。
+ * 累计退满时订单转 `refunded`，而 `refunded` 不在可退状态集合里，
+ * 入口与接口都会自动关上——不需要再靠「有没有记录」去挡。
  */
 export async function createRefundForOrder(
   orderId: string,
@@ -269,19 +336,33 @@ export async function createRefundForOrder(
   }
 
   const current = await repository.findRefundByOrderId(order.id);
-  if (current) {
-    // 已有进行中的申请，与「已申请过但已结束」提示不同：前者用户可以去看进度，
-    // 后者是这一阶段根本不支持再次申请。
-    throw new ApiError(
-      "BAD_REQUEST",
-      isActiveRefundStatus(current.status) ? REFUND_ALREADY_ACTIVE_MESSAGE : REFUND_RECORD_EXISTS_MESSAGE,
-    );
+  // 只挡**进行中**的那一条：同一时刻不能对同一单开两条流程。
+  // 已结束（已拒绝 / 已撤销 / 已通过）的记录不再挡——部分退款要能退第二次。
+  if (current && isActiveRefundStatus(current.status)) {
+    throw new ApiError("BAD_REQUEST", REFUND_ALREADY_ACTIVE_MESSAGE);
   }
   if (!canRequestRefund(order.status, false)) {
     throw new ApiError("BAD_REQUEST", REFUND_ORDER_NOT_ALLOWED_MESSAGE);
   }
-  // 整单退款：金额就是订单实付金额。金额异常时不生成一条 0 元的退款申请
-  if (order.totalAmount <= 0) {
+  /**
+   * ⚠️ **售后窗口**（P0-13 §一：completed 售后必须在订单冻结的窗口内）。
+   *
+   * 判据**原样复用** `isComplaintWindowClosed`（D11）：它读的是订单自己的
+   * `complaintDeadlineAt` 快照，**不读当前 PlatformConfig**，
+   * 因此天然满足「必须使用订单冻结 deadline，不读取当前配置追溯历史」。
+   *
+   * 不加 `status === "completed"` 的前置判断是**刻意**的：`isComplaintWindowClosed`
+   * 对没有快照的订单（在途订单、P0-9 之前的历史订单）返回 `false`，
+   * 也就是「窗口没关」。再加一层状态判断等于把同一条规则写成两处，
+   * 而两处迟早会不一致。
+   */
+  if (isComplaintWindowClosed(order, new Date().toISOString())) {
+    throw new ApiError("BAD_REQUEST", REFUND_WINDOW_CLOSED_MESSAGE);
+  }
+  // 实付异常时不生成一条 0 元的退款申请。
+  // ⚠️ 判据是 `actualPaidAmount`（§17 的退款基数）而不是 `totalAmount`：
+  // 券接入之后两者会分开，而退款只能按**用户实付**退，不能按渠道原价退。
+  if (order.actualPaidAmount <= 0) {
     throw new ApiError("BAD_REQUEST", REFUND_AMOUNT_INVALID_MESSAGE);
   }
 
@@ -296,7 +377,10 @@ export async function createRefundForOrder(
       orderId: order.id,
       // 用户新提交的申请只会是「待审核」：本阶段没有用户端的审核入口
       status: "pending",
-      amount: order.totalAmount,
+      // 申请时的实付快照。⚠️ 它**不是**「最后退了多少」——后者是 `decision.refundAmount`
+      amount: order.actualPaidAmount,
+      // 还没人决策。`null` 而不是零值决策：见 `RefundRequest.decision` 的注释
+      decision: null,
 
       reasonKey: input.reasonKey,
       reasonLabel: REFUND_REASON_LABELS[input.reasonKey] ?? input.reasonKey,
@@ -320,16 +404,80 @@ export async function createRefundForOrder(
 
   if (!outcome.ok) {
     // 走到这里说明上面查过之后、写入之前有另一个请求先进来了（并发提交）。
-    // 仓储的原子区段挡住了第二条记录，这里把结果翻译成同样的业务提示。
-    throw new ApiError(
-      "BAD_REQUEST",
-      isActiveRefundStatus(outcome.existing.status)
-        ? REFUND_ALREADY_ACTIVE_MESSAGE
-        : REFUND_RECORD_EXISTS_MESSAGE,
-    );
+    // 仓储的原子区段挡住了第二条**进行中**的记录，这里翻译成同样的业务提示。
+    // ⚠️ 只剩这一种失败原因了（已结束的记录不再被拒），因此不再需要分支。
+    throw new ApiError("BAD_REQUEST", REFUND_ALREADY_ACTIVE_MESSAGE);
   }
 
   return { refundId: outcome.refund.id, created: outcome.created };
+}
+
+// ——————————————————————————— 直接全额退款（P0-12，免审批） ———————————————————————————
+
+/**
+ * 用户**直接全额退款**：`paid → refunded` / `accepted → refunded`。
+ *
+ * 与上面 `createRefundForOrder` 的差别不是「快一点」或「少一步」，而是**业务完全不同**：
+ * 那个是向客服**申请**（写一条待审核记录，**订单一动不动**），这个是**当场就退**
+ * （没有申请、没有审核人、没有审批环）。因此它写得像「一步到位的动作」，
+ * 而不是「一条流程的起点」——它没有返回值让前端跳去哪个进度页，因为**没有进度页**。
+ *
+ * 四件事的顺序都是刻意的：
+ *
+ * 1. **归属校验在事务之前**。事务只回答「这件事在数据上此刻成不成立」，
+ *    它不知道也不该知道「谁在问」。查不到、或不是本人的订单一律**同一个 404**——
+ *    否则就能拿订单 id 逐个试探别人有哪些订单。
+ * 2. **业务失败在事务里判定**，不在这里先用状态预判一遍：预判等于把规则抄成两份，
+ *    而两份迟早会不一致（真正的保护必须在写入的那一段同步代码里）。
+ * 3. **失败原因翻译成人话**时才带状态：「已开始服务」与「这单现在退不了」对用户
+ *    是两件不同的事，前者还有路可走（走售后找客服），后者没有。
+ * 4. **金额不由调用方给**：请求体里没有金额字段，事务从订单上取 `actualPaidAmount`。
+ *
+ * ⚠️ 不需要幂等键。同一个意图第二次到达时，订单**已经是** `refunded`，
+ * 事务据此返回 `already-refunded`——比幂等键更强，因为状态是事实而不是调用方给的串，
+ * 因此它同样挡得住「不是同一个人点的第二次」（超时清扫、管理员退款）。
+ */
+export async function directRefundOrderForUser(
+  orderId: string,
+  userId: string,
+  params: URLSearchParams | undefined,
+  surface: MockSurface,
+): Promise<{ orderId: string; orderNo: string; refundedAmount: number; refundedAt: string }> {
+  if (!orderId) throw new ApiError("NOT_FOUND", "订单不存在");
+
+  const order = await withMockDebug(params, surface, () =>
+    getPaymentRepository().findOrderById(orderId),
+  );
+  if (!order || order.userId !== userId) {
+    throw new ApiError("NOT_FOUND", "订单不存在");
+  }
+
+  const outcome = await directRefundOrder(orderId, new Date().toISOString());
+
+  switch (outcome.kind) {
+    case "ok":
+      return {
+        orderId: outcome.orderId,
+        orderNo: outcome.orderNo,
+        refundedAmount: outcome.refundedAmount,
+        refundedAt: outcome.refundedAt,
+      };
+    case "not-found":
+      // 事务之前刚查到过；真发生说明存储被换掉了。对外与「本来就没有」无差别
+      throw new ApiError("NOT_FOUND", "订单不存在");
+    case "already-refunded":
+      throw new ApiError("BAD_REQUEST", DIRECT_REFUND_ALREADY_REFUNDED_MESSAGE);
+    case "amount-invalid":
+      // 实付 ≤ 0 的订单退无可退。与申请路径对同一异常**共用同一句文案**
+      // （「订单金额异常，暂时无法发起退款」）——「这一单的钱本身是坏的」只有一种说法
+      throw new ApiError("BAD_REQUEST", REFUND_AMOUNT_INVALID_MESSAGE);
+    case "not-eligible":
+      // `refunded` 在上面那一支已经拦掉了，走到这里的只有「已经开始 / 已经结束」
+      throw new ApiError(
+        "BAD_REQUEST",
+        outcome.status === "serving" ? DIRECT_REFUND_NOT_STARTED_MESSAGE : DIRECT_REFUND_NOT_ALLOWED_MESSAGE,
+      );
+  }
 }
 
 // ——————————————————————————— 撤销 ———————————————————————————

@@ -27,15 +27,17 @@
 /**
  * 结束当前履约绑定的原因。
  *
- * ⚠️ **本轮只有 `companion_cancel` 有入口**（打手在 `accepted` 阶段主动取消接单）。
- * 另外两个取值是 `database-schema.md` T4 已定义的 TARGET 占位，
- * **尚未实现、也没有任何写入路径**：
+ * ⚠️ **P0-11 起三个取值都有真实写入路径**：
  *
- * - `companion_disabled` —— 打手被封禁 / 移除导致回池，属于系统侧后续 Round；
- * - `staff_reassign`    —— 客服主动换人，同样属于后续 Round。
+ * - `companion_cancel`   —— 打手在 `accepted` 阶段主动取消接单（P0-6）；
+ * - `companion_disabled` —— 打手被下架 / 移除导致手上的单回池（P0-11，封禁事务内清扫）；
+ * - `staff_reassign`     —— 客服换人（P0-11），**同时覆盖两种落点**：
+ *   「退回公共池重新等人接」与「直接指定新打手接替」。两者的订单与派单动作
+ *   完全一样（解除绑定 + 回池结构），只有通知文案与是否随后重新指派不同，
+ *   因此不新增第四个 source（`docs/03-dev/rounds/P0-11/02-decisions.md` D3）。
  *
- * 保留它们是为了让「同一张订单上出现过几种退出」这个问题的取值集合一次定死，
- * 而不是为了提前设计封禁与换人流程（那是明确禁止的）。
+ * ⚠️ 取值集合在 P0-5 就定死了，这是它的用处：现在新增的是**写入路径**，
+ * 不是新的取值——「同一张订单上出现过几种退出」这个问题的答案集合没有变。
  */
 export type CompanionReleaseSource = "companion_cancel" | "companion_disabled" | "staff_reassign";
 

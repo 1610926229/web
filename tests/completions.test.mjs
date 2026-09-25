@@ -660,7 +660,9 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     const rs = refundStore();
     const refundId = unique("refund");
     rs.refunds.set(refundId, { id: refundId, orderId, status: "pending" });
-    rs.refundIdByOrder.set(orderId, refundId);
+    // P0-13（D10）：索引由单值改为**多值**——同一订单可以有多条申请，
+    // 已终结的不再挡、进行中的才挡，因此这里维护的是一个列表
+    rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
     const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(swept.autoApprovedSubmissionIds.length, 0, "进行中的退款必须挡住");
@@ -679,7 +681,9 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     const rs = refundStore();
     const refundId = unique("refund");
     rs.refunds.set(refundId, { id: refundId, orderId, status: "reviewing" });
-    rs.refundIdByOrder.set(orderId, refundId);
+    // P0-13（D10）：索引由单值改为**多值**——同一订单可以有多条申请，
+    // 已终结的不再挡、进行中的才挡，因此这里维护的是一个列表
+    rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
     const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(swept.autoApprovedSubmissionIds.length, 0, "审核中的退款同样阻塞");
@@ -713,7 +717,9 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     const rs = refundStore();
     const refundId = unique("refund");
     rs.refunds.set(refundId, { id: refundId, orderId, status: refundStatus });
-    rs.refundIdByOrder.set(orderId, refundId);
+    // P0-13（D10）：索引由单值改为**多值**——同一订单可以有多条申请，
+    // 已终结的不再挡、进行中的才挡，因此这里维护的是一个列表
+    rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
     const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.deepEqual(swept.autoApprovedSubmissionIds, [submissionId], `${refundStatus} 退款不阻塞`);
@@ -957,7 +963,7 @@ test("门禁 22：approveCompletion 的 serving→completed 必须走中央状�
   );
 });
 
-test("门禁 23：完成材料自动审核清扫必须挂在全部五条读取路径上（不多不少）", () => {
+test("门禁 23：完成材料自动审核清扫必须挂在全部六条读取路径上（不多不少）", () => {
   const servicesDir = path.join(ROOT, "lib", "services");
   const callers = collectFiles(servicesDir)
     .filter((file) => file.endsWith(".ts"))
@@ -967,29 +973,46 @@ test("门禁 23：完成材料自动审核清扫必须挂在全部五条读取�
 
   assert.deepEqual(
     callers,
-    ["adminOrders.ts", "companionEarnings.ts", "companionOrders.ts", "orders.ts", "staffCompletions.ts"],
-    "自动审核清扫必须恰好挂在五条读取路径上：用户端 / 管理端 / 客服端 / 打手端订单 / 打手端收益。" +
+    [
+      "adminOrders.ts",
+      "companionEarnings.ts",
+      "companionOrders.ts",
+      "orders.ts",
+      "staffCompletions.ts",
+      // P0-10：客服订单列表与详情都会显示完成材料摘要，因此也必须先物化完成事实
+      "staffOrders.ts",
+    ],
+    "自动审核清扫必须恰好挂在六条读取路径上：用户端 / 管理端 / 客服端订单 / 客服端完成材料 / 打手端订单 / 打手端收益。" +
       "漏挂一处（某个端读不到自动审核物化）或多挂一处（在别处偷偷清扫）都会红；" +
       "P0-9 的打手「我的收益」必须先物化完成事实、再物化解冻——只扫解冻不扫完成的话，" +
       "一张到期自动通过的订单在收益页上会是一片空白，而它的单其实早就完成了；" +
+      "P0-10 的客服订单页同理：它显示的是「这一单现在到哪一步了」，" +
+      "不物化的话客服会看到一条早该自动通过的完成材料还挂在「待审核」；" +
       "若有意把各端的调用收敛成一个公共物化函数，那是重构而非缺陷——必须在同一次改动里同步更新这里的白名单",
   );
 });
 
 // ——————————————————————————— 九、纯逻辑 ———————————————————————————
 
-test("状态机：四个状态、pending 只有两条出边，其余都是终态", () => {
+// ⚠️ 出边数量从两条变成三条：P0-11 起，当前履约被解除（打手取消接单 / 客服退回公共池 /
+// 客服换人 / 封禁回池）时，已提交但未审的完成材料要作废——否则这一单回到公共池、
+// 换了下一位护航，上一轮交的那份材料还挂在「待审核」等着被通过。
+// 判决仍然不可逆：三条出边全部指向终态，`invalidated` 没有任何回头路
+// （尤其是 `invalidated → approved`）。
+test("状态机：四个状态、pending 三条出边（P0-11 起含作废），其余都是终态", () => {
   assert.deepEqual([...COMPLETION_STATUSES], ["pending", "approved", "rejected", "invalidated"]);
-  assert.deepEqual(COMPLETION_TRANSITIONS.pending, ["approved", "rejected"]);
+  assert.deepEqual(COMPLETION_TRANSITIONS.pending, ["approved", "rejected", "invalidated"]);
   assert.deepEqual(COMPLETION_TRANSITIONS.approved, []);
   assert.deepEqual(COMPLETION_TRANSITIONS.rejected, []);
   assert.deepEqual(COMPLETION_TRANSITIONS.invalidated, []);
 
   assert.equal(canTransitionCompletion("pending", "approved"), true);
   assert.equal(canTransitionCompletion("pending", "rejected"), true);
+  assert.equal(canTransitionCompletion("pending", "invalidated"), true);
   assert.equal(canTransitionCompletion("approved", "approved"), false, "自环不是迁移");
   assert.equal(canTransitionCompletion("invalidated", "approved"), false);
   assert.equal(canTransitionCompletion("rejected", "approved"), false);
+  assert.equal(canTransitionCompletion("invalidated", "invalidated"), false, "作废不是可重入的");
 });
 
 test("自动通过阻塞判据：两条布尔任一为真即阻塞，纯函数不碰仓储", () => {

@@ -13,9 +13,9 @@
 ```
 web/
 ├── app/                    Next.js App Router：页面与接口
-├── components/             121 个 .tsx，按业务域分目录
+├── components/             132 个 .tsx，按业务域分目录
 ├── lib/                    全部业务逻辑（无 src/）
-├── tests/                  51 个 .test.mjs + 测试基础设施
+├── tests/                  66 个 .test.mjs + 测试基础设施
 ├── docs/                   需求、技术设计、开发、测试文档
 ├── public/                 静态资源
 ├── .claude/agents/         项目级 Claude Agent 定义（4 个，见 agent-collaboration.md）
@@ -57,10 +57,11 @@ app/
 │       ├── companions/  products/  categories/  staff/
 │       ├── content/{agreements,announcements,banners,quick-entries}/
 │       └── platform-config/  customer-service/
-├── staff/(console)/        客服工作台：complaints / conversations / refunds
+├── staff/(console)/        客服工作台：complaints / completions / conversations
+│                           / orders（全量订单查询，P0-10）/ refunds
 ├── companion/(console)/    打手工作台：orders（我的订单）/ orders/[id]（订单详情）
 │                           / earnings（我的收益，P0-9）/ exclusive（专属池）/ pool（公共池）
-└── api/                    125 个 route.ts（admin 62 · staff 20 · companion 8 · 其余为用户端）
+└── api/                    131 个 route.ts（admin 62 · staff 25 · companion 8 · 其余为用户端）
 ```
 
 ## 路由组（Route Group）说明 —— CURRENT，必读
@@ -85,9 +86,9 @@ app/api/
 ├── home/  catalog/  companions/  rankings/  agreements/  公开读取
 ├── me/  favorites/  coupons/  notifications/  tips/  suggestions/  reviews/
 ├── orders/  payments/  refunds/  complaints/  service/
-├── companion/                             打手接口（当前 2 个）
+├── companion/                             打手接口（8 个）
 ├── companion-applications/                入驻申请
-├── staff/                                 客服接口（16 个）
+├── staff/                                 客服接口（22 个）
 └── admin/                                 管理接口（62 个，含 admin/auth 3 个）
 ```
 
@@ -95,7 +96,7 @@ app/api/
 
 # 三、`components/` —— 展示组件
 
-**按业务域分目录**，共 28 个子目录、121 个 `.tsx`：
+**按业务域分目录**，共 26 个子目录、132 个 `.tsx`：
 
 ```
 components/
@@ -116,15 +117,19 @@ components/
 
 # 四、`lib/` —— 全部业务逻辑
 
+> 计数为**实测快照**（2026-09-24，P0-12 收口时重测；`find <dir> -name '*.ts' -o -name '*.tsx'` 的文件数与总行数）。
+> 上一次快照是 P0-10 收口时的读数，`lib/types` / `lib/constants` / `lib/data` / `lib/services` 的漂移
+> 来自 P0-11 与 P0-12 两轮（三轮都未提交，读数含全部三轮），一并按实际值订正。
+
 | 目录 | 文件数 / 行数 | 职责 |
 |---|---:|---|
-| `lib/types/` | 29 / 4784 | **纯类型声明**。禁止业务逻辑 |
-| `lib/constants/` | 47 / 12645 | **领域规则**：状态机表、校验、固定文案、DTO 映射 |
-| `lib/data/` | 59 / 9834 | 仓储接口 + Mock 实现 + 伪事务 |
-| `lib/services/` | 62 / 12229 | 服务端业务 + 浏览器 HTTP 客户端 |
-| `lib/auth/` | 11 / 771 | 会话、登录门、适配器、Mock 身份切换面板 |
+| `lib/types/` | 32 / 6136 | **纯类型声明**。禁止业务逻辑 |
+| `lib/constants/` | 51 / 14471 | **领域规则**：状态机表、校验、固定文案、DTO 映射 |
+| `lib/data/` | 70 / 12755 | 仓储接口 + Mock 实现 + 伪事务 |
+| `lib/services/` | 69 / 14599 | 服务端业务 + 浏览器 HTTP 客户端 |
+| `lib/auth/` | 11 / 866 | 会话、登录门、适配器、Mock 身份切换面板 |
 | `lib/api/` | 6 / 381 | 四个路由守卫 + 响应信封 + 浏览器 HTTP 出口 |
-| `lib/mocks/` | 22 | 种子数据与调试工具 |
+| `lib/mocks/` | 22 / 5153 | 种子数据与调试工具 |
 | `lib/config/` | 1 / 62 | Mock 环境开关 |
 | `lib/utils/` | 3 / 114 | `format.ts`（金额/日期）、`query.ts`、`text.ts` |
 
@@ -141,6 +146,13 @@ components/
   **P0-5.5 已实现**：`orders.ts` 的 `ORDER_TRANSITIONS` / `canTransitionOrder`（此前不存在）。见 `architecture-rules.md` §2.6。
 - **校验**：`checkout.ts`（`validateGameAccount`）、`safePath.ts`、`complaints.ts`（`validateComplaintText`）…
 - **金额规则**：`orderAmount.ts` —— 唯一合成点。
+- **跨界面共用的订单筛选纯函数**：`orderFilters.ts`（P0-10 建立）。日期解析 / 北京时间自然日 /
+  游戏名取值集合（含严格校验）/ 关键词命中 / 创建时间倒序这**五类规则**（由**七个函数**实现）
+  **与管理端和客服端的身份无关**，因此住在这里，两端引用同一份实现。
+  `adminOrders.ts` 按原名 re-export 它们。
+  ⚠️ **不要再写第二份**：带身份的规则（状态筛选、错误文案、DTO 字段表）才各自留在
+  `adminOrders.ts` / `staff.ts`。它**不得**放进 `orders.ts`——那个文件被客户端组件引用，
+  文件头明令不许出现任何运行时 `import`，而本文件依赖 `lib/utils/format.ts`。
 - **集中配置**：`site.ts`（`PLATFORM_NAME = "超哥电竞"`、`PLACEHOLDER_NOTICE`）。**禁止在页面内硬编码平台名**。
 
 ## 4.3 `lib/data/` —— 仓储与伪事务
@@ -160,12 +172,12 @@ lib/data/
 
 ## 4.4 `lib/services/` —— 服务端业务 + 浏览器客户端
 
-62 个文件，**两类混放在同一目录**：
+69 个文件，**两类混放在同一目录**（2026-09-24 实测；P0-11 新增 `staffOrderActions.ts`）：
 
 | 类型 | 命名 | 数量 | 例子 |
 |---|---|---|---|
-| 服务端业务 | 无后缀 | ~42 | `orders.ts`、`checkout.ts`、`adminRefunds.ts` |
-| 浏览器 HTTP 客户端 | `*Http.ts` | 20 | `ordersHttp.ts`、`staffHttp.ts` |
+| 服务端业务 | 无后缀 | 47 | `orders.ts`、`checkout.ts`、`adminRefunds.ts`、`staffOrders.ts`、`staffOrderActions.ts` |
+| 浏览器 HTTP 客户端 | `*Http.ts` | 22 | `ordersHttp.ts`、`staffHttp.ts` |
 | **管理端聚合** | `adminHttp.ts` | 1（1163 行） | 承载全部 62 个管理接口的客户端 |
 
 **⚠️ 服务端与浏览器必须分开**，否则 Mock 存储与种子数据会被打进浏览器产物。
@@ -218,7 +230,7 @@ lib/mocks/
 
 ```
 tests/
-├── *.test.mjs                 57 个测试文件
+├── *.test.mjs                 66 个测试文件
 ├── alias-hook.mjs             node --import 入口，注册下面的 hook
 ├── alias-loader.mjs           ~20 行，教会 node「@/ 别名」与「无扩展名相对导入」
 ├── app-path.mjs               按**路由**（忽略路由组）查找 app/ 下源文件
@@ -233,7 +245,7 @@ tests/
 
 **三类特殊测试**：
 
-1. **接口清单门禁**：`admin.test.mjs`（62 条）、`staff.test.mjs`（16 条）、`companion.test.mjs`（5 条，产品裁定 2026-09-19，**P0-5.5 建立 / P0-6 扩充**）。三者都扫描对应端口的 `app/api/**` 与预期清单比对，沿用现有源码扫描方式，**不新建测试框架**。
+1. **接口清单门禁**：`admin.test.mjs`（62 条）、`staff.test.mjs`（22 条，**P0-10 扩充**）、`companion.test.mjs`（8 条，产品裁定 2026-09-19，**P0-5.5 建立**）。三者都扫描对应端口的 `app/api/**` 与预期清单比对，沿用现有源码扫描方式，**不新建测试框架**。
 2. **路由门禁**：`routes.test.mjs` 真实扫描 `app/` 并与页面配置里的入口地址比对。
 3. **HTTP 冒烟**：`http-smoke.test.mjs`，需 `APP_BASE_URL`。
 
@@ -358,10 +370,14 @@ lib/data/mockCompanionReleaseRepository.ts
 
 它由以下事务消费，不自己拥有业务状态机：
 
-- 打手 accepted 主动取消 —— **CURRENT（P0-6）**：`lib/data/companionOrderTransaction.ts` 的 `cancelAcceptedOrder`；底层「写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 回 public → 通知」抽成一个**非导出**的私有出口（`writeAcceptanceRelease`），只有 `cancelAcceptedOrder` 调用它。
-  同一个文件另有 P0-7 的 `startCompanionOrder`（`accepted → serving`，**不产生退出历史、不动派单、不发通知**）：两个动作同属「打手对自己这一单做什么」这一个域，因此共用文件与同一份原子性依据，该文件当前共**两个**公开入口；
-- Admin 封禁/移除当前打手 —— **TARGET — NOT IMPLEMENTED**（§十四 out of scope）；
-- Staff 直接换人 —— **TARGET — NOT IMPLEMENTED**（§十四 out of scope）。
+- 打手 accepted 主动取消 —— **CURRENT（P0-6）**：`lib/data/companionOrderTransaction.ts` 的 `cancelAcceptedOrder`；底层「**作废 pending 完成材料** → 写退出历史 → 清当前履约绑定 → Order 回 paid → Dispatch 的去向 → 通知」抽成一个**非导出**的私有出口，P0-6 时叫 `writeAcceptanceRelease`，**P0-11 起改名 `releaseCurrentAssignment` 并扩成可服务四种 source**（`companion_cancel` / `staff_reassign` / `companion_disabled`，`reassign` 决定派单是回 public 还是直接改绑）；
+  同一个文件另有 P0-7 的 `startCompanionOrder`（`accepted → serving`，**不产生退出历史、不动派单、不发通知**）：两个动作同属「打手对自己这一单做什么」这一个域，因此共用文件与同一份原子性依据；
+- Admin 封禁当前打手 → 回池 —— **CURRENT（P0-11）**：`releaseOrdersForCompanion`（**同步**导出，由 `setCompanionFlags` 的原子区段直接调用，拒绝「已停用、单还挂在他名下」的中间态）；
+- Staff 退回公共池 / 直接换人 —— **CURRENT（P0-11）**：`releaseOrderByStaff` / `replaceOrderCompanionByStaff`，入口是客服端 `POST /api/staff/orders/[id]/release|replace`。
+
+> ⚠️ `writeAcceptanceRelease` 这个旧名**已不存在**（P0-11 改名 `releaseCurrentAssignment`）。
+> 该文件当前共**五个**公开入口：`cancelAcceptedOrder` · `startCompanionOrder` ·
+> `releaseOrderByStaff` · `replaceOrderCompanionByStaff` · `releaseOrdersForCompanion`。
 
 三者统一复用上面那条底层能力；**accepted 用户直接退款是终态退款，保留 actualCompanionId，不走回池清绑定语义。**
 

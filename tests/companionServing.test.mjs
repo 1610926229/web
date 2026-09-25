@@ -949,7 +949,7 @@ test("开始 11：写入口门禁——`orders/**` 下恰好三个，且 start �
   );
 });
 
-test("开始 12：本轮不新增任何通知——start 路径上不引用通知常量，通知常量仍然只有那四条（D6）", () => {
+test("开始 12：start 路径上不引用任何通知常量；通知常量集合共七条，每条都有自己的主人（P0-11 起）", () => {
   const txCode = stripComments(
     readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")),
   );
@@ -957,7 +957,8 @@ test("开始 12：本轮不新增任何通知——start 路径上不引用通�
 
   // (1) 事务层的 start 路径上不得出现任何通知写入或通知常量。
   //     只在整个文件的源码串上 `includes` 是不够的：那会让取消路径上的通知调用
-  //     替开始服务背书——而这两条路径「发不发通知」恰恰是相反的
+  //     替开始服务背书——而这两条路径「发不发通知」恰恰是相反的。
+  //     ⚠️ 这一半**不随时间放宽**：P0-11 一次加了三条通知，start 路径仍然一条都没碰。
   for (const forbidden of ["Notification", "appendNotification", "planNotification", "DISPATCH_NOTIFICATION"]) {
     assert.equal(
       txBody.includes(forbidden),
@@ -969,9 +970,13 @@ test("开始 12：本轮不新增任何通知——start 路径上不引用通�
   const serviceCode = stripComments(readSource(path.join(ROOT, "lib", "services", "companionOrders.ts")));
   assert.equal(functionBody(serviceCode, "startCompanionOrder").includes("Notification"), false);
 
-  // (2) 通知常量集合本身也不许长大：需求里被冻结的四条通知各有主，
-  //     「开始服务」不在其中。将来产品要求补，那是**新增一条产品通知**，
-  //     必须在那一轮里单独确认，不得顺手加
+  // (2) 通知常量集合是一份**可清点的名册**：每一条都要说得出它属于哪条路径。
+  //
+  // ⚠️ P0-7 时这里断言的是「四条，一条都不许长大」，理由是「开始服务」不在其中。
+  // P0-11 按 `cmd_p0-11.md` 加了三条，名册因此长大——但**长法是有方向的**：
+  // 新增的三条全都属于「这一单失去了当前履约人」这一类事件
+  // （客服退回公共池 / 客服指定换人 / 封禁回池），与「开始服务」无关。
+  // 所以这里不是把数字改大，而是改成逐条点名 + 断言 start 的那一条仍然不在名册里。
   const notificationConstants = [
     ...stripComments(readSource(path.join(ROOT, "lib", "constants", "dispatch.ts"))).matchAll(
       /export const (DISPATCH_NOTIFICATION_[A-Z_]+)/g,
@@ -981,11 +986,28 @@ test("开始 12：本轮不新增任何通知——start 路径上不引用通�
     .sort();
 
   assert.deepEqual(notificationConstants, [
+    // P0-7：打手取消接单 → 告诉下单用户「你的护航不再接这一单了」
     "DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED",
+    // P0-7：打手接单 → 告诉下单用户「有人接了」
     "DISPATCH_NOTIFICATION_ACCEPTED",
+    // P0-11：封禁护航时批量回池 → 逐单告诉下单用户
+    "DISPATCH_NOTIFICATION_COMPANION_DISABLED",
+    // P0-7：独占期超时 → 回公共池
     "DISPATCH_NOTIFICATION_EXCLUSIVE_TIMEOUT",
+    // P0-7：公共池无人接单超时
     "DISPATCH_NOTIFICATION_PUBLIC_TIMEOUT",
+    // P0-11：客服退回公共池 / 客服指定换人 → 都告诉下单用户「你的护航换了」
+    "DISPATCH_NOTIFICATION_STAFF_REASSIGNED",
+    "DISPATCH_NOTIFICATION_STAFF_REPLACED",
   ]);
+
+  // 名册里**没有**「开始服务」。将来产品真的要求补一条，那是新增一条产品通知，
+  // 必须在那一轮里单独确认，不得顺手加——这条断言就是那个「顺手」的刹车。
+  assert.equal(
+    notificationConstants.includes("DISPATCH_NOTIFICATION_SERVING_STARTED"),
+    false,
+    "开始服务仍然没有生命周期通知；要加必须先有产品确认，不能顺手",
+  );
 });
 
 test("开始 13：UI 只按服务端旗标显示入口，且开始服务成功后刷新、取消成功后不刷新（D7）", () => {

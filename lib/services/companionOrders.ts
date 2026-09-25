@@ -4,6 +4,7 @@ import {
   COMPANION_ORDER_NOT_CANCELLABLE_MESSAGE,
   COMPANION_ORDER_NOT_FOUND_MESSAGE,
   COMPANION_ORDER_NOT_STARTABLE_MESSAGE,
+  ORDER_DATA_INCONSISTENT_MESSAGE,
 } from "@/lib/constants/dispatch";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import {
@@ -215,6 +216,13 @@ export async function getCompanionOrderDetail(
  * |---|---|---|
  * | 订单不存在 / 不是本人实际履约 | `NOT_FOUND` → 404 | 两种表现必须一致，不泄露存在性 |
  * | 是本人的单，但状态已不是 `accepted` | `BAD_REQUEST` → 400 | 不是重放，是「点了此刻不该存在的按钮」 |
+ * | 完成材料的索引与记录对不上 | `SERVER_ERROR` → 500 | **不可能状态**，见下 |
+ *
+ * ⚠️ 那一条 500 是 P0-11 加的：解除履约从此还要作废这一单那份 `pending` 完成材料
+ * （EX-COMP-02），而那是整件事里**唯一可能失败**的一件。它失败时区段里
+ * **一笔都没写**，所以既不能报「已取消」，也不能报 404 / 400——前两个会把
+ * 一个存储被写坏的事实说成「打手操作有误」，而这正是 `order-missing` 在
+ * `staffCompletions.ts` 里报 500 的同一条理由。
  *
  * `companionId` **只允许**来自 `requireCompanion()` 返回的会话身份，
  * 不允许来自请求体：否则任何人都能以别人的名义取消。
@@ -246,6 +254,9 @@ export async function cancelCompanionOrder(
   if (outcome.kind === "ok" || outcome.kind === "replayed") return outcome;
   if (outcome.kind === "not-found") {
     throw new ApiError("NOT_FOUND", COMPANION_ORDER_NOT_FOUND_MESSAGE, 404);
+  }
+  if (outcome.kind === "inconsistent") {
+    throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
   }
   throw new ApiError("BAD_REQUEST", COMPANION_ORDER_NOT_CANCELLABLE_MESSAGE, 400);
 }

@@ -618,6 +618,15 @@ test("服务层写入：no-op 判据覆盖三个字段——送进来的字段�
   assert.equal(readPlatformConfig().completionAutoApprovalMinutes, 15);
   assert.equal(await getAdminAuditRepository().countAudits(), 2);
 
+  // ⚠️ 基线在这里**重新取一次**，不能继续用 (1) 之前那份 `baselineUpdatedAt`：
+  //    上面的 (3) 是一次**真的**写入，而写入按语义就要刷新时间戳
+  //    （同文件「每次写入刷新 updatedByAdminId 与 updatedAt」那条用例是它的正面证据）。
+  //    继续拿旧基线去比，比的其实是「(3) 有没有刷新时间戳」——那件事**本来就该发生**，
+  //    于是断言只在 (1) 与 (3) 两次写入落在**同一毫秒**里时才碰巧成立：
+  //    空闲机器上绿、满载跑法下红（P0-12 的门禁上真实红过一次）。
+  //    下面 (4) 要证的命题没变，仍然是「no-op 不刷新 updatedAt」，只是基线取在 (3) 之后。
+  const afterRealChangeUpdatedAt = readPlatformConfig().updatedAt;
+
   // (4) P0-9：第三个字段（投诉窗口）也要走同一条 no-op 判据。
   //     先与现状相同 → changed:false；再改它 → changed:true 且另外两个字段不动。
   //     ⚠️ 这一段是「no-op 判据是否把新字段算进去」的唯一直接证据：
@@ -628,7 +637,7 @@ test("服务层写入：no-op 判据覆盖三个字段——送进来的字段�
     idempotencyKey: "op-pc-cw-same",
   });
   assert.equal(cwSame.changed, false);
-  assert.equal(readPlatformConfig().updatedAt, baselineUpdatedAt);
+  assert.equal(readPlatformConfig().updatedAt, afterRealChangeUpdatedAt);
   assert.equal(await getAdminAuditRepository().countAudits(), 2);
 
   const cwChanged = await updateAdminPlatformConfig(ADMIN_ID, {

@@ -1,20 +1,43 @@
 import { ORDER_STATUSES, ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import type { AdminOrderDetail, AdminOrderListItem, Order, OrderStatus } from "@/lib/types/order";
 import type { AdminUserSummary } from "@/lib/types/user";
-import { formatDateTime } from "@/lib/utils/format";
+import { readOrderFilterDate } from "./orderFilters";
 import { clampPage, clampPageSize } from "./pagination";
+
+/**
+ * 七个**与身份无关**的订单筛选 / 搜索 / 排序纯函数已上移到 `./orderFilters`，
+ * 因为客服端（P0-10）原样需要它们，而在客服侧另写一份就是第二套实现。
+ *
+ * 这里按**原来的名字** re-export：既有引用点（`lib/services/adminOrders.ts`、
+ * `lib/data/mockPaymentRepository.ts`、`tests/adminOrders.test.mjs`）一个都不用改。
+ * 新代码请直接从 `./orderFilters` 引用共享实现。
+ */
+export {
+  compareOrdersByCreatedAt as compareOrdersForAdmin,
+  orderBeijingDate,
+  orderGameNames,
+  orderInDateRange,
+  orderMatchesKeyword as orderMatchesAdminKeyword,
+  readOrderFilterDate as readAdminOrderDate,
+  readOrderFilterGame as readAdminOrderGame,
+} from "./orderFilters";
 
 /**
  * 管理端「全量订单」的筛选规则、排序与 DTO 转换（服务端与浏览器共用）。
  *
- * ⚠️ 本文件除类型、`./orders`、`./pagination` 与 `lib/utils/format.ts`（都是纯函数）外
+ * ⚠️ 本文件除类型、`./orders`、`./orderFilters` 与 `./pagination`（都是纯函数）外
  * 没有运行时依赖：客户端组件引用它不会把服务端模块打进浏览器产物，
  * node 也能直接加载它做纯逻辑测试。
  *
- * 三条规则写在这里，是本阶段新增的**唯一**落点：
+ * ⚠️ 「游戏 / 时间范围 / 关键词 / 创建时间倒序」这**四类**（由**七个**函数实现）
+ * **与身份无关**的规则已上移到 `./orderFilters`（客服端同样需要，在别处再写一份
+ * 就是第二套实现）。本文件按原名 re-export 它们，引用点因此不受影响。
  *
- * 1. **筛选与排序的口径**：状态、游戏、时间范围、关键词四类条件，加一条稳定排序。
- *    列表页与接口都调这里的函数，因此「页面看到的」与「接口返回的」不会分叉。
+ * 留在这里的是**管理端自己的**口径（客服端有自己的一份，两者的文案与字段表刻意不同）：
+ *
+ * 1. **状态筛选与关键词的规范化**：`status` 是管理端独有的筛选维度（客服端不用它），
+ *    非法值报 400 还是回落默认，也由各端自己决定；
+ *    ⚠️ 关键词的**匹配规则**（匹配哪四个字段）已经共享，这里只剩读取与去空白。
  * 2. **列表与详情是两个 DTO**：`toAdminOrderListItem` 刻意丢掉游戏账号、备注、
  *    增值服务明细与四份售后摘要——列表一次返回多条，它们只属于详情页。
  * 3. **订单详情是只读的**：这里没有任何「改状态 / 改金额 / 改商品」的转换函数，
@@ -127,7 +150,7 @@ export function normalizeAdminOrderStatusFilter(raw: string | null): AdminOrderS
   return readAdminOrderStatusFilter(raw) ?? DEFAULT_ADMIN_ORDER_STATUS_FILTER;
 }
 
-// ——————————————————————————— 关键词 / 游戏 / 日期 ———————————————————————————
+// ——————————————————————————— 关键词 / 游戏 ———————————————————————————
 
 /**
  * 关键词：只去首尾空格。
@@ -137,75 +160,6 @@ export function normalizeAdminOrderStatusFilter(raw: string | null): AdminOrderS
  */
 export function readAdminOrderKeyword(raw: string | null): string {
   return (raw ?? "").trim();
-}
-
-/**
- * 订单里出现过的游戏名，去重并按名称排序。
- *
- * ⚠️ 筛选项**取自订单数据**，不是当前的商品目录：
- * - 目录里新增了一个游戏、但一单都还没有时，把它放进筛选栏只会得到一次必然为空的查询；
- * - 反过来，某个游戏后来下架了，历史订单仍然要能按它筛出来——那正是后台要查的东西。
- *
- * 排序用 `localeCompare` 的中文顺序，让人在筛选栏里找得到；顺序稳定因此可复现。
- */
-export function orderGameNames(orders: readonly Order[]): string[] {
-  const names = new Set<string>();
-  for (const order of orders) {
-    const name = order.gameName.trim();
-    if (name) names.add(name);
-  }
-  return [...names].sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
-}
-
-/** 严格读取游戏筛选：必须是订单里出现过的游戏名。空值表示「全部游戏」。 */
-export function readAdminOrderGame(raw: string | null, knownGames: readonly string[]): string | null {
-  const value = (raw ?? "").trim();
-  if (!value) return "";
-  return knownGames.includes(value) ? value : null;
-}
-
-/**
- * 日期筛选：只接受 `YYYY-MM-DD`。
- *
- * 用固定正则而不是 `Date.parse`：后者会接受 `2026/9/1`、`Sep 1 2026` 这类写法，
- * 而它们在地址栏里与页面展示的格式对不上，出了问题没人能一眼看出是哪个参数。
- * 空值表示不限。
- */
-const ADMIN_ORDER_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-export function readAdminOrderDate(raw: string | null): string | null {
-  const value = (raw ?? "").trim();
-  if (!value) return "";
-  if (!ADMIN_ORDER_DATE_PATTERN.test(value)) return null;
-  // 正则只保证形状；`2026-13-45` 这种也要挡住。构造出的日期回读不一致即视为非法
-  const time = Date.parse(`${value}T00:00:00.000Z`);
-  if (!Number.isFinite(time)) return null;
-  return new Date(time).toISOString().slice(0, 10) === value ? value : null;
-}
-
-/**
- * 订单创建时间落在北京时间的哪一天（`YYYY-MM-DD`）。
- *
- * 与页面展示口径一致（`formatDateTime` 固定 UTC+8）：用户在列表上看到「2026-09-12」，
- * 按 9-12 筛就应该筛得到它。用本地时区或 UTC 都会出现「显示 09-12、却被 09-13 筛掉」。
- */
-export function orderBeijingDate(order: Pick<Order, "createdAt">): string {
-  return formatDateTime(order.createdAt).slice(0, 10);
-}
-
-/** 订单创建时间是否落在 [from, to] 区间内（含两端，北京时间的自然日）。空串表示该侧不限。 */
-export function orderInDateRange(
-  order: Pick<Order, "createdAt">,
-  from: string,
-  to: string,
-): boolean {
-  if (!from && !to) return true;
-  const date = orderBeijingDate(order);
-  // 时间戳坏掉时按「不在范围内」处理：它本来也没法按日期归属，放进任何一次筛选都是错的
-  if (!date) return false;
-  if (from && date < from) return false;
-  if (to && date > to) return false;
-  return true;
 }
 
 // ——————————————————————————— 列表查询 ———————————————————————————
@@ -242,8 +196,8 @@ export function buildAdminOrderListQuery(input: {
     keyword: readAdminOrderKeyword(input.params.get("keyword")),
     game: input.game,
     // 日期在解析阶段已经校验过（严格模式非法即 400，宽松模式回落到空串）
-    from: readAdminOrderDate(input.params.get("from")) ?? "",
-    to: readAdminOrderDate(input.params.get("to")) ?? "",
+    from: readOrderFilterDate(input.params.get("from")) ?? "",
+    to: readOrderFilterDate(input.params.get("to")) ?? "",
     page: clampPage(input.params.get("page"), ADMIN_ORDER_MAX_PAGE),
     pageSize: clampPageSize(
       input.params.get("pageSize"),
@@ -251,55 +205,6 @@ export function buildAdminOrderListQuery(input: {
       ADMIN_ORDER_MAX_PAGE_SIZE,
     ),
   };
-}
-
-/**
- * 默认排序：**创建时间倒序**，同一时间按支付时间、再按 id 兜底。
- *
- * 兜底那两层不是可有可无的：预置数据里就有时间戳相同的订单，顺序不确定会让同一条
- * 在第一页出现过、翻到第二页又出现一次。三层比较保证同一份数据每次排出来的顺序**完全一致**。
- *
- * ⚠️ 与用户端的 `compareOrdersNewestFirst`（按支付时间）不同，这里按**创建时间**：
- * 后台要回答的是「这段时间进来了哪些单」，而时间范围的筛选也是按创建时间算的——
- * 排序的字段与筛选的字段必须是同一个，否则「筛 9 月、排出来按 8 月的时间交错」会很难解释。
- */
-export function compareOrdersForAdmin(
-  a: Pick<Order, "createdAt" | "paidAt" | "id">,
-  b: Pick<Order, "createdAt" | "paidAt" | "id">,
-): number {
-  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
-  if (a.paidAt !== b.paidAt) return a.paidAt < b.paidAt ? 1 : -1;
-  if (a.id === b.id) return 0;
-  return a.id < b.id ? -1 : 1;
-}
-
-/**
- * 关键词是否命中：**订单号 / 商品名称 / 用户昵称 / 平台展示 ID** 四处任一包含即可。
- *
- * 这四处正是客服手里能拿到的东西——用户打电话来报的要么是订单号，要么是「我的昵称」，
- * 要么是资料页上那串 ID。备注与游戏账号**不参与搜索**：那是内容不是标识，
- * 用它搜出来的结果没人能预期，而且备注里可能有用户写的隐私信息。
- */
-export function orderMatchesAdminKeyword(
-  input: {
-    orderNo: string;
-    productTitle: string;
-    /** 用户昵称；用户记录缺失时为空串 */
-    nickname: string;
-    /** 平台展示 ID；用户记录缺失时为空串 */
-    displayId: string;
-  },
-  keyword: string,
-): boolean {
-  const needle = keyword.trim().toLowerCase();
-  if (!needle) return true;
-
-  return (
-    input.orderNo.toLowerCase().includes(needle) ||
-    input.productTitle.toLowerCase().includes(needle) ||
-    input.nickname.toLowerCase().includes(needle) ||
-    input.displayId.toLowerCase().includes(needle)
-  );
 }
 
 // ——————————————————————————— DTO 转换 ———————————————————————————

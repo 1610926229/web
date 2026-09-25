@@ -6,7 +6,9 @@ import { plusMinutes } from "@/lib/constants/dispatch";
 import { canTransitionOrder } from "@/lib/constants/orders";
 import type {
   CompanionCompletionSubmitOutcome,
+  CompletionInvalidationOutcome,
   CompletionSubmission,
+  CompletionSubmissionStatus,
   StaffCompletionApproveOutcome,
   StaffCompletionRejectOutcome,
 } from "@/lib/types/completion";
@@ -15,6 +17,7 @@ import { currentPlatformConfig } from "./adminPlatformConfigTransaction";
 import { settleOrderCompletion } from "./earningTransaction";
 import {
   appendCompletionSubmission,
+  applyCompletionInvalidation,
   applyCompletionReview,
   completionStore,
 } from "./mockCompletionRepository";
@@ -46,6 +49,127 @@ import { readOrderBlockingFacts } from "./orderBlocking";
  * （`companionCompletions.ts` / `staffCompletions.ts`）；本文件收到的已经是合法意图，
  * 只回答「这件事此刻在数据上成不成立」，并且把成立的那一次与写入放在同一段同步代码里。
  */
+
+// ——————————————————————————— 作废（P0-11） ———————————————————————————
+
+/**
+ * 作废「某订单当前那份 pending 完成材料」的**判定**（只读，`invalidatePendingCompletionForOrder`
+ * 与它的只读预检共用，P0-11）。
+ *
+ * ⚠️ 判定只有这一份。多写一份「这一单的 pending 能不能作废」的规则，
+ * 就会在状态表或索引语义变化的那一天与写入侧分叉——一侧放行、一侧报错。
+ *
+ * `ok` 与 `none` 都是**写入不会失败**的两种情形：前者有一份 pending 要作废，
+ * 后者根本没有（绝大多数释放都属于后者）。另外两种是数据不自洽，如实报出来。
+ */
+function inspectPendingCompletion(orderId: string):
+  | { kind: "none" }
+  | { kind: "ok"; submissionId: string }
+  | { kind: "not-pending"; status: CompletionSubmissionStatus }
+  | { kind: "missing-record" } {
+  const completions = completionStore();
+
+  /* —— 第 1 步：这一单有没有 pending —— */
+  const submissionId = completions.pendingSubmissionIdByOrder.get(orderId);
+  if (!submissionId) return { kind: "none" };
+
+  /* —— 第 2 步：索引指向的记录必须还在 —— */
+  // 索引在、记录丢：数据已经不自洽。此时**不猜**（既不当作没有 pending，
+  // 也不硬写一条不存在的记录），如实报告，由调用方整件事失败
+  const submission = completions.submissions.get(submissionId);
+  if (!submission) return { kind: "missing-record" };
+
+  /* —— 第 3 步：结构校验（中央状态机）—— */
+  if (!canTransitionCompletion(submission.status, "invalidated")) {
+    return { kind: "not-pending", status: submission.status };
+  }
+
+  /* —— 第 4 步：领域 Guard —— */
+  // ⚠️ 与第 3 步并列存在，不是它的重复：能走到这里的状态今天只剩 pending
+  // （索引只装 pending，而第 3 步已排除了终态），但这一句才是「这一条此刻
+  // 允许被作废吗」的答案。删掉它，将来状态表一变宽，作废的范围就跟着变宽了
+  if (submission.status !== "pending") {
+    return { kind: "not-pending", status: submission.status };
+  }
+
+  return { kind: "ok", submissionId };
+}
+
+/**
+ * **只读**地问一次：「释放这一单时，作废它的 pending 完成材料会不会失败？」
+ *
+ * ## 它为什么存在（P0-11 §MINOR-1）
+ *
+ * `releaseOrdersForCompanion`（封禁回池）写的是「**全量校验 → 全量写**」：
+ * 多单在手时，若第 2 单的 pending 索引与记录对不上，第 1 单已经解除完了，
+ * 整件事却报 `inconsistent`——管理员看到失败，数据里躺着半截结果。
+ * 判定的唯一失败源就是作废，因此把这一步的判定**提前到校验阶段**读一遍。
+ *
+ * `true` = 这一次作废不可能失败（没有 pending，或有且可作废）。
+ * `false` = 数据不自洽，调用方应当**在任何写入之前**整件事失败。
+ *
+ * ⚠️ 它不是写入前的第二次独立判断：`invalidatePendingCompletionForOrder`
+ * 仍然会用同一个 `inspectPendingCompletion` 判一次（预检与写入之间没有 `await`，
+ * 因此两次结论必然相同）。预检的作用是**把失败前移**，不是替代那道门。
+ */
+export function canInvalidatePendingCompletionForOrder(orderId: string): boolean {
+  const inspected = inspectPendingCompletion(orderId);
+  return inspected.kind === "none" || inspected.kind === "ok";
+}
+
+/**
+ * 作废「某订单当前那份 pending 完成材料」（**同步、幂等**，P0-11）。
+ *
+ * ## 它是谁的入口
+ *
+ * **只有**订单释放路径会调它（封禁回池 / 客服换人）——见
+ * `lib/data/companionOrderTransaction.ts` 的 `releaseCurrentAssignment`
+ * （P0-11 起由它统一承载四件「解除当前履约」的事；P0-6 时期那个私有出口
+ * `writeAcceptanceRelease` 就是它被抽出来之前的形状）。
+ * 没有任何接口、任何页面暴露这个动作：客服点不出「作废」，打手也点不出来。
+ *
+ * ## 为什么必须走中央状态机（D15）
+ *
+ * `P0-9/02-decisions.md` 的 **D15** 有两条要求，这里是它们的落点：
+ * 1. **走中央状态机**——`canTransitionCompletion(status, "invalidated")` 是那次判定，
+ *    领域 Guard（`status === "pending"`）随后并列存在。两道门都要留，理由与
+ *    `approveCompletion` 的第 3、4 步同：状态表回答「这条边存不存在」，
+ *    领域 Guard 回答「这一条此刻就站在起点的状态上吗」。
+ * 2. **明确处理 `pendingSubmissionIdByOrder` 索引**——索引的清理收在
+ *    `applyCompletionInvalidation` 里，与状态写入同段完成。
+ *
+ * 判定本身收在 `inspectPendingCompletion`，与只读预检共用同一份。
+ *
+ * ## 幂等判据是索引本身
+ *
+ * 第一次调用清理掉索引；第二次调用时索引已不在，直接返回 `none`。
+ * 因此它在释放路径上重复执行是安全的（那段代码本身是原子区段，不会重复，
+ * 但这条性质让「将来再挂一个调用方」不会变成双重作废）。
+ *
+ * ## 为什么「没有 pending」不是错误
+ *
+ * 绝大多数释放都发生在打手还没提交完成材料的时候（`accepted` 阶段、
+ * 或 `serving` 刚接手）。那时**没有任何东西需要作废**，返回 `none` 让调用方继续。
+ */
+export function invalidatePendingCompletionForOrder(input: {
+  orderId: string;
+  at: string;
+}): CompletionInvalidationOutcome {
+  // —— 原子区段开始（无 await）——
+
+  const inspected = inspectPendingCompletion(input.orderId);
+  if (inspected.kind === "none") return { kind: "none" };
+  if (inspected.kind === "missing-record") return { kind: "missing-record" };
+  if (inspected.kind === "not-pending") return { kind: "not-pending", status: inspected.status };
+
+  /* —— 第 5 步：原子写入 —— */
+  const written = applyCompletionInvalidation(inspected.submissionId, input.at);
+  // 同一段同步代码里刚读到它，这里不可能为 null；真出现就按「记录丢了」如实报告
+  if (!written) return { kind: "missing-record" };
+  // —— 原子区段结束 ——
+
+  return { kind: "invalidated", submissionId: inspected.submissionId, changed: true };
+}
 
 // ——————————————————————————— 提交 ———————————————————————————
 

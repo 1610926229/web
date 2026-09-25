@@ -1,4 +1,5 @@
 import { canTransitionCompanionApplication } from "@/lib/constants/adminApplications";
+import { COMPANION_RELEASE_REASON_DISABLED } from "@/lib/constants/dispatch";
 import {
   toCompanionApplicationAuditSnapshot,
   toCompanionAuditSnapshot,
@@ -17,6 +18,7 @@ import type {
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
 import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
+import { releaseOrdersForCompanion } from "./companionOrderTransaction";
 import {
   applyApplicationReview,
   companionApplicationStore,
@@ -103,7 +105,16 @@ export type AdminCompanionWriteFailure =
   | { kind: "removed" }
   /** 已停用的记录谈不上「暂停 / 恢复接单」——那两个动作的前提是它还在架上 */
   | { kind: "disabled" }
-  | { kind: "operation-conflict" };
+  | { kind: "operation-conflict" }
+  /**
+   * 停用时要解除的订单数据不自洽（P0-11）：派单记录缺失，或完成材料的 pending
+   * 索引与记录对不上。**不可能状态**，报 500。
+   *
+   * ⚠️ 它是唯一一种「停用没做成」的原因，而**停用本身也一笔没写**——
+   * 扫单排在改标志位之前，正是为了不留下「人已停用、单还挂在他名下」
+   * （EX-COMP-01 要禁止的那一瞬）。管理员重试即可。
+   */
+  | { kind: "inconsistent" };
 
 export type AdminCompanionWriteResult =
   | {
@@ -529,6 +540,26 @@ export async function setCompanionFlags(
       changed: false,
       replayed: replay?.kind === "replay",
     };
+  }
+
+  /* —— 第 5 步：**停用**还要立刻解除他手上在履约的订单（P0-11 / EX-COMP-01）—— */
+  // ⚠️ 排在 `applyCompanionFlags` **之前**：扫单可能失败（数据不自洽），
+  // 而失败时不能留下「人已停用、订单还挂在他名下」——那正是 EX-COMP-01 要禁止的那一瞬。
+  // 排在这里，失败时标志位与审计都还没写，管理员重试即可；
+  // 反过来（先改标志位再扫单）就只能二选一：报一个已经发生了一半的失败，或者假装成功。
+  //
+  // ⚠️ 只有 `disable` 会扫：暂停 / 恢复 / 启用都不解除任何履约
+  // （`available = false` 不解除已有订单，EX-SERVICE-05；`enable` 只是回到名单）。
+  // 「移除」（`removeCompanion`）本轮**不做**解除——需求里没有那一条，见 D10。
+  if (intent === "disable") {
+    const released = releaseOrdersForCompanion({
+      companionId,
+      // 触发者是这位管理员，写进每条退出历史的 actorId
+      actorId: ctx.actorId,
+      reason: COMPANION_RELEASE_REASON_DISABLED,
+      at: ctx.at,
+    });
+    if (released.kind !== "ok") return { kind: "inconsistent" };
   }
 
   const written = applyCompanionFlags(companionId, flags);

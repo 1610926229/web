@@ -3,8 +3,16 @@ import { isEarningMatured } from "@/lib/constants/earnings";
 import type { Earning } from "@/lib/types/earning";
 import type { Order } from "@/lib/types/order";
 import { currentPlatformConfig } from "./adminPlatformConfigTransaction";
-import { appendEarning, applyEarningRelease, earningStore } from "./mockEarningRepository";
+import {
+  appendEarning,
+  appendEarningAdjustment,
+  applyEarningRelease,
+  applyEarningReversal,
+  earningStore,
+  newEarningAdjustmentId,
+} from "./mockEarningRepository";
 import { applyOrderCompletion, paymentStore } from "./mockPaymentRepository";
+import { listRefundsForOrderSync } from "./mockRefundRepository";
 import { readOrderBlockingFacts } from "./orderBlocking";
 
 /**
@@ -20,6 +28,12 @@ import { readOrderBlockingFacts } from "./orderBlocking";
  * 这条约束是刻意的、也是本轮最重要的一条：**资金事实只允许有一条生成路径**。
  * 复制成两套的那一天，「人工通过生成的收益」与「自动通过生成的收益」就会开始
  * 各自演化（一个改了金额来源、另一个没改），而两者的差异在页面上完全看不出来。
+ *
+ * ## 退款冲回的补记也挂在这一条路径上（P0-13 D9）
+ *
+ * `serving` 订单部分退款时收益还不存在，冲回只能等订单完成后**补记**（见
+ * `backfillRefundReversals`）。它同样只有这一处落点：任何第二个「建 Earning」的
+ * 地方都必须自己记得补记一次，而漏掉的那次会在页面上表现为「这笔钱怎么没被扣」。
  *
  * ## 原子性
  *
@@ -166,9 +180,80 @@ export function settleOrderCompletion(input: { orderId: string; at: string }):
     fineAmount: 0,
   };
   appendEarning(earning);
+
+  /* —— 第 4 步：补记该订单已批准退款的冲回额（P0-13 D9）—— */
+  // 顺序不能反：冲回是**写在一条已经存在的收益上**的
+  backfillRefundReversals({ earningId: earning.id, orderId: settled.id, at: input.at });
   // —— 原子区段结束 ——
 
-  return { changed: written.changed, order: settled, earning };
+  // 读回**补记之后**的那一份：`applyEarningReversal` 写入的是一个新对象，
+  // 直接返回上面那个 `earning` 会给调用方一个 `reversedAmount` 仍是 0 的快照，
+  // 而那正是这一整段要写下的东西
+  return {
+    changed: written.changed,
+    order: settled,
+    earning: earnings.earnings.get(earning.id) ?? earning,
+  };
+}
+
+/**
+ * 把该订单**已批准退款**的冲回额补记到刚建好的收益上（P0-13 D9）。
+ *
+ * `serving` 订单**没有** Earning（`settleOrderCompletion` 的守卫要求订单已是
+ * `completed`），因此「`serving` 部分退款 → 订单后来完成」这条路上，冲回在决策当时
+ * 无处可写。决策本身已经把金额算好并留在了退款记录上（D1 的公式只需要订单快照，
+ * 不需要 Earning 存在），这里做的事只有一件：把它**物化**——累加进新 Earning 的
+ * `reversedAmount`，并逐条补写明细。
+ *
+ * ⚠️ 走 `applyEarningReversal` 而不是自己给 `reversedAmount` 赋值：
+ * 「部分冲回**不改状态**、整笔冲完才 `reversed`」这条规则只在存储层那一处（D5）。
+ * 抄一份到这里，意味着以后改这条规则要改两个地方——而漏掉一处不会有任何报错。
+ *
+ * ⚠️ 逐条补写明细，不合成一条：`EarningAdjustment` 的粒度是**一次退款决策**
+ * （D8 用 `refundId` 唯一索引钉住），合成一条会让「这笔冲回是哪几笔退的、谁的责任」
+ * 再也答不出来，而那正是 Q1-c 要求留下这份记录的原因。
+ *
+ * ⚠️ 这里**不再钳制**累计额：不变式 `0 <= reversedAmount <= incomeAmount` 的唯一
+ * 保证点是 D4 的钳制，而它读的 `companionBaseIncome` 与这里 `incomeAmount` 的来源
+ * 是同一张订单上的同一个字段，中间不可能变。多夹一次只会让「谁在保证这个不变式」
+ * 多出一个答案。（存储层的 `applyEarningReversal` 自带一道护栏，那是**存储层自己的**
+ * 不变式，不是这里的。）
+ *
+ * ⚠️ 若该订单**永远不完成**（`serving` 全额退款 → 订单直接 `refunded`），
+ * 冲回就不会物化——这是正确的：`cmd_p0-13.md` 要求这种情况不产生 completed Earning，
+ * 打手本来就没有收益可冲。
+ */
+function backfillRefundReversals(input: {
+  earningId: string;
+  orderId: string;
+  at: string;
+}): void {
+  const approved = listRefundsForOrderSync(input.orderId).filter(
+    (refund) => refund.status === "approved" && refund.decision !== null,
+  );
+
+  for (const refund of approved) {
+    const decision = refund.decision;
+    // 平台全额承担的退款没有从打手身上冲任何钱：`amount <= 0` 时
+    // `applyEarningReversal` 一个字节都不写，也不需要一条空明细
+    if (!decision || decision.companionReversalAmount <= 0) continue;
+
+    applyEarningReversal(input.earningId, decision.companionReversalAmount);
+    appendEarningAdjustment({
+      id: newEarningAdjustmentId(),
+      earningId: input.earningId,
+      orderId: input.orderId,
+      refundId: refund.id,
+      type: "refund_reversal",
+      amount: decision.companionReversalAmount,
+      responsibility: decision.responsibility,
+      // 明细的 `createdAt` 取**写入时刻**，与即时冲回那条路一致：同一个字段在两条路上
+      // 必须是同一个意思——「这一行是什么时候写下的」。决策发生的时间在退款记录
+      // 自己的 `decidedAt` 上，这里不再抄一遍（抄两份就会出现两个可能的答案）
+      createdAt: input.at,
+      adminId: decision.decidedBy,
+    });
+  }
 }
 
 /**

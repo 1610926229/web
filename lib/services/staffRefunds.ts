@@ -24,8 +24,8 @@ import { IDEMPOTENCY_KEY_PATTERN, readIdempotencyKey, readTrimmedString } from "
 import {
   rejectRefund,
   startReviewRefund,
-  type AdminRefundWriteFailure,
   type AdminWriteContext,
+  type RefundReviewWriteFailure,
 } from "@/lib/data/adminRefundTransaction";
 import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseRepository";
 import { getCompanionRepository } from "@/lib/data/companionRepository";
@@ -329,8 +329,14 @@ function toWriteResult(refund: RefundRequest, changed: boolean): StaffRefundWrit
   };
 }
 
-/** 两个动作共用的失败翻译。 */
-function toApiError(outcome: AdminRefundWriteFailure): ApiError {
+/**
+ * 两个动作共用的失败翻译。
+ *
+ * ⚠️ 入参刻意是 `RefundReviewWriteFailure` 而不是 `AdminRefundWriteFailure`：
+ * 客服这两个动作不带资金决策，`decision-invalid` 在类型上就进不来，
+ * 因此这里不需要（也不应该）为它编一句客服侧的说法。
+ */
+function toApiError(outcome: RefundReviewWriteFailure): ApiError {
   switch (outcome.kind) {
     case "not-found":
       return new ApiError("NOT_FOUND", STAFF_REFUND_NOT_FOUND_MESSAGE, 404);

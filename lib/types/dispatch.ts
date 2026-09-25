@@ -40,7 +40,13 @@
  * - `exclusive` —— 在**专属池**里等用户指定的那位打手，固定 10 分钟；
  * - `public`    —— 在**公共池**里等任何一位有资格的打手，时长来自平台配置快照；
  * - `accepted`  —— 已被某位打手接走，两个池都不再接受接单；
- * - `timed_out` —— 公共池到点仍无人接，订单已自动全额退款。
+ * - `timed_out` —— 派单已关闭，不能再被接单。**两种来路**：公共池到点仍无人接
+ *   （P0-5，订单自动全额退款），或**订单在开始服务前被用户直接退款**（P0-12）。
+ *
+ * ⚠️ `timed_out` 这个名字来自它的第一种来路，但它现在**不只表示超时**；
+ * 字段名保留是因为改名要动 P0-5 的持久化语义，而它要表达的事实
+ * （`timedOutAt` = 关闭时刻）两种来路都有。展示用的名字见
+ * `DISPATCH_STATE_LABELS`，那里是中性的一版。
  *
  * ⚠️ **不要**再另设一个 `poolType` 字段。需求文档里的 `poolType ∈ {exclusive, public}`
  * 就是这个字段在「还没结束时」的两个取值；多一个字段就是多一个真值源，
@@ -90,6 +96,12 @@ export type DispatchRecord = {
 
   acceptedByCompanionId: string | null;
   acceptedAt: string | null;
+  /**
+   * **派单关闭的时刻**（`state` 变成 `timed_out` 的那一刻）；没关闭过时为 null。
+   *
+   * 两种来路都写它：公共池到点无人接，或订单在开始服务前被用户直接退款（P0-12）。
+   * 客服端把它显示成「关闭时间」而不是「超时时间」——理由见 `DISPATCH_STATE_LABELS`。
+   */
   timedOutAt: string | null;
 
   createdAt: string;

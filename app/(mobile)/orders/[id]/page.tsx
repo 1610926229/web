@@ -4,6 +4,7 @@ import Link from "next/link";
 import EmptyState from "@/components/common/EmptyState";
 import NavBar from "@/components/common/NavBar";
 import PriceText from "@/components/common/PriceText";
+import DirectRefundButton from "@/components/refunds/DirectRefundButton";
 import RequireAuth from "@/lib/auth/RequireAuth";
 import { COMPLAINT_STATUS_CLASS } from "@/lib/constants/complaints";
 import {
@@ -198,6 +199,9 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
  *
  * 每一项都由**服务端给出的值**决定显不显示：
  * - `allowedActions.canRequestRefund` —— 能不能申请退款（订单状态 + 有没有退款记录）；
+ * - `allowedActions.canDirectRefund` —— 能不能**直接全额退款**（P0-12，`paid` / `accepted`
+ *   当场退钱、免审批）。它与上一项由服务端的两个不相交状态集合保证**不会同时为真**，
+ *   因此这里也不需要 `else`：两者都在同一处规则里算好；
  * - `refundSummary` —— 已经申请过就引到退款详情，看进度或撤销；
  * - `allowedActions.canOpenConversation` —— 订单沟通入口，带未读数；
  * - `allowedActions.canSubmitComplaint` —— 提交投诉（带上订单 id，自动关联这一单）；
@@ -218,7 +222,27 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
 
       <div className="mt-1">
         {allowedActions.canRequestRefund ? (
-          <ActionRow href={`/orders/${detail.id}/refund`} label="申请退款" hint="整单退款" />
+          // 提示语刻意不说「整单退款」：P0-13 起申请是整单、**批下来可以是部分**，
+          // 「整单」两个字会让用户以为申请多少就退多少（实际退款金额在退款详情页显示）
+          <ActionRow href={`/orders/${detail.id}/refund`} label="申请退款" hint="按实付金额申请" />
+        ) : null}
+
+        {/*
+          直接全额退款（P0-12）：`paid` / `accepted` 这两档「尚未开始服务」的订单当场退钱，
+          免审批，因此它是**一个按钮**而不是一条引到表单页的链接——没有原因要填、
+          没有金额要确认（就是全额），多一跳只会让人以为还要等谁批。
+          与上面的「申请退款」由服务端保证不会同时出现（两个状态集合不相交）。
+        */}
+        {allowedActions.canDirectRefund ? (
+          <DirectRefundButton
+            orderId={detail.id}
+            // 两个金额都取自服务端（P0-13 整改）：这条路退的是**剩余可退额**，
+            // 不是订单实付——部分退款过的订单仍停在 paid / accepted 上。
+            // ⚠️ 这里的 `?? 0` 只是给类型收口：`canDirectRefund` 为真时
+            //    `directRefundAmountCents` 必定是数（同一个服务端函数一起给的）
+            amountCents={allowedActions.directRefundAmountCents ?? 0}
+            alreadyRefundedCents={allowedActions.alreadyRefundedAmountCents ?? 0}
+          />
         ) : null}
 
         {refundSummary ? (

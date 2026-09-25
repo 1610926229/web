@@ -287,6 +287,24 @@ export function applyOrderAcceptanceReleased(
     // 这种状态在结构上产生不出来（见 applyOrderAccepted 的同一句注释）
     actualCompanionId: null,
     companion: null,
+    // ⚠️ P0-11 起这里**多写一个字段**：`servingAt` 一并清空。
+    //
+    // 这条写入器现在服务两条边：`accepted → paid` 与 `serving → paid`
+    // （后者由 P0-11 首次接上入口：封禁回池 / 客服换人）。
+    // 而 `applyOrderServing` 写的是 `servingAt: order.servingAt ?? at`——
+    // 释放后若不清空，**新打手点「开始服务」会沿用上一任的开始时间**：
+    // 用户端时间轴、打手端「护航中」的开始时间都会显示错，
+    // 而它还是将来按实际服务时长做任何统计 / 结算的基准。
+    //
+    // 口径由产品在 P0-11 裁定：「`servingAt` 表达**当前这位**打手从何时开始服务」
+    // （见 `docs/03-dev/rounds/P0-11/02-decisions.md` §九 D-Q1）。
+    // ⚠️ `?? at` 那一边**刻意不动**：释放时清空之后，下一次开始服务必然写本次的 `at`，
+    // 而 `??` 仍然防着「状态还是 accepted 但 servingAt 已有值」的历史脏数据，
+    // 也让 P0-7 的「重复点击不刷新服务开始时间」那条保证原样成立。
+    //
+    // 对 `accepted → paid`（主动取消 / 换人）这条路径它是**恒等操作**——
+    // 还没开始服务时 `servingAt` 本来就该是 null。
+    servingAt: null,
   };
   current.orders.set(id, updated);
   return { previous, updated };
@@ -447,13 +465,40 @@ export function applyOrderRefund(
   at: string,
   /**
    * 这一次退掉的钱（分）。**不传表示「不改动累计已退」**——这是一个技术上的默认值，
-   * 当前**没有任何调用方**依赖它：两条退款路径（P0-5 公共池超时自动退款、
-   * P0-5.5 起的管理端退款裁决）都是全额退款，都显式传 `actualPaidAmount`。
+   * 只有极少数调用方依赖它（见下）。
    *
-   * 传了就一并写进 `refundedAmount`：**全额退款**的调用方传 `actualPaidAmount`，
-   * 因为订单类型上写着「全额退款后 refundedAmount === actualPaidAmount」。
-   * 少了这一步，用户会看到「已退款」但「累计已退 0 元」。
-   * 将来部分退款上线后，这里才是「累计已退」的累加入口（公式属后续批次）。
+   * ## P0-13：第三个参数的语义由「覆盖成多少」改为「这一次退多少（增量）」
+   *
+   * 旧语义是「把 `refundedAmount` 写成这个数」，只在「一次退满」的世界里成立。
+   * 部分退款上线后，同一个订单会被退第二次、第三次，覆盖式写入会让
+   * 「累计已退」变成「最后一次退了多少钱」——账当场就错了。
+   * 现在它累加：`refundedAmount = 原值 + 传入值`。
+   *
+   * ⚠️ **不要**据此认为「既有调用方都传全额，所以传什么都一样」——
+   * 那个推理在本仓库**已被证伪**：部分退款（P0-13）不改订单状态，
+   * 因此一张 `serving` 单可以带着 `refundedAmount > 0` 被 P0-11 的「退回公共池」
+   * 打回 `paid`，随后**直接退款**与**公共池超时自动退款**都会作用在它身上。
+   * 这两条路径因此都改传**本次应退的增量**（`实付 − 累计已退`），
+   * 而下面那一次钳制是它们的第二道保险，不是它们可以少算一款的理由。
+   *
+   * ## 两条被一并收紧的规则
+   *
+   * 1. **幂等短路条件放宽**：原来只在 `status === "refunded"` 时短路，
+   *    现在 `status === "refunded"` **或** `refundedAmount >= actualPaidAmount`
+   *    都算「已经退满」，不再累加、不刷新 `refundedAt`。
+   *    ⚠️ 只看状态是不够的：部分退款**不改状态**，一张已经退满的订单
+   *    如果因为某种原因停在原状态上，状态判据会放它再退一次。
+   * 2. **`status` 只在累计退满时才改成 `refunded`**（`architecture-rules.md`
+   *    与 `database-schema.md` T3 两条都是明写的硬规矩）。
+   *    部分退款**不改订单状态**——订单按原进度继续履约，
+   *    打手的收益也照常走它自己的生命周期。
+   *
+   * 3. **本次传入的金额封顶在「还剩多少」（P0-13 整改）**：
+   *    `EX-REFUND-02` 与 `cmd_p0-12.md:40` 把「累计已退不得超过实付」冻结为硬约束，
+   *    而 `refundedAmount` 的**唯一写入点就是这里**——于是这条不变式在这一行成为
+   *    **结构性**的，而不是「每个调用方自己记得把增量算对」：
+   *    调用方把「全额」当成「本次增量」传进来（最容易犯的一种），
+   *    结果是**这一单退到实付为止**，而不是退成 `1300/1000`。
    */
   refundedAmount?: number,
 ): { previous: Order; updated: Order; changed: boolean } | null {
@@ -462,15 +507,24 @@ export function applyOrderRefund(
   if (!order) return null;
 
   const previous = { ...order };
-  if (order.status === "refunded") {
+  // 「已经退满」的两个判据都要看：状态只是其中一个表达（见上面的第 1 条）
+  if (order.status === "refunded" || order.refundedAmount >= order.actualPaidAmount) {
     return { previous, updated: previous, changed: false };
   }
 
+  // 唯一一次钳制：见上面第 3 条。上面的短路已经保证 `remainingAmount > 0`
+  const remainingAmount = order.actualPaidAmount - order.refundedAmount;
+  const nextRefundedAmount =
+    order.refundedAmount + Math.max(0, Math.min(refundedAmount ?? 0, remainingAmount));
+  const fullyRefunded = nextRefundedAmount >= order.actualPaidAmount;
+
   const updated: Order = {
     ...order,
-    status: "refunded",
-    refundedAt: order.refundedAt ?? at,
-    refundedAmount: refundedAmount ?? order.refundedAmount,
+    status: fullyRefunded ? "refunded" : order.status,
+    // `refundedAt` 在**第一次退满**时写下，之后不再刷新（`??` 就是这条规则的落点）；
+    // 部分退款不写它——「什么时候退完的」那一刻还没到
+    refundedAt: fullyRefunded ? (order.refundedAt ?? at) : order.refundedAt,
+    refundedAmount: nextRefundedAmount,
   };
   current.orders.set(id, updated);
   return { previous, updated, changed: true };

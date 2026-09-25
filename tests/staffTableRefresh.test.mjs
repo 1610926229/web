@@ -24,8 +24,8 @@ import { fileURLToPath } from "node:url";
  * 它证明的是：这个修法不会再被悄悄改回去。真正的复验步骤见验收说明。
  *
  * ⚠️ 管理端那 8 张列表页也有同样的 `useState(initialResult)`，但它们的页面**没有**刷新
- * 按钮，缺陷一直是休眠的；本门禁只覆盖客服侧有刷新按钮的四张表（P0-8 起加完成材料），
- * 不越界去改管理端。
+ * 按钮，缺陷一直是休眠的；本门禁只覆盖客服侧有刷新按钮的表
+ * （P0-8 起加完成材料，P0-10 起加全量订单），不越界去改管理端。
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,6 +41,7 @@ const TABLES_WITH_SERVER_SNAPSHOT = [
   "StaffComplaintTable.tsx",
   "StaffCompletionTable.tsx",
   "StaffConversationTable.tsx",
+  "StaffOrderTable.tsx",
   "StaffRefundTable.tsx",
 ];
 
@@ -84,10 +85,11 @@ for (const file of TABLES_WITH_SERVER_SNAPSHOT) {
   });
 }
 
-test("客服四张表的页面都有刷新按钮——所以那四张表都必须过上一组断言", () => {
+test("客服五张表的页面都有刷新按钮——所以那五张表都必须过上一组断言", () => {
   const pages = [
     "app/staff/(console)/complaints/(list)/page.tsx",
     "app/staff/(console)/completions/(list)/page.tsx",
+    "app/staff/(console)/orders/(list)/page.tsx",
     "app/staff/(console)/refunds/(list)/page.tsx",
     "app/staff/(console)/conversations/(list)/page.tsx",
   ];

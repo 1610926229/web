@@ -83,13 +83,25 @@ export const ORDER_STATUS_HINTS: Record<OrderStatus, string> = {
  * 因此「只要状态表允许就可以直接改状态」是**明确错误**的用法：
  * 表允许只说明这个迁移在结构上讲得通，能不能做要由领域 Guard 回答。
  *
- * ## 2026-09-23 TARGET 结构：两条回到 `paid` 的路径都只是**结构许可**
+ * ## 两条回到 `paid` 的路径：**都有真实入口了**（P0-11 起）
  *
  * 表里出现的 `accepted → paid` 与 `serving → paid` 是 V0.3 需求确认的回池结构关系。
- * 但**只有前者在本轮有入口**（打手主动取消接单）；`serving → paid` 是
- * 封禁回池 / 客服换人的结构位置，本批次**不实现、也不提供任何 API 或按钮**
- * （`01-prompt.md` §五 / §十四）。状态机允许不等于该动作存在入口——
- * 这一条正是「表不代替 Guard」在**入口**层面的同一种表达。
+ * P0-6 先接上了前者（打手主动取消接单），P0-11 接上后者——
+ * 封禁回池（`companion_disabled`）与客服换人（`staff_reassign`）两条入口，
+ * 两者都**同时**作用于 `accepted` 与 `serving`，因此这张表里的两条边各自都有了调用方。
+ *
+ * ⚠️ 但这**不改变**「表不代替 Guard」：`serving → paid` 的合法入口只有
+ * 「封禁 / 客服换人」两件事，且都必须原子地写退出历史 + 清履约绑定（含 `servingAt`）
+ * + 派单回公共池 + 作废该打手那份 pending 完成材料 + 通知用户
+ * （见 `lib/data/companionOrderTransaction.ts`）。**打手本人**在 `serving` 阶段
+ * 仍然没有任何主动退出路径——表里有这条边，不构成给打手开一个按钮的理由。
+ *
+ * ## ⚠️ 结构上不存在 `serving → accepted`
+ *
+ * 「客服换人」在原单处于 `serving` 时的落点是 `serving → paid → accepted`
+ * （同一段无 `await` 的同步代码内连续两次写入，中间态不暴露给并发抢单），
+ * 而**不是**一条 `serving → accepted` 的直达边。新增那条边会让「更换护航」
+ * 看起来像一次无代价的字段改写，从而把「必须先解除旧绑定」这件事从状态机里抹掉。
  */
 export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
   paid: ["accepted", "refunded"],
