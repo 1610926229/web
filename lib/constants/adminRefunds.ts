@@ -10,6 +10,7 @@ import {
   REFUND_STATUSES,
   REFUND_STATUS_LABELS,
   assertRefundAmountWithinPaid,
+  assertRefundApprovalOrderStatus,
   computeRefundDecisionAmounts,
   isRefundResponsibility,
   resolveFinalDecisionAmounts,
@@ -202,11 +203,36 @@ export function canTransitionRefund(from: RefundStatus, to: RefundStatus): boole
 /**
  * 服务端判定的可执行动作。三个动作都是「迁移到某个状态」的别名，
  * 因此全部从 `ADMIN_REFUND_TRANSITIONS` 推导：终态三项都是 false。
+ *
+ * ⚠️ **`canApprove` 还多守一道订单状态闸**（产品裁定 2026-09-27）：
+ * `paid` / `accepted` 的订单**不允许批准售后退款申请**，
+ * 只有 `serving` / `completed` 能进这条资金链。因此第二个入参不是可有可无的装饰——
+ * 它是这道闸在**读侧**的唯一依据。
+ *
+ * ## 为什么读侧也要判，而不是「反正写侧会拒」
+ *
+ * 写侧（`adminRefundTransaction.ts` 的 `assertRefundApprovalOrderStatus`）是**保证**，
+ * 读侧是**告知**，两者不能互相替代：
+ *
+ * - 只有写侧：详情页会理直气壮地渲染一个永远返回 400 的「通过」按钮，
+ *   管理员填完比例、看完预览金额、按下去，才被告知「这一单根本不在范围内」——
+ *   他会先怀疑是自己填错了，而不是这一单本来就不该批；
+ * - 只有读侧：接口可以被直接请求，没有任何保护。
+ *
+ * ⚠️ 这与「不依赖前端隐藏按钮保证」**不矛盾**：那条说的是**不能只有**前端，
+ * 不是「前端不许知道」。服务端把结论算好交给页面，页面照做——页面自己写
+ * `if (orderStatus === "paid")` 才是被禁止的那件事。
  */
-export function adminRefundAllowedActions(status: RefundStatus): AdminRefundAllowedActions {
+export function adminRefundAllowedActions(
+  status: RefundStatus,
+  orderStatus: OrderStatus,
+): AdminRefundAllowedActions {
   return {
     canStartReview: canTransitionRefund(status, "reviewing"),
-    canApprove: canTransitionRefund(status, "approved"),
+    // 订单状态闸与状态机是**两个独立条件**，必须同时成立：
+    // 状态机说「这笔申请现在能不能批」，订单状态闸说「这一单的业务阶段允不允许走售后审批」
+    canApprove:
+      canTransitionRefund(status, "approved") && assertRefundApprovalOrderStatus(orderStatus) === null,
     canReject: canTransitionRefund(status, "rejected"),
   };
 }
@@ -668,7 +694,26 @@ export function toAdminRefundDetail(
     reviewNote: refund.reviewNote,
     cancelledAt: refund.cancelledAt,
     timeline: buildAdminRefundTimeline(refund),
-    allowedActions: adminRefundAllowedActions(refund.status),
+    allowedActions: adminRefundAllowedActions(refund.status, order.status),
+    /*
+      订单状态挡住「通过」时的原因，**与写侧 400 的 message 同一句话**
+      （同一个函数 `assertRefundApprovalOrderStatus`）。没被挡时为 null。
+
+      ⚠️ **必须先过 `canTransitionRefund` 这一关才去问订单档位**：`canApprove === false`
+      有两种互不相同的原因，页面（`AdminRefundConsole`）对它们的处置也不同——
+
+      | 情形 | `canApprove` | 页面 |
+      |---|---|---|
+      | 申请已终态（已通过 / 已拒绝 / 已撤销） | false | 三个按钮一起不显示，改显示「这笔退款申请已结束」 |
+      | 申请未终态，但订单不在审批范围 | false | 三个按钮照常显示，「通过」变灰，下面配上这句话 |
+
+      不先过第一关的话，一条**已通过**的申请（它的订单必然已是 `refunded`，
+      于是订单档位这一问也答「不行」）会同时渲染出「已结束」与「订单不在审批范围内」
+      两句话，把管理员引到**错误的原因**上去——而真正的原因是「这笔早批完了」。
+    */
+    approveBlockedReason: canTransitionRefund(refund.status, "approved")
+      ? assertRefundApprovalOrderStatus(order.status)
+      : null,
   };
 }
 

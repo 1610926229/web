@@ -23,6 +23,7 @@ import { adminAuditStore } from "../lib/data/mockAdminAuditRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
 import { getRefundRepository } from "../lib/data/refundRepository.ts";
+import { refundSeed } from "../lib/mocks/fixtures/refundSeed.ts";
 import { staffSeed } from "../lib/mocks/fixtures/staffSeed.ts";
 import { approveAdminRefund } from "../lib/services/adminRefunds.ts";
 import {
@@ -223,8 +224,12 @@ test("状态筛选解析：合法值通过，非法值在接口 400、在页面�
 // ——————————————————————————— 三、列表 ———————————————————————————
 
 test("列表：默认只看待审核，按申请时间倒序，排序稳定", async () => {
+  // 预置条数从种子里数出来，不写死：客服工作台看到的就是全部预置申请，
+  // 写死数字会让这个用例在每次加预置数据时变成「数字对不对」而不是「默认只看待审核」
+  const seedPending = refundSeed.filter((refund) => refund.status === "pending").length;
+
   const pending = await listStaffRefunds(resolveStaffRefundListQuery(page(), false), undefined, "server");
-  assert.equal(pending.total, 2);
+  assert.equal(pending.total, seedPending);
   assert.equal(pending.items.every((item) => item.status === "pending"), true);
   for (let index = 1; index < pending.items.length; index += 1) {
     assert.ok(compareStaffRefunds(pending.items[index - 1], pending.items[index]) <= 0);
@@ -235,7 +240,7 @@ test("列表：默认只看待审核，按申请时间倒序，排序稳定", as
     undefined,
     "server",
   );
-  assert.equal(all.total, 6);
+  assert.equal(all.total, refundSeed.length);
 
   // 稳定排序：同样的查询跑两次，顺序完全一致
   const again = await listStaffRefunds(
@@ -287,17 +292,26 @@ test("列表：分页不重不漏，total 不随页变", async () => {
     "server",
   );
 
+  // 前置：默认每页装得下全部预置数据——否则下面的 `all.items` 本身就是被截断的一页，
+  // 拿它当全集去比对只会得出一个看起来通过的错断言
+  assert.equal(all.items.length, all.total, "预置退款条数不能超过默认每页条数");
+
+  // 翻页次数由 `total` 推出来，不写死：写死的话，每加一条预置数据这个用例就会
+  // 变成「翻 3 页够不够」的断言，而不是它真正要守的「不漏、不重、total 稳定」
+  const pageSize = 2;
+  const pageCount = Math.ceil(all.total / pageSize);
+
   const seen = [];
-  for (const pageNumber of [1, 2, 3]) {
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
     const result = await listStaffRefunds(
-      resolveStaffRefundListQuery(page({ status: "all", page: pageNumber, pageSize: 2 }), false),
+      resolveStaffRefundListQuery(page({ status: "all", page: pageNumber, pageSize }), false),
       undefined,
       "server",
     );
-    assert.equal(result.pageSize, 2);
+    assert.equal(result.pageSize, pageSize);
     assert.equal(result.total, all.total);
-    assert.equal(result.hasMore, pageNumber * 2 < all.total);
-    assert.ok(result.items.length <= 2);
+    assert.equal(result.hasMore, pageNumber * pageSize < all.total);
+    assert.ok(result.items.length <= pageSize);
     seen.push(...result.items.map((item) => item.id));
   }
 

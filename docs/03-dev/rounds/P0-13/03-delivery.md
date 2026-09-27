@@ -100,7 +100,7 @@ Development Status: **`DONE`（自动门禁全绿，等用户本人验收）**
 | `tests/` | `adminRefunds.test.mjs` · `staffRefunds.test.mjs` · `earning.test.mjs` · `completions.test.mjs` |
 | `docs/02-tech-design/` | `api-contract.md` · `database-schema.md` · `architecture-rules.md` |
 
-⚠️ **本批次四轮的改动全部未提交**，工作区里堆着四轮的累计 diff。
+⚠️ **本批次四轮的改动在交付当时全部未提交**，工作区里堆着四轮的累计 diff。
 「上面这批是本轮的」**无法由 `git status` 自动复核**——它会把四轮的改动一起列出来，区分不了轮次。
 复核方式是**逐项核对**上表，而不是跑 `git status` 然后相信。
 可自动验证的只有一处：`docs/03-dev/rounds/P0-13/` 是 `git status` 里 `P0-13` 相关的唯一新增目录。
@@ -155,7 +155,10 @@ Development Status: **`DONE`（自动门禁全绿，等用户本人验收）**
 
 ---
 
-## 四、累计工作区状态（本批次四轮交付物，均**未提交**）
+## 四、累计工作区状态（本批次四轮交付物，交付当时均**未提交**）
+
+> ⚠️ **本节是「交付当时」的记录，保留不追改。** 用户本人已于**验收时点**提交
+> （`HEAD = 2e7006c`「完成p0-业务支付流程」，含四轮全部实现、测试与档案），见 §十一。
 
 ⚠️ 下列改动**不是 P0-13 的 delta**，而是 P0-10 / P0-11 / P0-12 / P0-13 累计至今、
 仍留在工作区的交付物。按 `cmd_batch:41-42`：「不得把累计 diff 冒充本轮 delta」——
@@ -325,11 +328,16 @@ P0-11 完成材料作废 · P0-11 候选资格口径 · P0-12 直接退款 ·
 
 ## 八、Git 状态
 
+> ⚠️ **本节是「交付当时」的记录，保留不追改**（「追加历史、不覆盖历史」）。
+> **当前状态以 §十一 验收收口为准**：用户本人已于验收时点提交，
+> `HEAD = 2e7006c`「完成p0-业务支付流程」，**「DONE 双门槛」两条均已满足**。
+
 - `HEAD = 3fbae6263794bda316b2b48dac03efd7f62afa01`，与本批次开始时**完全一致**
 - **本批次全程零 Git 写操作**：无 `add` / `commit` / `push` / `reset` / `restore` / `checkout` / `rebase` / `amend`
 - 仅使用只读命令：`git status` / `git rev-parse` / `git diff` / `git diff --stat` / `git log` / `git ls-files`
 - 提交由**用户本人**完成。按「DONE 双门槛」（① 用户本人验收 **且** ② 用户本人提交），
-  **Claude 无权把任何一轮标记为 `DONE`**——当前 P0-10 / P0-11 / P0-12 / P0-13 均停在 `AWAITING_ACCEPTANCE`
+  **Claude 无权把任何一轮标记为 `DONE`**——~~当前 P0-10 / P0-11 / P0-12 / P0-13 均停在 `AWAITING_ACCEPTANCE`~~
+  → ✅ **用户已于 2026-09-25 完成两条**，四轮现均为 **`DONE`**，见 §十一。
 
 ---
 
@@ -471,3 +479,329 @@ D19 **只推翻后一句**，前一句继续有效：
 `api-contract.md`（`orderMoney` 字段与 `decidedAmount` 仍需返回）、`04-acceptance.md`（§二 A 段重写为 A1–A13 + §三 PASS/FAIL 行 A）、
 本节、`README.md`、`CLAUDE.md`。
 ⚠️ **零 Git 写操作**，`HEAD` 仍为批次 baseline `3fbae62`。
+
+---
+
+## 十一、验收收口（2026-09-25，**只改档案，零代码改动**）
+
+用户本人于 **2026-09-25** 声明「**P0 人工验收已通过**」，并**明确指令**把 `P0-10` → `P0-13`
+四轮**一起标为 `DONE`**。本轮据此收口：
+
+| 项 | 结果 |
+|---|---|
+| `User Result` / `Final Result` | **`PASSED`** |
+| `Accepted At` | 2026-09-25 |
+| `Issues Found` | **1 项，已整改完毕**——验收第 1 项指出「退款比例的业务语义和界面反馈不够清楚」，已按 **D19** 完成（见 §十，**未改任何金额口径**） |
+| `Status` | `AWAITING_ACCEPTANCE` → **`DONE`** |
+| `Git Commit` | **`2e7006c`**（用户本人提交「完成p0-业务支付流程」） |
+
+> ✅ **「DONE 双门槛」两条均已满足，本次收口不涉及任何协议偏离。**
+> `development-workflow.md` §十七要求 `DONE` **同时**满足：
+> ① 用户本人说明验收通过；② **用户本人完成该项目相关的 Git 提交**。
+> - ① 用户本人于 **2026-09-25** 确认「**P0 人工验收已通过**」（在 D19 整改之后复核通过）；
+> - ② 用户本人**已完成提交**——`HEAD = 2e7006c`「完成p0-业务支付流程」
+>   （`124 files changed, 21017 insertions(+), 720 deletions(-)`），**含本批次四轮的全部**实现、测试与档案。
+>
+> Claude 全程**零 Git 写操作**；上面的 hash 取自**只读**命令（`git log` / `git show` / `git rev-parse`）。
+> ⚠️ **本文件 §四 / §八 写的「未提交」是「交付当时」的事实**——提交发生在**验收时点**，晚于交付；
+> 那些节**保留不追改**（「追加历史、不覆盖历史」），以本节为**当前状态**。
+> ⚠️ **本次收口对本档案的追加改动本身仍未提交**——与 P0-6.1 → P0-9 的先例一致，**不影响 `DONE` 的成立**。
+>
+> ⚠️ **§五 的 1 条追认项（R3）未收到逐条书面结论**，随整体验收**一并通过**。
+> ⚠️ **验收是整体结论，不是逐组打勾**——分组行保留 `——`，**不表示**某一组未通过。
+>
+> 📌 **另有一项与验收无关、但影响后续进度表的账**：`TBD-P13-1`
+> （`completed` 单**部分退款后**，消费累计 / 消费等级 / 周期榜是否按**全额** `actualPaidAmount` 计入）
+> **仍未裁定**，本轮**未动任何代码**，也不在本次验收范围内——它挂在本轮档案的遗留项里，
+> 需要产品决定后才可开工。
+
+⚠️ **本节零代码改动**：只改 `04-acceptance.md` / `README.md` 与本文件的状态字段。
+§一 ~ §十 的全部读数与结论**原样保留、不追改**（「追加历史、不覆盖历史」）。
+
+---
+
+## 十二、独立复核与后续 fix 交付（2026-09-27，**追加，不回退 `DONE`**）
+
+### 12.0 轮次性质
+
+2026-09-27 按 `rounds/cmd_p0-13_continue.md` 做的**独立验证轮**。
+该指令假定 P0-13 仍停在 `CLARIFYING` 需要从零开发，**与仓库事实不符**——
+`HEAD = 2e7006c` 已含本轮全部实现/测试/档案，状态 `DONE`、已由产品负责人验收。
+产品负责人确认按「独立验证轮」执行：**不回退 `DONE`、不重复 Q1/Q2、不重复实现、
+不修改历史验收结论**。
+
+**独立复核结论：0 BLOCKER / 2 MAJOR / 3 MINOR。**
+两条 MAJOR 经产品负责人裁定（2026-09-27）后整改；本节记录该整改。
+
+| 编号 | 级别 | 一句话 | 处置 |
+|---|---|---|---|
+| M1 | MAJOR | 售后退满复用了**直接退款**那条通知，对 `serving`/`completed` 说「服务开始前取消」「本单不产生收益」——**两句都是假的**，`withdrawn` 单尤其与账实相反 | 产品裁定**按场景拆文案** → `D20` |
+| M3 | MAJOR | **M1 的第一版整改自己写错了**：选择器写成两分支，把 `paid`/`accepted` 归进「服务已开始」——假话只是从一档搬到了另一档 | 按裁定表原样改回**三分支** + 改正两处假前提注释 → `D20` 实施补记 |
+| M2 | MAJOR | `adjustmentIdByRefund` 索引**只写不读**，`D8` 声称的 `refundId` 幂等**在代码里没有落点** | 加读点 + 原语抛错 + 调用侧先验证 → `D21` |
+| m1 | MINOR | `approve/route.ts` JSDoc 描述的是 **P0-13 之前**的语义，三处均假 | 只改注释 |
+| m2 | MINOR | `adminHttp.ts` 写「页面不做金额预览」，与 `D19` 冲突 | 只改注释 |
+| m3 | MINOR | `AdminRefundConsole.tsx` 自称「搜不到一个金额运算符」，同文件却有减法 | 只改注释（收窄断言） |
+
+> 裁定与理由全文见 `02-decisions.md` **§十二 `D20` / `D21`**。
+
+### 12.1 代码改动（8 个文件）
+
+```
+ app/api/admin/refunds/[id]/approve/route.ts |  27 ++--   注释重写
+ components/admin/AdminRefundConsole.tsx     |  11 +-     注释收窄
+ lib/constants/refunds.ts                    |  39 ++++    +2 文案常量，改正假前提注释
+ lib/data/adminRefundTransaction.ts          |  76 ++++-   三档选择器 + 冲回前查重 + 注释
+ lib/data/earningTransaction.ts              |  12 +-     补记前剔除已冲回
+ lib/data/mockEarningRepository.ts           |  37 +++     +读点，原语抛错
+ lib/services/adminHttp.ts                   |  10 +-     注释对齐 D19
+ tests/refundMoneyChain.test.mjs             | 246 ++++++   +6 用例，修 3 处测试缺陷
+ 8 files changed, 418 insertions(+), 40 deletions(-)
+```
+
+**M1（`D20`）**
+- `lib/constants/refunds.ts` 新增
+  `REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE`（`serving`）与
+  `REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION`（`completed`）；
+  **`REFUND_NOTIFICATION_COMPANION_REFUNDED` 原样保留**，继续服务 `paid`/`accepted`
+  的直接退款（P0-12）路径。
+- `lib/data/adminRefundTransaction.ts`：新增 `resolveCompanionRefundCopy(orderStatus)`
+  承接 `D20` 的**三档**裁定表，`planCompanionRefundNotification` 增加 `orderStatus`
+  入参、按**任何写入之前**读到的订单档位择一；调用点传 `orderStatus: order.status`。
+  **未列入裁定表的档位直接抛错**（不给默认文案）——该点位于写入之前，抛错即零副作用失败。
+
+**M2（`D21`）**
+- `lib/data/mockEarningRepository.ts`：新增
+  `findEarningAdjustmentIdByRefund(refundId): string | null`；
+  `appendEarningAdjustment` 在原子区段**开头**查重，同 `refundId` 已有明细即
+  `抛错拒绝重复冲回`（与通知的既有裁决「**id 不覆盖**」同一条纪律），
+  抛错时存储**零写入**。
+- `lib/data/adminRefundTransaction.ts`：即时冲回前先
+  `findEarningAdjustmentIdByRefund(refundId) !== null` 判定，已冲过则**跳过**
+  （重放返回原结果，不报 500）。
+- `lib/data/earningTransaction.ts`：`D9 backfillRefundReversals` 在**过滤阶段**
+  剔除已有明细的退款——该函数天然可重放，若不剔除会在**循环中途**抛错而前几笔已动钱。
+
+**MINOR**：三处**只改注释**，行为零变化。
+（复核另提出 `approve/route.ts` 的「**唯一**能最终决定退款金额与资金责任的入口」措辞偏强——
+其它入口退的是固定全额、无可裁量空间；已收紧为「唯一能**由人工裁定**…」并加括号说明。
+同样**只改注释**。）
+
+### 12.2 测试
+
+`tests/refundMoneyChain.test.mjs`：**+6 用例**（含 1 条修正的既有断言）
+
+| 用例 | 钉住什么 |
+|---|---|
+| `completed` 整单退款的通知文案 | 用 `..._AFTER_COMPLETION`；断言**不含**「开始服务前」**且不含**「不产生收益」 |
+| `serving` 整单退款的通知文案 | 用 `..._IN_SERVICE`；断言不含「开始服务前」；并**再驱动一次结算入口**确认退款后不会补建收益——那句「不产生收益」是面向将来的结论，只看退款那一刻不足以支撑它 |
+| `paid` / `accepted` 存量申请退满 | 第三档：必须仍是 `REFUND_NOTIFICATION_COMPANION_REFUNDED`（**且**不得是 `..._IN_SERVICE`）——`M3` 的回归保护 |
+| 三段文案互不相同 | 防止有人把直接退款那条接回售后路径 |
+| 同一 `refundId` 重复冲回 | `appendEarningAdjustment` 抛 `/拒绝重复冲回/`，且**索引与存储均未变**（零写入） |
+| 未知 `refundId` 查询 | `findEarningAdjustmentIdByRefund` 返回 `null`，不抛 |
+
+同时修正的三处**测试自身**缺陷（非产品问题）：
+1. 通知用例原用 `cp-1`——**`userId` 为 null**，通知根本不会被构造；
+   改用 `cp-10`（`userId = u-1022`，有收信地址）。
+2. 原断言 `allNotifications().length > notificationsBefore` 在**退款一条都没发**时
+   同样成立（`notificationsBefore` 取于造第二张订单之前，而造单本身会产生通知）——
+   即该断言**恒真**。改为只统计**退款类**通知、比对**本次新增的那一条**。
+3. 判别串原写作「服务开始前」，而**三条 body 里谁都没有这五个字**
+   （直接退款那条 body 的措辞是「在护航**开始服务前**」）——
+   于是那几条「不得包含」断言**全部恒真**。已改成 body 里真实存在的「开始服务前」。
+
+**`M3` 的红色验证（red-green）**：把选择器临时改回两分支后，
+新增的第三档用例**确实变红**（`AssertionError`，1 fail / 42 pass）；
+改回三分支后 43/43 全绿。即该用例不是恒真的。
+
+### 12.2.1 `M3` 的根因：两处被写进注释的**假前提**
+
+第一版在两处断言「本函数只在 `serving` / `completed` 两档被调用（`REFUNDABLE_ORDER_STATUSES`）」。
+
+- 假在哪：`REFUNDABLE_ORDER_STATUSES` 约束的是**申请创建**（`canRequestRefund`）；
+  **审核入口对订单档位没有任何守卫**，存量申请可以挂在 `accepted` 单上。
+- 证据（已逐条实读）：`rf-seed-1001-01`（`pending`）挂在 `ord-seed-1001-03`
+  （`status: "accepted"`、`actualCompanionId: "cp-2"`）上；
+  `refundSeed` 注释写明这两条存量「有意留着」；
+  `tests/adminRefunds.test.mjs:298` 至今在批准它，审核意见写的正是「服务未按约定开始」。
+- 为什么没爆：`cp-2.userId === null`（`seed.ts:330-331`），算不出收件人、通知不被构造。
+  **换一位有收信地址的打手，假话当场可复现。**
+
+两处注释已一并改正。**这不是新的产品裁定**——裁定表本来就是三档，第一版少实现了一档。
+
+### 12.3 验证读数（全部为**本轮实测**，非推断）
+
+| 门槛 | 命令 | 读数 |
+|---|---|---|
+| targeted | `node --import ./tests/alias-hook.mjs --test tests/refundMoneyChain.test.mjs` | tests 43 / **pass 43** / fail 0 / skipped 0 |
+| 全量离线 | `pnpm test` | tests **1391** / pass 1245 / **fail 0** / skipped 146 |
+| 类型 | `pnpm typecheck` | **exit 0** |
+| 静态 | `pnpm lint` | **exit 0** |
+| 构建 | `pnpm build` | **exit 0** |
+| 生产 HTTP | `APP_BASE_URL=… pnpm test`（`next start -p 3105`） | tests **1391** / pass **1391** / **fail 0** / **skipped 0** / exit 0 |
+
+- 用例总数 **1385 → 1391**（+6）。以上读数均为 `M3` 整改**之后**重跑所得。
+- 生产 HTTP 满足 `development-workflow.md` 的硬门槛：**fail = 0 且 skipped = 0**
+  （离线 146 条 skip 全部为「未设 `APP_BASE_URL` 则跳过」的 HTTP 用例，生产轮 0 skip 即已全部实跑）。
+- 生产服务进程已 `taskkill //F`，`netstat` 复核 **:3105 无 LISTENING**。
+
+### 12.4 已知遗留（**未动，不在本轮范围**）
+
+- ⚠️ **待产品裁定（本轮复核发现，未动代码）**：「在 `paid` / `accepted` 单上批准一笔
+  **存量**售后申请」本身是否是一个合法业务动作？
+  - 现状：审核入口对订单档位**没有守卫**，存量申请（`rf-seed-1001-01`）挂在 `accepted`
+    单上并可被批准，`tests/adminRefunds.test.mjs` 一直在这么做，`refundSeed` 注释也写明
+    「有意留着」——但**没有任何需求条目**正面确认过它合法。
+  - 若**合法**：`M3` 现在的三分支实现就是终态，无需再动。
+  - 若**应被拒绝**：那 `M3` 的真正落点应改成一个「非 `serving`/`completed` 的申请不得批准」
+    的守卫，而 `EX-REFUND-08` 那一行会变成另一个意思。
+  - ⚠️ **本轮不替产品选**，两种口径都保持现状可运行；`M3` 的三分支在两种口径下都不说假话。
+  - ✅ **【2026-09-27 补充，原文保留不动】** 产品已裁定：**不合法**，必须被拒绝。
+    落点就是上面说的那个守卫，见本节 **§十三** 与 `02-decisions.md` §十三 `D22`。
+    即 `M3` 的三分支中 `paid`/`accepted` 那一档**从此不可达**，保留为防御性分支。
+- ⚠️ `TBD-P13-1`（`completed` 单**部分退款后**，消费累计 / 消费等级 / 周期榜
+  是否按**全额** `actualPaidAmount` 计入）**仍未裁定**——需产品决定后才可开工，本轮**未碰**。
+- ⚠️ `§五 R3` 那条追认项仍**未收到逐条书面结论**，随整体验收一并通过（与 §十一 同）。
+- ⚠️ **`D21` 的调用侧检查今天不可达、因而无用例保护**（复核 NOTE，非缺陷）：
+  `M2` 里两处「先验证再动钱」——`adminRefundTransaction` 的 `alreadyReversed`
+  与 `earningTransaction` 的过滤——在当前状态机下都恒为 `false` / 无可剔除对象
+  （能走到审核的退款必不是 `approved`；`settleOrderCompletion` 只在 `serving → completed`
+  那一次迁移上跑）。**真正起作用、也有用例覆盖的是存储层那道重复抛错**。
+  保留这两处是给「真实数据库迁移 / `D9` 重跑 / Scheduler」留的防御，
+  但**删掉它们不会有任何用例变红**——后人别以为调用侧幂等已有测试保护。
+- ⚠️ **Mock 边界**：无真实数据库与支付通道；`globalThis` 存储随 dev server 重启复位。
+- ⚠️ `withdrawn` 收益仍 **DEFER**（冲回 0、平台全担）——本次**未改**。
+
+### 12.5 状态与 Git
+
+| 项 | 值 |
+|---|---|
+| `P0-13` `Status` | **仍为 `DONE`**（**未回退**为 `AWAITING_ACCEPTANCE`） |
+| `Accepted At` / `Git Commit` | `2026-09-25` / **`2e7006c`**（**未改**） |
+| `04-acceptance.md` 历史结论 | **未改** |
+| 本轮 HEAD | `2e7006c`（**未变**） |
+| Git 写操作 | **零** —— 全程只有 `git rev-parse` / `git status` / `git diff --stat` 等**只读**命令 |
+| P0-14 | **未开始** |
+
+> 📌 **本轮改动尚未提交**——与 P0-6.1 → P0-9 的先例一致，**不影响 `DONE` 的成立**；
+> 由产品负责人决定何时提交。
+> 📌 **建议提交信息**（Claude 不执行 Git）：
+> `fix(p0-13): 售后退满通知按场景拆文案；refundId 索引承担幂等查重`
+> —— 正文可引 `P0-13/02-decisions.md` §十二 `D20` / `D21` 与本节。
+
+---
+
+# 十三、遗留第 1 项裁定落地：`paid` / `accepted` 不允许批准售后退款（2026-09-27，**追加，不回退 `DONE`**）
+
+## 13.0 这一节是什么
+
+§十二 的复核把一项**未决的产品问题**留在了明面上（本节上方那段「本轮不替产品选」）：
+审核入口对订单档位没有守卫，`accepted` 的存量售后申请**可以被批准**并走完整条资金链。
+产品负责人已裁定，本节是**交付记录**；裁定与实现理由见 `02-decisions.md` §十三 `D22`。
+
+## 13.1 交付内容
+
+**一句话**：售后审核入口增加**服务端订单状态闸**，`paid` / `accepted` 的申请**批准被拒、零副作用**，
+但**仍可开始审核 / 驳回**；同时把读侧 DTO 与写侧口径对齐，页面不再显示一个注定 400 的「通过」按钮。
+
+| # | 落点 | 交付 |
+|---|---|---|
+| 1 | `lib/constants/refunds.ts` | `REFUND_APPROVAL_ORDER_STATUS_MESSAGE` + `assertRefundApprovalOrderStatus(orderStatus)`（复用既有的 `isOrderRefundable`，不新造状态集合） |
+| 2 | `lib/data/adminRefundTransaction.ts` | 失败类型 `order-status-not-eligible`；`approveRefund` 内的状态闸排在**状态机之后、金额计算与一切写入之前** |
+| 3 | `lib/services/adminRefunds.ts` | `order-status-not-eligible` → **400**（与 `invalid-transition` 同类） |
+| 4 | `lib/constants/adminRefunds.ts` | `adminRefundAllowedActions(status, orderStatus)` 增第二维；`toAdminRefundDetail` 新增 `approveBlockedReason` |
+| 5 | `lib/types/refund.ts` | `AdminRefundDetail.approveBlockedReason` |
+| 6 | `components/admin/AdminRefundConsole.tsx` | 渲染 `approveBlockedReason`（与「已结束」的提示是两种情形） |
+| 7 | `lib/mocks/fixtures/refundSeed.ts` | `rf-seed-1001-01` / `rf-seed-1002-01` 标注为**负向 fixture**；新增合法待审核 fixture `rf-seed-1003-01`（挂 `ord-seed-1003-01`，`completed`） |
+| 8 | 测试 4 个文件 | 见 13.3 |
+| 9 | `docs/01-requirements/…异常处理表.md` | `EX-REFUND-07` / `EX-REFUND-08` 记录本裁定 |
+
+## 13.2 三处「不做就会留坑」的地方
+
+**(a) 读侧与写侧必须同口径。** 服务端守卫做完之后，**生产 HTTP 复验**才发现
+`GET /api/admin/refunds/rf-seed-1001-01` 的 `allowedActions.canApprove` 仍为 `true`——
+即接口一边拒绝、一边告诉页面「可以批」。修法是让读侧**调用同一个纯函数**，
+并把原因（与 400 的 `message` **同一句话**）放进 `approveBlockedReason` 交给页面显示。
+**页面仍然不自己判断订单状态**，它只是把服务端算好的结论显示出来。
+
+**(b) 关掉 `canApprove` 时不能连坐另外两个动作。** `paid` / `accepted` 的存量申请
+必须**能被驳回**——那正是它们的应有处置。一起灰掉 = 让它们永远悬在「待审核」。
+`canStartReview` / `canReject` 因此**原样不动**，另有用例钉住这一点。
+
+**(c) 预置数据的改法：保留而不是改状态。** `rf-seed-1001-01` / `rf-seed-1002-01` 是
+P0-12 之前的**历史留痕**（`refundSeed.ts` 不变量 2 已专门解释它们为何能存在，
+`tests/directRefund.test.mjs` 也钉住了它们的处置）。**把订单状态改掉等于伪造一段
+没有发生过的历史**——用户端从来没开过那两张单的售后申请。因此保留原状、
+明确标成「必须被拒绝」的负向数据；另加一条落在合法档位的 `rf-seed-1003-01` 供「通过」类用例使用。
+
+## 13.3 测试
+
+| 文件 | 改动 |
+|---|---|
+| `tests/adminRefunds.test.mjs` | 新增 6 个用例：状态闸纯函数 / accepted 拒绝（四类写入前后深比对）/ paid 拒绝（并验守卫**排在金额闸之前**）/ 「只管通过」——两条存量仍可驳回 / serving 正常批准 / **详情 DTO 读侧写侧同口径**。`PENDING_REFUND` 改为 `rf-seed-1003-01`，修正一条 `orderStatus` 断言 |
+| `tests/refundMoneyChain.test.mjs` | 原先把 accepted 售后批准当资金链 happy path 的用例改为「批准被拒、整条资金链一个字都不动」 |
+| `tests/staffRefunds.test.mjs` | 新增预置数据打挂了两个**写死条数**的断言；三处改为**从种子推导**（并补一条 `all.items.length === all.total` 前置断言）。断言强度**没有降低**，反而更强 |
+| `tests/refunds.test.mjs` / `tests/directRefund.test.mjs` | 无改动，作为回归面重跑 |
+
+**零副作用的验法**：拒绝后逐一深比对该退款记录、订单、审计条数、退款类通知条数，
+并比对 `earningStore().adjustments.size` 与 `earningStore().earnings.size`——
+不是「看起来没写」，是**写入前后的全量快照相等**。
+
+**红-绿**：读侧守卫用例做过一次红-绿（临时摘掉订单闸与 `approveBlockedReason` → **2 fail**；恢复 → 42/42）。
+
+## 13.4 门禁读数（2026-09-27）
+
+| 命令 | 结果 |
+|---|---|
+| 目标文件 `node --test` | `adminRefunds` **42/42**；`refundMoneyChain` 全通过 |
+| `pnpm test` | **1398 tests / 1252 pass / 0 fail / 146 skip** |
+| `pnpm typecheck` | ✅ 通过 |
+| `pnpm lint` | ✅ 通过（exit 0） |
+| `pnpm build` | ✅ 通过（exit 0） |
+| `APP_BASE_URL=http://127.0.0.1:3105 pnpm test`（生产构建 + `next start`） | **1398 tests / 1398 pass / 0 fail / 0 skip** |
+| 生产 HTTP 手测 | `approve` 存量 accepted → **400**；`approve` 存量 paid → **400**；两条复读仍 `pending`、`decision` 仍 `null`；`reject` 两条 → **200** 且订单未动；`approve` serving → 200（4980 分）；`approve` completed → 200（39900 分）；详情读侧四档 `canApprove` / `approveBlockedReason` 全部符合预期 |
+| 生产页面手测（`/admin/refunds/[id]` SSR 产物） | 存量 accepted 页：「通过」带 `disabled=""`，**「开始审核」「拒绝」无 `disabled`**，原因句出现在页面上；serving 审核中页：「开始审核」`disabled=""`，「通过」「拒绝」可用，**原因句 0 次**；**已通过（终态）页：原因句 0 次、终态提示 1 次**（`M1` 修复后） |
+| 复核 | `reviewer-agent` 只读复核（结论见 13.5） |
+
+## 13.5 复核结论
+
+`reviewer-agent` 只读复核（**未修改任何文件**）：**0 BLOCKER / 0 MAJOR / 5 MINOR / 2 NOTE**。
+
+复核确认的要点（我逐条**自己复验过**，不是转述）：
+
+- 闸门位置正确：`canTransitionRefund` → **档位闸** → 金额计算 → 写入，闸门之前只有读；
+- 读侧与写侧**共用同一个谓词**，不会漂移；
+- `resolveCompanionRefundCopy()` 三档**保留为不可达的防御性分支**，`default: throw` 打不到合法路径；
+- 负向 fixture 与新增 fixture **全部满足** `build()` 的不变量，`ord-seed-1003-01` 全仓无其它引用；
+- 全仓已无「把 accepted 售后批准当 happy path」的残留。
+
+**5 条 MINOR：全部确认属实，已全部修掉**（不是「记录后放行」）：
+
+| # | 问题 | 处置 |
+|---|---|---|
+| M1 | `approveBlockedReason` **无条件下发**：终态申请（订单必然已是 `refunded`）会同时渲染「这笔退款申请已结束」与「订单不在审批范围内」两句，把管理员引到**错误的原因**上 | 改为**先过 `canTransitionRefund`** 再问档位；补一条终态用例；**红-绿验证**（还原成无条件下发 → 1 fail；改回 → 42/42） |
+| M2 | 三处注释仍写「审核入口对订单档位**没有守卫**」「`tests/adminRefunds.test.mjs` 今天仍在批准它」——与 `D22` 直接矛盾，**会诱使后人把闸门当成 bug 删掉** | 三处改为「`D22` 之后此分支不可达，保留为防御性；若变得可达，说明闸门被绕过——该修的是闸门」 |
+| M3 | `refundSeed.ts` 注释指向**不存在**的 `rf-seed-1001-06`（grep 零命中） | 改为实际 id `rf-seed-1003-01` |
+| M4 | 用例标题「放行的正是 **serving**」而夹具实际是 `completed` | 标题据实改写，并补**前置断言** `orderStatus === "completed"`，标题再脱节会当场变红 |
+| M5 | `api-contract.md` 未记新增的 400 失败码与 `approveBlockedReason` | 契约的 `approve` 段与详情段补全；改动清单同步补该文件 |
+
+**2 条 NOTE（未改代码，如实记录）**：
+
+- **NOTE 1**：畸形请求体的 400（例如缺比例）会**先于**档位闸的 400 返回——两者都在任何写入之前，**不违反**裁定第 8 条，只是错误信息的先后。排查时别据错误码反推闸门位置。
+- **NOTE 2**：拒绝用例里的 `deepEqual` 前后快照**依赖仓储的替换语义**；真正抓写入的是同一用例里的**计数断言**（审计 / 退款 / 通知 / `EarningAdjustment` / `earning`）。这些计数断言**已具备**，予以保留。
+
+⚠️ 复核明确声明**未运行测试**，因此上面 13.4 的数字由我本人跑出（见 13.4），复核方只做了代码层验证。
+
+## 13.6 状态与 Git
+
+| 项 | 值 |
+|---|---|
+| `P0-13` `Status` | **仍为 `DONE`**（**未回退**为 `AWAITING_ACCEPTANCE`） |
+| `Accepted At` / `Git Commit` | `2026-09-25` / **`2e7006c`**（**未改**） |
+| `04-acceptance.md` 历史结论 | **未改** |
+| Git 写操作 | **零** —— 全程只有 `git status` / `git diff` / `git log` 等**只读**命令 |
+| P0-14 | **未开始** |
+
+> 📌 **本批 fix 同样尚未提交**——由产品负责人决定何时提交。
+> 📌 **建议提交信息**（Claude 不执行 Git）：
+> `fix(p0-13): paid/accepted 不允许批准售后退款申请（服务端状态闸 + 读侧同口径）`
+> —— 正文可引 `P0-13/02-decisions.md` §十三 `D22` 与本节。

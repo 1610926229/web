@@ -648,8 +648,14 @@ export type AdminRefundDecisionRequest =
 /**
  * 审核通过：资金决策、退款记录、订单与打手收益在同一次写入里改到位。`reviewNote` 选填。
  *
- * ⚠️ **页面不做金额预览**（`architecture-rules.md` §三：客户端不做金额算术）：
- * 按钮只说「按 X% 退款，金额由系统计算」，实际金额读响应里的 `decidedAmount`。
+ * ⚠️ **客户端不做金额算术**（`architecture-rules.md` §三）——但**页面会实时预览金额**。
+ * 原先「页面不做金额预览、按钮只说『金额由系统计算』」的取舍已被 **P0-13 D19 取代**：
+ * 管理端确认框调 `previewRefundDecisionAmounts()`（`lib/constants/adminRefunds.ts`），
+ * 它复用的正是服务端写入路径上的同一对纯函数
+ * （`computeRefundDecisionAmounts` → `resolveFinalDecisionAmounts`），
+ * 因此「预览出来的」与「写下去的」必然是同一份公式算的。
+ *
+ * 客户端始终只传百分比字符串，**永不自己算钱**。
  */
 export function approveRefund(
   id: string,

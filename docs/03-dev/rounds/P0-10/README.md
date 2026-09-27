@@ -2,15 +2,22 @@
 
 Round ID: P0-10
 Title: 客服全量订单查询工作台（`/staff/orders` + `/staff/orders/[id]`）
-Status: AWAITING_ACCEPTANCE
+Status: DONE（2026-09-25 收口——「DONE 双门槛」两条**均已满足**，**无协议偏离**）
 Depends On: P0-9（`DONE`，`eef4e62`）— 客服侧订单只读详情所依赖的 Completion / Complaint / Refund / Earning 事实链
 Goal: 补齐 P0「客服查看订单」。新增统一客服订单入口（列表 + 详情），复用现有 Staff Auth 与 Order / Refund / Complaint / Completion / Dispatch 数据，**不创建第二套订单系统**；本轮到查询与只读详情为止。
 Primary Domain: Staff（客服工作台）· Order 只读查询
 Primary State Transition: 无（本轮**不引入任何新的状态迁移路径**；两个接口各挂一次既有的幂等惰性物化，理由见 `02-decisions.md` §九 A9-4）
 Started At: 2026-09-24
 Development Completed At: 2026-09-24
-Accepted At:
-Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成，Claude 无权代填）
+Accepted At: 2026-09-25（`User Result` / `Final Result` = `PASSED`）
+Git Commit: `2e7006c`（用户本人提交「完成p0-业务支付流程」；含本批次四轮全部实现、测试与档案）
+
+> ✅ **本轮已收口为 `DONE`（2026-09-25）。** 用户本人确认人工验收通过（`04-acceptance.md`）。
+> ✅ **「DONE 双门槛」两条均已满足，无协议偏离**：① 用户本人于 2026-09-25 确认 `PASSED`；
+> ② 用户本人已完成提交——**`HEAD = 2e7006c`「完成p0-业务支付流程」**
+> （`124 files changed, 21017 insertions(+), 720 deletions(-)`），该提交**含本批次四轮的全部**
+> 实现、测试与档案。Claude 全程**零 Git 写操作**，hash 取自只读命令。
+> ⚠️ 本次对收口档案的追加改动本身仍未提交——与 P0-6.1 → P0-9 的先例一致，**不影响 `DONE` 的成立**。
 
 > ✅ **开发已于 2026-09-24 完成，自动门禁全部通过**（`03-delivery.md` §六，**复核整改之后**的读数）：
 > `pnpm test` **1278** / fail 0 · 生产 `APP_BASE_URL` 全量 **1278/1278 / fail 0 / skipped 0** ·
@@ -32,12 +39,19 @@ Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成
 > ⚠️ 会话 / 退款 / 投诉 / 完成材料四个客服页面**按裁定「不扩展业务范围」一个字没改**，
 > 由此产生的「客服工作台内部有两种平台 ID」已由 A9-11 登记为**遗留项**，**不是缺陷**。
 >
-> ⏸️ **当前状态 `AWAITING_ACCEPTANCE`——等用户本人验收。**
+> ~~⏸️ **当前状态 `AWAITING_ACCEPTANCE`——等用户本人验收。**~~
+> ~~验收清单见 `04-acceptance.md`，其 **A0** 已由「⚠️ 待产品裁定」改为「✅ 已裁定并已修复」，
+> 验收动作变成「**验一下真的搜得到了**」。~~
+>
+> ~~⚠️ **`Status` 不由 Claude 改成 `DONE`**：按「DONE 双门槛」，需要 ① 用户本人说明验收通过
+> **且** ② 用户本人完成 Git 提交。本批次（P0-10 → P0-13）**禁止任何 Git 写操作**。~~
+>
+> ✅ **以上是交付当时的状态，现已收口（2026-09-25），原文划线保留不删。**
+> 用户本人于 **2026-09-25** 确认 `PASSED` 并**明确指令**把四轮（P0-10 → P0-13）一起标为 `DONE`。
 > 验收清单见 `04-acceptance.md`，其 **A0** 已由「⚠️ 待产品裁定」改为「✅ 已裁定并已修复」，
 > 验收动作变成「**验一下真的搜得到了**」。
->
-> ⚠️ **`Status` 不由 Claude 改成 `DONE`**：按「DONE 双门槛」，需要 ① 用户本人说明验收通过
-> **且** ② 用户本人完成 Git 提交。本批次（P0-10 → P0-13）**禁止任何 Git 写操作**。
+> ⚠️ 用户**未逐组打勾**，以**整体结论**通过；清单里的分组行保留 `——` 是**如实**记录，
+> **不表示**某一组未通过。✅ Git 提交**已完成**（`2e7006c`），**双门槛两条均已满足、无协议偏离**。
 
 ---
 

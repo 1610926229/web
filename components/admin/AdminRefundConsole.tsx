@@ -172,8 +172,15 @@ function OrderMoneyTable({ money }: { money: AdminRefundOrderMoney }) {
  *
  * ⚠️ 数量来自 `previewRefundDecisionAmounts()`，它调用的是**服务端写入路径上的同一对函数**
  * （`computeRefundDecisionAmounts` → `resolveFinalDecisionAmounts`）。
- * 本组件里**没有任何一处 `× 比例 / 10000`**——那是这条纪律唯一的验收方式：
- * 在这个文件里搜不到一个金额运算符，就说明它没有第二份公式。
+ *
+ * ⚠️ 这条纪律的验收方式是「**本文件里没有任何一处 `× 比例 / 10000`**」，
+ * 也就是没有任何一处**从比例推金额**的算式。
+ * （早先这里写的是「搜不到一个金额运算符」——那是个过强的断言，
+ * 本轮修正：下面 `companionRemaining` 就是一个减法。那个减法是共享定义
+ * `netAvailableAmount = incomeAmount − cumulativeReversalAmount` 的直接展开，
+ * 它不从比例算钱，钳制也仍然只在 `lib/constants/refunds.ts` 一处，
+ * 因此不是第二份公式；但说成「没有金额运算符」会让下一个人以为这里连减法都不许有，
+ * 而真正的界线是「不许有第二份公式」。）
  *
  * ⚠️ 没填全时显示 `ADMIN_REFUND_PREVIEW_INCOMPLETE_NOTE` 而**不是 ¥0.00**：
  * 「还没算得出来」与「算出来是 0 元」在界面上必须是两句话。
@@ -463,6 +470,16 @@ export default function AdminRefundConsole({ refund: initialRefund }: { refund: 
       ) : (
         <p className="mt-2 text-[13px] leading-5 text-ink-3">{ADMIN_REFUND_TERMINAL_NOTICE}</p>
       )}
+
+      {/*
+        「通过」被订单状态挡下时的说明。与 `ADMIN_REFUND_TERMINAL_NOTICE` 是**两种情形**：
+        那一句是「这笔申请已结束，一个动作都没有」，这一句是「另外两个动作还能做，
+        但这一单不在售后审批范围内」。文案来自服务端（与接口 400 的 message 同一句话），
+        页面只负责显示，不重新判断订单状态。
+      */}
+      {refund.approveBlockedReason ? (
+        <p className="mt-2 text-[13px] leading-5 text-ink-3">{refund.approveBlockedReason}</p>
+      ) : null}
 
       {/* Mock 标注：任何状态下都在，包括「已通过」之后 */}
       <p className="mt-3 rounded-lg border border-admin-line bg-page px-3 py-2 text-[12px] leading-4 text-ink-3">

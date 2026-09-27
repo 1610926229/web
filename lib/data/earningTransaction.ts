@@ -9,6 +9,7 @@ import {
   applyEarningRelease,
   applyEarningReversal,
   earningStore,
+  findEarningAdjustmentIdByRefund,
   newEarningAdjustmentId,
 } from "./mockEarningRepository";
 import { applyOrderCompletion, paymentStore } from "./mockPaymentRepository";
@@ -228,9 +229,14 @@ function backfillRefundReversals(input: {
   orderId: string;
   at: string;
 }): void {
-  const approved = listRefundsForOrderSync(input.orderId).filter(
-    (refund) => refund.status === "approved" && refund.decision !== null,
-  );
+  // ⚠️ **先验证再动钱**（P0-13 后续 fix）：本函数按订单把**所有**已批准退款补记一遍，
+  //    因此它天然可重放。已经留下明细的退款必须在这里就剔除——
+  //    `appendEarningAdjustment` 现在对重复 `refundId` 抛错，若不剔除，
+  //    重放会在循环中途抛错，而那时前几笔的 `applyEarningReversal` 已经落库了，
+  //    留下的正是「钱冲了、明细没写」的悬空状态。
+  const approved = listRefundsForOrderSync(input.orderId)
+    .filter((refund) => refund.status === "approved" && refund.decision !== null)
+    .filter((refund) => findEarningAdjustmentIdByRefund(refund.id) === null);
 
   for (const refund of approved) {
     const decision = refund.decision;

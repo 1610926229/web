@@ -39,6 +39,12 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 **⚠️ Claude 完成编码后只能标 `AWAITING_ACCEPTANCE`。**
 **`DONE` 需要两个条件同时满足：用户明确说验收通过 + 用户已自行 Git commit。**
 
+> ✅ **该规则在 2026-09-25 的收口中被完整执行、未被覆盖**：`P0-10` → `P0-13` 四轮的两条门槛
+> 均已满足——① 用户本人确认验收通过（`PASSED`）；② **用户本人完成 Git 提交**
+> （`HEAD = 2e7006c`「完成p0-业务支付流程」，含四轮全部实现、测试与档案），故标为 `DONE`。
+> **无协议偏离**，本条规则**一字未改**。Claude 全程**零 Git 写操作**、未代填任何 commit hash
+> （hash 取自只读 `git rev-parse` / `git show --stat`）。记录见下方批次收口块与各轮 `04-acceptance.md` 头部。
+
 ---
 
 ## 两条不可协商的规则
@@ -62,22 +68,37 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 | [`P0-7`](./P0-7/README.md) | `accepted → serving` —— 由当前实际打手点击「开始服务」 | `DONE` | `eef4e62` |
 | [`P0-8`](./P0-8/README.md) | CompletionSubmission + 客服审核 + 10 分钟自动审核 | `DONE` | `eef4e62` |
 | [`P0-9`](./P0-9/README.md) | Earning.frozen + 可配置投诉窗口 + `frozen → available` | `DONE` | `eef4e62` |
-| [`P0-10`](./P0-10/README.md) | 客服全量订单查询工作台（`/staff/orders` + `/staff/orders/[id]`） | `AWAITING_ACCEPTANCE` | —— |
-| [`P0-11`](./P0-11/README.md) | 客服换打手 + 打手禁用回池 + pending `CompletionSubmission` 失效 | `AWAITING_ACCEPTANCE` | —— |
-| [`P0-12`](./P0-12/README.md) | `paid` / `accepted` 用户免审批全额退款（`Order → refunded`） | `AWAITING_ACCEPTANCE` | —— |
-| [`P0-13`](./P0-13/README.md) | `serving` / `completed` 售后 + Admin 最终退款金额 + Earning 联动 | `AWAITING_ACCEPTANCE` | —— |
+| [`P0-10`](./P0-10/README.md) | 客服全量订单查询工作台（`/staff/orders` + `/staff/orders/[id]`） | `DONE`（2026-09-25 收口，✅ 无协议偏离） | `2e7006c` |
+| [`P0-11`](./P0-11/README.md) | 客服换打手 + 打手禁用回池 + pending `CompletionSubmission` 失效 | `DONE`（2026-09-25 收口，✅ 无协议偏离） | `2e7006c` |
+| [`P0-12`](./P0-12/README.md) | `paid` / `accepted` 用户免审批全额退款（`Order → refunded`） | `DONE`（2026-09-25 收口，✅ 无协议偏离） | `2e7006c` |
+| [`P0-13`](./P0-13/README.md) | `serving` / `completed` 售后 + Admin 最终退款金额 + Earning 联动 | `DONE`（2026-09-25 收口，✅ 无协议偏离） | `2e7006c` |
+
+> ✅ **批次 `cmd_batch_p0-10_to_p0-13.md` 四轮已全部收口为 `DONE`（2026-09-25）。**
+> 用户本人于 **2026-09-25** 确认人工验收通过（`PASSED`），并**明确指令**把四轮一起标为 `DONE`。
+> ✅ **「DONE 双门槛」两条均已满足、无协议偏离**：`development-workflow.md` §十七要求 `DONE`
+> **同时**满足「用户本人验收通过」与「**用户本人完成 Git 提交**」——
+> ① 用户本人已确认 **`PASSED`**；② 用户本人**已完成提交**：
+> `HEAD = 2e7006c`「完成p0-业务支付流程」（`124 files changed, 21017 insertions(+), 720 deletions(-)`），
+> 该提交**含四轮全部实现、测试与档案**。Claude 全程**零 Git 写操作**、未代填任何 commit hash。
+> 📌 各轮 `Git Commit` 已回填为 `2e7006c`；仅剩 `../需求功能点进度表.md` 的统计快照**重算**待办。
+> ⚠️ 用户**未逐组打勾**，以**整体结论**通过；各轮验收清单里的分组行保留 `——` 是**如实**记录，
+> **不表示**某一组未通过。各轮 §追认项（P0-11 R1–R4 / P0-12 R1–R2 / P0-13 R3）**未收到逐条书面结论**，
+> 随整体验收一并通过——⚠️ 其中 P0-12 标注为**「接入真实支付前的硬门禁」**，**不因「一并通过」而解除**。
+> 详细记录见四轮的 `04-acceptance.md` / `README.md` 与 `docs/03-dev/总需求进度表.md` 的 ⚠️ 段落。
 
 > 🔵 **`P0-10` 是批次 [`cmd_batch_p0-10_to_p0-13.md`](./cmd_batch_p0-10_to_p0-13.md) 的第一站**
 > （P0-10 → P0-11 → P0-12 → P0-13），2026-09-24 交付。
-> 开发完成 + 自动门禁全绿 + 只读 reviewer 复核**已结束并整改完毕**，**等用户本人验收**（`04-acceptance.md`）。
+> 开发完成 + 自动门禁全绿 + 只读 reviewer 复核**已结束并整改完毕**；
+> ✅ **2026-09-25 用户本人确认验收通过，已收口为 `DONE`**（✅ 无协议偏离，见上方批次收口块）。
+> 验收清单 `04-acceptance.md`。
 > ✅ reviewer 初判 **BLOCKER 0 / MAJOR 1 / MINOR 4 / NOTE 7**，那 1 条 MAJOR 是**回归保护缺失**
 > （两条新接口此前没有任何 HTTP 级测试，`null → 404` 这条映射在全仓无覆盖），
 > 行为本身经 reviewer 手工复验**都是对的**；MAJOR 与 4 条 MINOR **已全部修完**，
 > 新增 5 条 HTTP 用例（`tests/staffOrders.test.mjs` 17 → **22** 条）并做受控 mutation 验证，
 > 门禁复跑：`pnpm test` **1278** / fail 0 · 生产全量 **1278/1278** / fail 0 / skipped 0。
 > **现为 BLOCKER 0 / MAJOR 0**，满足批次自动继续条件（`03-delivery.md` §七）。
-> ⚠️ 该批次**禁止任何 Git 写操作**，因此 `Git Commit` 一列**留空**是正确的当前状态
-> （「DONE 双门槛」第二条只能由用户本人完成提交后填写）。
+> ⚠️ 本批次**禁止 Claude 做任何 Git 写操作**，因此**交付当时** `Git Commit` 一列**留空**是当时正确的状态；
+> ✅ **用户本人已于验收时点提交**（`2e7006c`），该列现已回填（「DONE 双门槛」第二条由用户本人完成）。
 > ✅ **验收前整改 A0 已完成（2026-09-25）**：产品负责人裁定 `P0-10/02-decisions.md` §九 **A9-9**
 > 选**方案 B**——`/staff/orders` **新增**平台展示 ID（`displayId`）一路，**既参与搜索、也展示在页面上**；
 > 旧的内部标识（`u-1001`）**继续可搜**（新增一路，不是替换）。
@@ -101,8 +122,10 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 >
 > 裁定原文、实现口径与逐条理由见 [`P0-11/02-decisions.md`](./P0-11/02-decisions.md) §九。
 > ⚠️ **`CLARIFYING` 期间没有写过任何业务代码**——这句仍然成立；本轮全部实现都发生在裁定之后。
-> 开发完成 + 自动门禁全绿 + 只读 reviewer 复核**已结束并整改完毕**，**等用户本人验收**
-> （[`P0-11/04-acceptance.md`](./P0-11/04-acceptance.md)）。
+> 开发完成 + 自动门禁全绿 + 只读 reviewer 复核**已结束并整改完毕**；
+> ✅ **2026-09-25 用户本人确认验收通过，已收口为 `DONE`**（✅ 无协议偏离，见上方批次收口块）。
+> 验收清单 [`P0-11/04-acceptance.md`](./P0-11/04-acceptance.md)；
+> ⚠️ 其 §四 的 4 条追认项（R1–R4）**未收到逐条书面结论**，随整体验收一并通过。
 > ✅ reviewer 初判 **BLOCKER 0 / MAJOR 2 / MINOR 4 / NOTE 2**，**现为 0 / 0**：
 > ① 三条新写接口没有任何 HTTP **正例**（权限矩阵缺「正常结果」那一格）→ 补 2 条 HTTP 正例，
 > 用 HTTP 现场造一单、打完**回读只读接口自证**，各做一次**受控 mutation** 证明咬得动；
@@ -120,8 +143,11 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 > 「移除是否应释放」登记为遗留。**四条都已实现，但都超出 `cmd_p0-11.md` 的字面。**
 
 > 🔵 **`P0-12` 是批次 [`cmd_batch_p0-10_to_p0-13.md`](./cmd_batch_p0-10_to_p0-13.md) 的第三站**，
-> 2026-09-24 交付。开发完成 + 自动门禁全绿 + **两轮**只读复核（**0 BLOCKER / 0 MAJOR**），
-> **等用户本人验收**（[`P0-12/04-acceptance.md`](./P0-12/04-acceptance.md)）。
+> 2026-09-24 交付。开发完成 + 自动门禁全绿 + **两轮**只读复核（**0 BLOCKER / 0 MAJOR**）；
+> ✅ **2026-09-25 用户本人确认验收通过，已收口为 `DONE`**（✅ 无协议偏离，见上方批次收口块）。
+> 验收清单 [`P0-12/04-acceptance.md`](./P0-12/04-acceptance.md)；
+> ⚠️ 其 §五 的 2 条追认项（R1/R2）标为**「接入真实支付前的硬门禁」**，**未收到逐条书面结论**，
+> 「一并通过」**不解除**该提醒义务。
 > 门禁：`pnpm test` **1346** / pass 1200 / fail 0 / skip 146 · 生产全量 **1346/1346 / fail 0 / skipped 0** ·
 > typegen + `tsc --noEmit` / `eslint` / `next build` 全部 exit 0。
 > ⚠️ 本轮**顺带修正了一处 P0-9 遗留的测试缺陷**（不是放宽断言）：
@@ -130,9 +156,11 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 > 该文件对批次 baseline `3fbae62` 的 diff 当时是**空的**，故属既有缺陷。
 > ⚠️ 验收清单 §五 有 **2 条需要产品追认**（R1 存量退款记录原样不动 / R2 同），
 > 且二者在**接入真实支付前**是**硬门禁**，不只是待追认项。
-> ⚠️ 该批次**禁止任何 Git 写操作**，`Git Commit` 一列留空是**正确的当前状态**。
+> ⚠️ 本批次**禁止 Claude 做任何 Git 写操作**，**交付当时** `Git Commit` 一列留空是当时正确的状态；
+> ✅ **用户本人已于验收时点提交**（`2e7006c`），该列现已回填。
 
-> ⛔→✅ **`P0-13` 曾经停在 `CLARIFYING`（2026-09-25 上午），产品裁定后已全部解除并交付，现为 `AWAITING_ACCEPTANCE`。**
+> ⛔→✅ **`P0-13` 曾经停在 `CLARIFYING`（2026-09-25 上午），产品裁定后已全部解除并交付；**
+> **2026-09-25 经用户本人确认验收通过后收口为 `DONE`（✅ 无协议偏离，见上方批次收口块）。**
 >
 > **当初为什么停**：Requirement Check 命中 `cmd_p0-13.md:30` 与批次文件 `:34-39` 的**特别停止条件**——
 > Q1（`completed` 部分退款如何影响打手 Earning）的责任子问题、
@@ -162,8 +190,12 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 > **Q2-d** 同一 Earning 允许**多次**冲减，必须保证 `0 ≤ 累计冲减 ≤ incomeAmount`，每次**幂等**。
 > **Q3** **继续 DEFER**（已提现后的追偿 / 负余额）。
 >
-> **交付**：开发完成 + 自动门禁全绿 + 只读 reviewer 复核**已整改完毕**，
-> **等用户本人验收**（[`P0-13/04-acceptance.md`](./P0-13/04-acceptance.md)）。
+> **交付**：开发完成 + 自动门禁全绿 + 只读 reviewer 复核**已整改完毕**；
+> **人工验收第 1 项**提出「退款比例的业务语义和界面反馈不够清楚」，已按 **D19** 整改完毕
+> （**未改任何金额口径**）；✅ **2026-09-25 用户本人确认验收通过，已收口为 `DONE`**
+> （✅ 无协议偏离，见上方批次收口块）。
+> 验收清单 [`P0-13/04-acceptance.md`](./P0-13/04-acceptance.md)；
+> ⚠️ 其 §五 的 1 条追认项（R3）**未收到逐条书面结论**，随整体验收一并通过。
 > ✅ reviewer 初判 **BLOCKER 1 / MAJOR 2 / MINOR 3**，**现为 0 / 0**，逐条见 `P0-13/03-delivery.md` §六：
 > ① **BLOCKER B-1**（真缺陷，复核时在磁盘上独立复现）：`applyOrderRefund` 的第三个参数
 > 语义从「覆盖成这个值」改成「本次的增量」之后，两条全额路径**仍然传实付全额**——
@@ -191,7 +223,8 @@ PLANNED → CLARIFYING → READY → IN_PROGRESS → AWAITING_ACCEPTANCE → DON
 > ⚠️ 验收清单 §五 有 **1 条需要产品追认**（**R3**）：部分退款过的订单再走全额直退时
 > **退的是「剩余可退额」**——P0-12 只写了「未全额退款」这个前置，**没写「部分已退」怎么办**。
 > 与 P0-12 的 R1/R2 同类：**已按具体口径实现，但没有权威文本冻结**。
-> ⚠️ 该批次**禁止任何 Git 写操作**，`Git Commit` 一列**留空**是正确的当前状态。
+> ⚠️ 本批次**禁止 Claude 做任何 Git 写操作**，**交付当时** `Git Commit` 一列留空是当时正确的状态；
+> ✅ **用户本人已于验收时点提交**（`2e7006c`），该列现已回填。
 > 📌 **未开始 P0-14。**
 >
 > 📋 **批次最终报告见 [`BATCH_p0-10_to_p0-13_最终报告.md`](./BATCH_p0-10_to_p0-13_最终报告.md)**

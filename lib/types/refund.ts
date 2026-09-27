@@ -246,6 +246,12 @@ export type AdminRefundListItem = {
  *
  * 三个动作全部从 `ADMIN_REFUND_TRANSITIONS` 推导（见 `lib/constants/adminRefunds.ts`），
  * 页面不拿状态自己写 `if`：终态（已通过 / 已拒绝 / 已撤销）三项都是 false。
+ *
+ * ⚠️ `canApprove` **不止看退款状态**：它还守一道订单状态闸（产品裁定 2026-09-27，
+ * `paid` / `accepted` 不允许批准售后申请），被挡下的原因见 `AdminRefundDetail.approveBlockedReason`。
+ * 因此 `canApprove === false` 有两种含义，页面**不能**用同一个 `if` 处理
+ * 「这笔申请已结束」与「这一单不在审批范围内」——前者走 `ADMIN_REFUND_TERMINAL_NOTICE`，
+ * 后者的按钮仍要出现（另外两个动作还可做），旁边配上原因。
  */
 export type AdminRefundAllowedActions = {
   canStartReview: boolean;
@@ -352,6 +358,21 @@ export type AdminRefundDetail = AdminRefundListItem & {
   cancelledAt: string | null;
   timeline: RefundTimelineEntry[];
   allowedActions: AdminRefundAllowedActions;
+  /**
+   * 订单状态挡住「通过」时的原因；没被挡时为 `null`。
+   *
+   * 产品裁定 2026-09-27：`paid` / `accepted` 的订单不允许批准售后退款申请，
+   * 只有 `serving` / `completed` 能进这条资金链。这类**存量**申请仍然存在
+   * （P0-12 之前开出来的），也仍然可以被**驳回**——只是不能批。
+   *
+   * ⚠️ 它与写侧 400 的 `message` 是**同一句话**（同一个函数算出来的），
+   * 因此不存在「界面说 A、接口说 B」的可能。
+   *
+   * ⚠️ **只在「申请本身还没结束」时才有值**：终态（已通过 / 已拒绝 / 已撤销）的申请
+   * 一律是 `null`——那种情况下 `canApprove === false` 的原因**是申请已结束**，
+   * 而不是订单档位。把两个原因混成一句话会把管理员引到错的地方去查。
+   */
+  approveBlockedReason: string | null;
 };
 
 /**

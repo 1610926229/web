@@ -889,3 +889,378 @@ D15 原文（保留在上面）里有两件事，必须分开看：
 - 「冲回后打手剩余收益（预计）」= `companionBaseIncome − reversedSoFar − 本次冲回`。
   它是 Q2-a 那条 `netAvailableAmount = incomeAmount − cumulativeReversalAmount`
   的直接展开，**不是**新建的余额桶（Q2-a 明令不建桶）。
+
+---
+
+# 十二、独立复核与后续 fix（2026-09-27，**追加，不覆盖以上任何一节**）
+
+## 12.0 这一节是什么
+
+2026-09-27 对**已 `DONE`、已由产品负责人验收、已提交 `2e7006c`** 的 P0-13
+做了一次**独立验证轮**（触发指令 `rounds/cmd_p0-13_continue.md`）。
+
+⚠️ **前提澄清**：该指令假定 P0-13 仍停在 `CLARIFYING`、需要从零开发。
+**这与仓库事实不符**——P0-13 的实现、测试、档案、验收、提交均已存在。
+产品负责人确认按「独立验证轮」执行：
+
+- **不回退** `DONE`，**不重复**追加 Q1/Q2（`§十` 的 `D-Q1`/`D-Q2`/`D-Q3` 就是那两份裁定），
+  **不重复实现**已完成的业务代码，**不修改**历史验收结论。
+
+验证结论：**0 BLOCKER / 2 MAJOR / 3 MINOR**。两条 MAJOR 经产品负责人裁定后整改，
+**本条只追加记录，不改写 `§十`–`§十一` 的历史**。
+
+## D20（✅ 已裁定，2026-09-27）—— 售后退满的打手通知**按场景拆文案**
+
+### 问题（MAJOR M1）
+
+售后审批退满时发给打手的通知，**复用了直接退款（P0-12）那条文案**
+`REFUND_NOTIFICATION_COMPANION_REFUNDED`。那条文案断言了两件事：
+
+> 「客户在**服务开始前**取消了订单」·「本单**不产生收益**」
+
+但售后审批路径**只处理 `serving` / `completed` 两档**
+（`REFUNDABLE_ORDER_STATUSES`，`lib/constants/refunds.ts:194`），这两句话**双双为假**：
+
+- 服务**已经开始过**（`serving` 至少已 `start`，`completed` 更是已结算）；
+- `completed` 的收益**已经生成过**，并正被本次决策冲回。
+
+尤其当该收益已 `withdrawn` 时（`resolveFinalDecisionAmounts` 把冲回额改写为 0），
+打手**实际保住了这笔钱**，却收到一条写着「不产生收益」的**书面结论**——与账实相反。
+
+⚠️ 这不是实现偏差：`D12` 当时裁定的就是「**复用** `REFUND_NOTIFICATION_COMPANION_REFUNDED`
+的文案口径」。**是那份口径对新场景不成立**，因此必须由产品裁定，不得自行改。
+
+### 裁定（产品负责人，2026-09-27）
+
+> **按场景拆文案。** 保留「paid/accepted → 客户在服务开始前取消」的现有文案，
+> 为 `serving` / `completed` 整单退款新增各自为真的文案。
+
+### Final Execution Rule
+
+按**订单在退款发生前走到哪一档**选文案（`planCompanionRefundNotification`
+的 `orderStatus` 入参，取自**任何写入之前**读到的订单快照）：
+
+| 订单档位 | 文案常量 | 为什么这几句是真的 |
+|---|---|---|
+| `paid` / `accepted`（直接退款 P0-12，**不变**） | `REFUND_NOTIFICATION_COMPANION_REFUNDED` | 服务尚未开始；不生成收益 |
+| `serving` | `REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE` | 服务已开始；全额退款**不生成 completed Earning**（原文：全额退款终止履约、不产生正常 completed Earning）⇒「不产生收益」成立，但**不得**说「服务开始前」 |
+| `completed` | `REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION` | 收益已生成过并按本次核定结果结算；**不得**说「不产生收益」，也不再对收益下任何结论，只说「已按本次售后结果结算，以收益记录为准」 |
+
+- 三段文案**必须彼此不同**（有用例钉住，防止有人把直接退款那条接回售后路径）。
+- 继续遵守原纪律：**不写平台对他做了什么处置**（不写「你被扣了」「你被处罚了」）。
+- ⚠️ 本裁定**只改文案**，不改任何金额、状态或权限规则。
+
+### D20 实施补记（2026-09-27，第一版写错、第二版改对）
+
+第一版把选择器写成了**两分支** `completed ? AFTER_COMPLETION : IN_SERVICE`。
+这是**错的**，而且错的正是这条裁定要消灭的那件事：`paid` / `accepted` 会静默落进
+`else`，收到一句「这一单在护航开始服务后经售后处理全额退款」——
+**而这两档根本没有开始过服务**，管理员自己的审核意见写的就是「服务未按约定开始」。
+假话没有被消除，只是从 `serving` / `completed` 搬到了 `paid` / `accepted`。
+
+⚠️ **这个错是一份被写进注释的假前提造成的**：第一版在
+`adminRefundTransaction.ts` 与 `refunds.ts` 两处都断言「本函数只在 `serving` / `completed`
+两档被调用（`REFUNDABLE_ORDER_STATUSES`）」。**那句话是假的**：
+
+- `REFUNDABLE_ORDER_STATUSES` 约束的是**申请创建**（`canRequestRefund`）；
+- **审核入口对订单档位没有任何守卫**，因此**存量**申请可以挂在一张 `accepted` 单上；
+- 这不是理论路径——`rf-seed-1001-01` 就挂在 `accepted` 的 `ord-seed-1001-03` 上
+  （`refundSeed` 的说明亲口写着「有意留着的」），而 `tests/adminRefunds.test.mjs`
+  **至今仍在批准它**。
+- 它今天没发出假通知**纯属巧合**：那位打手 `cp-2` 的 `userId` 为 null、
+  算不出收件人，通知根本不会被构造。换一位有收信地址的打手，假话当场可复现。
+
+第二版按**裁定表原样**写成三分支（`paid`/`accepted` → `REFUND_NOTIFICATION_COMPANION_REFUNDED`），
+并把两处假前提的注释一并改正。**未列入该表的档位直接抛错**（不给默认文案）：
+该调用点位于**任何写入之前**，抛错等于整个审核零副作用地失败，比退完钱再发一句错话好。
+
+> ⚠️ **这仍然只是「把裁定实现对」，不是新的产品裁定。** 裁定表本来就是三档，
+> 第一版少实现了一档。
+
+## D21（技术组织，Coordinator 自决）—— 让 `refundId` 索引真的承担幂等
+
+### 问题（MAJOR M2）
+
+`EarningAdjustment` 的 `adjustmentIdByRefund` 索引**只写不读**：
+`appendEarningAdjustment` 既不查重也不抛错，全仓**没有任何读点**。
+于是 `D8` 声称的「用 `refundId` 唯一索引钉住幂等」在代码里**没有落点**——
+今天的幂等**只**由「`approved` 是终态」+「一单一 Earning」两个上层事实承担。
+
+一旦将来多出一个调用方（真实数据库迁移 / `D9` 补记重跑 / Scheduler），
+同一笔退款会被**重复冲减打手收益**；而唯一的对账断言
+（累计额 === 明细之和）会把重复计入当成一次合法冲回，**照样绿**。
+
+### 处置（与通知的既有裁决同一条纪律 —— 「id 不覆盖」）
+
+1. **新增读点** `findEarningAdjustmentIdByRefund(refundId)`（存储层）；
+2. **原语抛错**：`appendEarningAdjustment` 在同一 `refundId` 已有明细时**抛错拒绝覆盖**，
+   查重发生在**两次写入之前**（原子区段开头），抛错时存储一个字节都没变；
+3. **调用侧先验证再动钱**——两个调用点都必须在 `applyEarningReversal` **之前**判定：
+   - `adminRefundTransaction` 的即时冲回：已冲过则**跳过**（不是报错；
+     「重放不重复冲回」是业务规则，报错会把一次本来正确的重放变成 500）；
+   - `earningTransaction` 的 `D9` 补记：在过滤阶段就剔除已有明细的退款。
+     该函数按订单把**所有**已批准退款补记一遍、天然可重放，若不剔除，
+     重放会**在循环中途**抛错，而那时前几笔的钱已经冲了 —— 正是本仓反复拒绝的悬空状态。
+
+## 本次同时修正的三条 MINOR（均只改注释，不改行为）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| m1 | `app/api/admin/refunds/[id]/approve/route.ts` 的 JSDoc 描述的是 **P0-13 之前**的语义，三处均为假（「四件事」「订单变为 `refunded`」「金额不可修改、请求体没有金额字段」） | 重写为实际语义：**六件事**、**累计退满才 `refunded`**、**金额由服务端的比例算出** |
+| m2 | `lib/services/adminHttp.ts` 写「页面不做金额预览」，与 `D19` 直接冲突 | 改为 `D19` 口径：客户端不做金额算术，但**页面会实时预览**，且预览复用服务端同一对纯函数 |
+| m3 | `components/admin/AdminRefundConsole.tsx` 自称「搜不到一个金额运算符」，同文件却有减法 | 把断言收窄为真正该守的界线——「没有任何一处 `× 比例 / 10000`」，并说明那个减法是共享定义 `netAvailableAmount` 的直接展开、钳制仍只有一处 |
+
+## 复核中发现并修正的一条**测试**缺陷（非产品问题）
+
+`tests/refundMoneyChain.test.mjs` 的「退满才关派单并通知打手」原本断言
+`allNotifications().length > notificationsBefore`，但那两件事都成立不了：
+
+1. 该用例用的 `cp-1` **`userId` 为 null**（预置 `cp-*` 大多如此），
+   `recipientUserId` 因此为 null，通知**根本不会被构造**；
+2. `notificationsBefore` 在**造第二张订单之前**取的，而造单本身就会产生
+   一串支付/接单/完成通知——「总数变多了」在退款一条都没发时同样成立。
+
+即该断言**在两条路径上都恒真**。已改用 `cp-10`（`userId = u-1022`，有收信地址）
+并只统计**退款类**通知、比对**本次新增的那一条**。
+
+## 本轮**没有**改变的事（防止后人误读）
+
+- ❌ 没有改任何**金额公式**、`incomeAmount` 不可变性、`0 <= 累计冲回 <= incomeAmount`、
+  累计 `refundedAmount <= actualPaidAmount`、幂等键或权限/DTO 边界；
+- ❌ 没有重新裁定 Q1/Q2/Q3（`withdrawn` 仍 **DEFER**）；
+- ❌ 没有回退 `DONE`，没有改历史验收结论；
+- ❌ 没有开始 P0-14。
+
+---
+
+# 十三、遗留第 1 项正式裁定：`paid` / `accepted` 不允许批准售后退款申请（2026-09-27，**追加，不覆盖以上任何一节**）
+
+## 13.0 这一节是什么
+
+§十二 的复核留下了一项**未决的产品问题**：`approveRefund` 没有订单状态守卫，
+因此一张 `accepted` 的存量售后申请**可以被管理员批准**并走完整条资金链
+（退款决策 → 累计 `refundedAmount` → Earning 冲回 → 通知 → 审计）。
+复核时把它标为「待产品裁定」，本节是**裁定结果与实现**。
+
+⚠️ 与 §十二 一样：**追加，不覆盖**。§十一 的 `D1`–`D19`、§十二 的 `D20`/`D21`
+以及历史验收结论**一个字都没有改**。P0-13 仍然保持 **DONE**。
+
+## D22（✅ 已裁定，2026-09-27）—— `paid` / `accepted` 不允许批准售后退款申请
+
+### 裁定原文（产品负责人）
+
+> **paid / accepted 状态下，不允许批准售后退款申请。**
+>
+> 退款路径正式保持唯一：
+> - `paid` → 用户 direct full refund
+> - `accepted` → 用户 direct full refund
+> - `serving` → after-sales
+> - `completed` → complaint / after-sales
+
+### 这条裁定解决的是什么
+
+在它之前，退款路径在**规则层**是唯一的（`DIRECT_REFUNDABLE_ORDER_STATUSES = ["paid","accepted"]`、
+`REFUNDABLE_ORDER_STATUSES = ["serving","completed"]`，`lib/constants/refunds.ts`），
+但**售后审核入口没有对应的守卫**：
+
+- `adminRefundAllowedActions(status)` 只看**退款状态**，不看订单状态；
+- `approveRefund()` 里没有订单状态判断。
+
+于是「用户**开不出** paid/accepted 的售后申请」与「管理员**能批** paid/accepted 的存量申请」
+同时成立。这不是理论问题：预置数据 `rf-seed-1001-01`（挂 `accepted`）正是一条
+**可被批准**的存量申请，`tests/adminRefunds.test.mjs` 原本就是拿它当**批准 happy path** 跑的。
+
+### 实现（三道，缺一不可）
+
+| # | 落点 | 内容 |
+|---|---|---|
+| ① | `lib/constants/refunds.ts` | `assertRefundApprovalOrderStatus(orderStatus)`：返回 `null` 表示放行，否则返回拒绝文案 `REFUND_APPROVAL_ORDER_STATUS_MESSAGE`。判定复用既有的 `isOrderRefundable`——**不新造第二份状态集合** |
+| ② | `lib/data/adminRefundTransaction.ts` | `approveRefund()` 内新增失败类型 `order-status-not-eligible`，守卫排在 `canTransitionRefund` **之后**、一切金额计算与写入**之前**（见 13.2） |
+| ③ | `lib/services/adminRefunds.ts` | `toApiError` 把 `order-status-not-eligible` 翻成 **400**（与 `invalid-transition` 同类：管理员点错了对象，不是权限问题） |
+
+### 与「不依赖前端隐藏按钮」的关系
+
+裁定第 4 条要求**不依赖前端隐藏按钮**。这里遵守的方式是：**服务端守卫是保证，读侧 DTO 是告知**。
+两者都要有，且不能互相替代——
+
+- 只有写侧 → 详情页理直气壮地渲染一个永远 400 的「通过」按钮，管理员填完比例、看完预览金额、按下去才被拒；
+- 只有读侧 → 接口可以被直接请求，等于没有保护。
+
+⚠️ **这条在生产 HTTP 复验时才被发现**：服务端守卫做完之后，`GET /api/admin/refunds/rf-seed-1001-01`
+的 `allowedActions.canApprove` 仍然是 `true`。修复方式是让读侧与写侧**共用同一个纯函数**
+（`adminRefundAllowedActions(status, orderStatus)` 内部调用 `assertRefundApprovalOrderStatus`），
+并在 `AdminRefundDetail` 上新增 `approveBlockedReason`，内容与接口 400 的 `message` **是同一句话**。
+页面只显示这句话，**不自己判断订单状态**。
+
+### 存量申请仍然可以「开始审核 / 驳回」
+
+这是本节**最容易做错的地方**：把 `canApprove` 关掉的同时，不能把另外两个动作一起关掉。
+`paid` / `accepted` 的存量申请（P0-12 之前开出来的）**必须能被驳回**——
+那正是它们的应有处置，一起灰掉等于让它们永远悬在「待审核」里没人能收尾。
+因此 `canApprove` 多加一个与门，`canStartReview` / `canReject` **原样不动**。
+
+### `resolveCompanionRefundCopy()` 三档文案的定位
+
+§十二 的 `D20` 把打手退款通知按退款前的订单档位拆成三档，其中 `paid`/`accepted` 一档
+在 `D22` 之后**已不可达**（批不了，就走不到发通知那一步）。裁定第 7 条明确：
+**保留这一档作为防御性分支，但不能因此认为 paid/accepted after-sales approval 合法**。
+
+保留而不是删掉的理由：`default: throw` 已经能兜住未知档位，而 `paid`/`accepted`
+是**已知的、有明确文案的**档位——把它的文案删掉只会让未来的改动在撞上这两档时
+拿到一个「无对应文案」的崩溃，而不是一句写好的话。**它是一条防御性分支，不是一条合法路径**，
+这句话同时写进了 `lib/constants/refunds.ts` 的注释与 `EX-REFUND-08`。
+
+## 13.1 预置数据的处置：负向 fixture + 一条新的合法 fixture
+
+裁定第 5 条要求把 `rf-seed-1001-01` 从「可批准的 happy path」改成「审核应拒绝」。
+
+| 记录 | 处置 |
+|---|---|
+| `rf-seed-1001-01`（`pending`，订单 `accepted`） | **保留原状**，但从「happy path」改标为**负向 fixture**（批准必被拒、驳回正常）。理由见下 |
+| `rf-seed-1002-01`（`pending`，订单 `paid`） | 同上，一并标为负向 fixture |
+| `rf-seed-1003-01`（`pending`，订单 `ord-seed-1003-01` `completed`） | **新增**：一条落在合法档位、可被正常批准的待审核申请 |
+
+**为什么保留而不是改成合法状态**：这两条记录是 P0-12 之前的**历史留痕**，
+`refundSeed.ts` 顶部的不变量 2 已经专门解释过它们为什么能存在
+（"用 `isOrderRefundable` 去判会在这两条上抛错，那等于让预置数据去否认一段真实的业务历史"），
+`tests/directRefund.test.mjs` 也有用例钉住它们的处置方式。把订单状态改掉，
+等于**伪造一段没有发生过的历史**——用户端从来没有开过这张单的售后申请。
+保留并明确它是「必须被拒绝」的负向数据，比改数据更诚实，也让这条规则**有数据可测**。
+
+**为什么需要一条新的合法 fixture**：`paid` / `accepted` 开不出新申请之后，
+「一条可以正常批准的待审核申请」在预置数据里就不存在了，
+每个验「通过」的用例都得自己造一条。`rf-seed-1003-01` 因此成为必需品。
+
+⚠️ **选订单踩了一次坑（记录以免重犯）**：第一版把它挂在 `ord-seed-1001-10` 上，
+直接打挂了 `tests/refunds.test.mjs` 的 **10 个用例**——那张单是该文件
+`FREE_SERVING_ORDER` 的样本，断言「护航中且没有进行中申请时必须给出申请退款入口」，
+而在它上面挂一条待审核申请会让那个入口**按规则消失**（同一条规则的另一面）。
+最终挂在 `ord-seed-1003-01`（`completed`，属于 `u-1003`，全仓 grep 确认没有任何用例引用它）。
+**教训：加预置数据前要先 grep 订单 id，确认没被当"干净样本"复用。**
+
+## 13.2 守卫的位置（为什么「零副作用」是结构上成立的）
+
+`approveRefund()` 的实际顺序：
+
+```
+① requireIdempotencyKey / 幂等重放判定
+② 找退款申请（not-found）→ 找订单（order-missing）
+③ canTransitionRefund(status, "approved")        ← 状态机
+④ assertRefundApprovalOrderStatus(order.status)  ← 本次新增的订单状态闸  ★
+⑤ 解析资金决策（validateRefundDecisionInput）
+⑥ 金额闸（单次 0 / 累计不超实付 / 可退余额钳制）
+⑦ —— 原子区段开始（无 await）—— 退款 / 订单 / Earning / EarningAdjustment / 通知 / 审计
+⑧ —— 原子区段结束 ——
+```
+
+★ 在 ⑦ 之前，因此被挡下时**六类写入一条都没有发生**。
+这不是靠「记得别写」保证的，而是靠**位置**：守卫在原子区段之外、
+在所有写入之前返回。测试对这四类（退款记录 / 订单 / EarningAdjustment / 通知）
+逐一做了写入前后深比对，并额外比了 `earningStore().earnings.size`。
+
+## 13.3 测试
+
+新增 5 个用例（`tests/adminRefunds.test.mjs`）：
+
+| 用例 | 验的是裁定第 9 条的哪一项 |
+|---|---|
+| 状态闸（纯函数）：只有 serving / completed 通过 | paid / accepted / refunded 一律拒绝 |
+| 存量 accepted 单上的售后申请：批准被拒，四类数据一个字都不改 | **accepted 拒绝 + 零副作用** |
+| 存量 paid 单上的售后申请：被拒，且金额闸根本轮不到 | **paid 拒绝 + 守卫顺序**（排在金额闸之前） |
+| 状态闸只管「通过」：存量申请仍可正常驳回 | 另外两个动作**没有**被误伤 |
+| 状态闸放行的正是 serving：同一条申请在合法档位上批准成功 | **serving 正常批准** |
+
+`completed` 的正常批准由既有的
+「审核之后详情与列表读到的是新状态：通过的那一单订单状态也变成已退款」覆盖
+（`PENDING_REFUND` = `rf-seed-1003-01`，订单 `completed`）。
+
+另新增 1 个**读侧/写侧同口径**用例：详情 DTO 的 `canApprove` / `approveBlockedReason`
+必须与写侧同一个判断；并当场用同一张单把「读侧说能批、写侧真的批得下去」跑通。
+
+`tests/refundMoneyChain.test.mjs` 里那条原本把 accepted 售后批准当资金链 happy path 的用例
+（裁定第 6 条）已改写为「批准被拒、整条资金链一个字都不动」。
+
+**红-绿验证**：新增的读侧守卫用例做过一次红-绿——临时把 `canApprove` 的订单闸与
+`approveBlockedReason` 去掉，`adminRefunds.test.mjs` 立刻 **2 fail**；恢复后 42/42。
+
+### 顺带修掉的两处测试与数据耦合（非产品问题）
+
+新增一条预置数据打挂了 `tests/staffRefunds.test.mjs` 的两个**写死条数**的断言
+（`pending.total === 2`、`all.total === 6`、以及「翻 3 页」）。三处都改成**从种子推导**：
+
+- `pending.total` ← `refundSeed.filter(status === "pending").length`
+- `all.total` ← `refundSeed.length`
+- 翻页次数 ← `Math.ceil(total / pageSize)`，并补一条前置断言
+  `all.items.length === all.total`（否则 `all.items` 本身就是被截断的一页，
+  拿它当全集去比只会得出一个看起来通过的错断言）
+
+改完**断言强度没有降低**——反而更强：写死的条数在加数据时只会变成
+「数字对不对」的断言，而不是它们真正要守的「默认只看待审核」「翻页不漏不重」。
+
+## 13.4 本次改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `lib/constants/refunds.ts` | 新增 `REFUND_APPROVAL_ORDER_STATUS_MESSAGE`、`assertRefundApprovalOrderStatus()`；修正 `D20` 文案旁一处假前提的注释 |
+| `lib/constants/adminRefunds.ts` | `adminRefundAllowedActions(status, orderStatus)` 增参并加订单闸；`toAdminRefundDetail` 传 `order.status`、新增 `approveBlockedReason` |
+| `lib/types/refund.ts` | `AdminRefundDetail.approveBlockedReason`；`AdminRefundAllowedActions` 注释补第二维 |
+| `lib/data/adminRefundTransaction.ts` | 新增失败类型 `order-status-not-eligible`；`approveRefund` 内状态闸；`RefundReviewWriteFailure` 同步排除 |
+| `lib/services/adminRefunds.ts` | `toApiError` 新增 `order-status-not-eligible` → 400 |
+| `components/admin/AdminRefundConsole.tsx` | 渲染 `approveBlockedReason`（与 `ADMIN_REFUND_TERMINAL_NOTICE` 是两种情形） |
+| `lib/mocks/fixtures/refundSeed.ts` | 两条负向 fixture 标注；新增 `rf-seed-1003-01`（挂 `ord-seed-1003-01`） |
+| `tests/adminRefunds.test.mjs` | `PENDING_REFUND` 改为 `rf-seed-1003-01`；新增 6 个用例；修正一条 `orderStatus` 断言 |
+| `tests/refundMoneyChain.test.mjs` | accepted 售后批准用例改为「被拒 + 零副作用」 |
+| `tests/staffRefunds.test.mjs` | 三处写死条数改为从种子推导 |
+| `docs/01-requirements/超哥电竞_特殊情况与异常处理表.md` | `EX-REFUND-07` 与 `EX-REFUND-08` 记录本裁定 |
+| `docs/02-tech-design/api-contract.md` | `approve` 段补「仅 `serving` / `completed` 可批，否则 400 零副作用」；详情段补 `approveBlockedReason` 字段 |
+| `docs/03-dev/rounds/BATCH_p0-10_to_p0-13_最终报告.md` | 新增 §H：验收后的两批 fix（`D20`/`D21` 与 `D22`），明确**不回退 `DONE`** |
+| `tests/refunds.test.mjs` | 仅补一条注释：两条存量负向预置数据「过得了自洽检查，但过不了审核」 |
+
+## 13.5 复验证据（2026-09-27）
+
+| 项 | 结果 |
+|---|---|
+| `node --test` 目标文件 | `adminRefunds` 42/42、`refundMoneyChain` 全部通过、`refunds` / `directRefund` 通过 |
+| `pnpm test`（本地） | **1398 tests / 1252 pass / 0 fail / 146 skip**（146 skip 是 HTTP 用例未设 `APP_BASE_URL`） |
+| `pnpm typecheck` | 通过（`next typegen && tsc --noEmit`） |
+| `pnpm lint` | 通过（exit 0） |
+| `pnpm build` | 通过（exit 0） |
+| `pnpm test` + `APP_BASE_URL`（`next start -p 3105` 生产构建） | **1398 tests / 1398 pass / 0 fail / 0 skip** |
+| 生产 HTTP 手测 | `approve` 存量 `accepted` → **400** + 裁定文案；`approve` 存量 `paid` → **400**；两条记录复读仍是 `pending`、`decision` 仍为 `null`（零副作用）；`reject` 两条 → **200** 且订单未动；`approve` `serving` → 200（退 4980 分）；`approve` `completed` → 200（退 39900 分）；详情读侧 `canApprove` 与 `approveBlockedReason` 四档全部符合预期 |
+| 复核 | `reviewer-agent` 只读复核：**0 BLOCKER / 0 MAJOR / 5 MINOR / 2 NOTE**；5 条 MINOR **已全部修掉**（见 13.6） |
+| 复核后复验 | 改完 MINOR 后**重跑全部门禁**：`typecheck` / `lint` / `build` 均 exit 0；`pnpm test` 1398/1252/0/146；生产构建 + `APP_BASE_URL` **1398/1398/0/0**；生产 HTTP 七项手测与页面三例手测全部符合预期 |
+
+## 13.6 复核结论与 5 条 MINOR 的处置（2026-09-27）
+
+`reviewer-agent` 只读复核结论：**0 BLOCKER / 0 MAJOR / 5 MINOR / 2 NOTE**。
+五条 MINOR **全部经我本人复验属实，全部修掉**（不是记录后放行）：
+
+| # | 问题 | 为什么必须修 | 处置 |
+|---|---|---|---|
+| M1 | `approveBlockedReason` **无条件下发** | 终态申请（其订单必然已是 `refunded`）会同时渲染「这笔退款申请已结束」与「订单不在审批范围内」，把管理员引到**错误的原因**上——真正的原因是「这笔早批完了」。这直接违背 `lib/types/refund.ts` 上自己写的「两个原因不得合并」 | 先过 `canTransitionRefund` 再问订单档位；补**终态用例**；**红-绿验证**（还原 → 1 fail；改回 → 42/42） |
+| M2 | 三处注释仍写「审核入口对订单档位**没有守卫**」「`tests/adminRefunds.test.mjs` **今天仍在批准它**」 | 这是**主动误导**：下一个开发者会以为 paid/accepted 售后退款在设计上合法，于是新增用例、撞上 400、**误判为闸门 bug 而把它删掉**——正是 `D22` 要防的回归 | 三处改为「`D22` 之后不可达，保留为防御性；**若变得可达，说明闸门被绕过，该修的是闸门**」 |
+| M3 | `refundSeed.ts` 注释指向**不存在**的 `rf-seed-1001-06` | 按注释排查会找不到东西，或误以为有一条被遗漏的种子 | 改为实际 id `rf-seed-1003-01` |
+| M4 | 用例标题「放行的正是 **serving**」而夹具实际是 `completed` | 标题与事实脱节 → 读者以为 serving 一档被具名覆盖，实际没有，将来那条用例被删也无人发现 | 标题据实改写 + 补**前置断言** `orderStatus === "completed"`，再脱节会当场变红 |
+| M5 | `api-contract.md` 未记新增的 400 与 `approveBlockedReason` | 对外可观察的失败码不进契约，前端遇到 400 只能猜 | 契约两处补全，改动清单同步补该文件 |
+
+**2 条 NOTE 未改代码，如实记录**：
+
+- **NOTE 1**：畸形请求体的 400（如缺比例）**先于**档位闸的 400 返回。两者都在任何写入之前，
+  **不违反**裁定第 8 条，只是错误信息的先后。**排查时别据错误码反推闸门位置**。
+- **NOTE 2**：拒绝用例里的 `deepEqual` 快照**依赖仓储的替换语义**才能生效；
+  真正抓写入的是同一用例里的**计数断言**（审计 / 退款 / 通知 / `EarningAdjustment` / `earning`）。
+  这几条计数断言**已具备**并予以保留——后人不要只留 `deepEqual`。
+
+⚠️ 复核方明确声明**未运行测试**，因此 13.5 的门禁数字由我本人跑出；复核做的是代码层验证。
+⚠️ MINOR 修完之后**重跑了全部门禁**（见 13.5），不是「改完就算」。
+
+## 13.7 本轮**没有**改变的事（防止后人误读）
+
+- ❌ 没有改任何**金额公式**、`incomeAmount` 不可变性、`0 <= 累计冲回 <= incomeAmount`、
+  累计 `refundedAmount <= actualPaidAmount`、幂等键或权限/DTO 边界；
+- ❌ **没有**改用户端的两条 `paid` / `accepted` 免审批直接退款路径（`EX-REFUND-07` 原样）；
+- ❌ 没有删除 `rf-seed-1001-01` / `rf-seed-1002-01`，也**没有**改它们的订单状态
+  （它们是历史留痕，改掉等于伪造历史）；
+- ❌ 没有把 `resolveCompanionRefundCopy()` 的三档删成两档；
+- ❌ 没有重新裁定 Q1/Q2/Q3（`withdrawn` 仍 **DEFER**）；
+- ❌ 没有回退 `DONE`，没有改历史验收结论，没有开始 P0-14。

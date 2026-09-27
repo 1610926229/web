@@ -2,7 +2,10 @@ import { toRefundAuditSnapshot } from "@/lib/constants/adminAudit";
 import { canTransitionRefund } from "@/lib/constants/adminRefunds";
 import {
   REFUND_NOTIFICATION_COMPANION_REFUNDED,
+  REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION,
+  REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE,
   assertRefundAmountWithinPaid,
+  assertRefundApprovalOrderStatus,
   computeRefundDecisionAmounts,
   isFullyRefunded,
   resolveFinalDecisionAmounts,
@@ -21,6 +24,7 @@ import {
   appendEarningAdjustment,
   applyEarningReversal,
   earningStore,
+  findEarningAdjustmentIdByRefund,
   newEarningAdjustmentId,
 } from "./mockEarningRepository";
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
@@ -110,20 +114,41 @@ export type AdminRefundWriteFailure =
    * 仍在 `lib/constants/refunds.ts`。反复出现在这里的其实是同一条规则，
    * 拆成枚举再让服务层映射回来只会让这句话有两个可能的落点。
    */
-  | { kind: "decision-invalid"; message: string };
+  | { kind: "decision-invalid"; message: string }
+  /**
+   * 订单档位不允许走售后**审批**（产品裁定 2026-09-27）。
+   *
+   * 只有 `serving` / `completed` 能进入售后资金链；`paid` / `accepted` 走的是
+   * 用户直接全额退款那条路，**不存在**可被管理员批准的售后申请。
+   *
+   * ⚠️ 这一条判的是**订单**档位，`invalid-transition` 判的是**退款申请**的状态——
+   * 两者会同时成立（一条挂在 `accepted` 单上的 `pending` 申请，
+   * 退款状态本身是允许通过的），因此必须分开报，否则管理员会以为自己点错了按钮。
+   *
+   * ⚠️ 与 `decision-invalid` 一样**带一句文案**：句子来自常量层的规则函数
+   * （`assertRefundApprovalOrderStatus`），数据层只转述。
+   */
+  | { kind: "order-status-not-eligible"; message: string };
 
 /**
  * 「只改退款申请」的两个动作（开始审核 / 拒绝）的失败情形。
  *
- * ⚠️ 用 `Exclude` 把 `decision-invalid` 摘出去，而不是让每一个这样的调用方
- * 在 `switch` 里补一个永远走不到的分支：这两个动作的入参里**根本没有资金决策**，
- * 它们不可能算出「金额过不了闸」。补一个分支就意味着要编一句不知道说给谁听的文案，
- * 而那种文案迟早会被当成真的能发生的事去排查。
+ * ⚠️ 用 `Exclude` 把 `decision-invalid` 与 `order-status-not-eligible` 摘出去：
  *
+ * - 这两个动作的入参里**根本没有资金决策**，不可能算出「金额过不了闸」；
+ * - 它们也**必须可以**作用在历史遗留的申请上——把一条挂在 `accepted` 单上的
+ *   存量申请**驳回**掉，正是该有的处置方式。若把状态闸也加在它们身上，
+ *   那些申请既批不了、也驳不掉，会永远悬在「待审核」。
+ *
+ * 补一个走不到的分支就意味着要编一句不知道说给谁听的文案，
+ * 而那种文案迟早会被当成真的能发生的事去排查。
  * 类型上说不出来，比运行时再拦一道更早——与 `AdminRefundDecisionRequest`
  * 把「只有分担制才有责任比例」写进判别联合是同一个理由。
  */
-export type RefundReviewWriteFailure = Exclude<AdminRefundWriteFailure, { kind: "decision-invalid" }>;
+export type RefundReviewWriteFailure = Exclude<
+  AdminRefundWriteFailure,
+  { kind: "decision-invalid" } | { kind: "order-status-not-eligible" }
+>;
 
 export type AdminRefundWriteResult =
   | {
@@ -229,13 +254,56 @@ export async function startReviewRefund(
 // ——————————————————————————— 通过（§退款审核 的核心） ———————————————————————————
 
 /**
+ * 按**退款发生前**的订单档位，挑一条**每一句都为真**的打手退款文案。
+ *
+ * ⚠️ 这张表就是产品裁定 `D20` 的落点，**三档缺一不可**：
+ *
+ * | 退款前档位 | 文案 | 为什么这几句是真的 |
+ * |---|---|---|
+ * | `paid` / `accepted` | `REFUND_NOTIFICATION_COMPANION_REFUNDED` | 服务尚未开始；不生成收益 |
+ * | `serving` | `..._IN_SERVICE` | 服务已开始；全额退款不生成 completed Earning |
+ * | `completed` | `..._AFTER_COMPLETION` | 收益已生成过并按本次核定结果结算 |
+ *
+ * ⚠️ **为什么不能写成两分支**：`completed ? A : B` 会把 `paid` / `accepted`
+ * 静默归进 `B`（「服务已开始」），而这两档**根本没有开始过**——
+ * 于是通知又成了一句与事实相反的话，只是换到了另一档。
+ * 写两分支时这**是**一条真实路径：存量申请 `rf-seed-1001-01` 挂在 `accepted` 的
+ * `ord-seed-1001-03` 上，`tests/adminRefunds.test.mjs` 当时确实在批准它。
+ *
+ * ✅ **P0-13 §十三 `D22`（2026-09-27）之后 `paid` / `accepted` 分支不可达**：
+ * 产品裁定那两档不允许批准售后退款，审核入口已由 `assertRefundApprovalOrderStatus`
+ * 把守（见本文件 `approveRefund` 里的状态闸）。三档因此是**防御性**的。
+ * ⚠️ 若将来这一档变得可达（有测试能批准一张 `paid` / `accepted` 单的售后申请），
+ * **那是闸门被绕过的信号，该修的是闸门**——不要反过来把这一档当成合法路径。
+ *
+ * ⚠️ **未列入上表的档位直接抛错**（而不是给个默认文案）：`refunded` 不可能
+ * 还存在可批准的申请，真出现说明不变式已经破了。这里**位于写入之前**，
+ * 抛错等于整个审核**零副作用**地失败——比退完钱再发一句错话好。
+ */
+function resolveCompanionRefundCopy(orderStatus: Order["status"]) {
+  switch (orderStatus) {
+    case "paid":
+    case "accepted":
+      return REFUND_NOTIFICATION_COMPANION_REFUNDED;
+    case "serving":
+      return REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE;
+    case "completed":
+      return REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION;
+    default:
+      throw new Error(`退款通知无对应文案：订单档位 ${orderStatus}`);
+  }
+}
+
+/**
  * 构造并校验一条**发给被退单打手**的通知（尚未写入）。
  *
  * ⚠️ 与 `directRefundTransaction` / `companionOrderTransaction` 里的同名逻辑
  * **刻意各留一份**，理由与那两处相同（十几行、不含业务判断，合并反而要为
  * 「将来第 N 种通知」预留参数）。本份与它们的区别是**触发时机**：
  * 那两处是「订单还没开始服务就被退掉」，这一处是「累计退满、这一单到此为止」。
- * 文案相同（`REFUND_NOTIFICATION_COMPANION_REFUNDED`），但同段写下去的东西完全不同。
+ *
+ * ⚠️ **文案按订单走到哪一档选**（P0-13 后续 fix，产品裁定「按场景拆文案」）：
+ * 见 `resolveCompanionRefundCopy()` —— 三档各有一条为真的文案。
  *
  * ⚠️ **只有累计退满时才会被调用**：部分退款不改订单状态、这一单还要继续做，
  * 打手并没有「被退单」——那会给一位还在服务中的打手发一条「你的订单被退款了」。
@@ -247,15 +315,25 @@ export async function startReviewRefund(
 function planCompanionRefundNotification(input: {
   userId: string;
   orderId: string;
+  orderStatus: Order["status"];
   at: string;
 }): Notification {
+  // ⚠️ **三档必须各有一条分支**，不能写成「completed ? A : B」——
+  //    那会把 `paid` / `accepted` 静默归进「服务已开始」，而它们**根本没有开始过**，
+  //    于是这条通知又变成一句与事实相反的书面结论（只是换到了另一档）。
+  //    写两分支时这**是**可达的：预置存量申请 `rf-seed-1001-01` 就挂在
+  //    `ord-seed-1001-03`（`accepted`）上，`tests/adminRefunds.test.mjs` 当时确实在批准它。
+  //    它当时没发出假通知纯属巧合——那位打手 `cp-2` 的 `userId` 为 null、没有收信地址。
+  //    ✅ `D22`（2026-09-27）之后这条路已被审核入口的状态闸堵死，这一档变成防御性分支。
+  const copy = resolveCompanionRefundCopy(input.orderStatus);
+
   const payload: NotificationInput = {
     userId: input.userId,
     // 这是「退款」这件事的通知，不是派单通知：用户端按 kind 分组展示
     kind: "refund",
-    title: REFUND_NOTIFICATION_COMPANION_REFUNDED.title,
-    summary: REFUND_NOTIFICATION_COMPANION_REFUNDED.summary,
-    body: REFUND_NOTIFICATION_COMPANION_REFUNDED.body,
+    title: copy.title,
+    summary: copy.summary,
+    body: copy.body,
     // 打手端的订单页，不是用户端的 `/orders/[id]`——那里会重新校验订单归属
     href: `/companion/orders/${input.orderId}`,
   };
@@ -372,6 +450,21 @@ export async function approveRefund(
     return { kind: "invalid-transition", status: existing.status };
   }
 
+  /* —— 状态闸：只有 serving / completed 能进入售后资金链（产品裁定 2026-09-27） —— */
+
+  // ⚠️ 这一判**必须**排在下面所有读取与写入之前：它就是「零副作用」的全部实现。
+  //    放在金额计算之后、写入之前也「不会写坏东西」，但那时已经读过收益、
+  //    算过金额，失败路径的语义就从「没开始」变成「算完了又反悔」——
+  //    而这条闸的判据只有一个字段，没有任何理由晚判。
+  //
+  // ⚠️ 为什么由服务端判而不是靠前端藏按钮：这条闸要挡的是**存量**申请
+  //    （`paid` / `accepted` 在 P0-12 之后已开不出新申请，但历史记录还在），
+  //    客户端看不出它和一条合法申请有什么区别。
+  const orderStatusMessage = assertRefundApprovalOrderStatus(order.status);
+  if (orderStatusMessage !== null) {
+    return { kind: "order-status-not-eligible", message: orderStatusMessage };
+  }
+
   /* —— 决策：先读既往冲回额，再按冻结公式算三个金额 —— */
 
   // 这一单**此前已批准**退款的累计冲回额（定义与理由见
@@ -438,8 +531,15 @@ export async function approveRefund(
     : null;
   const recipientUserId = companion?.userId ?? null;
   // 通知在**任何写入之前**构造、校验并拿到 id；写入段里只剩一次不会失败的 append
+  // ⚠️ 传的是**写入之前**读到的订单状态：通知是在任何写入之前构造的，
+  //    因此这里拿到的就是「这一单退掉之前走到哪一档」，文案才选得对
   const notification = recipientUserId
-    ? planCompanionRefundNotification({ userId: recipientUserId, orderId: order.id, at: ctx.at })
+    ? planCompanionRefundNotification({
+        userId: recipientUserId,
+        orderId: order.id,
+        orderStatus: order.status,
+        at: ctx.at,
+      })
     : null;
 
   /* —— 写入 —— */
@@ -463,8 +563,14 @@ export async function approveRefund(
   if (!orderWritten) throw new Error("退款审核通过时订单写入失败");
 
   // ④ 收益：累计冲回 + 一条明细。两者必须同段落库——只写其中一个，
-  //    「读用总数、审计用明细」这条关系就断了（不变式用例会当场抓住）
-  if (earning && companionReversalAmount > 0) {
+  //    「读用总数、审计用明细」这条关系就断了（不变式用例会当场抓住）。
+  //
+  //    ⚠️ **先验证再动钱**（P0-13 后续 fix）：同一退款决策只能冲一次（幂等键 = refundId）。
+  //    已经冲过就**跳过而不是报错**——「重放不重复冲回」是业务规则，报错会把一次
+  //    本来正确的重放变成 500。判定必须在 `applyEarningReversal` **之前**：
+  //    放到之后，存储层那道重复抛错留下的就是「钱冲了、明细没写」的悬空状态。
+  const alreadyReversed = findEarningAdjustmentIdByRefund(refundId) !== null;
+  if (earning && companionReversalAmount > 0 && !alreadyReversed) {
     const reversal = applyEarningReversal(earning.id, companionReversalAmount);
     if (!reversal) throw new Error("退款冲回时收益写入失败");
 

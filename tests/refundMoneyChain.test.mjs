@@ -9,6 +9,9 @@ import {
   REFUND_DECISION_RATE_REQUIRED_MESSAGE,
   REFUND_DECISION_RESPONSIBILITY_INVALID_MESSAGE,
   REFUND_DECISION_RESPONSIBILITY_REQUIRED_MESSAGE,
+  REFUND_NOTIFICATION_COMPANION_REFUNDED,
+  REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION,
+  REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE,
   assertRefundAmountWithinPaid,
   computeRefundDecisionAmounts,
   isFullyRefunded,
@@ -28,14 +31,20 @@ import {
 } from "../lib/data/companionOrderTransaction.ts";
 import { directRefundOrder } from "../lib/data/directRefundTransaction.ts";
 import { approveCompletion, submitCompletion } from "../lib/data/completionTransaction.ts";
-import { sweepMaturedEarnings } from "../lib/data/earningTransaction.ts";
-import { applyEarningReversal, earningStore } from "../lib/data/mockEarningRepository.ts";
+import { settleOrderCompletion, sweepMaturedEarnings } from "../lib/data/earningTransaction.ts";
+import {
+  appendEarningAdjustment,
+  applyEarningReversal,
+  earningStore,
+  findEarningAdjustmentIdByRefund,
+  newEarningAdjustmentId,
+} from "../lib/data/mockEarningRepository.ts";
 import { adminAuditStore } from "../lib/data/mockAdminAuditRepository.ts";
 import { notificationStore } from "../lib/data/mockNotificationRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { getDispatchRepository } from "../lib/data/dispatchRepository.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
-import { applyOrderRefund } from "../lib/data/mockPaymentRepository.ts";
+import { applyOrderRefund, paymentStore } from "../lib/data/mockPaymentRepository.ts";
 import { getRefundRepository } from "../lib/data/refundRepository.ts";
 import {
   approveAdminRefund,
@@ -88,6 +97,17 @@ const PRODUCT = { productId: "p-400w", specId: "s-400w", region: "手游" };
 const ADMIN = "admin-1";
 const STAFF = { id: "staff-1", name: "客服小雨" };
 const COMPANION_A = "cp-1";
+
+/**
+ * 一位**有收信地址**的打手：`cp-10` → `u-1022`（DEV-1 预置的有效打手）。
+ *
+ * ⚠️ 验通知的用例**必须**用它，不能用 `cp-1`：预置 `cp-*` 大多 `userId` 为 null，
+ * 那种打手在 `adminRefundTransaction` 里算不出 `recipientUserId`，
+ * 通知**根本不会被构造**。用 `cp-1` 断言「有没有通知」，两边都是 0——
+ * 断言永远成立，也就永远证明不了任何事。
+ */
+const NOTIFIABLE_COMPANION = "cp-10";
+const NOTIFIABLE_COMPANION_USER = "u-1022";
 
 let seq = 0;
 function unique(prefix) {
@@ -143,6 +163,17 @@ function allNotifications() {
   return [...notificationStore().notifications.values()];
 }
 
+/**
+ * 只挑「退款」这一类通知。
+ *
+ * ⚠️ 不能拿 `allNotifications().length` 的增减来验退款通知：
+ * 造一张 `completed` 订单本身就会产生一串通知（支付、接单、开始服务、完成……），
+ * 于是「总数变多了」在**退款一条都没发**的情况下也成立。
+ */
+function refundNotifications() {
+  return allNotifications().filter((item) => item.kind === "refund");
+}
+
 // ————————————————————————— 构造一张有收益的订单 —————————————————————————
 
 /**
@@ -151,7 +182,10 @@ function allNotifications() {
  * 与 `tests/earning.test.mjs` 的同类辅助保持同一套时刻关系（接单 −41 / 开始服务 −21 /
  * 提交材料 −11），因此这里不需要重新论证一遍链路自身的先后关系。
  */
-async function completedOrder({ completedAt = plusMinutes(now(), 62) } = {}) {
+async function completedOrder({
+  completedAt = plusMinutes(now(), 62),
+  companionId = COMPANION_A,
+} = {}) {
   const user = unique("u-p13");
   const created = await createPaymentRequest(
     {
@@ -172,20 +206,20 @@ async function completedOrder({ completedAt = plusMinutes(now(), 62) } = {}) {
   const dispatch = await getDispatchRepository().findDispatchByOrderId(orderId);
   assert.ok(dispatch, "支付成功后必须有一条派单记录");
   const accepted = await acceptDispatch(dispatch.id, {
-    companionId: COMPANION_A,
+    companionId,
     at: plusMinutes(completedAt, -41),
   });
   assert.equal(accepted.kind, "ok");
 
   const started = await startCompanionOrderTransaction({
-    companionId: COMPANION_A,
+    companionId,
     orderId,
     at: plusMinutes(completedAt, -21),
   });
   assert.equal(started.kind, "ok");
 
   const submitted = await submitCompletion({
-    companionId: COMPANION_A,
+    companionId,
     orderId,
     summary: "已完成护航服务",
     evidence: [],
@@ -217,7 +251,10 @@ async function completedOrder({ completedAt = plusMinutes(now(), 62) } = {}) {
  * 它专门用来验 D9：退款时收益还不存在，冲回必须**记在退款决策上**，
  * 等这一单将来结算时再补记，而不是当场丢掉。
  */
-async function servingOrder({ at = plusMinutes(now(), 32) } = {}) {
+async function servingOrder({
+  at = plusMinutes(now(), 32),
+  companionId = COMPANION_A,
+} = {}) {
   const user = unique("u-p13s");
   const created = await createPaymentRequest(
     {
@@ -236,12 +273,12 @@ async function servingOrder({ at = plusMinutes(now(), 32) } = {}) {
 
   const dispatch = await getDispatchRepository().findDispatchByOrderId(orderId);
   const accepted = await acceptDispatch(dispatch.id, {
-    companionId: COMPANION_A,
+    companionId,
     at: plusMinutes(at, -21),
   });
   assert.equal(accepted.kind, "ok");
   const started = await startCompanionOrderTransaction({
-    companionId: COMPANION_A,
+    companionId,
     orderId,
     at,
   });
@@ -916,9 +953,14 @@ test("存储层护栏：即使调用方算错，收益也不会被冲得比挣�
 // ————————————————————————— 六、退满的副作用与可见性 —————————————————————————
 
 test("退满才关派单并通知打手；部分退款两件事都不做", async () => {
-  const partial = await completedOrder();
+  // ⚠️ 用 `cp-10`（有 `userId`）而不是 `cp-1`：`cp-1` 的 `userId` 为 null，
+  //    通知**根本不会被构造**，于是「有没有通知」这件事在它身上无法证伪。
+  //    本轮独立复核发现原断言拿的是 `allNotifications().length` 的增量，
+  //    而两次 `completedOrder()` 自身就会产生一串支付/接单/完成通知——
+  //    那个「变多了」在退款一条都没发的情况下同样成立。这里改成只看退款类通知。
+  const partial = await completedOrder({ companionId: NOTIFIABLE_COMPANION });
   const partialRefund = await requestRefund(partial.orderId, partial.user);
-  const notificationsBefore = allNotifications().length;
+  const refundsBefore = refundNotifications().length;
   await approve(
     partialRefund,
     decisionBody({ refundRatePercent: "50", responsibility: "companion" }),
@@ -926,9 +968,9 @@ test("退满才关派单并通知打手；部分退款两件事都不做", async
 
   const dispatchAfterPartial = await getDispatchRepository().findDispatchByOrderId(partial.orderId);
   assert.notEqual(dispatchAfterPartial.state, "timed_out", "部分退款不得关闭派单");
-  assert.equal(allNotifications().length, notificationsBefore, "部分退款不通知打手");
+  assert.equal(refundNotifications().length, refundsBefore, "部分退款不通知打手");
 
-  const full = await completedOrder();
+  const full = await completedOrder({ companionId: NOTIFIABLE_COMPANION });
   const fullRefund = await requestRefund(full.orderId, full.user);
   await approve(fullRefund, decisionBody({ responsibility: "companion" }));
 
@@ -936,19 +978,186 @@ test("退满才关派单并通知打手；部分退款两件事都不做", async
   assert.equal(dispatchAfterFull.state, "timed_out", "退满必须关闭派单");
   assert.equal(
     dispatchAfterFull.acceptedByCompanionId,
-    COMPANION_A,
+    NOTIFIABLE_COMPANION,
     "关闭派单不得抹掉「谁接的」这段历史",
   );
   assert.equal(
     (await orderOf(full.orderId)).actualCompanionId,
-    COMPANION_A,
+    NOTIFIABLE_COMPANION,
     "订单也必须留着 actualCompanionId",
   );
 
-  assert.ok(
-    allNotifications().length > notificationsBefore,
-    "退满必须给打手留一条通知",
+  const delivered = refundNotifications();
+  assert.equal(delivered.length, refundsBefore + 1, "退满必须给打手留**恰好一条**退款通知");
+  assert.equal(delivered.at(-1).userId, NOTIFIABLE_COMPANION_USER, "通知要送到打手的账号上");
+});
+
+// ————————————— 六之二、P0-13 后续 fix：通知文案按场景、冲回明细只许一条 —————————————
+//
+// 独立复核发现（M1）：售后审批退满的打手通知**复用了直接退款那条文案**，
+// 而那条文案断言了「客户在**服务开始前**取消」与「本单**不产生收益**」。
+// 走售后审批的只有 `serving` / `completed` 两档，这两句话**双双为假**：
+// 服务已经开始过；`completed` 的收益也已经生成过并按本次核定结果冲回。
+// 产品裁定「按场景拆文案」，下面是钉住这个裁定的用例。
+
+test("fix M1：completed 整单退款 → 通知说「已完成」，不再说「服务开始前取消 / 不产生收益」", async () => {
+  const { user, orderId, earning } = await completedOrder({ companionId: NOTIFIABLE_COMPANION });
+  const refundId = await requestRefund(orderId, user);
+  // ⚠️ 预置数据里本来就有退款类通知，所以只能看**这一次新增的那条**，
+  //    不能断言「总数等于 1」
+  const idsBefore = refundNotifications().map((item) => item.id);
+  await approve(refundId, decisionBody({ responsibility: "companion" }));
+
+  const mine = refundNotifications().filter((item) => !idsBefore.includes(item.id));
+  assert.equal(mine.length, 1, "退满必须留**恰好一条**新的退款通知");
+  assert.equal(mine[0].userId, NOTIFIABLE_COMPANION_USER, "通知要送到这位打手的账号上");
+  assert.equal(mine[0].title, REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION.title);
+  assert.equal(mine[0].summary, REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION.summary);
+  assert.equal(mine[0].body, REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION.body);
+
+  // 反例才是这条用例的意义所在：把那条为「还没开始服务」写的文案接回售后路径，
+  // 打手会收到一句与账实相反的书面结论（他的收益**已经生成过**，就在下面）
+  assert.notEqual(
+    mine[0].body,
+    REFUND_NOTIFICATION_COMPANION_REFUNDED.body,
+    "completed 单不得复用「服务开始前取消」那条文案",
   );
+  // ⚠️ 判别串取「开始服务前」——那是**直接退款那条 body 里真实存在的措辞**；
+  //    写成「服务开始前」就成了一条恒真的断言（三条 body 里谁都没有那五个字）
+  assert.ok(
+    !mine[0].body.includes("开始服务前"),
+    "completed 单的服务明明已经开始过，不能说「服务开始前」",
+  );
+  assert.ok(
+    !mine[0].body.includes("不产生收益"),
+    "completed 单的收益已经生成过，不能说「不产生收益」",
+  );
+  assert.ok(earning, "前置：completed 单一定有收益");
+});
+
+test("fix M1：serving 整单退款 → 通知说「服务已开始」，且「不产生收益」在这里是真的", async () => {
+  const { user, orderId } = await servingOrder({ companionId: NOTIFIABLE_COMPANION });
+  const refundId = await requestRefund(orderId, user);
+  const idsBefore = refundNotifications().map((item) => item.id);
+  await approve(refundId, decisionBody({ responsibility: "platform" }));
+
+  const mine = refundNotifications().filter((item) => !idsBefore.includes(item.id));
+  assert.equal(mine.length, 1, "退满必须留**恰好一条**新的退款通知");
+  assert.equal(mine[0].userId, NOTIFIABLE_COMPANION_USER, "通知要送到这位打手的账号上");
+  assert.equal(mine[0].summary, REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE.summary);
+  assert.equal(mine[0].body, REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE.body);
+
+  // 同样不能说「开始服务前」——这一单已经 start 过了
+  assert.ok(
+    !mine[0].body.includes("开始服务前"),
+    "serving 单的服务已经开始过，不能说「服务开始前」",
+  );
+  // 但「不产生收益」在这一档**是成立的**：serving 全额退款不生成 completed Earning
+  // （`cmd_p0-13.md`：全额退款终止履约、不产生正常 completed Earning）
+  assert.equal(
+    earningOfOrder(orderId),
+    null,
+    "前置：serving 全额退款不产生 completed 收益——所以那句话在这里是真的",
+  );
+  assert.ok(mine[0].body.includes("不产生收益"));
+
+  // ⚠️ 但那句话是**面向将来**的结论，「此刻没有收益」还不足以支撑它——
+  //    真正会否证它的是「这张单后来又被结算了一次」。这里把结算入口再驱动一遍：
+  //    已退款的单不得补建收益，那句话才真的成立（也顺手钉住 `settleOrderCompletion`
+  //    对非 serving 单的早返回，这条链路上原本没有用例覆盖）。
+  const resettled = settleOrderCompletion({ orderId, at: plusMinutes(now(), 5) });
+  assert.equal(resettled?.changed, false, "已退款的单不得再被结算");
+  assert.equal(earningOfOrder(orderId), null, "退款之后也不会补建收益——所以那句话为真");
+});
+
+test("裁定后：paid / accepted 的存量申请**批准被拒**，整条资金链一个字都不动", async () => {
+  // 2026-09-27 产品裁定：`paid` / `accepted` 不允许批准售后退款申请
+  // （退款路径唯一：这两档走用户直接全额退款）。审核入口因此有了状态闸。
+  //
+  // 这条用例在**金额链**这一侧再钉一次：被拒的批准必须连**收益与冲回明细**都不碰。
+  // 拒的是「存量」——`rf-seed-1001-01` 挂在 `accepted` 的 `ord-seed-1001-03` 上，
+  // 是 P0-12 之前的真实历史留痕，不是构造出来的边界。
+  const order = paymentStore().orders.get("ord-seed-1001-03");
+  assert.ok(order, "前置：这张存量订单还在");
+  assert.equal(order.status, "accepted", "前置：它是 accepted——服务确实没开始过");
+
+  const refundBefore = await refundOf("rf-seed-1001-01");
+  const idsBefore = refundNotifications().map((item) => item.id);
+  const adjustmentsBefore = earningStore().adjustments.size;
+  const earningsBefore = earningStore().earnings.size;
+
+  await assert.rejects(
+    () => approve("rf-seed-1001-01", decisionBody({ responsibility: "platform" })),
+    (error) => {
+      assert.equal(error.code, "BAD_REQUEST");
+      return true;
+    },
+  );
+
+  // 退款申请、订单、通知、收益、冲回明细：一处都没动
+  assert.deepEqual(await refundOf("rf-seed-1001-01"), refundBefore, "退款记录不得被改动");
+  assert.equal(
+    (paymentStore().orders.get("ord-seed-1001-03")).status,
+    "accepted",
+    "订单不得被改动",
+  );
+  assert.equal(
+    refundNotifications().filter((item) => !idsBefore.includes(item.id)).length,
+    0,
+    "被拒的批准不得发出任何通知",
+  );
+  assert.equal(earningStore().adjustments.size, adjustmentsBefore, "不得写 EarningAdjustment");
+  assert.equal(earningStore().earnings.size, earningsBefore, "不得改动收益");
+
+  // ⚠️ 三档文案里的 `paid` / `accepted` 那一支因此是**防御性**的：
+  //    状态闸在它之前就把这两档挡住了，走不到 `resolveCompanionRefundCopy()`。
+  //    保留它不代表这两档的售后批准合法——见 `02-decisions.md` §十三 的分工说明。
+});
+
+test("fix M1：三段文案互不相同——挡住「把直接退款那条接回售后路径」的回归", () => {
+  const bodies = [
+    REFUND_NOTIFICATION_COMPANION_REFUNDED.body,
+    REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION.body,
+    REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE.body,
+  ];
+  assert.equal(new Set(bodies).size, 3, "三段文案必须彼此不同，否则拆文案等于没拆");
+});
+
+test("fix M2：同一 refundId 再追加一条冲回明细 → 存储层抛错，且一个字节都不写", () => {
+  const first = {
+    id: newEarningAdjustmentId(),
+    earningId: "earn-guard",
+    orderId: "ord-guard",
+    refundId: "ref-guard",
+    type: "refund_reversal",
+    amount: 100,
+    responsibility: "companion",
+    createdAt: now(),
+    adminId: "admin-guard",
+  };
+
+  appendEarningAdjustment(first);
+  assert.equal(
+    findEarningAdjustmentIdByRefund("ref-guard"),
+    first.id,
+    "写完第一条之后，索引必须能读出来（在这之前它只写不读）",
+  );
+
+  const countBefore = earningStore().adjustments.size;
+  assert.throws(
+    () => appendEarningAdjustment({ ...first, id: newEarningAdjustmentId() }),
+    /拒绝重复冲回/,
+    "同一笔退款决策只能有一条冲回明细",
+  );
+
+  // 抛错发生在两次写入**之前**，因此存储必须原样不动：既没有多出来的明细，
+  // 索引也没有被改指向新的那条（那会让「这笔冲回是哪条明细」指向一个重复记录）
+  assert.equal(earningStore().adjustments.size, countBefore, "抛错时不得留下任何写入");
+  assert.equal(findEarningAdjustmentIdByRefund("ref-guard"), first.id, "索引不得被改写");
+});
+
+test("fix M2：没有明细的 refundId 读出来是 null，不是空串或 undefined", () => {
+  assert.equal(findEarningAdjustmentIdByRefund("ref-never-written"), null);
 });
 
 test("D13：责任归属与平台承担额只给管理员；客服与用户只看到实退金额", async () => {

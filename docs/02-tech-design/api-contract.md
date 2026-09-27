@@ -116,7 +116,7 @@
 | GET | `/api/admin/refunds` | `requireAdmin` | `adminRefunds` | 退款列表（状态 / 关键词筛选） |
 | GET | `/api/admin/refunds/[id]` | `requireAdmin` | `adminRefunds` | 退款详情 |
 | POST | `/api/admin/refunds/[id]/start-review` | `requireAdmin` | `adminRefunds` | `pending → reviewing` |
-| POST | `/api/admin/refunds/[id]/approve` | `requireAdmin` | `adminRefunds` | 审核通过。**按比例算金额、累计写入 `refundedAmount`，退满才置订单为 `refunded`；按责任归属冲回打手收益** |
+| POST | `/api/admin/refunds/[id]/approve` | `requireAdmin` | `adminRefunds` | 审核通过。**按比例算金额、累计写入 `refundedAmount`，退满才置订单为 `refunded`；按责任归属冲回打手收益**。⚠️ **仅 `serving` / `completed` 订单可批**，其余档位 400 且零副作用（`D22`） |
 | POST | `/api/admin/refunds/[id]/reject` | `requireAdmin` | `adminRefunds` | 驳回（必填意见） |
 
 **⚠️ `approve` 的退款金额口径 —— P0-13 起已被取代（产品负责人裁定，2026-09-25）**
@@ -165,6 +165,25 @@
 - `approve` 的响应带 `decidedAmount`：**即使确认框已经会显示预计金额，这个字段也必须带**
   （D19）——界面上那个数是页面加载时的数据算的预计值，响应里这个才是**真正写下去**的数。
   成功提示报的是后者。
+- **`approve` 只接受 `serving` / `completed` 的订单**（产品裁定 2026-09-27，`P0-13/02-decisions.md` §十三 `D22`）。
+  `paid` / `accepted` 的退款路径是用户端**免审批直接全额退款**，不存在「管理员裁定比例」这一步。
+  订单档位不合法时返回 **`400` / `BAD_REQUEST`**，`message` 为
+  「该订单当前不在售后审批范围内：只有「护航中」「已完成」的订单可以走售后退款审批」，
+  **且零副作用**（不写退款、不写 `EarningAdjustment`、不发通知、不写审计）。
+  ⚠️ **只拦「通过」**：`start-review` 与 `reject` **不受此限**——P0-12 之前开出的存量申请
+  （挂在 `paid` / `accepted` 单上）仍然可以被驳回，那正是它们的应有处置。
+  ⚠️ 判据由服务端单点提供（`lib/constants/refunds.ts` 的 `assertRefundApprovalOrderStatus`），
+  **读侧与写侧共用**：`GET /api/admin/refunds/[id]` 的 `allowedActions.canApprove`
+  与写侧 400 不可能不一致。
+- `GET /api/admin/refunds/[id]` 的响应带 **`approveBlockedReason`**（同上裁定）：
+  字符串或 `null`。非 `null` 时它是**与 `approve` 的 400 `message` 同一句话**，
+  页面直接显示，不自己判断订单状态。
+  ⚠️ **只在申请本身未终态时才有值**：终态（已通过 / 已拒绝 / 已撤销）一律为 `null`——
+  那时 `canApprove === false` 的原因是「申请已结束」，页面走的是另一句提示
+  （`ADMIN_REFUND_TERMINAL_NOTICE`）。两个原因**不得混成一句**。
+- **回归测试**：`tests/refundMoneyChain.test.mjs`（公式 / 钳制 / 冲回 / 边界 /
+  订单金额快照 / 预览与落库一致）、`tests/adminRefunds.test.mjs`（状态机 / 幂等 / 审计 / 白名单 /
+  **订单档位闸与读侧同口径**）。详见 `database-schema.md` §9。
 - **回归测试**：`tests/refundMoneyChain.test.mjs`（公式 / 钳制 / 冲回 / 边界 /
   订单金额快照 / 预览与落库一致）、`tests/adminRefunds.test.mjs`（状态机 / 幂等 / 审计 / 白名单）。
   详见 `database-schema.md` §9。

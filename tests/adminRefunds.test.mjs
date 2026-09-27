@@ -8,9 +8,15 @@ import {
   canTransitionRefund,
   refundMatchesAdminKeyword,
 } from "../lib/constants/adminRefunds.ts";
+import {
+  REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+  assertRefundApprovalOrderStatus,
+} from "../lib/constants/refunds.ts";
 import { CONSUMPTION_ORDER_STATUS, sumEffectiveSpend } from "../lib/constants/levels.ts";
 import { beijingDayStart } from "../lib/constants/rankingPeriods.ts";
 import { adminAuditStore } from "../lib/data/mockAdminAuditRepository.ts";
+import { earningStore } from "../lib/data/mockEarningRepository.ts";
+import { notificationStore } from "../lib/data/mockNotificationRepository.ts";
 import { refundStore } from "../lib/data/mockRefundRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { approveRefund } from "../lib/data/adminRefundTransaction.ts";
@@ -50,8 +56,18 @@ import { createRefundForOrder } from "../lib/services/refunds.ts";
 const ADMIN = "admin-1";
 const SURFACE = "server";
 
-/** 待审核、且订单处于「已接单」的预置退款 */
-const PENDING_REFUND = "rf-seed-1001-01";
+/**
+ * 待审核、且订单处于「已完成」的预置退款 —— **本文件所有「通过」用例的对象**。
+ *
+ * ⚠️ 2026-09-27 产品裁定之后不能再用 `rf-seed-1001-01`：那条挂在 `accepted` 单上，
+ * 属于 P0-12 之前的存量，**审核必须被拒绝**（见本文件「状态闸」那一节）。
+ * 想要一条能正常批准的申请，订单必须是 `serving` / `completed`。
+ */
+const PENDING_REFUND = "rf-seed-1003-01";
+/** 待审核、但订单处于「已接单」——**负向**预置：批准必须被拒绝（存量语义） */
+const LEGACY_ACCEPTED_REFUND = "rf-seed-1001-01";
+/** 待审核、但订单处于「已付款」——**负向**预置：批准必须被拒绝（存量语义） */
+const LEGACY_PAID_REFUND = "rf-seed-1002-01";
 /** 审核中、订单处于「护航中」的预置退款 */
 const REVIEWING_REFUND = "rf-seed-1001-02";
 /** 已通过（终态） */
@@ -155,22 +171,44 @@ test("状态机：终态没有出边，撤销没有入边（管理端不能替�
 });
 
 test("可执行动作由状态推导：终态三项全 false，页面因此没有灰按钮", () => {
-  assert.deepEqual(adminRefundAllowedActions("pending"), {
+  // 「订单状态」这一维在下面单独覆盖，这里先钉住状态机这一维
+  const APPROVABLE_ORDER = "serving";
+
+  assert.deepEqual(adminRefundAllowedActions("pending", APPROVABLE_ORDER), {
     canStartReview: true,
     canApprove: true,
     canReject: true,
   });
-  assert.deepEqual(adminRefundAllowedActions("reviewing"), {
+  assert.deepEqual(adminRefundAllowedActions("reviewing", APPROVABLE_ORDER), {
     canStartReview: false,
     canApprove: true,
     canReject: true,
   });
   for (const terminal of ["approved", "rejected", "cancelled"]) {
     assert.deepEqual(
-      adminRefundAllowedActions(terminal),
+      adminRefundAllowedActions(terminal, APPROVABLE_ORDER),
       { canStartReview: false, canApprove: false, canReject: false },
       `${terminal} 不该有可执行动作`,
     );
+  }
+});
+
+test("可执行动作的第二维：订单不在审批范围时只有「通过」变灰，另外两个动作照旧", () => {
+  // 四档业务状态逐一验证：serving / completed 放行，paid / accepted 挡下
+  for (const orderStatus of ["serving", "completed"]) {
+    assert.equal(
+      adminRefundAllowedActions("pending", orderStatus).canApprove,
+      true,
+      `${orderStatus} 属于审批范围，应当可以批`,
+    );
+  }
+  for (const orderStatus of ["paid", "accepted"]) {
+    const actions = adminRefundAllowedActions("pending", orderStatus);
+    assert.equal(actions.canApprove, false, `${orderStatus} 不在审批范围，不能批`);
+    // ⚠️ 关键：另外两个动作**必须仍然可用**——这类申请是存量，
+    // 驳回（以及开始审核）正是它们的应有处置。一起灰掉等于让它们永远挂着
+    assert.equal(actions.canStartReview, true, `${orderStatus} 仍应能开始审核`);
+    assert.equal(actions.canReject, true, `${orderStatus} 仍应能驳回`);
   }
 });
 
@@ -1025,7 +1063,8 @@ test("审计恰好一次，且不保存退款说明、凭证地址与联系方�
   assert.ok(entries[1].after.reviewNote.startsWith("已核实"));
   // 业务状态与订单状态同时留档，这是「通过会动订单」唯一的痕迹
   assert.equal(entries[1].after.orderStatus, "refunded");
-  assert.equal(entries[0].after.orderStatus, "accepted");
+  // 开始审核**不动**订单：第一条快照里它还是原样（`PENDING_REFUND` 的订单是「已完成」）
+  assert.equal(entries[0].after.orderStatus, "completed");
 });
 
 test("三个动作失败时都不留审计，业务数据也一个字不改", async () => {
@@ -1036,6 +1075,122 @@ test("三个动作失败时都不留审计，业务数据也一个字不改", as
   );
   assert.equal(await auditCount(), 0);
   assert.deepEqual(await refundOf(APPROVED_REFUND), before);
+});
+
+// ————————————— 状态闸：paid / accepted 不允许批准售后退款（2026-09-27 裁定） —————————————
+//
+// 产品裁定：退款路径保持唯一——`paid` / `accepted` → 用户 direct full refund；
+// `serving` → 售后；`completed` → 投诉 / 售后。
+// 因此审核入口必须由**服务端**挡下 `paid` / `accepted`，不能靠前端藏按钮。
+//
+// 为什么要挡的是**存量**申请：P0-12 之后那两档已经开不出新申请
+// （`canRequestRefund` 只放行 `serving` / `completed`），但历史遗留的记录还在
+// （`rf-seed-1001-01` 挂 `accepted`、`rf-seed-1002-01` 挂 `paid`）。
+// 没有这道闸时，那两条存量申请会被批准成「绕过直接退款路径的人工退款」——
+// 同一档订单出现两条互斥的退款结果。
+
+test("状态闸（纯函数）：只有 serving / completed 通过，paid / accepted / refunded 一律拒绝", () => {
+  for (const status of ["serving", "completed"]) {
+    assert.equal(assertRefundApprovalOrderStatus(status), null, `${status} 应当放行`);
+  }
+  for (const status of ["paid", "accepted", "refunded"]) {
+    assert.equal(
+      assertRefundApprovalOrderStatus(status),
+      REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+      `${status} 必须被拒绝`,
+    );
+  }
+});
+
+test("存量 accepted 单上的售后申请：批准被服务端拒绝，四类数据一个字都不改", async () => {
+  const refundBefore = await refundOf(LEGACY_ACCEPTED_REFUND);
+  const orderBefore = await orderOf(LEGACY_ACCEPTED_REFUND);
+  assert.equal(orderBefore.status, "accepted", "前置：这条存量的订单确实是「已接单」");
+
+  // 四类可能在审批里被写到的数据，全部先记下**当前规模**
+  const auditBefore = await auditCount();
+  const notificationsBefore = notificationStore().notifications.size;
+  const adjustmentsBefore = earningStore().adjustments.size;
+  const earningsBefore = earningStore().earnings.size;
+
+  await expectApiError(
+    approveAdminRefund(LEGACY_ACCEPTED_REFUND, ADMIN, {
+      idempotencyKey: key(),
+      reviewNote: "已核实服务未按约定开始。",
+      ...decision(),
+    }),
+    "BAD_REQUEST",
+    REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+  );
+
+  // 退款申请、订单：一字未改
+  assert.deepEqual(await refundOf(LEGACY_ACCEPTED_REFUND), refundBefore, "退款记录不得被改动");
+  assert.deepEqual(await orderOf(LEGACY_ACCEPTED_REFUND), orderBefore, "订单不得被改动");
+  assert.notEqual((await refundOf(LEGACY_ACCEPTED_REFUND)).status, "approved");
+  // 审计 / 通知 / 收益与冲回明细：一条都没写
+  assert.equal(await auditCount(), auditBefore, "被拒绝的批准不得留下审计");
+  assert.equal(notificationStore().notifications.size, notificationsBefore, "不得发出任何通知");
+  assert.equal(earningStore().adjustments.size, adjustmentsBefore, "不得写 EarningAdjustment");
+  assert.equal(earningStore().earnings.size, earningsBefore, "不得改动收益");
+});
+
+test("存量 paid 单上的售后申请：同样被拒绝，且金额闸根本轮不到（顺序在它之前）", async () => {
+  const refundBefore = await refundOf(LEGACY_PAID_REFUND);
+  const orderBefore = await orderOf(LEGACY_PAID_REFUND);
+  assert.equal(orderBefore.status, "paid", "前置：这条存量的订单确实是「已付款」");
+
+  const auditBefore = await auditCount();
+
+  await expectApiError(
+    approveAdminRefund(LEGACY_PAID_REFUND, ADMIN, {
+      idempotencyKey: key(),
+      reviewNote: "已核实重复支付。",
+      ...decision(),
+    }),
+    "BAD_REQUEST",
+    REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+  );
+
+  assert.deepEqual(await refundOf(LEGACY_PAID_REFUND), refundBefore);
+  assert.deepEqual(await orderOf(LEGACY_PAID_REFUND), orderBefore);
+  assert.equal(await auditCount(), auditBefore);
+});
+
+test("状态闸只管「通过」：存量的 paid / accepted 申请仍然可以正常驳回（不然它们永远悬着）", async () => {
+  for (const legacy of [LEGACY_ACCEPTED_REFUND, LEGACY_PAID_REFUND]) {
+    const result = await rejectAdminRefund(legacy, ADMIN, {
+      idempotencyKey: key(),
+      reviewNote: "该订单走用户直接退款路径，本申请驳回。",
+    });
+    assert.equal(result.status, "rejected", `${legacy} 必须能被驳回`);
+    assert.equal(result.orderChanged, false, "驳回不动订单");
+  }
+  // 驳回之后订单仍是原样——「服务从未开始」这件事不会因为驳回而改变
+  assert.equal((await orderOf(LEGACY_ACCEPTED_REFUND)).status, "accepted");
+  assert.equal((await orderOf(LEGACY_PAID_REFUND)).status, "paid");
+});
+
+test("状态闸放行的是「护航中 / 已完成」两档：本用例走已完成单，合法档位上批准成功", async () => {
+  /*
+    两档各要有**具名**用例，否则将来某一条被删掉时，「serving 放行」会无人看护而没人发现。
+    本用例走的是 `completed`（`PENDING_REFUND` = `rf-seed-1003-01`，挂 `ord-seed-1003-01`）；
+    `serving` 一档由同文件下方「详情 DTO 的读侧与写侧同口径」覆盖——
+    它在护航中的 `rf-seed-1001-02` 上真的把批准走了下去。
+
+    ⚠️ 标题曾经写着「放行的正是 serving」而夹具是 `completed`（复核 MINOR）。
+    下面那句前置断言就是防止标题与事实再次脱节。
+  */
+  const before = await getAdminRefundDetail(PENDING_REFUND, undefined, SURFACE);
+  assert.equal(before.orderStatus, "completed", "前置：本用例走的是「已完成」档");
+  assert.equal(before.approveBlockedReason, null, "前置：合法档位不该被状态闸挡下");
+
+  const result = await approveAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: key(),
+    reviewNote: "已核实服务未按约定完成。",
+    ...decision(),
+  });
+  assert.equal(result.status, "approved");
+  assert.equal(result.orderStatus, "refunded", "退满之后订单转已退款");
 });
 
 // ——————————————————————————— 列表与详情 ———————————————————————————
@@ -1275,6 +1430,58 @@ test("审核之后详情与列表读到的是新状态：通过的那一单订�
   const row = data.items.find((item) => item.id === PENDING_REFUND);
   assert.ok(row, "通过之后应当能在「已通过」里筛到");
   assert.equal(row.orderStatus, "refunded", "列表里的订单状态列也要是已退款");
+});
+
+test("详情 DTO 的读侧与写侧同口径：订单不在审批范围时「通过」变灰并给出同一句原因", async () => {
+  // 负向：两张存量单（已接单 / 已付款）——写侧必然 400，读侧就不能说「可以批」
+  for (const [id, label] of [
+    [LEGACY_ACCEPTED_REFUND, "已接单"],
+    [LEGACY_PAID_REFUND, "已付款"],
+  ]) {
+    const detail = await getAdminRefundDetail(id, undefined, SURFACE);
+    assert.equal(
+      detail.allowedActions.canApprove,
+      false,
+      `${label} 的存量申请：详情页不能显示可点的「通过」`,
+    );
+    assert.equal(
+      detail.approveBlockedReason,
+      REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+      `${label} 的存量申请：原因必须与接口 400 的 message 是同一句话`,
+    );
+    assert.equal(detail.allowedActions.canReject, true, `${label} 的存量申请仍可驳回`);
+  }
+
+  // 正向：护航中的申请——读侧放行，且明确「没有被挡」
+  const serving = await getAdminRefundDetail(REVIEWING_REFUND, undefined, SURFACE);
+  assert.equal(serving.orderStatus, "serving", "前置：这一单确实在护航中");
+  assert.equal(serving.allowedActions.canApprove, true);
+  assert.equal(serving.approveBlockedReason, null, "没被挡时必须是 null，不是空字符串");
+
+  /*
+    终态的申请：`canApprove === false` 的**原因不是订单档位**，而是「这笔申请早结束了」。
+    此时不能再下发订单档位的理由，否则页面上会同时出现「这笔退款申请已结束」与
+    「订单不在审批范围内」两句话，把管理员引到错误的原因上去查（复核 MINOR）。
+
+    `rf-seed-1001-03` 是已通过、订单已 `refunded` 的那一条——它的订单档位这一问
+    当然也答「不行」，正是最容易把两个原因混起来的样本。
+  */
+  const terminal = await getAdminRefundDetail(APPROVED_REFUND, undefined, SURFACE);
+  assert.equal(terminal.orderStatus, "refunded", "前置：已通过的申请，订单必然是已退款");
+  assert.equal(terminal.allowedActions.canApprove, false, "终态不能批");
+  assert.equal(
+    terminal.approveBlockedReason,
+    null,
+    "终态的原因是「申请已结束」，不是订单档位——不能下发订单档位那句话",
+  );
+
+  // 两档口径必须一致：同一张单，读侧说能批，写侧就必须真的批得下去
+  const outcome = await approveAdminRefund(REVIEWING_REFUND, ADMIN, {
+    idempotencyKey: key(),
+    reviewNote: "",
+    ...decision(),
+  });
+  assert.equal(outcome.status, "approved");
 });
 
 // ——————————————————————————— 九、幂等键的意图绑定（P8D-2） ———————————————————————————

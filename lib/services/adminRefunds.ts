@@ -347,6 +347,11 @@ function toApiError(outcome: AdminRefundWriteFailure): ApiError {
     case "decision-invalid":
       // 文案由常量层的规则函数给出（单次 0 / 累计超过实付），这里只把它变成 400
       return new ApiError("BAD_REQUEST", outcome.message, 400);
+    case "order-status-not-eligible":
+      // 同上：文案来自 `assertRefundApprovalOrderStatus`。
+      // 400 而不是 403/409——这是「这个对象当前不可被这样操作」，与
+      // `invalid-transition` 同类，管理员看到的是自己点错了对象
+      return new ApiError("BAD_REQUEST", outcome.message, 400);
   }
 }
 

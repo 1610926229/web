@@ -153,6 +153,50 @@ export const REFUND_NOTIFICATION_COMPANION_REFUNDED = {
   body: "客户在护航开始服务前取消了这一单，订单已全额退款。本单不产生收益，你无需再做任何操作。",
 } as const;
 
+/**
+ * 售后审批退满、且**订单已完成护航**时发给打手的通知（P0-13 后续 fix，产品裁定）。
+ *
+ * ⚠️ **为什么不能复用 `REFUND_NOTIFICATION_COMPANION_REFUNDED`**：那条文案断言了两件事——
+ * 「客户在**服务开始前**取消了订单」与「本单**不产生收益**」。而 `completed` 单
+ * 这两件事**双双为假**：订单已经完成护航、`Earning` 也已经生成过并按本次核定结果冲回。
+ * 打手拿到的是一条**可被引用的书面结论**，写着与账实相反的话。
+ * 尤其当这笔收益已经 `withdrawn` 时（`resolveFinalDecisionAmounts` 把冲回额改写为 0），
+ * 他实际**保住了**这笔钱，却被告知「不产生收益」。
+ *
+ * ⚠️ **别再假定「售后审批只会遇到 `serving` / `completed`」**：`REFUNDABLE_ORDER_STATUSES`
+ * 约束的是**申请创建**（`canRequestRefund`），而存量申请可以挂在 `paid` / `accepted` 上
+ * （`rf-seed-1001-01` 就是，见 `refundSeed` 的说明）。那两档的正确文案恰恰**是**这条
+ * `..._REFUNDED`（服务确实没开始），所以选择器必须是三档，
+ * 见 `adminRefundTransaction` 的 `resolveCompanionRefundCopy()`。
+ *
+ * ✅ **但这条分支自 2026-09-27 起不可达**：产品裁定 `paid` / `accepted` 不允许批准售后申请，
+ * 审核入口已由 `assertRefundApprovalOrderStatus` 把守（本文件下方）。三档因此是
+ * **防御性**的——不是「合法路径之一」。若将来它变得可达，那说明闸门被绕过了，
+ * 该修的是闸门，而不是删掉这一档。
+ *
+ * ⚠️ 仍然遵守原纪律：**不写平台对他做了什么处置**。这里只陈述事实（已完成、已按本次
+ * 售后结果结算），不写「你被扣了」「你被处罚了」。
+ */
+export const REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION = {
+  title: "订单已退款",
+  summary: "订单已完成售后退款，收益按核定结果结算",
+  body: "这一单已完成护航，售后核定后全额退款。本单收益已按本次售后结果结算，请以收益记录为准。",
+} as const;
+
+/**
+ * 售后审批退满、但订单**只到 `serving`**（尚未完成）时发给打手的通知。
+ *
+ * ⚠️ 与上一条的差别只有一处，但那一处必须说对：`serving` 全额退款时
+ * **根本不会生成 completed `Earning`**（`cmd_p0-13.md`：全额退款终止履约、
+ * 不产生正常 completed Earning）。所以这里说「本单不产生收益」是**真的**——
+ * 这也正是它**不能**复用「服务开始前取消」那条文案的原因：服务明明已经开始过了。
+ */
+export const REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE = {
+  title: "订单已退款",
+  summary: "服务已开始，本单经售后退款后关闭",
+  body: "这一单在护航开始服务后经售后处理全额退款，订单已关闭。本单不产生收益，你无需再做任何操作。",
+} as const;
+
 export function isRefundStatus(value: string): value is RefundStatus {
   return (REFUND_STATUSES as readonly string[]).includes(value);
 }
@@ -211,6 +255,44 @@ export function canDirectRefund(status: OrderStatus): boolean {
 
 export function isOrderRefundable(status: OrderStatus): boolean {
   return (REFUNDABLE_ORDER_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * 售后**审批**入口的状态闸：只有 `serving` / `completed` 的订单能进入售后资金链。
+ *
+ * ## 产品裁定（2026-09-27）
+ *
+ * > **`paid` / `accepted` 状态下，不允许批准售后退款申请。**
+ * > 退款路径正式保持唯一：`paid` / `accepted` → 用户 direct full refund；
+ * > `serving` → 售后；`completed` → 投诉 / 售后。
+ *
+ * ## 为什么必须由服务端把守
+ *
+ * `canRequestRefund`（本文件另一处）只挡**申请创建**，它管不了**存量**记录：
+ * P0-12 把 `paid` / `accepted` 改成免审批直接退款之后，那两档**开不出新申请**，
+ * 但历史遗留的申请仍在（`refundSeed` 里的 `rf-seed-1001-01` 挂在 `accepted` 单上、
+ * `rf-seed-1002-01` 挂在 `paid` 单上，两条都是这段历史的真实留痕）。
+ * 审核入口原本对订单档位**没有任何守卫**，于是那两条存量申请会被批准成
+ * 「一次绕过直接退款路径的人工退款」——同一档订单出现两条互斥的退款结果。
+ *
+ * ⚠️ **不依赖前端隐藏按钮**：按钮该不该显示是 `adminRefundAllowedActions` 的事，
+ * 而「允不允许真的写下去」必须在服务端判——存量申请的历史数据在客户端看来毫无异常。
+ *
+ * ⚠️ 两者**共用这一个函数**，不是两份判断：`adminRefundAllowedActions` 的 `canApprove`
+ * 会调用本函数来决定按钮灰不灰，写侧（`adminRefundTransaction`）调用它来决定写不写。
+ * 「读侧说能批、写侧却 400」因此**在结构上不可能**——它们问的是同一个问题。
+ *
+ * ⚠️ **只管审批（会动钱的那一步）**：开始审核与拒绝**不**受本闸约束，
+ * 它们不碰订单、不碰收益、不产生任何金额。对被历史遗留的申请，
+ * 「驳回」正是应有的处置方式，把驳回也一并挡掉会让那些申请永远悬着。
+ *
+ * 返回 `null` 表示通过；否则返回一句可直接展示的文案（与 `assertRefundAmountWithinPaid` 同形）。
+ */
+export const REFUND_APPROVAL_ORDER_STATUS_MESSAGE =
+  "该订单当前不在售后审批范围内：只有「护航中」「已完成」的订单可以走售后退款审批";
+
+export function assertRefundApprovalOrderStatus(status: OrderStatus): string | null {
+  return isOrderRefundable(status) ? null : REFUND_APPROVAL_ORDER_STATUS_MESSAGE;
 }
 
 /**

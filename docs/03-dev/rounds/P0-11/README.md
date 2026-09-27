@@ -2,16 +2,25 @@
 
 Round ID: P0-11
 Title: 客服换打手（re-pool / direct replace）+ 打手被禁用后的自动释放 + pending `CompletionSubmission` → `invalidated`
-**Status: `AWAITING_ACCEPTANCE`**（Q1 / Q2 已于 2026-09-24 裁定，见 `02-decisions.md` §九；开发与门禁已完成）
-Depends On: P0-10（`AWAITING_ACCEPTANCE`）· P0-9 / P0-8 / P0-7 / P0-6（均 `DONE`）
+**Status: `DONE`**（2026-09-25 收口——「DONE 双门槛」两条**均已满足**，**无协议偏离**）
+Depends On: P0-10（`DONE`）· P0-9 / P0-8 / P0-7 / P0-6（均 `DONE`）
 Goal: 统一处理两类「释放当前打手并重新安排履约」的异常——① Staff 主动换打手 / re-pool；② Companion 被平台禁用后，已有 `accepted` / `serving` 订单自动释放回公共池。复用现有 release / dispatch 原语，**不创建复杂 Assignment**。
 Primary Domain: Order · Dispatch · CompanionReleaseRecord · CompletionSubmission
 Primary State Transition: `accepted → paid`（释放）· **`serving → paid`（本轮首次给它接入口）** · `paid → accepted`（新打手）· submission `pending → invalidated`
 Started At: 2026-09-24
 Development Completed At: 2026-09-24（门禁全绿：`pnpm test` 1324 / fail 0 / skip 143；生产 HTTP 全量 **1324/1324 / skipped 0** / typecheck / lint / build 各 exit 0）
 Review: **reviewer 初判 BLOCKER 0 / MAJOR 2 / MINOR 4 / NOTE 2 → 整改后 0 / 0**（明细见 `03-delivery.md` §七、`02-decisions.md` §十三）
-Accepted At: ——（等用户本人验收，见 `04-acceptance.md`）
-Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成，Claude 无权代填）
+Accepted At: 2026-09-25（`User Result` / `Final Result` = `PASSED`）
+Git Commit: `2e7006c`（用户本人提交「完成p0-业务支付流程」；含本批次四轮全部实现、测试与档案）
+
+> ✅ **本轮已收口为 `DONE`（2026-09-25）。** 用户本人确认人工验收通过（`04-acceptance.md`）。
+> ✅ **「DONE 双门槛」两条均已满足，无协议偏离**：① 用户本人于 2026-09-25 确认 `PASSED`；
+> ② 用户本人已完成提交——**`HEAD = 2e7006c`「完成p0-业务支付流程」**
+> （`124 files changed, 21017 insertions(+), 720 deletions(-)`），该提交**含本批次四轮的全部**
+> 实现、测试与档案（含本轮三个客服接口与唯一释放写入器）。Claude 全程**零 Git 写操作**。
+
+
+> ⚠️ **`04-acceptance.md` §四 的 4 条追认项（R1–R4）未收到逐条书面结论**，随整体验收一并通过。
 
 ---
 

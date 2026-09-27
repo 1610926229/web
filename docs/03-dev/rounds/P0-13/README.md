@@ -2,8 +2,8 @@
 
 Round ID: P0-13
 Title: `serving` / `completed` 售后 + Admin 最终退款金额 + Earning 联动
-**Status: `AWAITING_ACCEPTANCE`**（沿革：`CLARIFYING`（2026-09-25 建档）→ `READY`（产品裁定 Q1/Q2）→ `IN_PROGRESS` → 开发与门禁完成）
-Depends On: P0-12（`AWAITING_ACCEPTANCE`）· P0-11（`AWAITING_ACCEPTANCE`）· P0-10（`AWAITING_ACCEPTANCE`）· P0-9 / P0-8 / P0-7 / P0-6 / P0-5.5 / P0-5（均 `DONE`）
+**Status: `DONE`**（沿革：`CLARIFYING`（2026-09-25 建档）→ `READY`（产品裁定 Q1/Q2）→ `IN_PROGRESS` → `AWAITING_ACCEPTANCE` → **2026-09-25 收口，「DONE 双门槛」两条均已满足、无协议偏离**）
+Depends On: P0-12（`DONE`）· P0-11（`DONE`）· P0-10（`DONE`）· P0-9 / P0-8 / P0-7 / P0-6 / P0-5.5 / P0-5（均 `DONE`）
 Goal: 实现 `serving` 售后（不允许 direct refund）、`completed` 投诉窗口内的售后、Staff 处理售后事实、
 Admin 最终决定退款金额、partial / full refund、售后阻塞 `frozen` Earning 释放、退款与 Earning 一致。
 Primary Domain: Refund（既有核心，不新建）· Order · Earning · Dispatch
@@ -11,11 +11,20 @@ Primary State Transition: `completed → refunded`（**触发条件收窄为累�
 Started At: 2026-09-25
 Development Completed At: 2026-09-25（门禁全绿。⚠️ 交付当时是 `pnpm test` **1374** / pass 1228 / fail 0 / skipped 146、生产 **1374/1374**；**复核整改 B-1 之后**为 `pnpm test` **1377** / pass 1231 / fail 0 / skipped 146、生产 **1377/1377 / skipped 0**；**人工验收第 1 项整改 D19 之后**为 `pnpm test` **1385** / pass 1239 / fail 0 / skipped 146、生产 **1385/1385 / skipped 0**，typecheck / lint / build 各 exit 0。今日以 **1385** 为准，明细见 `03-delivery.md` §十）
 Review: **reviewer 初判 1 BLOCKER / 2 MAJOR / 3 MINOR / 若干 NOTE → 整改后 0 / 0**（明细见 `03-delivery.md` §六）
-Accepted At: ——（等用户本人验收，见 `04-acceptance.md`）
-Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成，Claude 无权代填）
+Accepted At: 2026-09-25（`User Result` / `Final Result` = `PASSED`；**先经验收第 1 项整改 D19**，用户复核后通过）
+Git Commit: `2e7006c`（用户本人提交「完成p0-业务支付流程」；含本批次四轮全部实现、测试与档案）
 
-> ⚠️ **`Status` 不由 Claude 改成 `DONE`**：按「DONE 双门槛」，需要 ① 用户本人说明验收通过
-> **且** ② 用户本人提交。在此之前本轮停在 `AWAITING_ACCEPTANCE`。
+> ✅ **本轮已收口为 `DONE`（2026-09-25）。** 用户本人确认人工验收通过（`04-acceptance.md`）。
+> ✅ **「DONE 双门槛」两条均已满足，无协议偏离**：① 用户本人于 2026-09-25 确认 `PASSED`
+> （在验收第 1 项整改 D19 之后复核通过）；② 用户本人已完成提交——
+> **`HEAD = 2e7006c`「完成p0-业务支付流程」**（`124 files changed, 21017 insertions(+), 720 deletions(-)`），
+> 该提交**含本批次四轮的全部**实现、测试与档案（含 D19 整改与 `tests/refundMoneyChain.test.mjs`）。
+> Claude 全程**零 Git 写操作**。
+> ⚠️ **`04-acceptance.md` §五 的 1 条追认项（R3）未收到逐条书面结论**，随整体验收一并通过。
+
+> ~~⚠️ **`Status` 不由 Claude 改成 `DONE`**：按「DONE 双门槛」，需要 ① 用户本人说明验收通过
+> **且** ② 用户本人提交。在此之前本轮停在 `AWAITING_ACCEPTANCE`。~~
+> ✅ **两条现均已满足**（① 用户确认 `PASSED`；② 用户提交 `2e7006c`），故本轮已收口为 `DONE`。
 
 ---
 
@@ -79,9 +88,10 @@ Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成
 `tests/{adminRefunds,staffRefunds,earning,completions}.test.mjs` ·
 `docs/02-tech-design/{api-contract,database-schema,architecture-rules}.md`
 
-⚠️ 本批次**四轮的改动全部未提交**，工作区里堆着四轮的累计 diff。
+⚠️ 本批次**四轮的改动在交付当时全部未提交**，工作区里堆着四轮的累计 diff。
 `git status` 会一起列出它们，**区分不了轮次**——上面的「本轮」是陈述，
 复核方式是逐项核对，不是跑 `git status` 然后相信。详见 `03-delivery.md` §一 / §四。
+✅ **用户本人已于验收时点提交**（`HEAD = 2e7006c`「完成p0-业务支付流程」，含四轮全部实现、测试与档案）。
 
 ---
 
@@ -91,7 +101,7 @@ Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成
 |---|---|
 | `01-prompt.md` | 原始指令档案（`cmd_p0-13.md` 原样拷贝，逐字节一致） |
 | `02-decisions.md` | §一–§九 Requirement Check（含原始提问，**未被覆盖**）· §十 产品裁定 · §十.一 冻结真值表 · §十一 **D1–D19**（D18 = B-1 整改，D19 = 验收第 1 项整改） |
-| `03-delivery.md` | 本轮交付、门禁读数、累计工作区状态、遗留 / MINOR / NOTE / TBD、Git 状态 |
+| `03-delivery.md` | 本轮交付、门禁读数、累计工作区状态、遗留 / MINOR / NOTE / TBD、Git 状态、**§十 验收整改 D19**、**§十一 验收收口（2026-09-25）** |
 | `04-acceptance.md` | 人工验收清单（含资金链路的定向点法）、待产品追认项 |
 | `README.md` | 本文件 |
 

@@ -134,6 +134,24 @@ export function newEarningAdjustmentId(): string {
 }
 
 /**
+ * 某个 `refundId` 是否**已经**留下过冲回明细；没有则返回 `null`。
+ *
+ * 这是 `adjustmentIdByRefund` 索引**唯一的读点**，也是「一次退款决策最多冲一次」
+ * 这条幂等约束在**调用侧**的判定入口（存储层的兜底在同文件
+ * `appendEarningAdjustment` 的抛错）。
+ *
+ * ⚠️ **P0-13 后续 fix**：在这之前这份索引是「只写不读」的——`appendEarningAdjustment`
+ * 既不查重也不抛错，于是「索引保证幂等」这句话在代码里没有任何落点，
+ * 幂等实际上**只**由「`approved` 是终态」+「一单一 Earning」这两个上层事实承担。
+ * 一旦将来多出一个调用方（真实数据库迁移 / D9 补记重跑 / Scheduler），
+ * 同一笔退款会被重复冲减打手收益，而唯一的对账断言（累计额 === 明细之和）
+ * 会把重复计入当成一次合法冲回，照样绿。
+ */
+export function findEarningAdjustmentIdByRefund(refundId: string): string | null {
+  return store().adjustmentIdByRefund.get(refundId) ?? null;
+}
+
+/**
  * 追加一条收益调整明细（**同步写原语**，无 `await`）。
  *
  * ⚠️ **只负责写**，不判断「该不该冲、冲多少」——那是伪事务的事，
@@ -142,13 +160,32 @@ export function newEarningAdjustmentId(): string {
  * 记录写入与 `refundId` 索引一起做：只写记录不写索引，同一次退款就能再冲一次
  * （幂等失效），而幂等失效是**重复扣打手的钱**，比悬空状态严重得多。
  *
+ * ⚠️ **同一 `refundId` 已经存在明细时抛错，拒绝覆盖**（P0-13 后续 fix）——
+ * 与 `appendNotification` 对重复 id 的处理同一条纪律：存储层宁可让调用方失败，
+ * 也不接受一次会让钱对不上的写入。查重发生在**两次写入之前**（原子区段开头），
+ * 因此抛错时存储**一个字节都没变**。
+ *
+ * ⚠️ 这把「先验证、再原子写入」的责任交给了调用方：业务路径（`adminRefundTransaction`
+ * 的即时冲回、`earningTransaction` 的 D9 补记）都必须**先**用
+ * `findEarningAdjustmentIdByRefund()` 判定、再动钱。判定放到 `applyEarningReversal`
+ * 之后，抛错时就会留下「钱冲了、明细没写」——那正是本仓库反复拒绝的悬空状态。
+ *
  * ⚠️ id 由调用方用 `newEarningAdjustmentId()` 备好（与 `appendNotification` 同一条约定）：
  * 本函数不生成 id，因为调用方需要在**同一段同步代码**里先判定、后写入。
  */
 export function appendEarningAdjustment(adjustment: EarningAdjustment): void {
   const current = store();
+
+  // —— 原子区段开始（无 await）——
+  const existingId = current.adjustmentIdByRefund.get(adjustment.refundId);
+  if (existingId !== undefined) {
+    throw new Error(
+      `该退款决策已有一条冲回明细，拒绝重复冲回：${adjustment.refundId}（已有 ${existingId}）`,
+    );
+  }
   current.adjustments.set(adjustment.id, adjustment);
   current.adjustmentIdByRefund.set(adjustment.refundId, adjustment.id);
+  // —— 原子区段结束 ——
 }
 
 /**

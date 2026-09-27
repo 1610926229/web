@@ -2,15 +2,23 @@
 
 Round ID: P0-12
 Title: `paid` / `accepted` 订单的用户**免审批直接全额退款**（`Order → refunded`）
-**Status: `AWAITING_ACCEPTANCE`**（开发与自动门禁全部完成，等用户本人验收；见 `04-acceptance.md`）
-Depends On: P0-11（`AWAITING_ACCEPTANCE`）· P0-10（`AWAITING_ACCEPTANCE`）· P0-9 / P0-8 / P0-7 / P0-6 / P0-5.5 / P0-5（均 `DONE`）
+**Status: `DONE`**（2026-09-25 收口——「DONE 双门槛」两条**均已满足**，**无协议偏离**）
+Depends On: P0-11（`DONE`）· P0-10（`DONE`）· P0-9 / P0-8 / P0-7 / P0-6 / P0-5.5 / P0-5（均 `DONE`）
 Goal: 把 2026-09-23 新规「`paid` / `accepted` 未开始服务 → 用户直接全额退款、**不需要客服/管理员审批**」落到既有退款/支付核心上：`Order.status → refunded`、`refundedAmount = actualPaidAmount`、派单关闭、不生成 Earning、`accepted` 时通知当前打手并**保留 `actualCompanionId`**。
 Primary Domain: Order · Refund（既有核心，不新建）· Dispatch
 Primary State Transition: `paid → refunded` · `accepted → refunded`（**两条边都已在 `ORDER_TRANSITIONS` 里，本轮第一次给它们接用户侧入口**）
 Started At: 2026-09-24
 Development Completed At: 2026-09-24
-Accepted At: ——（等用户本人验收，见 `04-acceptance.md`）
-Git Commit: ——（本批次禁止 Git 写操作；提交由用户本人完成，Claude 无权代填）
+Accepted At: 2026-09-25（`User Result` / `Final Result` = `PASSED`）
+Git Commit: `2e7006c`（用户本人提交「完成p0-业务支付流程」；含本批次四轮全部实现、测试与档案）
+
+> ✅ **本轮已收口为 `DONE`（2026-09-25）。** 用户本人确认人工验收通过（`04-acceptance.md`）。
+> ✅ **「DONE 双门槛」两条均已满足，无协议偏离**：① 用户本人于 2026-09-25 确认 `PASSED`；
+> ② 用户本人已完成提交——**`HEAD = 2e7006c`「完成p0-业务支付流程」**
+> （`124 files changed, 21017 insertions(+), 720 deletions(-)`），该提交**含本批次四轮的全部**
+> 实现、测试与档案（含本轮的新路由与伪事务 `directRefundOrder`）。Claude 全程**零 Git 写操作**。
+> ⚠️ **`04-acceptance.md` §五 的 2 条追认项（R1 / R2）未收到逐条书面结论**，随整体验收一并通过——
+> 但它们在验收清单里被标为**「接入真实支付前的硬门禁」**，「一并通过」**不解除**该提醒义务。
 
 ---
 
@@ -105,7 +113,7 @@ refunded  → 不允许再次退款
 |---|---|---|
 | `01-prompt.md` | 51 | 原始指令档案（`cmd_p0-12.md` 原样拷贝） |
 | `02-decisions.md` | 320 | Requirement Check 12 项逐条、与既有代码的唯一冲突、**D1–D12** 实现决策、待产品追认项 + §五.1 两处更正 |
-| `03-delivery.md` | 489 | 实现结果与验证、**两轮 reviewer 结论与整改（§七）**、门禁读数、MINOR / NOTE、Git 状态 |
+| `03-delivery.md` | 523 | 实现结果与验证、**两轮 reviewer 结论与整改（§七）**、门禁读数、MINOR / NOTE、Git 状态、**§十一 验收收口（2026-09-25）** |
 | `04-acceptance.md` | 295 | 人工验收清单（A–K 十一组 + 已知限制 + 两条待追认） |
 | `README.md` | 本文件 | 本轮索引 |
 
