@@ -96,6 +96,31 @@ export function resolveCompanionRevenueBase(itemsAmount: number, addonsAmount: n
 }
 
 /**
+ * 券的**实际抵扣额** = min(券面额, 原价)（P1-4 裁定 §2）。
+ *
+ * 裁定要求两条同时成立：`couponDiscountAmount <= originalAmount` 且
+ * `actualPaidAmount >= 0`。取小是保证它们**结构性成立**的最小手段——
+ * 不需要在别处再补一次「实付会不会变负」的判断，也不可能算出负数实付。
+ *
+ * ⚠️ **它不是「静默归零」**：归零只发生在券面额本身就是 0 或负的坏数据上，
+ * 而那种情况下没有任何金额被减掉，实付就是原价——这与裁定禁止的
+ * 「未达门槛却按 0 元优惠继续下单」是两回事：未达门槛在这里**根本走不到**，
+ * 它在 `resolveCouponApplication()` 就已经被拒绝（见 `lib/constants/coupons.ts`）。
+ *
+ * ⚠️ 券面额大过原价（例如满 10 减 100）时**按原价封顶而不是拒绝**：
+ * 用户付 0 元是这笔交易唯一说得通的结果，拒绝一张平台自己发的券没有任何好处。
+ */
+export function resolveCouponDiscountAmount(
+  discountAmount: number | null,
+  originalAmount: number,
+): number {
+  if (discountAmount === null) return 0;
+  // 面额为负的坏数据同样落进 0：不做「反向加价」
+  if (discountAmount <= 0) return 0;
+  return Math.min(discountAmount, Math.max(0, originalAmount));
+}
+
+/**
  * 下单那一刻定下来的金额域输入。
  *
  * `companionRateBp` 是**商品此刻的比例**；写进订单后叫 `companionRateSnapshot`——
@@ -108,7 +133,13 @@ export type OrderMoneyDomainInput = {
   addonsAmount: number;
   /** 商品此刻的分账比例（基点） */
   companionRateBp: number;
-  /** 优惠券抵扣（P0 恒为 0） */
+  /**
+   * 券的**实际抵扣额**（P1-4 起可能非 0）。
+   *
+   * ⚠️ 调用方必须先过 `resolveCouponDiscountAmount()` 再传进来——本函数**不夹**它。
+   * 只夹一处有两个好处：金额规则不会分裂成两份，而「实付为负」这件事在
+   * **唯一的来源**上就已经不可能发生，不需要在每个读端再防一次。
+   */
   couponDiscountAmount: number;
 };
 
@@ -140,7 +171,8 @@ export type OrderMoneyDomain = {
  * 顺序不是随意的，四步各有各的输入：
  *
  * 1. **原价**：商品 + 增值服务。它的定义里没有分账这回事；
- * 2. **实付**：原价扣掉券。当前没有券，所以它与原价相等；
+ * 2. **实付**：原价扣掉券（P1-4 起 `couponDiscountAmount` 可能非 0，
+ *    且已被 `resolveCouponDiscountAmount()` 夹到不超过原价，因此实付不会是负数）；
  * 3. **分账基数**：由 `resolveCompanionRevenueBase()` 决定，**独立于第 1 步**。
  *    当前规则下它与原价相等，但这是规则的结果，不是原价的定义；
  * 4. **护航收益**：基数 × 比例（唯一下取整处），然后**用实付减掉它**得到平台净收入

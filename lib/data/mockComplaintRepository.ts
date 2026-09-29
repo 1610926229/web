@@ -119,8 +119,9 @@ export const mockComplaintRepository: ComplaintRepository = {
   },
 
   async queryComplaintsForAdmin(filter: AdminComplaintQueryFilter) {
+    const { statuses } = filter;
     return [...store().complaints.values()]
-      .filter((complaint) => filter.status === null || complaint.status === filter.status)
+      .filter((complaint) => statuses === null || statuses.includes(complaint.status))
       .filter((complaint) => filter.type === null || complaint.typeKey === filter.type)
       .sort(compareComplaintsForAdmin);
   },

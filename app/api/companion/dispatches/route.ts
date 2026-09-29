@@ -17,7 +17,7 @@ import { listCompanionPools } from "@/lib/services/companionDispatch";
  *
  * 本文件只有 GET：接单走 `POST /api/companion/dispatches/[id]/accept`。
  * **没有拒绝 / 放弃 / 退回公共池的接口**——「不接」就是什么都不做，
- * 专属池十分钟到点后由系统自动转入公共池。
+ * 专属池独占期（自 P1-2 起由管理员配置，默认 10 分钟）到点后由系统自动转入公共池。
  */
 export async function GET() {
   try {

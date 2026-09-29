@@ -118,8 +118,14 @@ function UserSection({ order }: { order: AdminOrderDetail }) {
  * 不是当前商品目录：之后改价、改图、下架都不影响这里，而客服要判断的正是
  * 「这一单当时买的是什么」。
  *
- * 三行金额的关系是自洽的：`单价 × 数量 = 商品小计`，`商品小计 + 增值服务 = 实付合计`。
+ * 金额的关系是自洽的：`单价 × 数量 = 商品小计`，
+ * `商品小计 + 增值服务 = 原价`，`原价 − 优惠券抵扣 = 实付金额`。
  * 把它们一起列出来，是让「金额对不对」可以被当场核对，而不是去查代码。
+ *
+ * ⚠️ **P1-4 改正了两处**：原先底部那一行写着「实付合计」却读 `order.totalAmount`
+ * （**优惠前**应付总额），并断言「商品小计 + 增值服务 = 实付合计」。
+ * 满减券生效后这两条都不再成立——那一行会把用户没付的券面额也算进「实付」里。
+ * 现在三行分开列，读的是订单金额域的三个字段，与客服工作台、用户端同一套说法。
  */
 function AmountSection({ order }: { order: AdminOrderDetail }) {
   return (
@@ -164,11 +170,22 @@ function AmountSection({ order }: { order: AdminOrderDetail }) {
           </div>
         </div>
 
-        <div className="flex items-baseline justify-between border-t border-admin-line pt-3">
-          <span className="text-[13px] text-ink-3">实付合计</span>
-          <span className="text-[18px] font-semibold tabular-nums text-ink">
-            ¥{formatYuan(order.totalAmount)}
-          </span>
+        {/* 原价 / 券抵扣 / 实付（P1-4）：三行一起列，后台才能核对
+            「原价 − 券 = 实付」。券抵扣行**恒显示**（不用券时为 ¥0.00）——
+            这一栏是**对账**用的，不是促销展示：让某一行时有时无，
+            核账的人就分不清「没有券」和「漏了一行」 */}
+        <div className="flex flex-col gap-1 border-t border-admin-line pt-3">
+          <DetailRow label="原价（优惠前）" value={`¥${formatYuan(order.originalAmount)}`} />
+          <DetailRow
+            label="优惠券抵扣"
+            value={`−¥${formatYuan(order.couponDiscountAmount)}`}
+          />
+          <div className="mt-1 flex items-baseline justify-between border-t border-admin-line pt-3">
+            <span className="text-[13px] text-ink-3">实付金额</span>
+            <span className="text-[18px] font-semibold tabular-nums text-ink">
+              ¥{formatYuan(order.actualPaidAmount)}
+            </span>
+          </div>
         </div>
       </div>
     </Section>
@@ -178,7 +195,7 @@ function AmountSection({ order }: { order: AdminOrderDetail }) {
 /**
  * 护航：**指定**的人与**实际接单**的人分两行写（P0-5）。
  *
- * 这两件事可以是两个人：用户指定 A、A 十分钟内没接、订单自动进公共池、B 接走。
+ * 这两件事可以是两个人：用户指定 A、A 在独占期内没接、订单自动进公共池、B 接走。
  * 合成一行的话，「我明明指定了 A，怎么是 B 在打」在后台就查不出来——
  * 而那正是客服最需要回答的问题。
  *

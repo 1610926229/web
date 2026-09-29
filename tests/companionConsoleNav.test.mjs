@@ -128,15 +128,22 @@ test("门禁 3：CompanionHeader 全仓只有一处 import（(console) layout）
   );
 
   // 同一份 layout 同时说明四件事：
-  // (1) 整个 (console) 路由组（概览 / 池 / 专属池 / 我的订单 / 订单详情 / 我的收益）共用这一个顶栏；
+  // (1) 整个 (console) 路由组（概览 / 池 / 专属池 / 我的订单 / 订单详情 / 我的收益 / 订单聊天）
+  //     共用这一个顶栏；
   // (2) 没有每页复制按钮；
   // (3) 用户端页面拿不到它（它们不在这个路由组里，也没有任何页面 import 它）；
   // (4) 不是打手的人看到的是提示页，不是顶栏。
+  //
+  // ⚠️ P0-14 修订：新增「订单聊天」列表页与聊天页（`chats/`），清单从六个变八个。
+  // 两页都落在 `(console)` 下，因此自动吃这一个顶栏——这也正是把它们放进路由组
+  // 而不是另起一层的目的（另起一层就会多出第二个 layout，下面那条断言会先红）。
   const pages = collectFiles(COMPANION_CONSOLE_DIR)
     .filter((file) => file.endsWith("page.tsx"))
     .map(relative)
     .sort();
   assert.deepEqual(pages, [
+    "app/companion/(console)/chats/[orderId]/page.tsx",
+    "app/companion/(console)/chats/page.tsx",
     "app/companion/(console)/earnings/page.tsx",
     "app/companion/(console)/exclusive/page.tsx",
     "app/companion/(console)/orders/[id]/page.tsx",

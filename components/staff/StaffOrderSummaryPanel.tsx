@@ -29,7 +29,9 @@ export default function StaffOrderSummaryPanel({ order }: { order: StaffOrderSum
         <Row label="商品" value={order.productTitle} />
         <Row label="规格" value={order.specName} />
         <Row label="数量" value={String(order.quantity)} />
-        <Row label="金额" value={`¥${formatYuan(order.totalAmount)}`} />
+        {/* 概要行给**实付**（P1-4）：客服在这一页最先要知道的是「用户付了多少」，
+            而原价 / 券抵扣 / 实付的完整三行在下方的金额区块里 */}
+        <Row label="实付金额" value={`¥${formatYuan(order.actualPaidAmount)}`} />
         <Row label="用户" value={order.userNickname} />
         <Row label="护航" value={order.companionSummary} />
       </dl>

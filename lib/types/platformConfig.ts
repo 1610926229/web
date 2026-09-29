@@ -29,17 +29,43 @@
 /**
  * 平台级参数。
  *
- * ⚠️ 本阶段**只有一项**。不给它加「预留字段」或 `Record<string, unknown>`：
+ * ⚠️ 本阶段**四项**，全部是「生命周期时长」：专属池超时、公共池超时、
+ * 完成材料自动审核时长、投诉窗口。不给它加「预留字段」或 `Record<string, unknown>`：
  * 一个能装下任何东西的配置表，在半年后会变成「谁都能往里塞一个没人知道用途的键」，
  * 而每一项配置的合法性校验、审计含义、对业务的影响面都不一样。
  * 加一项就在这里加一个**具名、有类型、有校验**的字段。
+ *
+ * ⚠️ 四项**都有各自的 snapshot 落点**，没有一项是「读了立刻生效、用完就忘」的：
+ * 专属池 → `Dispatch.exclusiveTimeoutMinutesSnapshot`、
+ * 公共池 → `Dispatch.publicTimeoutMinutesSnapshot`、
+ * 完成材料 → `CompletionSubmission.autoApprovalMinutesSnapshot`、
+ * 投诉窗口 → `Order.complaintWindowMinutesSnapshot`。
  */
 export type PlatformConfig = {
+  /**
+   * **专属**订单池「指定打手独占接单权持续多久」的时长，**单位：分钟**（P1-2）。
+   *
+   * 语义：订单被指定给某位打手的那一刻起算，该打手在这段时间内独占接单权；
+   * 达到这个时长仍未接单 → 订单**转入公共池**（不是退款、不是售后）。
+   *
+   * ⚠️ 与另外三项一样按**快照**语义：派单进入 `exclusive` 时把当时的取值冻结成
+   * `Dispatch.exclusiveTimeoutMinutesSnapshot` 并算出 `exclusiveDeadlineAt`，
+   * 之后改配置**不影响**已经进入专属池的派单。默认 10，取值 1 ~ 1440 分钟。
+   *
+   * ⚠️ 这一项的前身是源码常量 `EXCLUSIVE_WAIT_MINUTES = 10`（注释写着「固定 10 分钟，
+   * 不可配置」）。产品已裁定必须可配置（2026-09-23 需求校对 + EX-CONFIG-04），
+   * 那个常量在 P1-2 被删除——**「10」现在只作为本字段的默认值存在**。
+   */
+  exclusivePoolTimeoutMinutes: number;
+
   /**
    * 公共订单池「无人接单多久算超时」的时长，**单位：分钟**。
    *
    * 语义：订单进入公共池的时刻起算，达到这个时长仍无人接单 → 停止接取 → **自动全额退款**。
    * 判定基于 `deadline <= now`，与「有没有人来访问」无关。
+   *
+   * ⚠️ 从专属池超时转进来的订单**会重新冻结**这一次的取值：本参数是**每次**进入公共池
+   * 时冻结，不是「一张订单只冻结一次」。
    */
   publicPoolTimeoutMinutes: number;
 
@@ -105,15 +131,17 @@ export type AdminPlatformConfigWriteResult = {
  * 按会话与时钟填。把它们做成可选字段（`updatedAt?: string`）等于给「客户端
  * 声称自己是谁、改动发生在什么时候」留了一个入口。
  *
- * ⚠️ 三个字段都是**可选**：PATCH 只带要改的那一项，服务端会把没带的字段
+ * ⚠️ 四个字段都是**可选**：PATCH 只带要改的那一项，服务端会把没带的字段
  * 保持现状（不是清空）。但**至少要带一个**——空 PATCH 不算一次改动；
  * 这个「至少一个」由服务端校验，不在这里用类型表达（联合类型表达不了）。
  *
- * 取值合法性由页面与服务端各自用 `isValidPublicPoolTimeoutMinutes()` /
- * `isValidCompletionAutoApprovalMinutes()` / `isValidComplaintWindowMinutes()`
- * 判定，**不在这里**用类型表达（`number` 表达不了「60~10080 的整数」）。
+ * 取值合法性由页面与服务端各自用 `isValidExclusivePoolTimeoutMinutes()` /
+ * `isValidPublicPoolTimeoutMinutes()` / `isValidCompletionAutoApprovalMinutes()` /
+ * `isValidComplaintWindowMinutes()` 判定，**不在这里**用类型表达
+ * （`number` 表达不了「60~10080 的整数」）。
  */
 export type AdminPlatformConfigPatch = {
+  exclusivePoolTimeoutMinutes?: number;
   publicPoolTimeoutMinutes?: number;
   completionAutoApprovalMinutes?: number;
   complaintWindowMinutes?: number;

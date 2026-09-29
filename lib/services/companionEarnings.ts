@@ -1,4 +1,8 @@
-import { COMPANION_EARNINGS_NOTICE, EARNING_STATUS_LABELS } from "@/lib/constants/earnings";
+import {
+  COMPANION_EARNINGS_NOTICE,
+  EARNING_STATUS_LABELS,
+  earningNetAmount,
+} from "@/lib/constants/earnings";
 import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
 import { sweepMaturedEarnings } from "@/lib/data/earningTransaction";
 import { getEarningRepository } from "@/lib/data/earningRepository";
@@ -66,6 +70,9 @@ function materializeCompletionAutoApprovals(): void {
  * ⚠️ `netAmount` 在这里算，**页面不算**（`architecture-rules.md` §三 禁止客户端做金额算术）。
  * 它不落在 `Earning` 上：`incomeAmount - reversedAmount` 是一个可以从两个存储字段
  * 唯一推出来的数，存第三份只会多一个可能对不上的地方。
+ *
+ * ⚠️ 算式取自 `earningNetAmount()`，**不在这里重写**：收入榜读的是同一个数
+ * （`lib/constants/companionRankings.ts`），两处各写一遍就是两份口径。
  */
 function toCompanionEarningItem(earning: Earning, orderNo: string): CompanionEarningItem {
   return {
@@ -74,7 +81,7 @@ function toCompanionEarningItem(earning: Earning, orderNo: string): CompanionEar
     orderId: earning.orderId,
     incomeAmount: earning.incomeAmount,
     reversedAmount: earning.reversedAmount,
-    netAmount: earning.incomeAmount - earning.reversedAmount,
+    netAmount: earningNetAmount(earning),
     status: earning.status,
     // 文案由服务端给：页面不自己维护一份状态名映射
     statusLabel: EARNING_STATUS_LABELS[earning.status],
@@ -132,9 +139,13 @@ export async function listCompanionEarnings(companionId: string): Promise<Compan
  * 页面顶部会显示一个点不出来的数字。原值与冲回额在每条记录上各自可见，
  * 需要解释「为什么少了」时看得到原因。
  *
- * ⚠️ `reversed`（整笔冲销）**不计入任何一个桶**——它的净额本来就是 0；
- * `withdrawn` 同理不计入：本阶段不可达，而真到了可达的那一天，
+ * ⚠️ `withdrawn` **不计入任何一个桶**：本阶段不可达，而真到了可达的那一天，
  * 「已提现的钱算不算我的收益」是一个需要产品回答的问题，不该在这里顺手决定。
+ *
+ * ⚠️ **P0-15：净额归零的记录停在 `frozen`**（产品裁定退款批准后不改状态），
+ * 因此它会落进 `frozen` 这个桶——但加进去的是 `netAmount`，也就是 0。
+ * 合计因此仍然正确（「冻结中」那个数不会包含已经退掉的钱），
+ * 而记录本身照旧出现在列表里，打手看得到「这一单被退过」。
  */
 function sumByStatus(items: CompanionEarningItem[], status: "frozen" | "available"): number {
   return items

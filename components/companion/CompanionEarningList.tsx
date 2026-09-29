@@ -1,7 +1,7 @@
 import Link from "next/link";
 import EmptyState from "@/components/common/EmptyState";
 import PriceText from "@/components/common/PriceText";
-import { EARNING_STATUS_CLASS, EARNING_STATUS_HINTS } from "@/lib/constants/earnings";
+import { EARNING_STATUS_CLASS, earningHintFor } from "@/lib/constants/earnings";
 import type { CompanionEarningItem } from "@/lib/types/earning";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
 
@@ -58,7 +58,7 @@ const EARNINGS_EMPTY_DESCRIPTION = "订单完成后产生的收益会出现在�
  *
  * ⚠️ 状态色**只从 `EARNING_STATUS_CLASS` 取**，页面与卡片不得写 `text-status-*`：
  * 与订单状态同一条约定，换色只改常量那一处。
- * ⚠️ 状态名取服务端给的 `statusLabel`，一句话说明取 `EARNING_STATUS_HINTS`：
+ * ⚠️ 状态名取服务端给的 `statusLabel`，一句话说明取 `earningHintFor()`：
  * 页面不自己维护第三份文案。
  */
 function EarningCard({ item }: { item: CompanionEarningItem }) {
@@ -102,9 +102,12 @@ function EarningCard({ item }: { item: CompanionEarningItem }) {
         </>
       ) : null}
 
-      {/* 一句话说清「这笔钱现在能不能用」，而不是只报流程到了哪一步 */}
+      {/* 一句话说清「这笔钱现在能不能用」，而不是只报流程到了哪一步。
+          ⚠️ 取文案走 `earningHintFor()` 而不是直接查 `EARNING_STATUS_HINTS`：
+          净额已归零的收益**停在 `frozen`**（P0-15 产品裁定），
+          直接查表会对它说出「到期自动转为可提现」——那永远不会发生。 */}
       <p className="mt-1 text-[12px] leading-5 text-ink-3">
-        {EARNING_STATUS_HINTS[item.status]}
+        {earningHintFor({ status: item.status, netAmount: item.netAmount })}
       </p>
 
       <div className="mt-2 flex items-end gap-2 border-t border-line pt-2">

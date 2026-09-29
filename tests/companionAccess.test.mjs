@@ -271,6 +271,12 @@ test("不是护航 / 已下架时不读第二次：一次判定同样只读一�
  *
  * ⚠️ P0-9 修订：「我的收益」（`earnings/`）与「我的订单」同一个取舍——
  * 它要拿当前打手的 id 去查自己那份收益，因此同样必须走同一份缓存结果，清单从五个变六个。
+ *
+ * ⚠️ P0-14 修订：「订单聊天」的列表页与聊天页（`chats/`）要拿当前打手的 id
+ * 才能取自己那一段聊天，因此与上面两处同一个取舍，清单从六个变八个。
+ * ⚠️ 这两页比其他页**更不能**少这一层判定：聊天页的取数入口
+ * （`getCompanionChatDetail`）本身也重新校验归属，但那是第二道闸——
+ * 第一道若省掉，「我是不是打手」就会由页面各自判断，而这正是本清单要防的。
  */
 test("结构约束：资格判定必须缓存包装，工作台的调用点是显式清单", () => {
   const consoleDir = path.join(ROOT, "app", "companion");
@@ -283,6 +289,8 @@ test("结构约束：资格判定必须缓存包装，工作台的调用点是�
   assert.deepEqual(
     callSites,
     [
+      "app/companion/(console)/chats/[orderId]/page.tsx",
+      "app/companion/(console)/chats/page.tsx",
       "app/companion/(console)/earnings/page.tsx",
       "app/companion/(console)/exclusive/page.tsx",
       "app/companion/(console)/layout.tsx",
@@ -294,7 +302,7 @@ test("结构约束：资格判定必须缓存包装，工作台的调用点是�
   );
 
   // 一次请求一份结果靠的是 React.cache，因此这条包装本身就是约束的一部分：
-  // 去掉它，上面那六个调用点就会变成六次独立的仓储读取
+  // 去掉它，上面那八个调用点就会变成八次独立的仓储读取
   const access = stripComments(
     readFileSync(path.join(ROOT, "lib", "services", "companionAccess.ts"), "utf8"),
   );

@@ -15,7 +15,13 @@ import {
 import { canEnterAdminConsole } from "../lib/constants/admin.ts";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, IDEMPOTENCY_KEY_PATTERN } from "../lib/constants/writes.ts";
 import { acceptDispatch, sweepExpiredDispatches } from "../lib/data/companionDispatchTransaction.ts";
-import { cancelAcceptedOrder } from "../lib/data/companionOrderTransaction.ts";
+import {
+  cancelAcceptedOrder,
+  // 与 `companionDispatchTransaction` 同一个理由：事务层与服务层同名，
+  // 显式起别名让「这是数据层的伪事务」在调用点一眼可见
+  startCompanionOrder as startCompanionOrderTransaction,
+} from "../lib/data/companionOrderTransaction.ts";
+import { approveCompletion, submitCompletion } from "../lib/data/completionTransaction.ts";
 import { getCompanionReleaseRepository } from "../lib/data/companionReleaseRepository.ts";
 import { getCompanionRepository } from "../lib/data/companionRepository.ts";
 import { getDispatchRepository } from "../lib/data/dispatchRepository.ts";
@@ -23,18 +29,21 @@ import { resetMockStore } from "../lib/data/mockStore.ts";
 import { getNotificationRepository } from "../lib/data/notificationRepository.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
 import { updateAdminPlatformConfig } from "../lib/services/adminPlatformConfig.ts";
+import { approveAdminRefund } from "../lib/services/adminRefunds.ts";
 import { getAdminOrderDetail } from "../lib/services/adminOrders.ts";
 import { confirmPaymentRequest, createPaymentRequest } from "../lib/services/checkout.ts";
 import {
   acceptDispatchForCompanion,
   listCompanionPools,
 } from "../lib/services/companionDispatch.ts";
+import { listCompanionEarnings } from "../lib/services/companionEarnings.ts";
 import {
   cancelCompanionOrder,
   getCompanionOrderDetail,
   listCompanionOrders,
 } from "../lib/services/companionOrders.ts";
 import { getOrderDetailForUser } from "../lib/services/orders.ts";
+import { createRefundForOrder } from "../lib/services/refunds.ts";
 import { collectFiles, readSource, stripComments } from "./source-text.mjs";
 
 /**
@@ -187,6 +196,59 @@ async function acceptedOrder(companionId, user = uniqueUser(), overrides = {}) {
   assert.equal(after.status, "accepted");
   assert.equal(after.actualCompanionId, companionId);
   return { user, order, dispatchId: dispatch.id, acceptedAt };
+}
+
+/**
+ * 「一张走到 `completed`、并且**真的产生了收益记录**的新订单」（P0-15 的收益口径用）。
+ *
+ * ⚠️ 为什么要走完整链路而不是手写一条 Earning：**收益只由 `settleOrderCompletion`
+ * 在 `serving → completed` 的同一段同步代码里产生**，能执行 `insert` 的入口只有伪事务
+ * （`lib/data/earningRepository.ts` 的读写分离）。这里刻意不去碰 `earningStore()`——
+ * 绕过写入路径造出来的「收益」并不代表业务上真会发生的那一种，用它去断言
+ * `netIncomeAmount` 只会证明测试自己会摆数据。
+ *
+ * ⚠️ 四个时刻都从 `paidAt` 起算、且接单必须落在**公共池超时之内**：超时时长是平台单例，
+ * 本文件前面的用例改过它（最小到 4 分钟），因此这里固定用 +1 分钟——与
+ * `acceptedOrder` 同一个取值，不依赖「跑到这里时它是多少」。
+ */
+async function completedOrder({ companionId = COMPANION_A, user = uniqueUser(), overrides = {} } = {}) {
+  const order = await placeOrder(user, overrides);
+  const dispatch = await dispatchOf(order.id);
+
+  const accepted = await acceptDispatch(dispatch.id, {
+    companionId,
+    at: plusMinutes(order.paidAt, 1),
+  });
+  assert.equal(accepted.kind, "ok", "这条用例需要一次成功的接单");
+
+  const started = await startCompanionOrderTransaction({
+    companionId,
+    orderId: order.id,
+    at: plusMinutes(order.paidAt, 2),
+  });
+  assert.equal(started.kind, "ok", "这条用例需要一次成功的开始服务");
+
+  const submitted = await submitCompletion({
+    companionId,
+    orderId: order.id,
+    summary: "已完成护航服务",
+    evidence: [],
+    at: plusMinutes(order.paidAt, 3),
+  });
+  assert.equal(submitted.kind, "ok", "这条用例需要一份在途完成材料");
+
+  const completedAt = plusMinutes(order.paidAt, 4);
+  const approved = await approveCompletion({
+    submissionId: submitted.submissionId,
+    staffId: "staff-1",
+    staffName: "客服小雨",
+    at: completedAt,
+  });
+  assert.equal(approved.kind, "ok", "这条用例需要一次成功的客服通过");
+
+  const after = await orderOf(order.id);
+  assert.equal(after.status, "completed", "前置条件：订单必须走到 completed");
+  return { user, order: after, completedAt };
 }
 
 /** 断言一个取消请求以指定的错误码 / 状态码 / 文案被拒绝，并返回那个错误。 */
@@ -580,8 +642,11 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
       "acceptedAt",
       "canCancel",
       "canStart",
+      "displayStatus",
+      "displayStatusLabel",
       "gameName",
       "id",
+      "netIncomeAmount",
       "orderNo",
       "paidAt",
       "productCoverUrl",
@@ -611,10 +676,13 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
       "canStart",
       "completion",
       "customerNickname",
+      "displayStatus",
+      "displayStatusLabel",
       "gameAccountId",
       "gameName",
       "id",
       "itemsAmount",
+      "netIncomeAmount",
       "orderNo",
       "paidAt",
       "productCoverUrl",
@@ -638,8 +706,22 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
   assert.equal(detail.servingAt, null, "accepted 的单还没开始服务");
   assert.equal("servingAt" in item, false, "servingAt 只属于详情，不属于列表项");
 
-  // 白名单已经覆盖了这一点，逐个点名是为了说明**为什么**它们不该在
-  for (const leaked of [
+  /*
+    白名单已经覆盖了这一点，逐个点名是为了说明**为什么**它们不该在，
+    而且**列表与详情都要过一遍**：两份 DTO 是分别在 `toCompanionOrderListItem` 与
+    `getCompanionOrderDetail` 里挑出来的，只检查详情的话，某个字段单独漏进列表
+    仍然会一路流到浏览器。
+
+    ⚠️ **平台金额域**（`clubNetIncome` / `companionBaseIncome` / `companionRateSnapshot` /
+    `refundedAmount`）与**归属内部字段**（`userId` / `exclusiveCompanionId`）是两组不同的东西，
+    但它们的对外口径是同一条：「打手只需要知道这一单自己挣了多少」——
+    用户付了多少、平台抽了几成、这单原来归谁，都不是他该看见的。
+
+    ⚠️ 注意 `netIncomeAmount`（P0-15 新增）**不在**这份黑名单里，这是刻意的：
+    它是**打手自己的钱**（下面有专门的用例证明它与「我的收益」页同源），
+    与被挡住的 `companionBaseIncome`（分账基数，平台侧账目）不是一回事。
+  */
+  const PLATFORM_MONEY_AND_INTERNAL_KEYS = [
     "clubNetIncome",
     "companionBaseIncome",
     "companionRateSnapshot",
@@ -650,8 +732,14 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
     "userId",
     "exclusiveCompanionId",
     "releaseHistory",
+  ];
+  for (const [surface, payload] of [
+    ["列表", item],
+    ["详情", detail],
   ]) {
-    assert.equal(Object.hasOwn(detail, leaked), false, `打手端订单 DTO 不该带 ${leaked}`);
+    for (const leaked of PLATFORM_MONEY_AND_INTERNAL_KEYS) {
+      assert.equal(Object.hasOwn(payload, leaked), false, `${surface} DTO 不该带 ${leaked}`);
+    }
   }
 
   // 履约必需的两项必须在：没有账号与备注就打不了这一单
@@ -673,6 +761,138 @@ test("取消 11：打手端 DTO 是显式挑字段的——canCancel 由服务�
   assert.ok(serving, "预置里 cp-1 有一张 serving 的单");
   assert.equal(serving.status, "serving");
   assert.equal(serving.canCancel, false, "serving 之后没有普通主动取消入口");
+
+  /*
+    ═══ P0-15 的三个字段：**语义由真实单据证明**，不是只钉键名 ═══
+
+    上面两份白名单只回答了「这些键在不在」。三个新字段各自有几种取值/语义，
+    而「键在」对它们同时为真——只钉键名的话，把 `netIncomeAmount` 写成恒 `null`、
+    把 `displayStatus` 写成恒等于 `status`，测试全绿而行为全错。
+    因此下面用**真实仓储**造出四种单据，逐个把语义钉住：
+
+    | 这张单 | `netIncomeAmount` | `displayStatus` |
+    |---|---|---|
+    | 刚接单、没有收益、没退过款 | `null`（这笔账还没产生） | `=== status`（`accepted`） |
+    | 已完成、收益已生成（未冲回） | 净额（与「我的收益」页同源） | `=== status`（`completed`） |
+    | 已退款（收益记录不存在） | `0`（退款把这一单收益取消，与比例无关） | `"refunded"` |
+    | **部分退款**（退了 50%） | `0`（收益**整笔**冲销，不乘比例） | `"refunded"`，而 `status` 仍是 `completed` |
+
+    ⚠️ 前两行与后两行的差别就是**这一对字段为什么必须分开**：只有最后一行
+    `displayStatus !== status`（P0-15 指令 ②§八）。少了它，把 `displayStatus` 写成
+    `status` 的别名也能全绿——而那正是这条分离规则要防的写法。
+
+    ⚠️ `null` 与 `0` 必须分开：合并成一句「¥0」会让尚未完成的订单看起来像被退款了。
+  */
+
+  // (1) 刚接单：账还没产生，展示状态就是真实状态
+  assert.equal(item.netIncomeAmount, null, "没有收益记录、也没退过款：这一单的账还没有产生");
+  assert.equal(item.displayStatus, "accepted", "未退款时展示状态 === 真实状态");
+  assert.equal(item.displayStatus, item.status, "未退款时展示状态必须与真实状态逐字相同");
+  assert.equal(item.displayStatusLabel, item.statusLabel);
+  assert.equal(item.displayStatusLabel, "已接单");
+
+  // (2) 已完成、收益已生成：净额是**打手自己的钱**，与「我的收益」页上的 netAmount 同源。
+  //     这条用真实链路造出单据（接单 → 开始服务 → 提交材料 → 客服通过 → 自动结算收益），
+  //     因此它证明的是「同一个数在两处被算出同一个值」，而不是测试自己摆的数据
+  const { order: completed } = await completedOrder({ companionId: COMPANION_A });
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.refundedAmount, 0, "这一条必须是**未退款**的已完成单，否则它测的不是收益口径");
+  assert.ok(completed.companionBaseIncome > 0, "这一单必须有大于 0 的分账基数，否则断言没有说服力");
+
+  const completedItem = (await listCompanionOrders(COMPANION_A)).items.find(
+    (entry) => entry.id === completed.id,
+  );
+  assert.ok(completedItem, "刚完成的单必须立刻出现在他自己的订单列表里");
+  assert.notEqual(
+    completedItem.netIncomeAmount,
+    null,
+    "收益已经生成：这一个数必须是净额，不能停在「还没结算」",
+  );
+  // 同源：与「我的收益」页上那一条**逐字相等**（两处都由 `incomeAmount - reversedAmount` 推出）
+  const earningItem = (await listCompanionEarnings(COMPANION_A)).items.find(
+    (entry) => entry.orderId === completed.id,
+  );
+  assert.ok(earningItem, "已完成且已结算的订单必须在「我的收益」里有一条记录");
+  assert.equal(
+    completedItem.netIncomeAmount,
+    earningItem.netAmount,
+    "订单列表的「本单收益」与「我的收益」页的净额必须是同一个数",
+  );
+  // 第二个独立来源：未冲回时净额就等于订单冻结的分账基数（金额只有一处算术）
+  assert.equal(completedItem.netIncomeAmount, completed.companionBaseIncome);
+  assert.equal(completedItem.displayStatus, "completed", "未退款时展示状态 === 真实状态");
+  assert.equal(completedItem.displayStatusLabel, "已完成");
+
+  // (3) 已退款：收益记录根本不存在（订单没走到 completed），但规则给出的答案是 0 而不是 null
+  const refundedOrder = await orderOf(SEEDED_REFUNDED);
+  assert.equal(refundedOrder.actualCompanionId, COMPANION_A, "这一单必须是挂在 cp-1 名下的");
+  assert.ok(refundedOrder.refundedAmount > 0, "前置条件：这一单真的退过款");
+
+  const refundedItem = (await listCompanionOrders(COMPANION_A)).items.find(
+    (entry) => entry.id === SEEDED_REFUNDED,
+  );
+  assert.ok(refundedItem, "预置里 cp-1 有一张已退款的单");
+  assert.equal(
+    refundedItem.netIncomeAmount,
+    0,
+    "已退款 ⇒ 本单收益为 0（与退款比例无关）；回 null 会让打手看到一行「—」而事实是挣了 0 元",
+  );
+  assert.equal(refundedItem.displayStatus, "refunded", "退过款的单，打手侧看到的应当是「已退款」");
+  assert.equal(refundedItem.displayStatusLabel, "已退款");
+  assert.equal(refundedItem.status, "refunded", "全额退款时展示状态与真实状态恰好相同");
+
+  /*
+    (4) **部分退款**：这才是 `displayStatus` 与 `status` 分家的那一格（P0-15 §六）。
+    订单走完了整个生命周期（`completed`），退款只退了一部分，因此**订单状态保持不变**，
+    但打手这一单的钱已经全部取消——他看到的应当是「已退款」。
+
+    ⚠️ 走**真实链路**造这一格：用户提交售后申请 → 管理员按 50% 批准。
+    手写一个 `refundedAmount` 只能证明字段被读出来，证明不了「部分退款之后
+    `Order.status` 不被强制改成 `refunded`」这条规则真的生效。
+  */
+  const { user: refundUser, order: partialOrder } = await completedOrder({ companionId: COMPANION_A });
+  const applied = await createRefundForOrder(
+    partialOrder.id,
+    refundUser,
+    {
+      reasonKey: "other",
+      description: "服务过程与约定不符，申请部分退款。",
+      evidence: [],
+      idempotencyKey: uniqueKey(),
+    },
+    undefined,
+    "server",
+  );
+  await approveAdminRefund(applied.refundId, "admin-1", {
+    idempotencyKey: uniqueKey(),
+    reviewNote: "已核实，按 50% 退款。",
+    refundRatePercent: "50",
+  });
+
+  const refundedOrderState = await orderOf(partialOrder.id);
+  assert.equal(
+    refundedOrderState.status,
+    "completed",
+    "部分退款**不得**把订单改成 refunded：这一单的真实生命周期照走（P0-15 §六）",
+  );
+  assert.ok(
+    refundedOrderState.refundedAmount > 0 && refundedOrderState.refundedAmount < partialOrder.actualPaidAmount,
+    "前置条件：这一次退的是**一部分**（退了钱、但没退满）",
+  );
+
+  const partialItem = (await listCompanionOrders(COMPANION_A)).items.find(
+    (entry) => entry.id === partialOrder.id,
+  );
+  assert.ok(partialItem);
+  assert.equal(partialItem.status, "completed", "真实状态仍然是「已完成」");
+  assert.equal(partialItem.displayStatus, "refunded", "打手侧看到的必须是「已退款」");
+  assert.equal(partialItem.displayStatusLabel, "已退款");
+  assert.notEqual(partialItem.displayStatus, partialItem.status, "这一格的意义就在于两者不同");
+  assert.equal(
+    partialItem.netIncomeAmount,
+    0,
+    "退款批准后收益**整笔**归零：退 50% 也是 0，不是「留下 50%」",
+  );
 });
 
 test("取消 12：通知只发给下单用户、恰好一条、不重复，也不带订单隐私", async () => {

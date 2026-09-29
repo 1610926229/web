@@ -2,7 +2,7 @@ import { plusMinutes } from "@/lib/constants/dispatch";
 import { buildDispatchSeed } from "@/lib/mocks/fixtures/dispatchSeed";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
-import type { DispatchRecord } from "@/lib/types/dispatch";
+import type { DispatchAcceptSource, DispatchRecord } from "@/lib/types/dispatch";
 import { getMockStore } from "./mockStore";
 import type { DispatchRepository } from "./dispatchRepository";
 
@@ -98,16 +98,28 @@ export function createDispatchRecord(record: DispatchRecord): DispatchRecord {
 /**
  * 接单（**同步写入器**，无 `await`）。
  *
- * 写派单的 `acceptedByCompanionId` / `acceptedAt` / 状态。
+ * 写派单的 `acceptedByCompanionId` / `acceptedAt` / `acceptedVia` / 状态。
  *
  * ⚠️ 订单那一侧（`status = accepted`、`actualCompanionId`）**不在本函数里**：
  * 它由伪事务在**同一个**无 `await` 区段里紧跟着写。两处必须在同一区段，
  * 否则会出现「派单说被 A 接了、订单说没人接」这种自相矛盾的状态。
+ *
+ * ## `via` 是**必填**，不是可选项（P1-5 §九-F）
+ *
+ * 两个调用方都要**明说自己是谁**：打手自己接单传 `"companion"`，
+ * 客服直接换人传 `"staff"`。做成必填参数是有意的——**不填就编译不过**，
+ * 于是一个新的绑定入口不可能「忘了写来源」而悄悄落进存量派生通道里
+ * 被算成一次主动接单。写成可选参数 + 默认值就等于把这条保证交给记性。
+ *
+ * ⚠️ 注意 `via` **只描述这一次绑定是谁发起的**，与「谁算接单榜」无关：
+ * 那条规则在 `lib/constants/companionRankings.ts`（只数 `"companion"`）。
+ * 本函数不判、也不过滤，它只把事实写下来。
  */
 export function applyDispatchAccepted(
   id: string,
   companionId: string,
   at: string,
+  via: DispatchAcceptSource,
 ): DispatchRecord | null {
   const current = store();
   const record = current.dispatches.get(id);
@@ -118,6 +130,7 @@ export function applyDispatchAccepted(
     state: "accepted",
     acceptedByCompanionId: companionId,
     acceptedAt: at,
+    acceptedVia: via,
     updatedAt: at,
   };
   current.dispatches.set(id, updated);
@@ -135,8 +148,14 @@ export function applyDispatchAccepted(
  * 1. 状态回到 `public`；
  * 2. **重记**公共池的进入时刻与截止时间——不是沿用上一次，而是按**那一刻**的配置
  *    重新冻结快照（用户被承诺的是「进入池子那一刻的规则」，后台之后改参数不影响这一单）；
- * 3. 清空**当前接单绑定**（`acceptedByCompanionId` / `acceptedAt`）；
+ * 3. 清空**当前接单绑定**（`acceptedByCompanionId` / `acceptedAt` / **`acceptedVia`**）；
  * 4. `updatedAt` 跟着走。
+ *
+ * ⚠️ 第 3 条里的 `acceptedVia` 是 P1-5 §九-F 补上的，与 `acceptedByCompanionId`
+ * 是**同一条理由的第二个字段**：绑定没了，绑定的**来源**也必须跟着没。
+ * 漏清就是「这一单现在没人接，却记着上次是谁把它绑上去的」——
+ * 而存量派生通道（`deriveLegacyAcceptEvents`）读的正是这两个字段，
+ * 于是它会把一次**已经被取消掉的接单**算成一次主动接单，**回池之后越数越多**。
  *
  * ⚠️ 第 3 条是 P0-6 补上的（D3）。此前唯一的调用点是专属池超时清扫，那条路径上
  * 从来没人接过单，两个字段本来就是 `null`，漏清**看不见**；一旦被取消接单复用，
@@ -168,6 +187,7 @@ export function applyDispatchToPublic(
     publicTimeoutMinutesSnapshot: timeoutMinutes,
     acceptedByCompanionId: null,
     acceptedAt: null,
+    acceptedVia: null,
     updatedAt: enteredAt,
   };
   current.dispatches.set(id, updated);

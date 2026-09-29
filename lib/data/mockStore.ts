@@ -90,6 +90,13 @@ export type MockStoreName =
    */
   | "companionRelease"
   /**
+   * 接单事件（成功的 `acceptDispatch` 留下的**只增不改**历史）。P1-5 起由接单事务写入、
+   * **没有预置数据**。它存在的唯一理由是「换人会覆盖派单记录上的接单人」——
+   * 先后有几个人接过这一单，只能由这张表回答。
+   * 见 `lib/data/mockCompanionAcceptRepository.ts`。
+   */
+  | "companionAccept"
+  /**
    * 打手收益（订单完成后生成、随投诉窗口冻结、到期释放）。P0-9 起由完成事务写入，
    * 之后只被 `sweepMaturedEarnings` 改状态，**没有预置数据**
    * （P0-9 之前就已经 completed 的历史订单不回溯补收益，见 `lib/types/order.ts`

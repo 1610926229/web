@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api/ApiError";
 import {
+  complaintStatusesForFilter,
   normalizeAdminComplaintResult,
 } from "@/lib/constants/adminComplaints";
 import { COMPLAINT_STATUS_LABELS } from "@/lib/constants/complaints";
@@ -132,7 +133,7 @@ async function orderSummaryInput(orderId: string | null): Promise<StaffComplaint
     orderNo: order.orderNo,
     status: order.status,
     productTitle: order.productTitle,
-    totalAmount: order.totalAmount,
+    actualPaidAmount: order.actualPaidAmount,
     releaseHistory,
   };
 }
@@ -206,7 +207,7 @@ export async function queryStaffComplaintList(
 
     const [rows, users] = await Promise.all([
       getComplaintRepository().queryComplaintsForAdmin({
-        status: query.status === "all" ? null : query.status,
+        statuses: complaintStatusesForFilter(query.status),
         type: query.type === "all" ? null : query.type,
       }),
       staffUserIndex(),

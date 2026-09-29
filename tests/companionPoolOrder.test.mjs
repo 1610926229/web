@@ -3,7 +3,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { EXCLUSIVE_WAIT_MINUTES, plusMinutes } from "../lib/constants/dispatch.ts";
+import { plusMinutes } from "../lib/constants/dispatch.ts";
+import { EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES } from "../lib/constants/platformConfig.ts";
 import { acceptDispatch } from "../lib/data/companionDispatchTransaction.ts";
 import { cancelAcceptedOrder } from "../lib/data/companionOrderTransaction.ts";
 import { getDispatchRepository } from "../lib/data/dispatchRepository.ts";
@@ -190,14 +191,15 @@ function pinPublicPoolEntry(dispatchId, enteredAt, timeoutMinutes) {
   return record;
 }
 
-/** 同上，走专属池那两个字段。专属池时长固定为 `EXCLUSIVE_WAIT_MINUTES`，不可配置。 */
+/** 同上，走专属池那两个字段。专属池时长取进池时冻结的快照（默认 10 分钟，P1-2 起可配置）。 */
 function pinExclusiveEntry(dispatchId, enteredAt) {
   const record = dispatchStore().dispatches.get(dispatchId);
   assert.ok(record, `派单 ${dispatchId} 必须存在`);
   assert.equal(record.state, "exclusive", "只有还在专属池里的单才谈得上「专属池进入时刻」");
 
   record.exclusiveEnteredAt = enteredAt;
-  record.exclusiveDeadlineAt = plusMinutes(enteredAt, EXCLUSIVE_WAIT_MINUTES);
+  record.exclusiveDeadlineAt = plusMinutes(enteredAt, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+  record.exclusiveTimeoutMinutesSnapshot = EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES;
   return record;
 }
 
@@ -546,7 +548,7 @@ test("11.7 由专属池转过来的单按**转入公共池的时刻**排，不�
   assert.equal(xAfter.state, "public", "X 必须已经真的转入公共池，否则本用例的两个排序键不会分叉");
   assert.equal(xAfter.exclusiveEnteredAt, xPinnedExclusive, "当初进专属池的时刻是历史事实，不该被抹掉");
   // 转入公共池的时刻 = 专属池到点那一刻（`sweepExpiredDispatches` 的既有规则）
-  assert.equal(xAfter.publicPoolEnteredAt, plusMinutes(xPinnedExclusive, EXCLUSIVE_WAIT_MINUTES));
+  assert.equal(xAfter.publicPoolEnteredAt, plusMinutes(xPinnedExclusive, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES));
   // 反例先成立：X 的**历史**时刻比 Y 的进池时刻更早，而它的**当前**时刻更晚。
   // 少了这一条，本用例证明不了任何事
   assert.ok(

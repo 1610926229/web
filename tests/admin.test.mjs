@@ -553,6 +553,8 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/orders/page.tsx",
     "admin/refunds/page.tsx",
     "admin/complaints/page.tsx",
+    // P1-3：售后统一工作台（退款 + 投诉的混合待办队列）
+    "admin/aftersales/page.tsx",
   ]) {
     const file = findAppFile(route);
     assert.ok(file.length > 0, `缺少 ${route}`);
@@ -589,6 +591,7 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/orders/page.tsx",
     "admin/refunds/page.tsx",
     "admin/complaints/page.tsx",
+    "admin/aftersales/page.tsx",
   ]) {
     const file = findAppFile(route);
     assert.ok(file.includes("(list)"), `${route} 应当待在 (list) 里，加载边界才收得住`);
@@ -599,6 +602,8 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/orders/[id]/page.tsx",
     "admin/refunds/[id]/page.tsx",
     "admin/complaints/[id]/page.tsx",
+    // P1-3：售后工作台的详情页是**两级动态段**（案件类型 + id），仍然一个 loading.tsx 都不许有
+    "admin/aftersales/[caseType]/[id]/page.tsx",
   ]) {
     const dir = path.dirname(findAppFile(route));
     assert.equal(
@@ -654,14 +659,21 @@ test("用户端不出现任何管理后台入口", () => {
   }
 });
 
-test("后台导航覆盖十一个已开放模块，未开放模块没有入口", () => {
+test("后台导航覆盖十三个已开放模块，未开放模块没有入口", () => {
   // P8B 把「商品与类目」从 `ADMIN_UPCOMING_MODULES` 里搬进了导航，
   // P8C 又把「订单 / 退款 / 投诉」搬了进来，P8D-1 再搬进来「客服账号」，
-  // P8E-1 再搬进来「运营内容」，P0-1 再搬进来「平台参数」：
+  // P8E-1 再搬进来「运营内容」，P0-1 再搬进来「平台参数」，P1-3 再搬进来「售后工作台」：
   // 它们的页面已经存在，侧栏再挂一条「后续开放」就会与真实入口并存，运营点哪个都不对。
   // 这条断言守的是「导航与已建成的页面一一对应」。
   //
   // ⚠️ 退款与投诉是**两条**导航项，不是一个「售后」：一边会写订单，一边只写平台侧结论。
+  // **P1-3 之后这句话仍然成立，而导航里也确实多了一条「售后工作台」——两者不矛盾**：
+  // 原判断针对的是「把两种**处置动作**合成一个入口」，而工作台不改这个分工。
+  // 它是一个**只读的分流队列**（退款与投诉混合、按未完结/处理中/已结束分视图），
+  // 点进去之后渲染的正是各自既有的 `AdminRefundConsole` / `AdminComplaintConsole`，
+  // 处置动作仍然只在各自的工作面上发生。两个原有入口**一条都没有删**。
+  // ⚠️ 它排在 `/admin/complaints` 之后、`/admin/customer-service` 之前：它与订单/退款/投诉
+  // 是同一簇（都是「这一单出了什么事」），而客服账号与平台参数是另外两类东西。
   // ⚠️ 「客服账号」（地址 `/admin/customer-service`）管的是**谁能登录 /staff 工作台**，
   // 与客服在工作台里能看什么是两件事；它也不与用户端名单、排行榜发生任何关系。
   // ⚠️ 「运营内容」（地址 `/admin/content`）是**一条**导航项而不是四类内容各一条：
@@ -670,6 +682,9 @@ test("后台导航覆盖十一个已开放模块，未开放模块没有入口",
   // ⚠️ 「平台参数」（地址 `/admin/platform-config`）排在**最后**：上面每一条都是
   // 「业务对象与账号」，它是**全局规则**本身——改它不动任何一条已有记录，
   // 只决定此后新发生的业务按什么走。插在中间会让人以为它属于相邻那个模块。
+  // ⚠️ P1-4 验收整改轮加了「优惠券发放」（`/admin/coupons`），它排在平台参数**之前**、
+  // 客服账号**之后**：发券是对一个业务对象做一次动作，属于「业务对象与账号」这一侧，
+  // 而**不是**全局规则。放在平台参数后面会让上面那条读法失效。
   assert.deepEqual(
     ADMIN_NAV_ITEMS.map((item) => item.href),
     [
@@ -682,7 +697,9 @@ test("后台导航覆盖十一个已开放模块，未开放模块没有入口",
       "/admin/orders",
       "/admin/refunds",
       "/admin/complaints",
+      "/admin/aftersales",
       "/admin/customer-service",
+      "/admin/coupons",
       "/admin/platform-config",
     ],
   );
@@ -711,7 +728,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件 + 运营内容十九件 + 平台参数一件", () => {
+test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件 + 运营内容十九件 + 发券三件 + 平台参数一件 + 经营首页一件 + 售后聚合一件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -719,6 +736,11 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
   assert.deepEqual(
     routeFiles.map((file) => path.relative(ADMIN_API_DIR, file).replace(/\\/g, "/")).sort(),
     [
+      // P1-3：售后统一工作台的**只读聚合列表**。⚠️ 只有列表这一个地址，**没有**详情地址与动作地址：
+      // 详情是服务端组件直接调服务（不经过 HTTP），而三个处置动作（开始审核 / 通过 / 驳回、
+      // 开始处理 / 解决 / 关闭）仍然只挂在各自的 `/api/admin/refunds/**`、`/api/admin/complaints/**` 上。
+      // 工作台再开一套动作地址，就等于给同一份事务逻辑开了第二个入口。
+      "aftersales/route.ts",
       "auth/logout/route.ts",
       "auth/mock-login/route.ts",
       "auth/session/route.ts",
@@ -775,6 +797,25 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "content/quick-entries/[id]/remove/route.ts",
       "content/quick-entries/[id]/route.ts",
       "content/quick-entries/route.ts",
+      // P1-4 验收整改轮：管理员向指定用户发放优惠券
+      // ⚠️ 三个地址各有分工，**没有**「撤销发放」「编辑已发的券」：
+      // 券一旦发出去就是用户的资产，管理端不能悄悄改它或收回它
+      // （要收回只能等它过期或停用模板——那是「以后不能用」，不是「抹掉这一张」）。
+      // - `coupons`（GET）：可发的模板，只含 enabled 的
+      // - `coupons/grant-targets`（GET）：按关键词找用户，空关键词返回空列表
+      // - `coupons/grant`（POST）：发放
+      // ⚠️ 发放人只取 `requireAdmin()` 的会话身份，请求体里没有这个字段——
+      // 「谁发的」这条审计如果能让调用方自己声明，它就不再是审计。
+      // ⚠️ 也没有「列出某人已持有的券」地址：那是用户端「我的优惠券」的事，
+      // 管理端在挑人时只需要知道他手上**有几张**（`grant-targets` 的 `ownedCount`）。
+      "coupons/grant-targets/route.ts",
+      "coupons/grant/route.ts",
+      "coupons/route.ts",
+      // P1-1：经营首页（只读聚合）
+      // ⚠️ **只有一个地址，只有 GET**：经营首页不做任何业务动作
+      // （不审批、不退款、不换人、不改申请状态），因此没有 POST / PATCH / DELETE。
+      // 明细与处置都在各自的模块页里，这里只负责聚合、展示与跳转。
+      "dashboard/route.ts",
       // P8C：订单（全量查询，**只读**）
       // ⚠️ 这里没有「改订单状态」「分配护航」「改金额」这类地址：本阶段的订单详情只读，
       // 订单唯一会被改动的地方是「退款审核通过」，它的主语是退款申请，入口在退款模块

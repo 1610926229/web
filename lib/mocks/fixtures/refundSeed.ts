@@ -34,8 +34,14 @@ import { orderSeed } from "./orderSeed";
  * 并按分存储，不在这里手写数字——手写的金额迟早会和订单对不上。
  *
  * ⚠️ **P0-13 起多一条自洽要求：`approved` 必须有资金决策**（见 `build` 的不变量 4）。
- * 决策的三个金额同样**由公式算出来**，不手写：决策里的比例与责任归属是「当时谁批的、
+ * 决策的金额同样**由公式算出来**，不手写：决策里的**退款比例**是「当时谁批的、
  * 按什么比例批的」这个历史事实，必须由种子作者显式写出，而金额是它的推论。
+ *
+ * ⚠️ **P0-15 起「一个订单最多一条退款申请」是硬规则**，因此本文件底部的跨记录校验
+ * 从「累计金额不得超过实付」升级为「订单号不得重复」——预置数据里出现两条同订单申请，
+ * 今天已经不是「一种历史形态」，而是一条**不可能被写出来的数据**
+ * （`createRefundRequest` 会拒绝它）。让它在启动时就抛错，比等到某个页面渲染出
+ * 一个两次退款的订单要好。
  */
 
 /** 预置凭证：只写类型与文件名，地址统一由 `EVIDENCE_PLACEHOLDER_URL` 占位。 */
@@ -58,11 +64,12 @@ type PresetRefundInput = {
   cancelledAt?: string;
   evidence?: PresetEvidence[];
   /**
-   * 资金决策的**输入**（比例与责任归属）：`approved` 必填、其余状态**禁止填写**。
+   * 资金决策的**输入**（只有退款比例）：`approved` 必填、其余状态**禁止填写**。
    *
-   * ⚠️ 只给输入，不给金额：三个金额由 `computeRefundDecisionAmounts` 按 §17 算，
+   * ⚠️ 只给输入，不给金额：两个金额由 `computeRefundDecisionAmounts` 从订单快照算
+   * （P0-15 指令 ①§二 / ①§三：退款额按比例取整，打手冲回额**与比例无关、恒为整笔**），
    * 与运行时那条路径**走的是同一个函数**。手写金额的话，预置数据里的
-   * 「退款 = 打手冲回 + 平台承担」就会是一份没人验证过的算术。
+   * 「退款额 = 实付 × 比例、冲回额 = 订单收益」就会是一份没人验证过的算术。
    */
   decide?: RefundDecisionInput;
 };
@@ -101,7 +108,7 @@ function build(input: PresetRefundInput): RefundRequest {
   // 其余状态**必须没有**。少了一半，页面上就会出现「已通过但退了多少不知道」
   // 或「还没批却写着退了多少」这两种互相矛盾的展示。
   if (input.status === "approved" && !input.decide) {
-    throw new Error(`预置退款 ${input.id} 已通过，必须给出资金决策（比例与责任归属）`);
+    throw new Error(`预置退款 ${input.id} 已通过，必须给出资金决策（退款比例）`);
   }
   if (input.status !== "approved" && input.decide) {
     throw new Error(`预置退款 ${input.id} 不是「已通过」，不能带资金决策`);
@@ -112,9 +119,9 @@ function build(input: PresetRefundInput): RefundRequest {
   const amounts = input.decide
     ? computeRefundDecisionAmounts({
         actualPaidAmount: order.actualPaidAmount,
+        // 预置数据里一个订单最多一条申请（文件底部的跨记录校验钉死），
+        // 因此这里既没退过钱、也没冲回过收益，不存在需要减掉的前序金额
         companionBaseIncome: order.companionBaseIncome,
-        // 预置数据里一个订单最多一条已通过申请，因此没有既往冲回
-        reversedSoFar: 0,
         input: input.decide,
       })
     : null;
@@ -130,12 +137,11 @@ function build(input: PresetRefundInput): RefundRequest {
     decision:
       input.decide && amounts
         ? {
+            // 与写入路径同一口径：比例**原样存下**，不再有 null 这个取值
             refundRateBp: input.decide.refundRateBp,
             refundAmount: amounts.refundAmount,
-            responsibility: input.decide.responsibility,
-            companionLiabilityRateBp: input.decide.companionLiabilityRateBp,
+            // 整笔归零，与比例无关（P0-15 §三）
             companionReversalAmount: amounts.companionReversalAmount,
-            platformBorneAmount: amounts.platformBorneAmount,
             decidedBy: MOCK_ADMIN_LOGIN_ID,
             decidedAt,
           }
@@ -219,11 +225,17 @@ export const refundSeed: RefundRequest[] = [
     reviewingAt: "2026-09-09T12:00:00.000Z",
     reviewedAt: "2026-09-09T13:30:00.000Z",
     reviewNote: "已核实本次服务未开始，退款申请通过，款项按原支付渠道退回。",
-    // 资金决策：服务未开始，全额退、平台承担。
-    // ⚠️ 预置数据里**没有 Earning**（收益只在运行时由订单完成产生），因此这里也不能写
-    // 「已从打手收益冲回多少」的责任归属——那会造出一条有冲回金额、却没有对应
-    // 冲回明细的历史决策，而 P0-13 要求平台承担与打手承担都必须可审计（Q1-c）。
-    decide: { refundRateBp: 10000, responsibility: "platform", companionLiabilityRateBp: null },
+    // 资金决策：服务未开始，全额退（100%）。
+    // ⚠️ 预置数据里**没有 Earning**（收益只在运行时由订单完成产生），因此
+    // `companionReversalAmount` 写下的那个数**今天没有可冲的对象**——这不矛盾：
+    // 冲回的对象是「订单冻结的经济快照」而不是「一条已存在的 Earning」，
+    // 金额在决策当时就已算好并留在退款记录上，将来由
+    // `backfillRefundReversals` 在订单完成时物化。
+    // ⚠️ P0-15 之前这里还要写 `responsibility: "platform"` 来表达「这笔钱不从打手身上出」，
+    // **责任模型已废止**：全额退款下打手本来就没有收益可冲（订单未开始 ⇒ 不建 Earning）。
+    decide: {
+      refundRateBp: 10000,
+    },
   }),
   // 已拒绝：订单保持「已付款」，不会因为被拒绝而变动
   build({
@@ -287,19 +299,37 @@ export const refundSeed: RefundRequest[] = [
 ];
 
 /**
- * 跨记录不变量（P0-13）：任一订单上**已通过**申请的退款金额之和，
- * 不得超过该订单的 `refundedAmount`。
+ * 跨记录不变量（**P0-15 起是硬规则，不再是「账要平」**）：一个订单**最多一条**退款申请。
  *
- * 为什么必须在这里再查一遍：「一条申请自洽」不代表「一单的账自洽」。
- * 部分退款上线后，同一订单可以有多条已通过申请，而每条各自都算对的情况下，
- * 它们的**和**仍然可能超过订单实付——那正是「累计退款不得超过实付」这条规则
- * （`cmd_p0-13.md`）被破坏的样子。这条校验让预置数据一旦越界就在启动时抛错，
- * 而不是等到某个页面显示出一个退不完的账。
+ * ⚠️ 这条校验的**性质变了**，不是把阈值收紧：P0-13 时期同一订单多条已通过申请是
+ * **合法形态**（部分退款可以退第二次），那时这里查的是「已通过金额之和 ≤ 累计已退」——
+ * 一个**算术**约束。P0-15 之后同订单两条申请**根本写不出来**
+ * （`createRefundRequest` 直接拒绝，见 `lib/data/refundRepository.ts`），
+ * 于是这里查的是**结构**约束：预置数据里出现重复订单号，说明这份种子是在旧模型下写的、
+ * 或者有人照着旧规则补了一条——两种情况都必须在启动时炸掉，而不是悄悄渲染出一个
+ * 「这一单退了两次」的页面。
+ *
+ * ⚠️ 仍然保留金额一侧的核对，但降级为**兜底**：既然一单只有一条申请，
+ * 「已通过金额之和」就退化成那一条自己的金额，`≤` 检查恒真，
+ * 唯一的用途是万一将来有人给一个订单预置了 approved 却没同步
+ * `order.refundedAmount`。留着它是因为删掉一条校验只会让数据少一层保护。
  *
  * ⚠️ 只能查「≤」不能查「=」：订单也可能由**免审批直接退款**那条路径退掉
  * （P0-12），那条路径不产生任何退款申请记录，因此 `refundedAmount` 有值而
  * 「已通过申请之和」为 0 是完全正常的。
  */
+{
+  const seenOrderIds = new Set<string>();
+  for (const refund of refundSeed) {
+    if (seenOrderIds.has(refund.orderId)) {
+      throw new Error(
+        `预置退款数据违反「一个订单最多一次退款」：订单 ${refund.orderId} 出现了第二条申请`,
+      );
+    }
+    seenOrderIds.add(refund.orderId);
+  }
+}
+
 for (const order of orderSeed) {
   const approvedTotal = refundSeed
     .filter((refund) => refund.orderId === order.id && refund.status === "approved")

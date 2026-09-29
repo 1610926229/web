@@ -1,9 +1,11 @@
+import { COMPANION_CHAT_PAGE_TITLE } from "@/lib/constants/conversations";
 import {
   COMPANION_EXCLUSIVE_PAGE_TITLE,
   COMPANION_ORDERS_PAGE_TITLE,
   COMPANION_POOL_PAGE_TITLE,
 } from "@/lib/constants/dispatch";
 import { COMPANION_EARNINGS_PAGE_TITLE } from "@/lib/constants/earnings";
+import { MESSAGE_MAX_LENGTH } from "@/lib/constants/service";
 import { PLATFORM_NAME } from "@/lib/constants/site";
 
 /**
@@ -28,7 +30,7 @@ export const COMPANION_OVERVIEW_PAGE_TITLE = "工作台";
  * 顶部导航。顺序即页面上从左到右的顺序。
  *
  * 两张池子分成两页而不是一页两个区：它们回答的是**两个不同的问题**——
- * 「用户在等我」（专属池，一对一，十分钟）与「谁都能接」（公共池）。
+ * 「用户在等我」（专属池，一对一，独占期自 P1-2 起可配置）与「谁都能接」（公共池）。
  * 合成一页的话，打手在专属池里翻找公共单时，会看不出哪些是「本来只给我」的。
  * 标签文案取自 `lib/constants/dispatch.ts`，两个页面与导航引用的是同一份字符串。
  *
@@ -42,11 +44,16 @@ export const COMPANION_OVERVIEW_PAGE_TITLE = "工作台";
  * ⚠️ 收益紧跟在订单**之后**（而不是更靠后）：问「这一单挣了多少」的人，
  * 十有八九是刚从订单页点过来的；两者被池子隔开的话，他会以为收益在别处。
  * 标签文案取自 `lib/constants/earnings.ts`，页面与导航引用的是同一份字符串。
+ *
+ * ⚠️ 「订单聊天」放在收益**之后、专属池之前**：聊天是**订单的延伸**，和「我的订单」
+ * 同属「当前责任」这一列，不是「找单入口」。把它放进两张池子那一边，读起来会变成
+ * 「先去抢单，再回头处理手上的沟通」——所以它紧挨着订单与收益。
  */
 export const COMPANION_NAV_ITEMS: readonly { href: string; label: string }[] = [
   { href: "/companion", label: COMPANION_OVERVIEW_PAGE_TITLE },
   { href: "/companion/orders", label: COMPANION_ORDERS_PAGE_TITLE },
   { href: "/companion/earnings", label: COMPANION_EARNINGS_PAGE_TITLE },
+  { href: "/companion/chats", label: COMPANION_CHAT_PAGE_TITLE },
   { href: "/companion/exclusive", label: COMPANION_EXCLUSIVE_PAGE_TITLE },
   { href: "/companion/pool", label: COMPANION_POOL_PAGE_TITLE },
 ];
@@ -141,3 +148,54 @@ export const COMPANION_BACK_TO_USER_HREF = "/";
  */
 export const COMPANION_SCOPE_NOTICE =
   "本阶段已开放专属订单池、公共订单池、我的订单、开始服务、提交完成材料与我的收益。收益提现不在本阶段范围内。";
+
+// ——————————————————————————— 订单聊天（P0-14）———————————————————————————
+
+/** 聊天详情页底部「回到列表」的入口文案。 */
+export const COMPANION_CHAT_BACK_LABEL = "返回订单聊天";
+
+/** 聊天页还没有任何一条消息时，消息区中央的那句提示。 */
+export const COMPANION_CHAT_EMPTY_MESSAGES = "还没有消息。可以在这里和下单用户沟通这一单的情况。";
+
+/** 聊天列表里这一单还没有任何消息时，那行「最后一条消息」的占位。 */
+export const COMPANION_CHAT_LIST_NO_MESSAGE = "还没有消息，去打个招呼";
+
+/**
+ * 聊天列表里，这一单已全额退款、聊天转入只读时的角标（裁定 `TBD-P0-14-1`）。
+ *
+ * ⚠️ 只写「只读」不够：护航在列表上看到这四个字，第一反应是「我是不是被换下了」。
+ * 加上「已退款」说明原因，才不会让他去问客服一件没发生的事。
+ *
+ * ⚠️ 标出来而不是把这一行从列表里拿掉：裁定要求记录**保留可查**，
+ * 藏掉入口等于让记录查不到。
+ */
+export const COMPANION_CHAT_LIST_READONLY_LABEL = "已退款 · 只读";
+
+/** 聊天页输入区的操作文案。 */
+export const COMPANION_CHAT_REFRESH_LABEL = "刷新";
+export const COMPANION_CHAT_REFRESHING_LABEL = "刷新中…";
+export const COMPANION_CHAT_SEND_LABEL = "发送";
+export const COMPANION_CHAT_SENDING_LABEL = "发送中";
+export const COMPANION_CHAT_INPUT_PLACEHOLDER = "输入消息…";
+export const COMPANION_CHAT_INPUT_ARIA_LABEL = "消息内容";
+
+/**
+ * 输入区下方那句提示：单条长度上限与「刷新才能看到对方回复」。
+ *
+ * ⚠️ 长度上限取自 `MESSAGE_MAX_LENGTH`（用户端与打手端同一条规则），这里不另写数字，
+ * 否则两条规则迟早有一处是旧的。
+ */
+export const COMPANION_CHAT_MAX_LENGTH_HINT = `单条消息最多 ${MESSAGE_MAX_LENGTH} 个字；发送后如需查看对方回复，点右上角「刷新」。`;
+
+/**
+ * 订单已全额退款时，聊天页**底栏**（原输入区位置）的说明（裁定 `TBD-P0-14-1`）。
+ *
+ * ⚠️ **位置就是它的全部意义**：输入框整个消失而原地没有任何替代说明时，
+ * 护航会以为页面坏了或自己断网了。因此它回答的是**「我为什么打不了字」**。
+ *
+ * ⚠️ **与页顶那条 `COMPANION_CHAT_REFUNDED_NOTICE` 分工，不是同义反复**：
+ * 页顶那条讲**「发生了什么、记录还在不在」**，这一条讲**「这里为什么没有输入框」**。
+ * 两句若写成同一个字符串，同一屏上会出现一模一样的一句话两遍——
+ * 那是 bug 的样子，不是强调。
+ */
+export const COMPANION_CHAT_READONLY_FOOTER = "已全额退款，无法继续发送消息。";

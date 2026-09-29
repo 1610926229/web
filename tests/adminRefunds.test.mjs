@@ -82,17 +82,26 @@ function key() {
 }
 
 /**
- * 通过时必填的资金决策三件套（P0-13）。
+ * 通过时必填的资金决策 —— **P0-15 之后只剩一个比例字段**。
  *
- * 默认是**全额、平台承担**：它正好复现 P0-13 之前的语义（整单退款、不碰打手收益），
- * 因此本文件里所有既有的「通过之后订单变已退款」断言不需要改口径——
- * 这批用例要验的是状态机、幂等、审计与消费口径，与钱在平台和打手之间怎么分无关。
+ * ⚠️ 2026-09-28 产品裁定推翻了 P0-13 / P0-14 的责任划分模型，本条注释依据的是新规则：
+ * 请求体只该携带 `refundRatePercent`（管理端百分比），三个金额一律由服务端按冻结公式算：
+ *   - `refundAmount = floor(actualPaidAmount × rateBp / 10000)`
+ *   - `companionReversalAmount = companionBaseIncome`（**恒为全额**，10% / 30% / 50% / 100% 都一样）
+ *   - `responsibility` / `companionLiabilityRatePercent` / `platformBorneAmount` 已从
+ *     `lib/**` 整条删除，服务端不再读、也不再写。
  *
- * 责任划分、部分退款与打手收益冲回由 `tests/refundMoneyChain.test.mjs` 专门覆盖：
+ * 因此旧版本里那句「默认是全额、平台承担：正好复现 P0-13 之前的语义（不碰打手收益）」
+ * **不再成立**：现在只要通过，打手这一单的净收益就一定被全额冲回，与比例无关；
+ * 平台最终收入 = `actualPaidAmount − refundAmount`。
+ *
+ * 这里取「100%」是为了让本文件既有的「通过之后订单变已退款」断言继续成立：
+ * 只有**全额**退款才会把 `Order.status` 改成 `refunded`（部分退款保留真实生命周期）。
+ * 金额公式与打手冲回链由 `tests/refundMoneyChain.test.mjs` 专门覆盖——
  * 那些规则要一条完整的资金链（订单 → 收益 → 冲回），混在这里会让两件事都说不清。
  */
 function decision(overrides = {}) {
-  return { refundRatePercent: "100", responsibility: "platform", ...overrides };
+  return { refundRatePercent: "100", ...overrides };
 }
 
 /**
@@ -109,12 +118,12 @@ function decision(overrides = {}) {
  * （`同幂等键重放`）就是靠钉住这个数抓出它的。
  */
 function decisionInput(overrides = {}) {
-  return {
-    refundRateBp: 10000,
-    responsibility: "platform",
-    companionLiabilityRateBp: null,
-    ...overrides,
-  };
+  // ⚠️ P0-15 之后 `RefundDecisionInput` 只剩 `refundRateBp` 一个字段。
+  // 旧版本里的 `refundFullRemaining` / `responsibility` / `companionLiabilityRateBp`
+  // 是已被删除的规则，写进来只会让「数据层形状」看起来还带着责任划分，
+  // 因此这里如实只给新形状；要伪造它们由调用方通过 `overrides` 显式传入
+  // （服务端会忽略，见「退款金额不可篡改」那条）。
+  return { refundRateBp: 10000, ...overrides };
 }
 
 async function refundOf(id) {
@@ -382,17 +391,21 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
 
   await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: key(),
-    // 服务端只认这三个字段算钱；下面全部是伪造的同名/派生字段
+    // 服务端只认 refundRatePercent 这一个字段算钱；下面全部是伪造的同名/派生字段
     ...decision(),
     /*
       客户端伪造：金额、状态、审核人、审核时间、订单状态、退款单号。
 
-      ⚠️ P0-13 起这里还多了一类**新的**伪造面：资金决策的**派生值**。
-      请求体只该携带两个比例与一个责任方（`refundRatePercent` /
-      `companionLiabilityRatePercent` / `responsibility`），三个金额由服务端按
-      §17 冻结公式算。如果写入侧是「有值就用请求体的值」，下面这几个伪造字段
-      就能直接决定退多少钱、打手被冲回多少——而它们恰恰是这一批**唯一**
-      动了钱的字段，因此必须在这里被钉死：伪造的金额一个都不许落地。
+      ⚠️ P0-15 之后伪造面只剩**一个**真正动钱的比例字段 + 一批派生金额。
+      请求体只该携带 `refundRatePercent`；其余三个金额由服务端按 §17 冻结公式算
+      （`companionReversalAmount` 恒等于订单上的打手收益，与比例无关）。
+      如果写入侧是「有值就用请求体的值」，下面这几个伪造字段就能直接决定退多少钱、
+      打手被冲回多少，因此必须在这里被钉死：伪造的金额一个都不许落地。
+
+      另外，**已删除的责任划分字段**（`responsibility` /
+      `companionLiabilityRatePercent` / `platformBorneAmount`）也一并伪造进来：
+      它们现在不在契约里，服务端既不该读、也不该把客户端传的值写回决策对象——
+      下面用 `Object.hasOwn` 从**写入结果**这一侧验证它们没有复活。
     */
     amount: 1,
     status: "rejected",
@@ -406,6 +419,8 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
     refundRateBp: 1,
     companionReversalAmount: 99999999,
     platformBorneAmount: -99999999,
+    responsibility: "companion",
+    companionLiabilityRatePercent: "100",
     decidedBy: "admin-999",
     decidedAt: "2000-01-01T00:00:00.000Z",
   });
@@ -419,16 +434,28 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
   assert.equal(after.refundNo, before.refundNo);
   assert.equal(after.orderId, before.orderId);
 
-  // 服务端按「100% / 平台承担」自己算出来的那三个数，才是唯一能落地的值
+  // 服务端按「100%」自己算出来的那几个数，才是唯一能落地的值
   const written = after.decision;
   assert.notEqual(written, null);
-  assert.equal(written.refundRateBp, 10000, "比例只认 refundRatePercent");
+  assert.equal(written.refundRateBp, 10000, "比例只认 refundRatePercent，不看请求体里的 refundRateBp");
   assert.equal(written.refundAmount, order.totalAmount, "退款额由服务端按实付×比例算");
-  assert.notEqual(written.refundAmount, 1, "伪造的 refundAmount / decidedAmount 无效");
-  assert.equal(written.companionReversalAmount, 0, "responsibility=platform 时冲回额恒为 0");
+  assert.notEqual(written.refundAmount, 1, "伪造的 refundAmount / decidedAmount / amount 无效");
+  // P0-15：冲回额恒为全额，等于订单上的打手收益（与比例、与责任方都无关）
+  assert.ok(order.companionBaseIncome > 0, "预置订单的打手收益非 0，否则下面那条断言什么也没证明");
+  assert.equal(
+    written.companionReversalAmount,
+    order.companionBaseIncome,
+    "打手冲回额恒为全额（= 订单上的 companionBaseIncome），与比例 / responsibility 无关",
+  );
   assert.notEqual(written.companionReversalAmount, 99999999, "伪造的冲回额无效");
-  assert.equal(written.platformBorneAmount, order.totalAmount, "平台承担额由服务端算");
-  assert.notEqual(written.platformBorneAmount, -99999999, "伪造的平台承担额无效");
+  // 责任划分模型已被 P0-15 整条删除：这些字段不得再出现在写出的决策对象上
+  assert.equal(Object.hasOwn(written, "platformBorneAmount"), false, "平台承担额已删除，不得被伪造字段复活");
+  assert.equal(Object.hasOwn(written, "responsibility"), false, "责任方已删除，不得被伪造字段复活");
+  assert.equal(
+    Object.hasOwn(written, "companionLiabilityRatePercent"),
+    false,
+    "打手责任比例已删除，不得被伪造字段复活",
+  );
   assert.equal(written.decidedBy, ADMIN, "决策人来自服务端会话，不由请求体决定");
   assert.notEqual(written.decidedAt, "2000-01-01T00:00:00.000Z");
 
@@ -606,7 +633,11 @@ test("纯口径：已退款订单在任何计入口径里都是零", async () =>
     (order) => order.status === "completed",
   );
   assert.ok(completed, "这位用户应当有已完成订单，否则这条对照做不了");
-  assert.equal(sumEffectiveSpend([completed]), completed.totalAmount);
+  // ⚠️ 期望值取 `actualPaidAmount`（P1-4）：口径读的是**实付**。种子订单没有券，
+  // 两个数当前相等，所以这一条也拦不住字段读错——它只是把「口径 = 实付」这句话
+  // 显式写进断言；真正的守门符在 `tests/levels.test.mjs` 的「接券后按实付计入」，
+  // 那条的两个数**故意不相等**。
+  assert.equal(sumEffectiveSpend([completed]), completed.actualPaidAmount);
   assert.equal(sumEffectiveSpend([{ ...completed, status: "refunded" }]), 0);
 
   // 预置的已退款订单一分都不进累计——它的金额不为零，才说明它确实是被排除的
@@ -778,20 +809,27 @@ test("拒绝已完成的退款：订单仍是已完成，累计消费与六个�
   }
 
   /*
-    用户端：订单仍是已完成，**申请入口照样在**。
+    用户端：订单仍是已完成，但**申请入口已经关闭**。
 
-    ⚠️ 这里在 P0-13（D10）之前断言的是 `false`，理由是「一笔订单只有一条退款记录」。
-    那条理由已经不成立了：只有**进行中**的记录才挡申请，已拒绝 / 已撤销 / 已通过
-    的记录都不再挡——部分退款要求同一单能退第二次。因此被驳回之后，
-    用户看到的是「可以重新申请」而不是「入口消失」。
-    这一条是**放宽的已知后果**（产品已裁定接受），必须在 DTO 这一层也被钉住：
-    只改服务端的判定而让这里的断言留在旧口径，等于把一条已裁定的规则
-    在用户端又收回去，而且不会有任何报错。
+    ⚠️ 这里在 P0-15（2026-09-28 产品裁定）之前断言的是 `true`。
+    P0-13 期间的理由是「只有**进行中**的记录才挡申请，已拒绝 / 已撤销 / 已通过的记录
+    都不再挡——部分退款要求同一单能退第二次」。这条理由已随 P0-15 被推翻：
+    **一个订单最多一次退款申请，一旦提交就永久关闭**（拒绝 / 撤销 / 通过都一样）。
+    因此被驳回之后，用户看到的是「入口消失」而不是「可以重新申请」；
+    `canRequestRefund` 由 `canRequestRefund(status, hasRefundRecord)` 给出——
+    只要这一单**存在过**任何一条退款记录（含已驳回）就为 false。
+
+    在 DTO 这一层钉住它，是因为若只改服务端判定而让这里的断言留在旧口径，
+    页面按钮与接口判定会各说各话，而且不会有任何报错。
   */
   const detail = await getOrderDetailForUser(OTHER_COUNTED_ORDER, COUNTED_USER, undefined, SURFACE);
   assert.equal(detail.status, "completed");
-  assert.equal(detail.allowedActions.canRequestRefund, true, "被驳回不消耗掉这一单的退款机会");
-  assert.equal(detail.refundSummary.status, "rejected", "但那一条记录本身仍然是「未通过」");
+  assert.equal(
+    detail.allowedActions.canRequestRefund,
+    false,
+    "一单只能申请一次：被驳回也算用掉了这一次机会，入口必须关闭",
+  );
+  assert.equal(detail.refundSummary.status, "rejected", "那一条记录本身仍然是「未通过」");
 });
 
 test("通过已完成的退款：订单变已退款，累计消费正好扣掉这一单，周期榜按完成时间归属扣减", async () => {
@@ -926,11 +964,14 @@ test("通过之后历史快照与退款金额仍原样：商品、实付、完�
     refundNo: "FAKE",
     completedAt: "2000-01-01T00:00:00.000Z",
     status: "rejected",
-    // 同一类伪造的第二个面：决策里的**派生金额**（见上一条测试的说明）
+    // 同一类伪造的第二个面：决策里的**派生金额**与已删除的责任划分字段
+    // （见上一条测试的说明；P0-15 之后 responsibility 一侧的字段已不在契约里）
     decidedAmount: 1,
     refundAmount: 1,
     companionReversalAmount: 99999999,
     platformBorneAmount: -99999999,
+    responsibility: "companion",
+    companionLiabilityRatePercent: "50",
   });
 
   const after = await orderById(COUNTED_ORDER);
@@ -948,8 +989,20 @@ test("通过之后历史快照与退款金额仍原样：商品、实付、完�
   assert.notEqual(refundAfter.amount, 1);
   assert.equal(refundAfter.refundNo, refundBefore.refundNo);
   assert.equal(refundAfter.decision.refundAmount, before.totalAmount, "退款额由服务端算，不用伪造的 1");
-  assert.equal(refundAfter.decision.companionReversalAmount, 0, "平台承担时冲回额为 0");
-  assert.equal(refundAfter.decision.platformBorneAmount, before.totalAmount);
+  // P0-15：冲回额恒为全额（= 订单上的打手收益），与比例 / 责任方都无关。
+  // 这与「历史快照不被改写」是同一条不变量的两面：服务端算出来的金额才是唯一真值。
+  assert.ok(before.companionBaseIncome > 0, "预置订单的打手收益非 0，否则下面那条断言什么也没证明");
+  assert.equal(
+    refundAfter.decision.companionReversalAmount,
+    before.companionBaseIncome,
+    "打手冲回额恒为全额，且不被伪造的 99999999 改写",
+  );
+  assert.notEqual(refundAfter.decision.companionReversalAmount, 99999999);
+  assert.equal(
+    Object.hasOwn(refundAfter.decision, "platformBorneAmount"),
+    false,
+    "平台承担额已随责任模型删除，伪造的 -99999999 不得落地",
+  );
 });
 
 // ——————————————————————————— 幂等与审计 ———————————————————————————

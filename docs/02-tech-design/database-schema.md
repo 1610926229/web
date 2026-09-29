@@ -176,15 +176,28 @@
 
 > `refundedAmount` 表示**该订单累计实际已经退还给用户的金额**。
 
-- **P0-13 起它是真正的累计值**（不再只是「未来会扩展成累计」）：
-  每一次批准把它加上**本次**退款额，因此部分退款下 `refundedAmount < actualPaidAmount` 是正常的，
-  而 `refundedAmount === actualPaidAmount` 恰恰是「全额退款」的定义。
-- 管理员批准退款时**必须**显式传本次退款额，由 `applyOrderRefund` 累计写入。
+- ⛔ **「累计」这个词在 P0-15 之后不再成立**（2026-09-28 指令 ①§一 / §九 正式覆盖）：
+  一个订单**至多一次实际退款执行**，因此 `refundedAmount` 就是**那一次退的钱**，
+  不存在把它「加上第二次」的路径。字段名与加法写法都留着（`applyOrderRefund` 是三条
+  退款路径共用的唯一资金写入口），但**「累计」只是历史沿革，不是今天的语义**。
+  P0-13 当时写「它是真正的累计值」是对的——那时同一个订单会被退第二次、第三次；
+  **那一版规则已被覆盖**。
+- 管理员批准退款时**必须**显式传本次退款额，由 `applyOrderRefund` 写入。
   **P0-5.5 已落地**：金额取自**被修改的那张订单**的冻结快照（`order.actualPaidAmount` × 比例），
   不取退款申请上的 `amount` 快照。曾经的缺陷说明见 §9。
 - **⚠️ 部分退款本身不得自动把 `Order.status` 改成 `refunded`。**
   `Order.status === "refunded"` 的正式含义是：**该订单已经全额退款。**
-  **只有累计退满才转**，判据单点在 `lib/constants/refunds.ts` 的 `isFullyRefunded`。
+  **只有退满才转**（一单一退下「退满」= 这一次的比例是 100%），
+  判据单点在 `lib/constants/refunds.ts` 的 `isFullyRefunded`。
+- **⚠️ 「出过款」是一个独立于状态与比例的判据**：部分退款**不改 `Order.status`**，
+  因此「这一单退过款了吗」不能用 `status === "refunded"` 或 `refundedAmount >= actualPaidAmount`
+  回答。唯一定义是 `hasRefundBeenExecuted(order)`（`refundedAmount > 0`）。
+  三条出款路径（直接退款 / 售后台审 / 公共池超时）都必须在**计划阶段**用它，
+  不能在写入层静默拒掉——那会让调用方拿到一份报了假账的返回清单。
+- **⚠️ 计划层要问的是更宽的那一句**：「退款**还能不能再发生**」=
+  `isRefundExecutionClosed(order)`（并集，状态判据 ∪ 出过款判据）。
+  窄判据答不了 `status === "refunded"` 而 `refundedAmount === 0` 的情形，
+  只问窄问题会让计划层放行、存储层拒绝，正是上一条要避免的假账。
 
 **⚠️ 状态机：已实现（P0-5.5）**：
 `lib/constants/orders.ts:83` 的 `ORDER_TRANSITIONS` + `:100` 的 `canTransitionOrder`
@@ -268,12 +281,35 @@ PaymentRequest ──(1:1，支付成功后)──> Order ──(1:1)──> Dis
 | Mock Store | `"dispatch"` → `{ dispatches: Map<string, DispatchRecord>; dispatchIdByOrder: Map<orderId, dispatchId> }` |
 | 主键 | `id` |
 | 状态 | `"exclusive"` \| `"public"` \| `"accepted"` \| `"timed_out"` |
-| 关键字段 | `id`、`orderId`、`state`、`exclusiveCompanionId`、`exclusiveEnteredAt`、`exclusiveDeadlineAt`、`publicPoolEnteredAt`、`publicTimeoutMinutesSnapshot`、`publicDeadlineAt`、`acceptedByCompanionId` |
+| 关键字段 | `id`、`orderId`、`state`、`exclusiveCompanionId`、`exclusiveEnteredAt`、`exclusiveDeadlineAt`、`exclusiveTimeoutMinutesSnapshot`、`publicPoolEnteredAt`、`publicTimeoutMinutesSnapshot`、`publicDeadlineAt`、`acceptedByCompanionId`、`acceptedVia` |
+
+> ⚠️ **`acceptedVia` 由 P1-5 §九-F 产品裁定新增**（`"companion"` \| `"staff"` \| `null`）：
+> **这一次绑定是谁发起的**。它存在的唯一理由是**把「订单进入 `accepted`」与「产生一次接单事件」
+> 分开**——两条路径共用同一个状态迁移函数 `applyDispatchAccepted()`，但从计数的角度看
+> **只有打手自己接单算数**（客服直换 / 直接指定**不算**）。因此：
+>
+> - `applyDispatchAccepted(id, companionId, at, via)` 的 `via` 是**必填第 4 参**——
+>   新加的绑定入口**不填就编译不过**（写成可选 + 默认值等于把这条保证交给记性）；
+> - 它与 `acceptedByCompanionId` **同生共死**：`applyDispatchToPublic()` 把绑定清空时
+>   **必须一并清成 `null`**，否则会出现「没人接、却记着上次是谁发起的」；
+> - **`null` 是一种有意义的取值，不是「还没填」**：`deriveLegacyAcceptEvents()` 对
+>   `"staff"` 与 `null` **一律不派生**（**fail-closed**，两档方向一致）。
+>   产品裁定原文：「如果历史数据无法区分：不得凭空补接单事件。宁可继续保持
+>   『存量接单榜是历史下界』。**不要为了让历史数字好看而伪造主动接单行为。**」
+>
+> 📌 **迁移约束**：将来建真库时这一列必须是 **NOT NULL + 枚举**（取值 `"companion"` / `"staff"`），
+> 存量行回填**不得**用「有 `acceptedByCompanionId` 就填 `"companion"`」这种推断——
+> 那正是裁定禁止的「凭空补」。存量行应回填**一个明确的『未知』值**（对应今天的 `null`）。
 
 > ⚠️ **上表此前漏列了 public 侧三个字段**（`publicPoolEnteredAt` / `publicTimeoutMinutesSnapshot` /
 > `publicDeadlineAt`）与 `acceptedByCompanionId`（P0-6.1 补全）。它们一直是真实字段，
 > 只是没写进这一行；而 P0-6.1 的池子排序真值正是 `publicPoolEnteredAt`，
 > 一份「查不到这个字段」的数据模型文档会让人以为排序键不存在。
+>
+> ⚠️ **`exclusiveTimeoutMinutesSnapshot` 由 P1-2 新增**：专属池时长原本是源码常量
+> （`EXCLUSIVE_WAIT_MINUTES = 10`，**已在 P1-2 删除**），因此不需要快照——
+> 常量不可能在半路被改。改成可配置之后，「这一单当初按几分钟算」就必须记在记录上，
+> 否则无法回答「管理员改了配置，为什么这张单的截止时间没变」。
 
 **两组「进入时刻 + 到点时刻」**：`exclusiveEnteredAt` / `exclusiveDeadlineAt`（专属池）与
 `publicPoolEnteredAt` / `publicDeadlineAt`（公共池）。**当前**用哪一组由 `state` 决定。
@@ -320,42 +356,65 @@ PaymentRequest ──(1:1，支付成功后)──> Order ──(1:1)──> Dis
 
 | 项 | 值 |
 |---|---|
-| 类型 | `lib/types/refund.ts` — `RefundRequest`(:83)、`RefundDecision`(:53)、`RefundStatus`(:24)、`RefundResponsibility`(:41)、`RefundReasonKey`(:27) |
+| 类型 | `lib/types/refund.ts` — `RefundRequest`、`RefundDecision`、`RefundStatus`、`RefundReasonKey`。⚠️ `RefundResponsibility` **已于 P0-15 删除** |
 | 仓储 | `lib/data/refundRepository.ts` → `mockRefundRepository` |
 | Mock Store | `"refund"` → `{ refunds: Map; refundIdByKey: Map<"${userId}:${key}", id>; refundIdsByOrder: Map<orderId, id[]> }` |
 | 主键 | `id`；另有 `refundNo` |
 | 状态 | `"pending"` \| `"reviewing"` \| `"approved"` \| `"rejected"` \| `"cancelled"` |
 | 关键字段 | `id`、`refundNo`、`userId`、`orderId`、`status`、**`amount`（申请时的实付快照）**、**`decision`（本次退款的资金决策，未决策为 `null`）**、`reasonKey`、`reasonLabel`、`description`、`evidence[]`、`createdAt`、`updatedAt`、`reviewingAt`、`reviewedAt`、`reviewedBy`、`reviewedByRole`、`reviewedByName` |
 
-### 9.1 `RefundDecision` —— 一次退款的资金决策（P0-13）
+### 9.1 `RefundDecision` —— 一次退款的资金决策（P0-13；**P0-15 收敛为三项**）
 
-`RefundRequest.decision` 是**值对象**（不单独建表），六项字段回答「这一次退了多少、这笔钱谁承担」+
+`RefundRequest.decision` 是**值对象**（不单独建表），现在只有**三**个金额字段 +
 决策人与时刻：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `refundRateBp` | `number` | 本次退款比例（基点 `1..10000`）。**管理员输入的就是比例，不是金额** |
-| `refundAmount` | `number` | 分。`floor(Order.actualPaidAmount × refundRateBp / 10000)` |
-| `responsibility` | `"platform"` \| `"companion"` \| `"shared"` | 资金责任归属，由**管理员**认定 |
-| `companionLiabilityRateBp` | `number \| null` | **只有 `shared` 有值**，其余两种为 `null`（给了就是 400，不静默忽略） |
-| `companionReversalAmount` | `number` | 分。**本次**从打手收益冲回的金额（见 §T2.1） |
-| `platformBorneAmount` | `number` | 分。`refundAmount − companionReversalAmount`，**用减法构造**，**允许为负** |
+| `refundRateBp` | `number` | 本次退款比例（基点 `1..10000`）。**管理员输入的就是比例，不是金额**。⚠️ **不再是 `number \| null`**：P0-14 那个「退满剩余时为 `null`」的形态随该机制一并删除（见下） |
+| `refundAmount` | `number` | 分。**唯一的公式**：`floor(Order.actualPaidAmount × refundRateBp / 10000)`；`refundRateBp === 10000` 时恒等于 `actualPaidAmount` |
+| `companionReversalAmount` | `number` | 分。从打手收益冲回的金额。⚠️ **恒等于 `Order.companionBaseIncome`（整笔）**，与退款比例无关——见 §T2.1 |
 | `decidedBy` / `decidedAt` | `string` | 决策管理员 id 与时刻 |
 
+**⚠️ P0-15 删除了四个字段**（`refundFullRemaining` / `responsibility` /
+`companionLiabilityRateBp` / `platformBorneAmount`），**四个都是真正的删除**，不是弃用：
+
+| 已删除 | 原先用途 | 为什么删 |
+|---|---|---|
+| `refundFullRemaining` | 「退满剩余」意图（P0-14） | 它存在的**唯一**理由是「按比例只有 101 个离散取值，实付 2990 时有 2890 个金额永远表达不出来，先部分退过款的单子可能永远差 1~99 分退不满」。**一单一退之后这个前提消失了**——一个订单最多退一次，退完就结束，不存在「退不满」。完整论证保留在 `docs/03-dev/rounds/P0-14/02-decisions.md` §十四（那是历史，不是当前规则） |
+| `responsibility` | 资金责任归属（P0-13） | 责任模型**整体废止**：退款批准即打手收益整笔归零，不再有「谁承担」这一步——见 §T2.1 与 `EX-REFUND-03` |
+| `companionLiabilityRateBp` | `shared` 时的打手责任比例 | 随责任归属一起删除 |
+| `platformBorneAmount` | `refundAmount − companionReversalAmount` | ⚠️ **它最危险**：P0-15 之后 `companionReversalAmount` 恒等于整笔冲回，因此它**恒等于 `refundAmount`**。留着一个恒等的第三个数，就是给对账造出**第二份真值**——两份账迟早对不上，而对账的人会以为其中一份是错的。平台最终收入改为**算出来**：`actualPaidAmount − refundAmount` |
+
+⚠️ **不做「保留但弃用」的兼容层**：本仓库无真库、无历史持久化数据，
+唯一的历史载体是种子 fixture（`lib/mocks/fixtures/refundSeed.ts`），迁移成本为零。
+半吊子的兼容层只会让新写入路径继续看得到那些字段，而「新写入路径不得依赖责任字段」
+正是产品裁定的一条。
+
 **⚠️ `amount` 与 `decidedAmount` 是两个数。** `amount` 是**申请创建时**订单实付的快照，
-回答「这一单本来涉及多少钱」；实退金额是 `decision.refundAmount`。部分退款下两者**不再相等**，
+回答「这一单本来涉及多少钱」；实退金额是 `decision.refundAmount`。部分退款下两者**不相等**，
 因此必须分开存、分开给，不能拿一个去顶另一个。
-对外（列表 / 详情）由 `decidedAmount` 暴露实退额；**六项决策字段只给管理端**（客服 / 用户只拿 `decidedAmount`）。
+对外（列表 / 详情）由 `decidedAmount` 暴露实退额；**三项决策字段只给管理端**（客服 / 用户只拿 `decidedAmount`）。
 
 ### 9.2 索引
 
 **`refundIdsByOrder`：`orderId → 申请 id 列表`，P0-13 起由单值改为多值。**
 
-⚠️ 它**不再**表达「一单一申请」。部分退款要求同一单能退第二次（D10），因此：
+⚠️ **P0-15 起它重新表达「一单一申请」，而且这次是硬约束。**
+
+| 世代 | 索引形态 | 「能不能再申请」的判据 |
+|---|---|---|
+| P0-12 之前 | 单值 `orderId → id` | 一条申请，天然一单一申请 |
+| P0-13（部分退款） | 多值 `orderId → id[]` | `isActiveRefundStatus`——**已通过 / 已拒绝 / 已撤销的记录不再挡**新的申请 |
+| **P0-15（当前）** | **多值仍然保留形态**，但长度恒为 0 或 1 | **列表非空即封死**：`listRefundsForOrderSync(orderId)[0]` 存在就返回 `order_already_has_refund`，**不看状态** |
+
 - 索引回答的是「这一单有哪些申请」，**按创建先后排列**；
-- 「同一时刻最多一条进行中」由 `isActiveRefundStatus` **单独**判定——**已通过 / 已拒绝 / 已撤销的记录不再挡**新的申请。
-  ⚠️ 判据必须**逐条看过列表里的每一条**，只看最新那一条会放过「前一笔已驳回、后一笔仍在审核」；
-- 未来数据库上它是**普通索引**，另加一条「同一 `orderId` 同一时刻最多一条 `pending` / `reviewing`」的部分唯一索引。
+- ⚠️ **列表形态是刻意保留的**：将来若真需要「一单多次退款」，改的只是判据这一处，
+  而不是索引结构 + 仓储 + 服务层 + DTO 一起动。当前「长度恒为 0 或 1」由写入路径保证，
+  **不是由类型保证**——因此写入侧的守卫必须留着，不能因为「反正是单值」就删掉判断。
+- ⚠️ **判据不再看状态**，这是 P0-15 与 P0-13 的分水岭：「已驳回」也不再放行第二次申请。
+  已通过 / 已拒绝 / 已撤销的记录**同样挡**新的申请。
+- 未来数据库上它是一条**唯一索引**（`orderId` 唯一），而不是部分唯一索引——
+  约束是「一个订单至多一条退款记录」，与状态无关。
 
 **状态机**：`ADMIN_REFUND_TRANSITIONS`（`lib/constants/adminRefunds.ts`）：
 
@@ -368,18 +427,28 @@ cancelled  → []
 ```
 
 **⚠️ 退款有独立状态机，与 `OrderStatus` 无关。**
-**唯一例外**：审核通过会**累计**退款金额，**只有累计退满才**把订单置为 `refunded`（`adminRefundTransaction.ts:460`）。
-**部分退款不改订单状态**——订单按原进度继续履约，打手的收益也照常走它自己的生命周期。
+**唯一例外**：审核通过会写入退款金额，**只有比例 100%（`refundAmount === actualPaidAmount`）才**把订单置为 `refunded`。
+**部分退款不改订单状态**——订单按原进度继续履约。
+
+⚠️ 但**打手看到的不是订单状态**（P0-15）：部分退款下打手端另有派生的
+`displayStatus = "refunded"` / `displayStatusLabel = "已退款"`（`lib/constants/orders.ts`
+的 `resolveCompanionDisplayStatus`）。两条线**必须分开**：「这一单履约到哪一步」是事实，
+「站在这位打手的位置上该怎么称呼它」是口径。
+⚠️ **展示状态不参与任何权限或可写性判断**——聊天的可写性看的是真实订单状态
+（`isOrderChatClosed`），因此部分退款**不会**锁掉订单沟通。
 
 **⚠️ 曾经确认的缺陷（产品负责人裁定：修 Bug，不隐藏字段）——已于 P0-5.5 修复，P0-13 后仍然有效**：
 `adminRefundTransaction.ts` 调用 `applyOrderRefund` 时**省略了第三个参数**，导致订单被置为 `refunded` 但 **`refundedAmount` 为 0**。
 - **正式规则**：管理员批准退款时**必须**显式传本次退款额，由 `applyOrderRefund` **累计**写入 `refundedAmount`
   （P0-13 起该参数的语义由「覆盖成多少」改为「**这一次退多少**」）。
-- **修复结果**：`adminRefundTransaction.ts:460` 现显式传 `decision.refundAmount`（服务端按订单快照算出来的数，
-  非申请上的 `amount` 快照）；`applyOrderRefund` 对**已退满**（`status === "refunded"` **或**
-  `refundedAmount >= actualPaidAmount`）的订单短路返回 `changed: false`，因此重复批准不重复累计、不刷新 `refundedAt`。
+- **修复结果**：`adminRefundTransaction.ts` 现显式传 `decision.refundAmount`（服务端按订单快照算出来的数，
+  非申请上的 `amount` 快照）；`applyOrderRefund` 对**已退款**（`status === "refunded"` **或**
+  `refundedAmount >= actualPaidAmount`）的订单短路返回 `changed: false`，因此重复批准不重复退款、不刷新 `refundedAt`。
   ⚠️ 只看状态是不够的：部分退款**不改状态**，一张已退满的订单若停在原状态上，状态判据会放它再退一次。
-- **金额闸**：累计 `refundedAmount + 本次 <= actualPaidAmount`，越界是 400。
+- **金额闸**：`refundedAmount + 本次 <= actualPaidAmount`，越界是 400。
+  ⚠️ P0-15 之后「累计」这个词已经名不副实（一单一退，最多加一次），
+  但这道闸**必须原样留着**：它挡的是「同一次退款被算了两遍」这类写入侧错误，
+  而那条防线不因为业务上只退一次就变得多余。
 - **回归测试要求**：管理员全额退款后，**同时**断言 `Order.status === "refunded"` **且** `refundedAmount === actualPaidAmount`。
   **不得再出现「已退款但退款金额为 0」。** 部分退款的对应断言在 `tests/refundMoneyChain.test.mjs`。
 
@@ -566,22 +635,27 @@ closed     → []
 | 仓储 | `lib/data/platformConfigRepository.ts` → `mockPlatformConfigRepository` |
 | Mock Store | `"platformConfig"` → `{ config: PlatformConfig }` |
 | 主键 | **单例**（不是集合） |
-| 关键字段 | `publicPoolTimeoutMinutes`（P0-1）、`completionAutoApprovalMinutes`（P0-8）、`complaintWindowMinutes`（P0-9）、`updatedAt`、`updatedByAdminId` |
+| 关键字段 | `exclusivePoolTimeoutMinutes`（P1-2）、`publicPoolTimeoutMinutes`（P0-1）、`completionAutoApprovalMinutes`（P0-8）、`complaintWindowMinutes`（P0-9）、`updatedAt`、`updatedByAdminId` |
 
 **⚠️ 单例且恒不为 null**：没有记录时用预置值，而不是让每个调用方处理「还没有配置」——
 那会让「参数缺失」变成一条到处都要判的空值路径。
 
 **⚠️ 改配置不动历史订单**：订单进入需要计时的环节时把自己那一刻的参数值冻结成快照。
 
-**CURRENT（P0-9 落地）**：三项参数都已可配置，且都遵循「进入对应生命周期阶段时冻结快照」的规则——
-`publicPoolTimeoutMinutes`（订单进池时冻结到 `Dispatch.publicTimeoutMinutesSnapshot`）、
-`completionAutoApprovalMinutes`（提交完成材料时冻结到 `CompletionSubmission.autoApprovalMinutesSnapshot`）、
-`complaintWindowMinutes`（订单进入 completed 时冻结到 `Order.complaintWindowMinutesSnapshot`
-并算出 `complaintDeadlineAt`）。三项的取值区间**不共用**：前两项 1~1440，投诉窗口 60~10080
-（P0-9 `02-decisions.md` D17）。
+**CURRENT（P1-2 落地）**：**四项**参数都已可配置，且都遵循「进入对应生命周期阶段时冻结快照」的规则——
+`exclusivePoolTimeoutMinutes`（P1-2，派单进入 `exclusive` 时冻结到 `Dispatch.exclusiveTimeoutMinutesSnapshot`
+并算出 `exclusiveDeadlineAt`）、`publicPoolTimeoutMinutes`（订单进池时冻结到
+`Dispatch.publicTimeoutMinutesSnapshot`）、`completionAutoApprovalMinutes`（提交完成材料时冻结到
+`CompletionSubmission.autoApprovalMinutesSnapshot`）、`complaintWindowMinutes`（订单进入 completed 时冻结到
+`Order.complaintWindowMinutesSnapshot` 并算出 `complaintDeadlineAt`）。四项的取值区间**不共用**：
+专属池 / 公共池 / 完成材料 1~1440，投诉窗口 60~10080（P0-9 `02-decisions.md` D17）。
+专属池与公共池**今天恰好同区间**，但仍是两个字段各自的校验函数与错误文案，不合并。
 
-**TARGET — NOT IMPLEMENTED（V0.3）**：同一个 PlatformConfig 继续作为唯一平台配置真值源，后续仍可扩展
-（如 exclusive pool timeout）。新参数一律遵循上面同一条冻结规则；不得新建第二套配置实体。
+**⚠️ 单例记录上没有 `id` 字段**：它是**唯一**的一份配置，加一个 id 会让「配置可以有多条」这句话
+在类型上成立。审计要按对象查历史，用的是常量 `PLATFORM_CONFIG_ID`（`lib/constants/platformConfig.ts`）。
+
+**TARGET — NOT IMPLEMENTED（V0.3）**：同一个 PlatformConfig 继续作为唯一平台配置真值源，
+后续仍可扩展。新参数一律遵循上面同一条冻结规则；**不得新建第二套配置实体**。
 
 ---
 
@@ -738,26 +812,42 @@ export type Earning = {
 - `sweepMaturedEarnings(at)` —— 到期解冻，挂在读取路径上（与 `sweepCompletionAutoApprovals` 同一条惰性物化机制）。
   真实 Scheduler 上线后必须调用**同一个**函数，不是另写一套。
 
-`withdrawn` / `reversed` 两个取值的写入路径：
+`withdrawn` / `reversed` 两个取值的写入路径——**今天两个都是零**：
 
-- **`reversed` —— P0-13 起可达**：退款冲回累计到 `incomeAmount`（整笔冲销）时写入，
-  见 `lib/data/mockEarningRepository.ts` 的 `applyEarningReversal`；
+- **`reversed` —— P0-15 起不可达**（P0-13 起曾可达）。产品裁定：退款批准后
+  「处理对象应当仍是 `Earning.status = frozen`」，因此整笔冲销**不改状态**，
+  收益**停在 `frozen`**。见 `lib/data/mockEarningRepository.ts` 的 `applyEarningReversal`
+  与 `rounds/P0-15/02-decisions.md` §二 Q5。
+  ⚠️ 保留这个取值而不是删掉，与 `withdrawn` 同一条理由：它是这张表在完整设计里的取值，
+  删除等于宣称这张表没有这个状态。
 - `withdrawn` 仍然**只有类型占位、没有写入路径**（提现是 TBD，见 api-contract 第四部分）。
-  ⚠️ 但它在 P0-13 之后**参与业务判定**：一笔已 `withdrawn` 的收益本轮**不做冲回**（D17），
-  因此「没有写入路径」不等于「可以当它不存在」。
+  ⚠️ **P0-15 起它也不再参与任何业务判定**：P0-13 那条「已 `withdrawn` 的收益本轮不做冲回」（D17）
+  **已删除**，同时删掉的还有退款决策里为它准备的那个分支。理由见 §T2.1「已提现」一行——
+  这个状态在当前业务路径上**不可达**，而**为不可达的状态写分支，本身就是一种设计**，
+  产品裁定明确不做 withdrawn 追偿。
+  ⚠️ 类型上**仍然留着这个取值**（`database-schema.md` T2 的字段设计），
+  但**「留在类型上」与「代码里为它写分支」是两件事**：前者是「这张表将来会有这个状态」，
+  后者是「现在就按它会发生来处理」。
 
 **已确认业务语义（P0-9 全部落地）：**
 
 - 订单进入 completed（人工审核或系统自动审核）后，为当时实际履约打手生成一条 frozen Earning；`incomeAmount = Order.companionBaseIncome` 快照。
 - Order completed 时冻结 `complaintWindowMinutesSnapshot` / `complaintDeadlineAt`；Earning.availableAt 复用该 deadline。
 - deadline 到达且无投诉/有效售后冻结原因后 `frozen → available`（阻塞判据与 P0-8 自动通过**共用** `isCompletionAutoApprovalBlocked` + `readOrderBlockingFacts`）。
+  > ⚠️ **P0-15 补齐：这里不止「到期 + 无阻塞」两条。** 完整判据是**三条同时成立**——
+  > ① `availableAt` 已到 ② 无阻塞 ③ **净额未被冲光**（`!isEarningFullyReversed`）。
+  > 第 ③ 条是 P0-15 加的：退款批准后收益**停在 `frozen`**（见本文件 T2.1 与 Q5 裁定），
+  > 于是「被退款冲光」与「正常冻结中」**共用同一个状态**，只靠前两条会把一笔
+  > 净额为 0 的收益放行成「可提现」。唯一真值源：`lib/data/earningTransaction.ts`
+  > 的 `sweepMaturedEarnings`。**顺带**：`frozen` 的逐条说明不再由状态单独决定，
+  > 走 `earningHintFor({ status, netAmount })`。
 - 平台之后修改投诉期不改变已 completed 订单的 deadline。
 - 提现、自动罚款、管理员余额调整/会费批扣的账本细节仍不在本实体本轮强行定义。
 - `sweepMaturedEarnings()` 同步、幂等、可重复调用；后台 Scheduler 必须复用它。
 - **不追溯**：P0-9 之前已完成的历史订单不回填 Earning（那会用历史 `completedAt` 造出一笔「已经该解冻」的钱）。
 - **无实际履约打手时不建记录**：没有 `actualCompanionId` 就没有收益可发，如实不建，而不是建一条 `companionId: ""` / 金额 0 的假记录。
 
-### T2.1 退款冲回（P0-13 落地）
+### T2.1 退款冲回（P0-13 落地；**P0-15 收敛为「整笔一次」**）
 
 **不得修改原始 `Earning.incomeAmount`，不建立余额桶。**
 退款通过**独立的冲回记录**表达；净额由服务端算好给出（`lib/types/earning.ts` 的 `CompanionEarningItem`）：
@@ -768,12 +858,14 @@ netAmount = incomeAmount − reversedAmount     // 即产品裁定里的 netAvai
 
 | 规则 | 内容 |
 |---|---|
-| 累计字段 | `Earning.reversedAmount` **累加**（不是覆盖）。同一笔收益**允许被多次冲减**（Q2-d） |
-| 不变式 | `0 <= reversedAmount <= incomeAmount`。**钳制发生在 `computeRefundDecisionAmounts`**（按「该单剩余可冲回额」），存储层的 `applyEarningReversal` 再夹一次作为最后一道护栏 |
-| 状态规则 | `0 < reversedAmount < incomeAmount` → **留在原状态**（`frozen` 仍 `frozen`、`available` 仍 `available`）；**整笔冲完** → `reversed`。⚠️ 部分冲回**绝不能**把 `frozen` 变成 `available`——那等于用一次退款把冻结期提前结束 |
-| 已提现 | 收益为 `withdrawn` 时本轮**不冲回**：`companionReversalAmount = 0`，多出来的部分由平台承担（D17，Q3 仍 DEFER） |
-| 没有收益时 | 退款发生在 `serving`（尚未结算、还没有 Earning）时，冲回额**记在退款决策上**，待这一单将来结算时由 `settleOrderCompletion` **补记**（D9）。⚠️ 一次都不会结算的单（例如服务中被整单退掉）因此永远不产生冲回，这是正确的 |
-| 明细 | 每一次冲回写**恰好一条** `EarningAdjustment`，以 `refundId` 为幂等键：一次退款决策最多冲一次（**重复扣打手的钱**比悬空状态严重得多） |
+| 冲回额 | **恒等于 `incomeAmount`（整笔）**，与退款比例无关。`refundRateBp` 是 1000（10%）还是 10000（100%），冲回的都是全额 |
+| 累计字段 | `Earning.reversedAmount` 仍是**累加**语义（`applyEarningReversal` 加法写入），但 P0-15 之后**已经没有能让它停在中途的路径**——「半冲」只可能来自写坏的数据 |
+| 不变式 | `0 <= reversedAmount <= incomeAmount`。⚠️ 原先还需要服务端的「剩余可冲回额」钳制配合（P0-13 `02-decisions.md` §十一 D4），**现在不需要了**：冲回额就是 `incomeAmount` 本身，构造上不可能越界。存储层的 `applyEarningReversal` 护栏**保留**，它挡的是写入侧错误 |
+| 状态规则 | 退款批准 → **状态不变，仍是 `frozen`**（P0-15 产品裁定，`rounds/P0-15/02-decisions.md` §二 Q5）。净额归零**不**改状态：这笔钱永远不会变成可提现，「冻结中」正是这个事实。⚠️ 早先本轮写的 D8（「整笔冲销 → `reversed`」）**已被该裁定推翻**。⚠️ 与 P0-13 那条「部分冲回留在原状态」（Q2-c）方向相同、理由不同：Q2-c 的理由是「把部分冲回写成 `reversed` 会让打手以为白干了」，那条理由的前提在新规则下反转（他确实白干了） |
+| 状态不改，那靠什么挡住释放 | **净额闸**：`sweepMaturedEarnings` 的判据里多一条 `!isEarningFullyReversed(earning)`。没有它，一笔已经归零的收益会在 `availableAt` 到点后被写成 `available`（状态是 `frozen`、时间也到了，前四条判据全都放行）。存储层的 `applyEarningRelease` 用同一个函数再拦一道——指令 ②§六 要求「不得只依赖上层读取到的旧状态」 |
+| 已提现 | **不可达，不写分支**。正常业务设计保证收益在退款结算之前根本到不了可提现阶段：只有 `completed` 订单才有 Earning 且创建即 `frozen`，它唯一的出口 `sweepMaturedEarnings` 的判据里含「无有效退款」，而可批准的申请本身就构成阻塞；批准后收益当场归零，**永不经过 `available`**（归零后连净额闸也过不去）。完整的结构性论证写在 `lib/data/adminRefundTransaction.ts` 第 ④ 步。⚠️ 原先 D17 那条「收益已提现 → 冲回 0、平台承担全部」的特例**已随本轮删除**——它是一条**设计**，而产品裁定明确不做 withdrawn 追偿 |
+| 没有收益时 | 退款发生在 `serving`（尚未结算、还没有 Earning）时，冲回额**记在退款决策上**，待这一单将来结算时由 `settleOrderCompletion` **补记**（D9）。⚠️ 一次都不会结算的单（例如服务中被整单退掉）因此永远不产生冲回，这是正确的——打手本来也没挣到钱 |
+| 明细 | 每一次冲回写**恰好一条** `EarningAdjustment`，以 `refundId` 为幂等键：一次退款决策最多冲一次（**重复扣打手的钱**比悬空状态严重得多）。P0-15 起「恰好一条」有了第二重保证：一个订单至多一次退款 |
 
 ### T2.2 `EarningAdjustment`（收益调整明细）—— CURRENT（P0-13 落地）
 
@@ -786,12 +878,16 @@ export type EarningAdjustment = {
   orderId: string;
   refundId: string;      // 幂等键：一次退款最多一条冲回明细
   type: EarningAdjustmentType;
-  amount: number;        // 分，恒为正
-  responsibility: RefundResponsibility;
+  amount: number;        // 分，恒为正。P0-15 起恒等于该收益的 incomeAmount
   createdAt: string;
   adminId: string;       // 做出决策的管理员
 };
 ```
+
+⚠️ **`responsibility: RefundResponsibility` 已于 P0-15 删除**（`lib/types/earning.ts`）。
+它原先记的是「这一次冲回是按谁的责认定的」——责任模型整体废止之后，这个字段
+既无来源也无读者。（上面代码块里已删掉该行；留这段说明是为了让查旧代码的人
+知道它不是漏掉，而是**故意不在**。）
 
 | 项 | 值 |
 |---|---|
@@ -867,6 +963,20 @@ complaintDeadlineAt: string | null;
 **TARGET — NOT IMPLEMENTED**：`companion_disabled`（封禁回池）与 `staff_reassign`（客服换人）
 两个 `source` 取值只有类型占位，**没有任何写入路径**——它们是 §十四 的 out of scope 项。
 
+> 📌 **2026-09-29 更正（P1-5 期间核对源码时发现，上面这一句今天已不成立；只批注，不改写原文）**：
+> **三条 `source` 全部有写入路径**，没有任何一条停留在「类型占位」。
+> 实测（`grep -rn 'source: "' lib/data/` 与 `lib/constants/dispatch.ts:347`）：
+> - `companion_cancel` → `cancelAcceptedOrder()`（P0-6）；
+> - `staff_reassign` → `lib/data/companionOrderTransaction.ts` **两个分支**：
+>   `releaseOrderByStaff()`（客服退回公共池，`reassign = null`）与
+>   `replaceOrderCompanionByStaff()`（客服**直接换人**，`reassign` 非空）；
+> - `companion_disabled` → `releaseOrdersForCompanion()`（封禁时的事务内清扫，P0-11）。
+>
+> 也就是说：本实体**整体已落地**，不是「部分实现」。上方那句话是 P0-6 时期的快照，
+> 在 P0-11 之后没有跟着更新——**这正是本文件下方 T4 正文已经写对、而这一句没写对**的地方。
+> 裁定见 `rounds/P0-11/02-decisions.md` D-Q2。⚠️ §十四 的 out of scope 项指的是
+> **完整的 Assignment 聚合**，不是这三个取值本身。
+
 P0 明确**不引入复杂 Assignment 聚合**，但回池后必须能回答“谁曾经负责、为什么退出、何时退出、谁触发”。最小逻辑实体：
 
 ```ts
@@ -898,6 +1008,48 @@ export type CompanionReleaseRecord = {
   两条路径**都不需要管理员批准**，都只写 `CompanionReleaseRecord` 与既有 `Order` / `Dispatch` 字段，
   **不新增聚合、不新增字段、不扩 `OrderStatus`**。
 - accepted 用户直接退款是**终态退款而不是回池**，因此保留 Order.actualCompanionId，不使用“清当前履约绑定”的语义。
+
+## T4b. 接单事件 CompanionAcceptEvent（接单历史）—— **已实现（P1-5）**
+
+**CURRENT（P1-5 落地；§九-F 裁定后收窄）**：`lib/types/companionAccept.ts`、
+`lib/data/mockCompanionAcceptRepository.ts`（**只增不改**的 `Map`），
+同步写原语 `appendCompanionAccept()`，写入者是原子区段：
+
+| 写入者 | 是否写事件 | 为什么 |
+|---|---|---|
+| `lib/data/companionDispatchTransaction.ts`（打手**自己** `acceptDispatch`） | ✅ 写 | 这是裁定里唯一该计入接单榜的动作 |
+| `lib/data/companionOrderTransaction.ts`（**客服直换 / 直接指定**） | ❌ **不写** | 裁定：「即使底层为了订单状态迁移复用了 `applyDispatchAccepted()`，也不得因为复用了同一个状态迁移函数，就把 Staff assignment 当成 Companion accept event」 |
+
+⚠️ **首版曾让客服直换也写一条**（第一轮 review 的 M1），**该处置已被裁定推翻**——
+见 `DispatchRecord.acceptedVia` 上方那段与 `rounds/P1-5/03-delivery.md` §6.5。
+
+```ts
+export type CompanionAcceptEvent = {
+  id: string;            // `acc_<uuid>`，写入器当场生成并确认未被占用
+  dispatchId: string;    // ⚠️ 不是唯一键：换人复用同一条派单记录
+  orderId: string;
+  companionId: string;   // **实际接单**的人；换人后可与 Order.actualCompanionId 不同
+  acceptedAt: string;
+};
+```
+
+**它为什么必须是一张独立的只增表**：`DispatchRecord.acceptedByCompanionId` 是一个**当前状态**
+字段，只有**一个**；而客服改派复用同一条派单记录并覆盖它，加上 `dispatchIdByOrder`
+保证一单只有一行派单记录。因此「这一单上先后有几个人接过」**在现模型里读不出来**。
+产品裁定要求接单榜统计**成功的接单事件次数**（`A → B → A ⇒ A=2、B=1`）且
+「取消 / 换人 / 退款 / 未完成**不回写**历史」——一条只增不改的历史是这句话唯一的落点。
+这与 T4 是**同一个理由的两处应用**：T4 记「谁**走**了」，本表记「谁**来**了」。
+
+**未来 DB 迁移约束**：
+
+| 事项 | 要求 |
+|---|---|
+| 表 | `companion_accept_event`，**只增不改**：没有 UPDATE / DELETE 路径，没有软删除字段 |
+| 索引 | `(companion_id, accepted_at)` 普通索引——榜单按打手聚合、按周期切时间 |
+| ⚠️ 唯一约束 | **不得**在 `dispatch_id` 上建唯一索引：一张单先后有多位接单人是**正常业务** |
+| 写入事务 | 必须与「派单变 `accepted` + 订单变 `accepted` + 发通知」**同一个事务**——分开写会出现「接单成功了但没有历史」，而那种不一致**事后无法从任何字段补回来** |
+| ⚠️ 迁移期数据 | 迁移当刻已存在的 `state = accepted` 派单记录只有**最后一次**可考据，因此**存量期的接单榜数字是下界**（只少不多）。这是**数据可获得性**限制，不是口径妥协——P1-5 的读取侧用 `DerivedAcceptEvent` 把这一次读出来（按 `dispatchId` 整体去重，**不写回表**） |
+| ⚠️ §九-F 裁定后的**收窄** | 派生**只认** `DispatchRecord.acceptedVia === "companion"`：`"staff"`（客服直换）与 `null`（**认不出来源**）**一律不派生**（fail-closed）。裁定原文：「`deriveLegacyAcceptEvents()` 不得把能够识别为 Staff direct replacement / Staff direct assignment 的历史绑定记录推导成 `CompanionAcceptEvent`。如果历史数据无法区分：**不得凭空补接单事件**。宁可继续保持『存量接单榜是历史下界』。**不要为了让历史数字好看而伪造主动接单行为。**」<br>📌 因此存量榜**只会更低、不会更高**，这是**有意选的保守方向**；真实事件表（`companion_accept_event`）不受影响——**裁定不影响新数据，只影响「读旧数据时猜不猜」** |
 
 ## T5. AfterSales / Complaint 的 P0 边界
 

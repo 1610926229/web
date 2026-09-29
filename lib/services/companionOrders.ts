@@ -6,7 +6,9 @@ import {
   COMPANION_ORDER_NOT_STARTABLE_MESSAGE,
   ORDER_DATA_INCONSISTENT_MESSAGE,
 } from "@/lib/constants/dispatch";
-import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
+import { earningNetAmount } from "@/lib/constants/earnings";
+import { ORDER_STATUS_LABELS, resolveCompanionDisplayStatus } from "@/lib/constants/orders";
+import { hasRefundBeenExecuted } from "@/lib/constants/refunds";
 import {
   IDEMPOTENCY_KEY_MISSING_MESSAGE,
   readIdempotencyKey,
@@ -19,8 +21,10 @@ import {
   startCompanionOrder as startCompanionOrderTransaction,
 } from "@/lib/data/companionOrderTransaction";
 import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
+import { getEarningRepository } from "@/lib/data/earningRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getUserRepository } from "@/lib/data/userRepository";
+import type { Earning } from "@/lib/types/earning";
 import type {
   CompanionCancelOutcome,
   CompanionOrderDetail,
@@ -78,13 +82,54 @@ export type CompanionStartSuccess = Extract<
   { kind: "ok" } | { kind: "replayed" }
 >;
 
-/** 订单 → 打手端列表项。**显式挑字段**：新增的订单字段不会自动出现在这里。 */
-function toCompanionOrderListItem(order: Order): CompanionOrderListItem {
+/**
+ * 这一单打手最终拿到多少（分）——`CompanionOrderListItem.netIncomeAmount` 的唯一算法。
+ *
+ * ⚠️ **`null` 与 `0` 是两件事**：`null` 是「这笔账还没产生」（订单还没结算），
+ * `0` 是「结算过、但一分不剩」。判定顺序因此不能倒过来——先问「退过款吗」，
+ * 再问「结算了吗」。
+ *
+ * ⚠️ 「已退款 ⇒ 0」这一条**不是从收益记录读出来的**，而是规则本身：
+ * 退款把这一单的收益整个取消，与退款比例无关（10% 也是 0）。订单在完成之前
+ * 根本没有 Earning，而「完成前被退款」恰恰是最常见的一类退款——那时若回 `null`，
+ * 打手看到的会是「本单收益 —」，而事实是他这一单挣了 0 元。
+ *
+ * ⚠️ 但不能因此把它写成「已退款就无脑显示 ¥0」：这里仍然优先读**收益记录的真实净额**。
+ * 万一数据里真的存在一笔部分冲回（P0-15 的业务路径上不可达，但存储层并不禁止），
+ * 页面显示的会是真话而不是一句断言。**显示真相优先于显示规则**。
+ */
+function resolveOrderNetIncome(order: Order, earning: Earning | null): number | null {
+  // 净额算式走**全仓唯一的** `earningNetAmount()`（`lib/constants/earnings.ts`）。
+  // ⚠️ 这里曾经自己写了一遍 `incomeAmount - reversedAmount`：字面相同、今天也相同，
+  // 但它是**第三份**副本——将来给算式加夹零 / 改口径时，收益页与收入榜会一起变，
+  // 而打手订单列表不会，同一笔钱在三个界面上出现两个金额。
+  // 由 `tests/earningSettlementFreeze.test.mjs` 的源码门禁守着（三处下游全部在扫描清单里）。
+  if (earning) return earningNetAmount(earning);
+  // 走单点判据，不自己写 `refundedAmount > 0`：这两处一旦分叉，
+  // 打手看到的「本单收益 ¥0」与列表上那句「已退款」就会互相打架
+  return hasRefundBeenExecuted(order) ? 0 : null;
+}
+
+/**
+ * 订单 → 打手端列表项。**显式挑字段**：新增的订单字段不会自动出现在这里。
+ *
+ * ⚠️ `earning` 由调用方**一次取回后按订单索引**，不在这里逐单查询——
+ * 列表是 N 条订单，逐条 `findEarningByOrderId` 就是 N 次查询，
+ * 而 `listEarningsForCompanion` 本来就一次回答「这位打手全部收益」。
+ */
+function toCompanionOrderListItem(order: Order, earning: Earning | null): CompanionOrderListItem {
+  // 展示状态与真实状态分开（P0-15）：退款之后打手看到的是「已退款」，
+  // 而订单自己的生命周期照走。判定只有一处，见 `resolveCompanionDisplayStatus`
+  const displayStatus = resolveCompanionDisplayStatus(order);
+
   return {
     id: order.id,
     orderNo: order.orderNo,
     status: order.status,
     statusLabel: ORDER_STATUS_LABELS[order.status],
+    displayStatus,
+    displayStatusLabel: ORDER_STATUS_LABELS[displayStatus],
+    netIncomeAmount: resolveOrderNetIncome(order, earning),
     paidAt: order.paidAt,
     acceptedAt: order.acceptedAt,
     productTitle: order.productTitle,
@@ -120,6 +165,21 @@ function materializeCompletionAutoApprovals(): void {
 }
 
 /**
+ * 这位打手「订单 id → 收益」的索引（P0-15）。
+ *
+ * ⚠️ **一次查询回答全部订单**：`listEarningsForCompanion` 返回的是这位打手
+ * 全部收益，按订单 id 建索引即可，不必逐单 `findEarningByOrderId`。
+ * 打手的订单数与收益数都由他自己实际完成过多少单约束，不会无界增长。
+ *
+ * ⚠️ 归属由仓储的查询条件保证（只返回这一位的收益），因此拿 `order.id` 去索引
+ * 不存在「串到别人账上」的风险——索引里本来就只有他自己的记录。
+ */
+async function companionEarningIndex(companionId: string): Promise<Map<string, Earning>> {
+  const earnings = await getEarningRepository().listEarningsForCompanion(companionId);
+  return new Map(earnings.map((earning) => [earning.orderId, earning]));
+}
+
+/**
  * 当前打手**实际履约过**的订单。
  *
  * 状态与排序都由仓储决定（支付时间倒序），服务层只做 DTO 裁剪：
@@ -132,8 +192,12 @@ export async function listCompanionOrders(companionId: string): Promise<Companio
   // 惰性物化自动通过事实（幂等）：列表同样展示订单状态，只挂详情会让列表停在 serving
   materializeCompletionAutoApprovals();
 
-  const orders = await getPaymentRepository().queryOrdersByCompanion(companionId);
-  return { items: orders.map(toCompanionOrderListItem) };
+  const [orders, earnings] = await Promise.all([
+    getPaymentRepository().queryOrdersByCompanion(companionId),
+    companionEarningIndex(companionId),
+  ]);
+
+  return { items: orders.map((order) => toCompanionOrderListItem(order, earnings.get(order.id) ?? null)) };
 }
 
 /**
@@ -171,8 +235,11 @@ export async function getCompanionOrderDetail(
   const order = await getPaymentRepository().findOrderById(orderId);
   if (!order || order.actualCompanionId !== companionId) return null;
 
+  // 单点查询用仓储的单点方法（与列表那条索引同源，都是收益域自己的读入口）
+  const earning = await getEarningRepository().findEarningByOrderId(order.id);
+
   return {
-    ...toCompanionOrderListItem(order),
+    ...toCompanionOrderListItem(order, earning),
     // ⚠️ `servingAt` **只在这里出现**，不进列表项：列表卡片只显示下单与接单两个节点，
     // `serving` 那一单在列表里由状态名「护航中」表达（见 CompanionOrderDetail 的注释）
     servingAt: order.servingAt,

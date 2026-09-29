@@ -1,6 +1,7 @@
 import { compareOrdersForAdmin, orderInDateRange } from "@/lib/constants/adminOrders";
 import { plusMinutes } from "@/lib/constants/dispatch";
 import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
+import { isRefundExecutionClosed } from "@/lib/constants/refunds";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
 import type { Order, OrderCompanionSnapshot } from "@/lib/types/order";
@@ -134,7 +135,11 @@ export const mockPaymentRepository: PaymentRepository = {
         paymentRequestId: request.id,
         orderId: order.id,
         userId: request.userId,
-        amount: request.totalAmount,
+        // ⚠️ 实付，不是 `totalAmount`（P1-4 修正）。`totalAmount` 是**优惠前**的应付总额，
+        // 拿它当支付金额就等于「按原价扣款却给优惠」——用户被多收了钱，而且
+        // 支付记录与订单的 `actualPaidAmount` 从此对不上。
+        // 无券时两者相等，因此这一改动对既有链路零影响。
+        amount: request.actualPaidAmount,
         status: "success",
         paidAt,
       };
@@ -238,6 +243,17 @@ export function applyOrderAccepted(
     // 因此「派单说被 A 接了、订单说没人接」这种状态在结构上产生不出来
     actualCompanionId: input.companionId,
     companion: input.companion,
+    // ⚠️ 「这一单**曾经**被承接」的历史事实（P1-4 验收整改轮）。`??` 就是它的全部规则：
+    // **只写第一次**，后来的第二个打手接手同一单不会刷新它。
+    //
+    // 它与上面的 `acceptedAt` 是**两个概念**，而这里正是它们唯一分道扬镳的地方：
+    // 下面的 `applyOrderAcceptanceReleased()` 会把 `acceptedAt` 清回 null
+    // （否则一张回到 `paid` 的单会在用户端时间轴上显示「已接单」），
+    // 而**本字段永不清空**——「有没有人接过」不因为人又走了就变成「没接过」。
+    //
+    // 两条来路都写它：打手自己接单、客服直接指定 / 换人。**两条都算被承接**，
+    // 因此优惠券一律不返还（裁定 §一.3 明令不得按接单榜的 `acceptedVia` 区分）。
+    everAcceptedAt: order.everAcceptedAt ?? input.at,
   };
   current.orders.set(id, updated);
   return { previous, updated };
@@ -305,6 +321,15 @@ export function applyOrderAcceptanceReleased(
     // 对 `accepted → paid`（主动取消 / 换人）这条路径它是**恒等操作**——
     // 还没开始服务时 `servingAt` 本来就该是 null。
     servingAt: null,
+    // ⚠️ **`everAcceptedAt` 刻意不在这里**（P1-4 验收整改轮）。
+    //
+    // 上面那四个字段是「当前履约绑定」，绑定解除时当然一起退回去；
+    // 而 `everAcceptedAt` 不是绑定，是**历史事实**——「这一单有没有被承接」。
+    // 它一旦写上就不再变，回池、换人、退款都不清。
+    //
+    // 少写这一句会怎样，值得写下来：`accepted → 客服取消/回池 → paid → 用户退款`
+    // 这条路径上，订单会被判成「从未被承接」，于是**优惠券被错误地还给用户**。
+    // 裁定 §一.2 把这条路径**点名列出**，就是因为它正是那种「只在多步之后才显形」的错。
   };
   current.orders.set(id, updated);
   return { previous, updated };
@@ -467,38 +492,44 @@ export function applyOrderRefund(
    * 这一次退掉的钱（分）。**不传表示「不改动累计已退」**——这是一个技术上的默认值，
    * 只有极少数调用方依赖它（见下）。
    *
-   * ## P0-13：第三个参数的语义由「覆盖成多少」改为「这一次退多少（增量）」
+   * ## 第三个参数的语义：「这一次退多少」（增量）
    *
-   * 旧语义是「把 `refundedAmount` 写成这个数」，只在「一次退满」的世界里成立。
-   * 部分退款上线后，同一个订单会被退第二次、第三次，覆盖式写入会让
-   * 「累计已退」变成「最后一次退了多少钱」——账当场就错了。
-   * 现在它累加：`refundedAmount = 原值 + 传入值`。
+   * P0-13 把它从「覆盖成多少」改成「这一次退多少（增量）」——覆盖式写入会让
+   * 「累计已退」变成「最后一次退了多少钱」。写入形式至今是
+   * `refundedAmount = 原值 + 传入值`（再钳一次，见下）。
    *
-   * ⚠️ **不要**据此认为「既有调用方都传全额，所以传什么都一样」——
-   * 那个推理在本仓库**已被证伪**：部分退款（P0-13）不改订单状态，
-   * 因此一张 `serving` 单可以带着 `refundedAmount > 0` 被 P0-11 的「退回公共池」
-   * 打回 `paid`，随后**直接退款**与**公共池超时自动退款**都会作用在它身上。
-   * 这两条路径因此都改传**本次应退的增量**（`实付 − 累计已退`），
-   * 而下面那一次钳制是它们的第二道保险，不是它们可以少算一款的理由。
+   * ⚠️ **但 P0-15 之后「增量」这个概念实际上只剩一个可能的取值**：一单一退，
+   * 所以调用本函数时 `refundedAmount` 必然是 `0`，「原值 + 传入值」永远是
+   * 「0 + 本次」，**累计**这件事已经不存在了。保留加法形式是因为它正确且无成本，
+   * 不是因为有第二次。
    *
-   * ## 两条被一并收紧的规则
+   * ## 一单一退在这里是**结构性**的（P0-15，指令 ①§一 / §八）
    *
-   * 1. **幂等短路条件放宽**：原来只在 `status === "refunded"` 时短路，
-   *    现在 `status === "refunded"` **或** `refundedAmount >= actualPaidAmount`
-   *    都算「已经退满」，不再累加、不刷新 `refundedAt`。
-   *    ⚠️ 只看状态是不够的：部分退款**不改状态**，一张已经退满的订单
-   *    如果因为某种原因停在原状态上，状态判据会放它再退一次。
-   * 2. **`status` 只在累计退满时才改成 `refunded`**（`architecture-rules.md`
+   * 本函数是 `refundedAmount` 的**唯一写入点**，因此「第二次实际退款执行不可能发生」
+   * 这件事，靠的就是下面短路条件里的 `isRefundExecutionClosed(order)`——
+   * 不是靠界面藏按钮，也不是靠每个调用方自觉。
+   *
+   * ⚠️ **它挡掉的是一条真实可达的路径，不是假想**：
+   * 部分退款不改订单状态，因此一张 `serving` 单可以带着 `refundedAmount > 0`
+   * 被 P0-11 的「退回公共池」打回 `paid`，随后**直接退款**与
+   * **公共池超时自动退款**都想再作用在它身上。2026-09-28 的交付前审查
+   * 逐步核实过这条路径，它当时是可达的（见 `hasRefundBeenExecuted` 的注释）。
+   *
+   * ⚠️ **调用方仍要在计划阶段自己判一次**（`directRefundTransaction` /
+   * `companionDispatchTransaction`）：这里静默返回 `changed: false` 时，
+   * 调用方的返回清单（如 `refundedOrderIds`）仍会把它算成「退过款」。
+   *
+   * ## 另两条规则（都还在）
+   *
+   * 1. **`status` 只在退满时才改成 `refunded`**（`architecture-rules.md`
    *    与 `database-schema.md` T3 两条都是明写的硬规矩）。
    *    部分退款**不改订单状态**——订单按原进度继续履约，
    *    打手的收益也照常走它自己的生命周期。
-   *
-   * 3. **本次传入的金额封顶在「还剩多少」（P0-13 整改）**：
+   * 2. **本次传入的金额封顶在「还剩多少」**：
    *    `EX-REFUND-02` 与 `cmd_p0-12.md:40` 把「累计已退不得超过实付」冻结为硬约束，
-   *    而 `refundedAmount` 的**唯一写入点就是这里**——于是这条不变式在这一行成为
-   *    **结构性**的，而不是「每个调用方自己记得把增量算对」：
-   *    调用方把「全额」当成「本次增量」传进来（最容易犯的一种），
-   *    结果是**这一单退到实付为止**，而不是退成 `1300/1000`。
+   *    而写入点就是这里——于是这条不变式在这一行成为**结构性**的。
+   *    在一单一退下这次钳制已不可能改变结果（`剩余额 === 实付`），
+   *    但它是「调用方算错了也不会退超过实付」的那道保险，**留着**。
    */
   refundedAmount?: number,
 ): { previous: Order; updated: Order; changed: boolean } | null {
@@ -507,8 +538,23 @@ export function applyOrderRefund(
   if (!order) return null;
 
   const previous = { ...order };
-  // 「已经退满」的两个判据都要看：状态只是其中一个表达（见上面的第 1 条）
-  if (order.status === "refunded" || order.refundedAmount >= order.actualPaidAmount) {
+  // 「已经退过款」的判据要一起看（P0-15）：
+  //
+  // - `hasRefundBeenExecuted(order)` —— **一单一退**（指令 ①§一 / §八）：
+  //   只要出过一次款，退款流程即告终结，**任何**后续路径都不得再出款。
+  //   这是本函数最重要的一条闸，因为**本函数是 `refundedAmount` 的唯一写入点**，
+  //   所以「第二次退款不可能」这件事在这里是**结构性**的，而不是靠每个调用方自觉。
+  //   ⚠️ 它**替代不了**调用方各自的判据：调用方在计划阶段就要按它决定「要不要
+  //   通知 / 要不要报进 `refundedOrderIds`」——静默被这里拒掉的 id 仍会出现在
+  //   调用方的返回清单里，那正是「计划层放行、存储层静默拒绝」这种不一致。
+  // - `isRefundExecutionClosed(order)` —— 状态判据 ∨ 出过款判据，**并集的单点定义**
+  //   （P0-15 决策 D20）。不要再在别处手写这个 `||`。
+  // - `refundedAmount >= actualPaidAmount` —— 只有 `actualPaidAmount === 0` 时它才
+  //   与上面两条不同（`0 >= 0` 成立），而那种坏单子**不得**被写成「凭空退满」。
+  if (
+    isRefundExecutionClosed(order) ||
+    order.refundedAmount >= order.actualPaidAmount
+  ) {
     return { previous, updated: previous, changed: false };
   }
 

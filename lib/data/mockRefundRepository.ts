@@ -1,5 +1,4 @@
 import { compareRefundsForAdmin } from "@/lib/constants/adminRefunds";
-import { isActiveRefundStatus } from "@/lib/constants/refunds";
 import { refundSeed } from "@/lib/mocks/fixtures/refundSeed";
 import type { ActorRole } from "@/lib/types/actor";
 import type { RefundDecision, RefundRequest, RefundStatus } from "@/lib/types/refund";
@@ -33,11 +32,11 @@ type MockRefundStore = {
   /**
    * orderId → 该订单的退款申请 id **列表**，按创建先后排列。
    *
-   * ⚠️ **P0-13 起由单值改为多值**：部分退款要求同一订单能有多条申请
-   * （「一次退不完、之后再退一次」），而原来的单值索引 + 创建时的
-   * `order_has_active_refund` 拒绝路径让这件事根本不可能发生。
-   * 未来数据库上它不再是唯一索引，而是一条普通索引 + 「同一订单同一时刻
-   * 最多一条进行中」的部分唯一索引。
+   * ⚠️ **P0-13 起由单值改为多值，P0-15 起长度恒为 0 或 1**（创建闸门不允许第二条）。
+   * 形状**刻意不收回单值**：收回等于用类型宣称「一单只会有一条」，
+   * 而这个宣称的守护者本来就在 `createRefundRequest` 里——两处各说一遍，
+   * 将来放宽时又得同步改两个地方。列表形状让约束只存在于一处（那道闸门）。
+   * 未来数据库上它是唯一索引（P0-15 的规则已回到「一单一条」）。
    */
   refundIdsByOrder: Map<string, string[]>;
 };
@@ -46,8 +45,11 @@ function createStore(): MockRefundStore {
   const refunds = new Map(refundSeed.map((refund) => [refund.id, refund]));
   const refundIdsByOrder = new Map<string, string[]>();
   for (const refund of refundSeed) {
-    // ⚠️ 这里**不再**检查「一个订单只有一条退款」——P0-13 起那是合法数据。
-    // 保留的只有「同一条种子不能出现两次」这个 trivial 事实，它由上面的 Map 保证。
+    // ⚠️ 这里**不再**检查「一个订单只有一条退款」：那道校验现在由
+    // `refundSeed` 文件底部的跨记录不变量负责，在**数据定义处**炸掉。
+    // 仓储这一层只负责把种子装进索引；重复订单号若真溜进来，
+    // 上面的 Map 会让后一条覆盖前一条的 id 映射——所以校验必须留在种子那边，
+    // 不能指望这里兜底。
     const list = refundIdsByOrder.get(refund.orderId) ?? [];
     list.push(refund.id);
     refundIdsByOrder.set(refund.orderId, list);
@@ -80,9 +82,15 @@ function keyOf(userId: string, idempotencyKey: string): string {
 /**
  * 某订单的**全部**退款申请，按创建先后排列（**同步读，无 `await`**）。
  *
- * ⚠️ 给伪事务用的：审批时要读「这一单此前已批准退款的冲回额之和」，
- * 而那个读取必须与后面的写入在同一段同步代码里（`adminRefundTransaction`）。
- * 因此它不能用 `getRefundRepository()` 的异步方法。
+ * ⚠️ 给伪事务用的：审批（`adminRefundTransaction`）与冲回补记
+ * （`backfillRefundReversals`）都要在**同一段同步代码里**先读这一单的申请、
+ * 再写决策或明细，因此不能用 `getRefundRepository()` 的异步方法——
+ * 每个 `await` 都会让出执行权，读到的状态就可能已经不是写的时候那个。
+ *
+ * ⚠️ **P0-15 起返回长度恒为 0 或 1**。调用方**不要**因此改成
+ * 「取第一条就够了」：调用点关心的是「这一单**有没有**已批准退款」这类
+ * 集合语义问题，用列表表达它是准确的。收窄读取会让「一单一条」
+ * 从一条**被闸门保证的事实**退化成调用方脑子里的一个假设。
  *
  * 走索引而不是遍历 `refunds`：索引是「哪些申请属于这一单」这份事实的唯一表达，
  * 遍历 Map 再按 `orderId` 过滤等于把同一份事实重新推导一遍。
@@ -106,9 +114,9 @@ export const mockRefundRepository: RefundRepository = {
   },
 
   async findRefundByOrderId(orderId) {
-    // P0-13：一单可以有多条申请，这里给**最新的一条**（列表尾）。
-    // 「最新」是页面要的那个：订单详情上的那张退款卡回答的是
-    // 「这一单的退款现在走到哪了」，而不是「历史上退过几次」。
+    // 取列表尾（= 最新一条）。P0-15 之后一单最多一条，因此「尾」与「唯一那条」
+    // 是同一个元素；写法保留是因为路由本身没变，而改成 `list[0]` 只是在
+    // 一单一条的假设上做优化，收益为零、改动面却扩散到读的人要重新确认一次。
     const list = listRefundsForOrderSync(orderId);
     return list.length > 0 ? list[list.length - 1] : null;
   },
@@ -129,16 +137,17 @@ export const mockRefundRepository: RefundRepository = {
       if (existing) return { ok: true, refund: existing, created: false };
     }
 
-    // 2) **同一时刻只能有一条进行中**（P0-13 起）。
-    //    ⚠️ 判据是「进行中」而不是「有任何记录」：部分退款要求同一单能退第二次，
-    //    因此已批准 / 已拒绝 / 已撤销的记录**不再挡**。这一处与
-    //    `canRequestRefund(status, hasActiveRefund)` 是同一个判断的两处落点，
-    //    而这里是**真正生效**的那一处（服务层那次只是提前给出好一点的提示）。
-    const existingForOrder = listRefundsForOrderSync(refund.orderId).find((item) =>
-      isActiveRefundStatus(item.status),
-    );
+    // 2) **一个订单最多一条申请，任何状态都算数**（P0-15）。
+    //    ⚠️ 判据是「存在任何记录」，**不是**「存在进行中的」——P0-13 那段
+    //    `.find((item) => isActiveRefundStatus(item.status))` 已删除。
+    //    已批准（退款已执行，流程终结）/ 已拒绝（一次机会已用掉）/ 已撤销
+    //    （用户自己撤回，同样是机会用掉）**都挡**。这是产品规则
+    //    「提交过即封死，一次机会」在存储层的落点：**就算有人绕过服务层
+    //    直接调这个仓储方法，第二条申请也写不进来**。
+    //    服务层那次同样口径的检查只是提前给出可读的错误信息。
+    const existingForOrder = listRefundsForOrderSync(refund.orderId)[0];
     if (existingForOrder) {
-      return { ok: false, reason: "order_has_active_refund", existing: existingForOrder };
+      return { ok: false, reason: "order_already_has_refund", existing: existingForOrder };
     }
 
     current.refunds.set(refund.id, refund);
@@ -173,8 +182,9 @@ export const mockRefundRepository: RefundRepository = {
   },
 
   async queryRefundsForAdmin(filter: AdminRefundQueryFilter) {
+    const { statuses } = filter;
     return [...store().refunds.values()]
-      .filter((refund) => filter.status === null || refund.status === filter.status)
+      .filter((refund) => statuses === null || statuses.includes(refund.status))
       .sort(compareRefundsForAdmin);
   },
 };

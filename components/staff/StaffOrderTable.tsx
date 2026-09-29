@@ -339,7 +339,7 @@ export default function StaffOrderTable({
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-ink-2">{item.quantity}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums text-ink">
-                      ¥{formatYuan(item.totalAmount)}
+                      ¥{formatYuan(item.actualPaidAmount)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-ink-2">{item.gameName}</td>
                     <td className="px-4 py-3">

@@ -28,10 +28,14 @@ export type MockSurface = "server" | "http";
  * 空数据注入的作用范围。首页各模块是独立的视觉段落，因此空态也按模块区分，
  * 而不是「一处为空 = 整页为空」。
  *
- * `levels` / `agreements` / `rankings` / `companions` 不属于首页，而是给消费等级、
- * 协议、排行榜与陪玩列表四个页面用的：它们的空态是**整块功能没有数据**
- * （等级配置为空、协议全部未配置、榜单无人上榜、陪玩名单为空），
+ * `levels` / `agreements` / `rankings` / `companionRankings` / `companions` 不属于首页，
+ * 而是给消费等级、协议、**用户消费榜、打手榜**与陪玩列表用的：它们的空态是
+ * **整块功能没有数据**（等级配置为空、协议全部未配置、榜单无人上榜、陪玩名单为空），
  * 既不可能靠改一条数据造出来，也不该为了验收去删预置数据。
+ *
+ * ⚠️ `rankings`（消费榜）与 `companionRankings`（打手榜）**是两个范围、不是同一个**：
+ * 榜单本身是两个独立业务维度，清空其中一张时另一张必须原样保留——
+ * 否则「这张榜的空态生效了吗」这个问题就没有答案（两张一起空了）。
  */
 export type MockEmptyScope =
   | "none"
@@ -42,6 +46,11 @@ export type MockEmptyScope =
   | "levels"
   | "agreements"
   | "rankings"
+  // 打手排行榜（P1-5）的空榜。
+  // ⚠️ **不能复用 `rankings`**：那一个清的是**用户消费榜**，两者是两个独立业务维度
+  // （产品裁定 §10），共用注入键会让「我清的是哪张榜」变得说不清——
+  // 验收「打手榜空态」时把消费榜一起清掉，看的人分不清是空态生效了还是页面坏了。
+  | "companionRankings"
   | "companions"
   | "applications"
   // 管理后台：类目与商品两组列表分别清空（P8B）
@@ -57,6 +66,18 @@ export type MockEmptyScope =
   // 单独一个范围而不是并进 `all` 之外的某个已有值：客服账号与订单、退款、投诉
   // 不在同一张列表上，混在一起会让「空态是生效了还是页面坏了」变得说不清
   | "staff"
+  // 管理后台经营首页：六个数字（今日订单 / 今日 GMV / 今日退款 + 三个待办）全部清零（P1-1）。
+  // ⚠️ 它**不等于**上面的 `orders` / `refunds` / `complaints`：那三个清的是三张**列表**，
+  // 而经营首页的数是从仓储现算的聚合值，清空列表并不等于当天没有成交。
+  // 「今天还没有订单」是一个**完全正常**的经营首页，因此要有一种只影响它的注入方式。
+  | "dashboard"
+  // 管理后台售后工作台：退款与投诉的混合待办队列清空（P1-3）。
+  // ⚠️ 单独一个范围而不是复用 `refunds` / `complaints`：那两个各自只清**一张专用列表**，
+  // 而工作台是**同一批数据的另一种视图**——想验证「这张混合队列的空态」时，
+  // 用 `refunds` 会连退款列表一起清掉，看的人分不清是空态生效了还是页面坏了。
+  // 反过来说，清 `aftersales` **不影响**退款与投诉两张专用列表，这是刻意的：
+  // 它们与工作台是三个各自独立的取数入口。
+  | "aftersales"
   | "all";
 
 const SCOPE_VALUES: readonly MockEmptyScope[] = [
@@ -67,6 +88,7 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "levels",
   "agreements",
   "rankings",
+  "companionRankings",
   "companions",
   // 管理后台概览：把申请与护航两组数字分别清零，用来验证「全部为 0」时的安全降级
   "applications",
@@ -76,6 +98,8 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "refunds",
   "complaints",
   "staff",
+  "dashboard",
+  "aftersales",
   "all",
 ];
 

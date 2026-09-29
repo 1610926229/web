@@ -1,3 +1,4 @@
+import { OPEN_COMPLAINT_STATUSES } from "./complaints";
 import type { ComplaintStatus } from "@/lib/types/complaint";
 import type { CompanionCompletionInfo, CompletionSubmission, CompletionSubmissionStatus } from "@/lib/types/completion";
 import type { OrderStatus } from "@/lib/types/order";
@@ -6,8 +7,12 @@ import { countCharacters } from "@/lib/utils/text";
 /**
  * 完成材料（CompletionSubmission）的状态、校验与展示规则（服务端与浏览器共用）。
  *
- * ⚠️ 本文件只有 `import type` 与纯函数，没有任何运行时依赖（`countCharacters` 也是纯函数）：
- * 客户端组件引用它不会把服务端模块打进浏览器产物，node 也能直接加载它做纯逻辑测试。
+ * ⚠️ 本文件的运行时依赖只有一个：`./complaints` 的 `OPEN_COMPLAINT_STATUSES`
+ * （`isUnresolvedComplaintStatus()` 的判据，见下文）。其余都是 `import type` 与纯函数
+ * （`countCharacters` 也是纯函数）。`complaints.ts` 同样是**客户端安全**模块
+ * （无 `lib/data`、无 `node:` 依赖），因此「客户端组件引用它不会把服务端模块打进
+ * 浏览器产物，node 也能直接加载它做纯逻辑测试」这两条结论不变——
+ * 上面的「没有任何运行时依赖」是 P1-1 之前的措辞，已按事实更正。
  *
  * 这里只描述**规则**，不读写数据。判断「能不能提交」「要不要自动通过」的权威仍然是服务端：
  * 页面用同一套函数渲染入口，写接口时在伪事务里再校验一次。
@@ -127,7 +132,11 @@ export function canTransitionCompletion(
  * 若已 `resolved` 的投诉永久阻塞自动审核，「保持人工处理」会退化成「此单永不自动通过」。
  */
 export function isUnresolvedComplaintStatus(status: ComplaintStatus): boolean {
-  return status === "pending" || status === "processing";
+  // ⚠️ 判据取自 `OPEN_COMPLAINT_STATUSES`（`lib/constants/complaints.ts`），
+  // 不在这里再写一遍 `=== "pending" || === "processing"`：管理后台首页的待办卡
+  // 数的是同一组状态，两处各写一份字面量的话，将来只改一处就会造成
+  // 「卡上 3 条、列表 1 条」或「有投诉却自动通过了」这类静默分叉。
+  return (OPEN_COMPLAINT_STATUSES as readonly ComplaintStatus[]).includes(status);
 }
 
 /**

@@ -31,6 +31,26 @@ export type EarningRepository = {
   listEarningsForCompanion(companionId: string): Promise<Earning[]>;
 
   /**
+   * **全部**收益记录（不分打手、不分页）。
+   *
+   * 与 `listEarningsForCompanion` 的区别是刻意的，不是重复：
+   * 那一个回答「**这位打手**挣了多少」（归属是查询条件，打手端只能看到自己），
+   * 这一个回答「**所有人**挣了多少」，是**跨打手聚合**的入口。
+   *
+   * ⚠️ 目前**只有一个调用方**：打手收入榜（P1-5）。
+   * 榜单要跨打手求净额，逐个打手各查一次是 N+1 次查询。
+   * ⚠️ 本方法只负责**把行取出来**，「按打手分组、按周期过滤、求和」是
+   * `lib/constants/companionRankings.ts` 里的纯函数——**Mock 阶段这样最省事，
+   * 但换成真实数据库时应当下推成一个 `GROUP BY`**，届时本方法的签名可以不变，
+   * 也可以换成返回聚合结果；不变的约束只有一条：**净额口径只在那里定义一次**。
+   *
+   * ⚠️ **它是内部聚合入口，不是对外接口**：返回的 `Earning` 带 `orderId` /
+   * `reversedAmount` / `fineAmount` 等字段，**一个都不许进公开 DTO**
+   * （裁定 §9 的白名单）——聚合后的榜单只给名次与一个指标值。
+   */
+  listAllEarnings(): Promise<Earning[]>;
+
+  /**
    * 按订单取那一条收益；没有返回 null。
    *
    * 用于回答「这一单的收益状态是什么」这类单点问题，也是「一个订单最多一条收益」

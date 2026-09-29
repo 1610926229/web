@@ -1,6 +1,5 @@
-import type { EarningStatus } from "@/lib/types/earning";
 import type { OrderStatus } from "@/lib/types/order";
-import type { RefundReasonKey, RefundResponsibility, RefundStatus } from "@/lib/types/refund";
+import type { RefundDecision, RefundReasonKey, RefundStatus } from "@/lib/types/refund";
 import { formatShareRatioBpForInput } from "./shareRatio";
 
 /**
@@ -81,10 +80,24 @@ export const REFUND_DESCRIPTION_TOO_LONG_MESSAGE = `退款说明不能超过 ${R
  * 时代的说法。现在用户申请时**不填金额、也看不到金额**（他本来就不该能决定退多少），
  * 退多少由管理员在最终决策时按比例核定，因此这里只能说清「谁定、依据是什么」。
  */
-export const REFUND_AMOUNT_NOTE = "退款金额由平台按订单实付金额与责任认定核定，无需你填写";
+export const REFUND_AMOUNT_NOTE = "退款金额由平台按订单实付金额核定，无需你填写";
 
 export const REFUND_STATUS_INVALID_MESSAGE = "退款状态筛选无效";
-export const REFUND_ALREADY_ACTIVE_MESSAGE = "该订单已有进行中的退款申请，请先查看退款进度";
+/**
+ * 该订单**已经提交过**退款申请——不论那一条现在是什么状态（P0-15）。
+ *
+ * ⚠️ **P0-15 改口径，同时改了变量名**：原名 `REFUND_ALREADY_ACTIVE_MESSAGE`
+ * （「该订单已有**进行中**的退款申请」）说的是「等一下、还在走流程」，
+ * 新规则说的是「这一单的退款机会已经用掉了」。两句话对用户意味着完全不同的两件事
+ * （前者可以等，后者不能），因此**不保留旧名字**——名字不改，
+ * 调用方就会继续按旧语义去理解这个失败。
+ *
+ * ⚠️ **措辞里不写「不能再申请」的硬话，而是给出去路**：退款入口关闭不等于
+ * 「平台不管了」，与 `REFUND_WINDOW_CLOSED_MESSAGE` 同一条纪律——
+ * 规则再严，也要留一句人能找到的出口。
+ */
+export const REFUND_ALREADY_EXISTS_MESSAGE =
+  "该订单已提交过退款申请，一个订单只能申请一次退款；如有其他问题请联系客服";
 export const REFUND_NOT_CANCELLABLE_MESSAGE = "只有待审核的退款申请可以撤销";
 export const REFUND_ORDER_NOT_ALLOWED_MESSAGE = "该订单当前不可申请退款";
 export const REFUND_AMOUNT_INVALID_MESSAGE = "订单金额异常，暂时无法发起退款";
@@ -108,21 +121,27 @@ export const REFUND_WINDOW_CLOSED_MESSAGE =
   "该订单完成后的售后申请窗口已结束，无法再提交退款申请；如有其他问题请联系客服。";
 
 /**
- * ⚠️ **P0-13 删除了 `REFUND_RECORD_EXISTS_MESSAGE`**（「该订单已有退款申请记录，
- * 本阶段不支持重复申请」）。理由有两条，缺一不可：
+ * ## 「重复申请」这条规则的两次反转（**读这段再动唯一性**）
  *
- * 1. **业务上必须能重复申请**：P0-13 支持部分退款，而「第一次退了一部分、
- *    后来又发现还要再退」只能靠第二次申请表达。这条规则若保留，
- *    部分退款就永远只能退一次；
- * 2. `canRequestRefund` 的注释**自己早就写下了这份计划**——
- *    「将来放开重复申请时，只需把这一条放宽成 `isActiveRefundStatus`」。
- *    本轮执行的就是这句，不是新发明的规则。
+ * | 轮次 | 规则 | 依据 |
+ * |---|---|---|
+ * | P0-13 之前 | 有**任何**记录就拒绝（`REFUND_RECORD_EXISTS_MESSAGE`） | 「一笔订单一次全额退」 |
+ * | **P0-13** | 只挡**进行中**的；已拒绝 / 已撤销后可再申请 | 部分退款要能退第二次 |
+ * | **P0-15**（当前） | 有**任何**记录就拒绝（`REFUND_ALREADY_EXISTS_MESSAGE`） | 「一个订单最多只允许一次退款」 |
  *
- * 重复申请能被打开，靠的是**两道闸**而不是这一句话（见 `canRequestRefund`）：
- * 进行中的记录仍然挡着（同一时刻只能有一条流程），以及
- * **金额闸**——累计退款不得超过实付（`assertRefundAmountWithinPaid`）。
- * 用户端不会因此出现「退不完的钱」：累计退满时管理员那一步会自动把订单转 `refunded`，
- * 而 `refunded` 不在 `REFUNDABLE_ORDER_STATUSES` 里，申请入口自行消失。
+ * ⚠️ **P0-13 那段删除说明保留在这里，因为它记录了一个当时正确、现在被推翻的判断**：
+ * 它写着「业务上必须能重复申请：部分退款而『第一次退了一部分、后来又发现还要再退』
+ * 只能靠第二次申请表达」。产品负责人 2026-09-28 正式裁定**不存在多次退款**，
+ * 因此那个理由整体失效——**不是它当年写错了，是产品规则变了**。
+ *
+ * ⚠️ **现在挡重复申请的是「有没有记录」，不再是「有没有进行中的」**，
+ * 而且判据的两处落点（服务层提示 + 仓储原子区段）必须**同时**改，
+ * 否则会出现「界面上按钮没了、接口还能提交」这种最糟的形态。
+ * 真正生效的是**仓储那一处**（见 `lib/data/refundRepository.ts` 的约束 1）。
+ *
+ * ⚠️ **金额闸仍然保留**（`assertRefundAmountWithinPaid`）。唯一性让「累计」
+ * 不再可能超过一笔，但那道闸守的是另一件事——**这一次退的钱不能超过实付**，
+ * 它与「能退几次」无关，删掉它等于把「单笔超退」的门也一起打开。
  */
 
 /**
@@ -160,8 +179,11 @@ export const REFUND_NOTIFICATION_COMPANION_REFUNDED = {
  * 「客户在**服务开始前**取消了订单」与「本单**不产生收益**」。而 `completed` 单
  * 这两件事**双双为假**：订单已经完成护航、`Earning` 也已经生成过并按本次核定结果冲回。
  * 打手拿到的是一条**可被引用的书面结论**，写着与账实相反的话。
- * 尤其当这笔收益已经 `withdrawn` 时（`resolveFinalDecisionAmounts` 把冲回额改写为 0），
- * 他实际**保住了**这笔钱，却被告知「不产生收益」。
+ *
+ * ⚠️ **P0-15 起「收益被冲回多少」不再有第二种答案**：退款一旦批准，
+ * 打手本单收益**整笔**归零，与退款比例无关（§五）。原先这里要担心
+ * 「已提现的收益被改写成不冲回、打手其实保住了钱」（`resolveFinalDecisionAmounts`），
+ * 那条分支已随责任模型一并删除——普通退款下 `withdrawn` 结构上不可达。
  *
  * ⚠️ **别再假定「售后审批只会遇到 `serving` / `completed`」**：`REFUNDABLE_ORDER_STATUSES`
  * 约束的是**申请创建**（`canRequestRefund`），而存量申请可以挂在 `paid` / `accepted` 上
@@ -211,6 +233,20 @@ export const ACTIVE_REFUND_STATUSES: readonly RefundStatus[] = ["pending", "revi
 export function isActiveRefundStatus(status: RefundStatus): boolean {
   return (ACTIVE_REFUND_STATUSES as readonly string[]).includes(status);
 }
+
+/**
+ * **未终态**的退款状态——管理端 `status=open` 的口径，也是首页待办卡的计数口径。
+ *
+ * ⚠️ **刻意与 `ACTIVE_REFUND_STATUSES` 是同一个数组，不另写一份
+ * `["pending", "reviewing"]`。** 两个概念不同（一个是「会挡住新申请」，
+ * 一个是「管理员还没处理完」），但今天取值相同；写成两个字面量数组意味着
+ * 其中一处将来被改动时，另一处**不会报错、只会静默分叉**——
+ * 「待办卡说有 4 条、列表只筛出 3 条」这类问题就是这样长出来的。
+ *
+ * ⚠️ 做成**别名**而不是新数组，是让「两者必须一致」这件事在类型层面成立：
+ * 若将来产品要求它们分开，必须显式把这里改成一个独立数组，那一步是可见的。
+ */
+export const OPEN_REFUND_STATUSES: readonly RefundStatus[] = ACTIVE_REFUND_STATUSES;
 
 /**
  * 允许**申请**退款（走人工审核）的订单状态：护航中 / **已完成**。
@@ -308,49 +344,58 @@ export function assertRefundApprovalOrderStatus(status: OrderStatus): string | n
  * P0-12 没有缩减「哪些订单能退」，它把原来的一条路拆成了两条**互斥**的路——
  * 本函数是「拆之前那个问题」的现名，因此它今天恰好仍等于原来那四档。
  *
- * ⚠️ **入参只有状态，没有 `hasActiveRefund`**，因此它**不回答**「这一刻能不能真的提交/点到」：
- * 对一张 `serving` / `completed` 且**已有进行中退款**的订单它返回 `true`，而同文件的
- * `canRequestRefund(status, hasActiveRefund)` 对同一张订单返回 `false`。服务端拒绝时用的是
- * `REFUND_ALREADY_ACTIVE_MESSAGE`（见 `lib/services/refunds.ts` 的判定）。
+ * ⚠️ **入参只有状态，没有 `hasRefundRecord`**，因此它**不回答**「这一刻能不能真的提交/点到」：
+ * 对一张 `serving` / `completed` 且**已提交过退款申请**的订单它返回 `true`，而同文件的
+ * `canRequestRefund(status, hasRefundRecord)` 对同一张订单返回 `false`。服务端拒绝时用的是
+ * `REFUND_ALREADY_EXISTS_MESSAGE`（见 `lib/services/refunds.ts` 的判定）。
  * **「入口该不该显示」必须用 `canRequestRefund` /
  * `canDirectRefund` / 服务端的 `allowedActions` 判定，不要用本函数**——
  * 用它去把守按钮，`serving` 单上会显示一个点进去必然报错的「申请退款」。
  *
- * ⚠️ P0-13 之后它与 `canRequestRefund` 的差距**变小了**（已结束的记录不再挡住申请），
- * 但**没有消失**：仍在进行中的那一条依然只有 `canRequestRefund` 看得见。
+ * ⚠️ 它与 `canRequestRefund` 的差距在 P0-15 之后**又变宽了**（这是第二轮变化）：
+ * P0-13 把差距缩到「只有进行中的那一条挡住」，P0-15 把**所有记录**重新变成挡板，
+ * 于是两张表的差值回到「有没有任何申请记录」。差距变宽**不需要改本函数**——
+ * 本函数从来只回答状态那一半，它没有跟着任何一版规则变过。
  */
 export function hasRefundPath(status: OrderStatus): boolean {
   return isOrderRefundable(status) || canDirectRefund(status);
 }
 
 /**
- * 能否申请退款 = 订单状态可退，**且**这一单没有**进行中**的退款申请。
+ * 能否申请退款 = 订单状态可退，**且**这一单**从来没提交过**退款申请。
  *
- * 反过来读，就是仍然不能申请的两种情况：
+ * 反过来读，就是不能申请的两种情况：
  *
  * 1. 订单状态本身不可退（已退款；以及未支付等根本不存在的状态）；
- * 2. 已有**进行中**的退款申请（待审核 / 审核中）——不能同时对同一单开两条流程。
+ * 2. 已有**任何**退款申请记录——不论它是待审核、审核中、已通过、已拒绝还是已撤销。
  *
- * ⚠️ **P0-13 起第二项入参的语义由「有**任何**记录」收窄为「有**进行中**记录」
- * （形参名随之从 `hasRefundRecord` 改为 `hasActiveRefund`）**。
- * 这是本文件自己在上一版注释里写下的计划：「将来放开重复申请时，
- * 只需把这一条放宽成 `isActiveRefundStatus`」。本轮做部分退款，
- * 「一次退不完、之后再申请一次」是**业务本身的需求**，不是顺手放开。
+ * ⚠️ **形参名在 P0-13 与 P0-15 之间来回改了一次，这不是笔误**：
  *
- * ⚠️ 这一放宽**不是**「退款可以无限重复」：还有两道闸在外面，且都不在本函数里——
+ * | 轮次 | 形参名 | 语义 |
+ * |---|---|---|
+ * | P0-13 之前 | `hasRefundRecord` | 有**任何**记录就挡 |
+ * | P0-13 | `hasActiveRefund` | 只挡**进行中**的 |
+ * | **P0-15**（当前） | `hasRefundRecord` | 有**任何**记录就挡 |
  *
- * - **金额闸**：累计退款不得超过订单实付（`assertRefundAmountWithinPaid`）。
- *   本函数看不到金额，因此它答不了「还能退多少」；
- * - **状态闸**：累计退满时订单转 `refunded`，而 `refunded` 不在
- *   `REFUNDABLE_ORDER_STATUSES` 里，第一项立刻变假。
+ * 名字必须跟着语义走：叫 `hasActiveRefund` 而让调用方传「有没有任何记录」，
+ * 下一个人会照着名字去传 `isActiveRefundStatus(...)`，于是
+ * **被拒绝的申请又能再申请一次**——一个只在名字上错的分叉。
  *
- * ⚠️ 已知后果（**产品已裁定接受**，见 `P0-13/02-decisions.md` §十一 D10）：
- * 已拒绝 / 已撤销的记录**不再挡着**再次申请——用户可以就同一单再提交一次。
- * 这是「允许重复申请」的必然含义，而不是漏挡的一条分支；
- * 若将来要禁止「反复被拒后反复提交」，那是一条**新的产品规则**，需要单独裁定。
+ * ⚠️ **「已拒绝 / 已撤销也挡」是产品裁定，不是漏挡的反面**：
+ * 产品负责人 2026-09-28 明确裁定「提交过即封死，一次机会」。
+ * 已知后果是「管理员拒一次，用户此单再无退款渠道」——
+ * 这个后果是**被看见并被接受的**（见 `P0-15/02-decisions.md` Q2），
+ * 不是没想清楚。若将来要改成「被拒后可再申请」，那是一条新的产品规则。
+ *
+ * ⚠️ 两道外闸仍然在，且都不在本函数里：
+ *
+ * - **金额闸**（`assertRefundAmountWithinPaid`）：退款额不得超过订单实付。
+ *   本函数看不到金额，因此它答不了「这一笔能退多少」；
+ * - **仓储原子区段**（`lib/data/refundRepository.ts` 约束 1）：真正生效的那一处。
+ *   本函数只是**提前**给出好一点的界面提示。
  */
-export function canRequestRefund(status: OrderStatus, hasActiveRefund: boolean): boolean {
-  return isOrderRefundable(status) && !hasActiveRefund;
+export function canRequestRefund(status: OrderStatus, hasRefundRecord: boolean): boolean {
+  return isOrderRefundable(status) && !hasRefundRecord;
 }
 
 /** 能否撤销：只有待审核（pending）。审核中（reviewing）本阶段不允许撤销。 */
@@ -358,87 +403,49 @@ export function canCancelRefund(status: RefundStatus): boolean {
   return status === "pending";
 }
 
-/* ═════════════════════ 退款资金决策（P0-13） ═════════════════════ */
+/* ═════════════════ 退款资金决策（P0-13 建立 · P0-15 收敛） ═════════════════ */
 
 /**
  * 退款决策的**金额规则**（服务端与浏览器共用，纯函数，不读写数据）。
  *
- * ## 规则的出处
+ * ## 规则出处：**P0-15 覆盖了 §17**
  *
- * 全部来自 `docs/01-requirements/超哥电竞_业务流程表.md` **§17**
- * （标题即「部分退款资金公式（规则已冻结）」）与 §16.B「**管理员只输入退款比例，
- * 金额由系统计算**」。这里**没有一条新公式**：
+ * 原先这里抄的是 `docs/01-requirements/超哥电竞_业务流程表.md` **§17**
+ * 「部分退款资金公式（规则已冻结）」——那是一条**按责任比例**冲减打手的公式。
+ * 产品负责人 2026-09-28 正式覆盖了它（`P0-15/01-prompt.md` 指令 ① §三/§四/§五）。
+ * **§17 的按比例冲减部分标 `SUPERSEDED`，`platformBorneAmount` 整项作废。**
+ *
+ * 当前公式（这里没有一条是自创的，全部来自指令 ①）：
  *
  * ```text
- * refundRate ∈ [0, 10000] bp
- * userRefundAmount   = floor(actualPaidAmount × refundRate)
- * companionReversal  = floor(companionBaseIncome × refundRate)          // companion
- *                    = floor(companionBaseIncome × refundRate × liability) // shared
- *                    = 0                                                  // platform
- * platformBorne      = userRefundAmount − companionReversal   ← 用减法，不是另算一个数
- * 必须保持：userRefundAmount = companionReversal + platformBorne
- * 允许：platformBorne < 0
+ * refundRate ∈ [0, 10000] bp                     // 管理员一次性核定，只看一次
+ * refundAmount      = floor(actualPaidAmount × refundRate / 10000)
+ * companionReversal = companionBaseIncome        // ⚠️ 整笔，**不乘比例**
+ * platformNetIncome = actualPaidAmount − refundAmount
  * ```
  *
- * ⚠️ 「用减法构造」是**硬要求**，不是写法偏好：若平台承担额也各自取整算一遍，
- * 恒等式 `userRefundAmount = companionReversal + platformBorne` 会在
- * 取整误差下**偶发不成立**（差 1 分）。减法构造让恒等式**在定义上**成立。
+ * ## 三条与 §17 时代**根本不同**的性质
  *
- * ⚠️ **`platformBorne` 允许为负**（§17 明写「允许 `clubIncomeAdjustment < 0`」）：
- * 打手的分账基数按**原价**算（§18），券由平台承担，因此「冲回额」可能大于
- * 「实际退给用户的钱」。这不是缺陷，是已经冻结的规则；页面照实显示。
+ * 1. **冲回额与退款比例无关**。退 10% 与退 100% 都把打手这一单收益整笔取消。
+ *    这是本轮最容易被写错的一行——写成 `floor(收益 × 比例)` 之后金额看起来
+ *    「挺合理」，只是打手偷偷留下了钱，页面上完全看不出来。
+ * 2. **不再需要钳制，因为不变式变成了构造性的**。§17 时代要钳制，是因为
+ *    按比例 × 责任比例的公式**可能算出超过收益的数**（券场景下
+ *    `companionBaseIncome` 甚至可能大于实付）。现在冲回额**就是**
+ *    `companionBaseIncome` 本身，`0 <= reversedAmount <= incomeAmount`
+ *    在定义上成立，没有可以越界的表达式。⚠️ 删掉钳制**不是**放弃这条不变式，
+ *    而是让它不再需要一段专门的代码来维持——原先那段 `Math.max/min`
+ *    现在会是一段永远不改变结果的死代码。
+ * 3. **「平台承担额」这个概念本身没有了**。它回答「本次退款里平台担了多少」，
+ *    与打手收益无关；而今天要回答的是「平台最终剩多少」——见 `platformNetIncome()`。
+ *    两者数值上也不相等（打手收益 ≠ 退款额），**不能互相顶替**。
  *
- * ⚠️ 与 §17 的一处措辞对齐：§17 里的 `clubIncomeAdjustment` 是**俱乐部口径**的调整额，
- * 本仓库没有俱乐部实体，平台即俱乐部，故字段名为 `platformBorneAmount`，
- * **语义与公式完全一致**。
- *
- * ## 为什么必须钳制（`reversedSoFar`）
- *
- * 产品裁定 Q2-d 要求「**必须保证** `0 <= cumulativeReversalAmount <= incomeAmount`」。
- * 这条不变式**不能**靠「公式本身不会超」来论证：`companionBaseIncome` 并不保证
- * `<= actualPaidAmount`（§18 的券场景下它按原价算，反而可能大于实付），
- * 而且同一笔收益可以被多次退款反复冲减（Q2-d 明说允许）。
- * 因此这里显式钳制在「该单**剩余**可冲回额」以内——
- * 这是**唯一**保证不变式成立的地方，去掉它不变式就会破。
+ * ⚠️ **每次退款必带一个比例，没有例外**：`refundFullRemaining`（「退满剩余」）
+ * 那个一等意图已删。它当年存在的唯一理由是「多步部分退款会留下 1–99 分尾差，
+ * 而 `floor(实付 × n/100)` 只有 101 个离散值，够不着」——**现在一个订单只退一次，
+ * 没有尾差可追**。它想表达的另一件事（把剩下的全退掉）现在就是 **100%**，
+ * 且 `floor(实付 × 10000 / 10000) === 实付` 恒成立，因此连特例都不需要。
  */
-
-/**
- * 退款**责任归属**选项。取值由服务端校验，文案只此一份。
- *
- * ⚠️ `hint` 在 **P0-13 验收整改**时补上了**冲回公式**（原先只有一句抽象描述）。
- * 验收时的原话是「不要只显示抽象百分比」：管理员选「打手承担」时必须能立刻看出
- * 冲回额乘的是**打手收益**而不是**退款金额**——这两个基数不同，
- * 也只有在打手收益恰好等于退款金额时才会巧合相等。
- */
-export const REFUND_RESPONSIBILITIES: readonly {
-  key: RefundResponsibility;
-  label: string;
-  hint: string;
-}[] = [
-  {
-    key: "platform",
-    label: "平台承担",
-    hint: "打手冲回 = 0；平台承担 = 本次退款金额。",
-  },
-  {
-    key: "companion",
-    label: "打手承担",
-    hint: "打手冲回 = 打手收益 × 退款比例（⚠️ 乘的是打手收益，不是退款金额）。",
-  },
-  {
-    key: "shared",
-    label: "按比例分担",
-    hint:
-      "打手冲回 = 打手收益 × 退款比例 × 打手责任比例（⚠️ 乘的是打手收益，不是退款金额）；" +
-      "平台承担 = 本次退款金额 − 打手冲回（可能为负）。",
-  },
-];
-
-export const REFUND_RESPONSIBILITY_LABELS: Record<RefundResponsibility, string> =
-  REFUND_RESPONSIBILITIES.reduce<Record<string, string>>((labels, item) => {
-    labels[item.key] = item.label;
-    return labels;
-  }, {}) as Record<RefundResponsibility, string>;
 
 /**
  * 退款比例的输入范围（整数百分比）。100% 即全额退款。
@@ -449,8 +456,6 @@ export const REFUND_RESPONSIBILITY_LABELS: Record<RefundResponsibility, string> 
  */
 export const REFUND_RATE_PERCENT_MIN = 0;
 export const REFUND_RATE_PERCENT_MAX = 100;
-export const COMPANION_LIABILITY_PERCENT_MIN = 0;
-export const COMPANION_LIABILITY_PERCENT_MAX = 100;
 
 /**
  * 决策表单的全部失败文案。
@@ -461,191 +466,184 @@ export const COMPANION_LIABILITY_PERCENT_MAX = 100;
  */
 export const REFUND_DECISION_RATE_REQUIRED_MESSAGE = "请填写退款比例";
 export const REFUND_DECISION_RATE_INVALID_MESSAGE = `退款比例必须是 ${REFUND_RATE_PERCENT_MIN}~${REFUND_RATE_PERCENT_MAX} 之间的整数百分比`;
-export const REFUND_DECISION_RESPONSIBILITY_REQUIRED_MESSAGE = "请选择退款责任归属";
-export const REFUND_DECISION_RESPONSIBILITY_INVALID_MESSAGE = "退款责任归属取值无效";
-export const REFUND_DECISION_LIABILITY_REQUIRED_MESSAGE = "按比例分担时必须填写打手责任比例";
-export const REFUND_DECISION_LIABILITY_INVALID_MESSAGE = `打手责任比例必须是 ${COMPANION_LIABILITY_PERCENT_MIN}~${COMPANION_LIABILITY_PERCENT_MAX} 之间的整数百分比`;
-export const REFUND_DECISION_LIABILITY_UNEXPECTED_MESSAGE =
-  "只有「按比例分担」才需要填写打手责任比例";
 export const REFUND_DECISION_AMOUNT_ZERO_MESSAGE = "退款金额为 0，无法提交退款决策";
+/**
+ * 金额闸遇到的**负**退款额——这不是「退 0 元」，是数据已经坏了。
+ *
+ * ⚠️ 与上一句分开写（P0-14 验收整改补正）：负额只可能来自
+ * `refundedAmount > actualPaidAmount`（已退超过实付）。原先它与 0 共用
+ * 「退款金额为 0」那句，运维看到「为 0」会去查「为什么算出来是 0」，
+ * 而真正该查的是「为什么已退超过实付」——把信号指错了方向。
+ * 依据：`lib/types/refund.ts` 里「负数是数据出问题的信号，藏起来更糟」那条纪律。
+ *
+ * ⚠️ **P0-15 后它仍然可能被触发**，尽管累计已不可能：唯一性让「本次退款额」
+ * 至多等于实付，而 `refundedAmount` 是订单上的历史字段——一张在 P0-15 之前
+ * 就已被多退过的单子（或任何被外部写坏的数据）依然会走到这里。
+ * 保留它，是因为**删掉一道数据异常检测不会让异常消失，只会让它静默通过**。
+ */
+export const REFUND_DECISION_AMOUNT_NEGATIVE_MESSAGE =
+  "该订单已退金额已超过实付金额，订单数据异常，请先核对金额再提交退款决策";
+/**
+ * 金额闸的「超过实付」一档。
+ *
+ * ⚠️ **P0-15 补上了补救方向**（原先只有「请调整退款比例」）：多步退款模型废止后
+ * 不再有尾差，`100%` 就是退满全部，因此「填 100」对管理员是一个**真正的出路**，
+ * 而不只是一句「你自己再想想」。
+ *
+ * 这句话同时是**管理端预览**与**提交被拒**两处的文案（P0-15 起预览不再持有
+ * 一份自己的副本，见 `lib/constants/adminRefunds.ts` 的 `previewRefundDecisionAmounts`）：
+ * 两处必须一字不差，否则会出现「预览说 A、提交说 B」。
+ */
 export const REFUND_DECISION_EXCEEDS_PAID_MESSAGE =
-  "累计退款金额超过订单实付金额，请调整退款比例";
-
-export function isRefundResponsibility(value: string): value is RefundResponsibility {
-  return REFUND_RESPONSIBILITIES.some((item) => item.key === value);
-}
+  "退款金额超过订单实付金额，请调整退款比例（填 100 表示全额退款）";
 
 /**
  * 一次退款决策的**输入**（服务端内部口径）。
  *
- * ⚠️ 全部是**基点**整数。表单给的百分比字符串在接口层就换算掉
+ * ⚠️ 比例全部是**基点**整数。表单给的百分比字符串在接口层就换算掉
  * （`lib/constants/adminRefunds.ts`），因此规则层永远只面对整数基点，
  * 不面对 `"33.5"` 这种字符串，也不会在规则里做二次解析。
+ *
+ * ## P0-15：输入只剩一个字段
+ *
+ * 原来这里有两个维度（`refundFullRemaining` 二选一 × `responsibility` 三选一），
+ * 合成四个成员。P0-15 之后两者都不存在了：
+ *
+ * - **「退满剩余」删掉了**。它当年存在是因为**多步**部分退款会留下 1–99 分尾差，
+ *   而 `floor(实付 × n/100)` 只有 101 个离散值，够不着那个余数。
+ *   现在**一个订单只退一次**，`floor(实付 × n/100)` 一步到位，**没有余数可追**。
+ *   而它当年想表达的另一件事（「把剩下的全退掉」）现在就是 **100%**：
+ *   `floor(实付 × 10000 / 10000) === 实付` 恒成立。
+ *   ⚠️ 注意这不是「换了个名字」——旧字段在**被部分退过的单子**上有不可替代的语义
+ *   （那时它是 `实付 − 已退`，不等于实付的 100%），而那个场景本身没了。
+ * - **`responsibility` / `companionLiabilityRateBp` 删掉了**：管理员不再选责任归属，
+ *   打手一律整笔归零（P0-15 §五）。
  */
 export type RefundDecisionInput = {
   refundRateBp: number;
-  responsibility: RefundResponsibility;
-  /** 只有 `shared` 有意义；其余两种必须为 `null`（见 D2：金额字段不静默忽略） */
-  companionLiabilityRateBp: number | null;
 };
 
-/** 一次退款决策算出来的三个金额（单位：分）。 */
+/**
+ * 一次退款决策算出来的**两个**金额（单位：分）。
+ *
+ * ⚠️ **P0-15 删掉了 `platformBorneAmount`**，而不是让它恒为某个值。
+ * 它回答的是「本次退款里平台担了多少」，而新口径要回答的是
+ * 「**平台最终净收入** = 实付 − 退款额」——这两个问题**不同**：
+ * 前者与打手收益无关，后者与打手收益也无关，但前者在「打手整笔归零」之后
+ * 已经没有任何一处需要它了。需要平台净收入的地方请用 `platformNetIncome()`
+ * 现算，不要把它塞回决策里——决策记的是**动作**，不是**结算结果**。
+ */
 export type RefundDecisionAmounts = {
   refundAmount: number;
+  /**
+   * 这一次从打手收益冲回的金额（分）。
+   *
+   * ⚠️ **恒等于 `companionBaseIncome`**，与 `refundRateBp` **无关**：
+   * 退 10% 与退 100% 都把这笔收益整笔取消（P0-15 §三 / §五）。
+   * 传入 `companionBaseIncome` 而不是在这里写 0 或按比例算，
+   * 是为了让「整笔」这件事由**调用点的入参**表达——
+   * 将来若真有部分冲减的需求，改的是这里的一句话，而不是去找散落的公式。
+   */
   companionReversalAmount: number;
-  platformBorneAmount: number;
 };
 
 /**
  * 决策输入的**形状校验**（不涉及订单金额，因此可以独立测试与独立复用）。
  *
  * 返回 `null` 表示通过，否则返回给管理员看的中文原因。
- * ⚠️ 它**不检查**「累计退款是否超过实付」——那要看订单，属于
+ * ⚠️ 它**不检查**「退款额是否超过实付」——那要看订单，属于
  * `assertRefundAmountWithinPaid`。
+ *
+ * ⚠️ **P0-15 后它只剩比例一道校验**：责任归属与责任比例两个字段被删除，
+ * 因此它们的三句失败文案也一并删除（`REFUND_DECISION_RESPONSIBILITY_*` /
+ * `REFUND_DECISION_LIABILITY_*`）。留着一句永远不会被返回的文案，
+ * 会让人以为那条校验还在。
  */
 export function validateRefundDecisionInput(input: RefundDecisionInput): string | null {
   if (!Number.isInteger(input.refundRateBp)) return REFUND_DECISION_RATE_REQUIRED_MESSAGE;
   const ratePercent = input.refundRateBp / 100;
-  if (
-    ratePercent < REFUND_RATE_PERCENT_MIN ||
-    ratePercent > REFUND_RATE_PERCENT_MAX
-  ) {
+  if (ratePercent < REFUND_RATE_PERCENT_MIN || ratePercent > REFUND_RATE_PERCENT_MAX) {
     return REFUND_DECISION_RATE_INVALID_MESSAGE;
   }
-
-  if (!isRefundResponsibility(input.responsibility)) {
-    return REFUND_DECISION_RESPONSIBILITY_INVALID_MESSAGE;
-  }
-
-  if (input.responsibility === "shared") {
-    const liability = input.companionLiabilityRateBp;
-    if (liability === null) return REFUND_DECISION_LIABILITY_REQUIRED_MESSAGE;
-    if (!Number.isInteger(liability)) return REFUND_DECISION_LIABILITY_INVALID_MESSAGE;
-    const liabilityPercent = liability / 100;
-    if (liabilityPercent < COMPANION_LIABILITY_PERCENT_MIN || liabilityPercent > COMPANION_LIABILITY_PERCENT_MAX) {
-      return REFUND_DECISION_LIABILITY_INVALID_MESSAGE;
-    }
-  } else if (input.companionLiabilityRateBp !== null) {
-    // ⚠️ 不静默忽略：管理员填了责任比例却选了「平台承担」，
-    // 那个数字会被丢掉，而他以为它生效了。金额字段宁可报错。
-    return REFUND_DECISION_LIABILITY_UNEXPECTED_MESSAGE;
-  }
-
   return null;
 }
 
 /**
- * 按 §17 算这一次退款的三个金额（单位：分）。
+ * 算这一次退款的两个金额（单位：分）。
  *
  * ⚠️ **入参必须是订单的冻结经济快照**（`Order.actualPaidAmount` /
  * `Order.companionBaseIncome`），**不得**传当前商品价或当前分账比例——
  * P0-13 §一原文：「不得重新按当前商品/分账比例计算，必须基于订单冻结经济快照」。
  *
- * `reversedSoFar` = 该订单**此前已批准**退款累计冲回的打手收益（分）。
- * 它只为钳制服务，不参与正向计算。
+ * ## P0-15：从「三个金额」缩成「两个」
+ *
+ * 退款额只按比例一条路算；冲回额**恒为整笔**，与比例无关。
+ * `alreadyRefundedAmount` 与 `reversedSoFar` 两个入参随之删除——
+ * 前者只服务「退满剩余」（已删），后者只服务累计钳制（已无累计）。
+ *
+ * ⚠️ **删除钳制不会让 `0 <= reversedAmount <= incomeAmount` 失效**，
+ * 而是把它变成了**构造上成立**：冲回额就是 `companionBaseIncome`，
+ * 既不可能是负的，也不可能超过自己。原先需要钳制，是因为公式
+ * （按比例 × 责任比例）可能算出超过收益的数；现在没有那个公式了。
  */
 export function computeRefundDecisionAmounts(params: {
   actualPaidAmount: number;
   companionBaseIncome: number;
-  reversedSoFar: number;
   input: RefundDecisionInput;
 }): RefundDecisionAmounts {
-  const { actualPaidAmount, companionBaseIncome, reversedSoFar, input } = params;
+  const { actualPaidAmount, companionBaseIncome, input } = params;
 
-  const refundAmount = Math.floor((actualPaidAmount * input.refundRateBp) / 10000);
-
-  let grossReversal: number;
-  if (input.responsibility === "platform") {
-    grossReversal = 0;
-  } else if (input.responsibility === "companion") {
-    grossReversal = Math.floor((companionBaseIncome * input.refundRateBp) / 10000);
-  } else {
-    const liability = input.companionLiabilityRateBp ?? 0;
-    grossReversal = Math.floor(
-      (companionBaseIncome * input.refundRateBp * liability) / 10000 / 10000,
-    );
+  // 实付 ≤ 0 的异常单：没有可退的钱，也没有可冲回的收益。
+  // ⚠️ 仍然必须先拦。P0-15 之后它拦的不再是「分母为 0 导致 NaN」
+  //    （那个分母已随「退满剩余」一起删除），而是**一个坏订单不该产生任何资金动作**：
+  //    放它过去的话，下面会算出 `refundAmount = 0`，而金额闸对 0 的判据是
+  //    「退款金额为 0」——那句话对管理员说的是「你填的比例太小」，
+  //    真正的问题却是「这一单的实付金额是坏的」。返回 0 让闸门挡下来，
+  //    与改动前的行为一致。
+  if (actualPaidAmount <= 0) {
+    return { refundAmount: 0, companionReversalAmount: 0 };
   }
 
-  // ⚠️ 钳制：保证 0 <= 累计冲回 <= incomeAmount（Q2-d）。见本节顶部说明。
-  const remainingReversible = Math.max(0, companionBaseIncome - reversedSoFar);
-  const companionReversalAmount = Math.max(0, Math.min(grossReversal, remainingReversible));
-
   return {
-    refundAmount,
-    companionReversalAmount,
-    // 用减法构造，让恒等式在定义上成立（见顶部说明）
-    platformBorneAmount: refundAmount - companionReversalAmount,
+    refundAmount: Math.floor((actualPaidAmount * input.refundRateBp) / 10000),
+    // ⚠️ **不乘比例**。这是 P0-15 §三 / §五 的核心：
+    //    退 10% 与退 100% 都把打手这一单的收益**整笔**取消。
+    //    写成 `Math.floor(companionBaseIncome * refundRateBp / 10000)` 是
+    //    本条规则下最容易犯、也最难在页面上看出来的错——金额会变"合理"，
+    //    只是打手偷偷留下了钱。
+    companionReversalAmount: companionBaseIncome,
   };
 }
 
 /**
- * **D17**：收益已经提现时，本次退款**不从打手身上冲回**（Q3 仍 DEFER），
- * 那部分钱由平台全额承担。
+ * **平台最终净收入**（分）= `实付 − 退款额`（P0-15 §四）。
  *
- * 这是「读一侧」与「写一侧」都必须走的一步，因此抽成纯函数：
+ * ⚠️ **它是现算的，不是存下来的**：平台净收入是订单与退款两个事实的**推论**，
+ * 不是一次退款动作的属性。把它写进决策记录等于给同一个数留两份出处。
  *
- * - **写一侧**：`approveRefund` 在写决策前调用它，拿到真正落库的三个金额；
- * - **读一侧**：管理端界面的「本次预计退款金额」调用**同一个函数**。
+ * ⚠️ **它与被删除的 `platformBorneAmount` 不是同一个量**，别拿这个去补那个：
+ * 后者问「本次退款里平台担了多少」，与打手收益无关；这个问「平台最后剩多少」，
+ * 同样与打手收益无关，但**只在打手整笔归零的新口径下**才等于「实付 − 退款额」。
  *
- * ⚠️ 若只在写一侧实现，界面会对一笔已经提现的收益显示「预计冲回 ¥X」，
- * 而服务端实际写下去的是 0——一笔账在界面上和在库里不一致，且**只有提交之后**才看得出来。
- *
- * ⚠️ 第三个金额仍然用**减法构造**（与 `computeRefundDecisionAmounts` 同一条纪律）：
- * 恒等式 `refundAmount = companionReversalAmount + platformBorneAmount`
- * 必须在**任何**分支下都在定义上成立。
+ * ⚠️ 打手的份额**不在这条式子里出现**，这是对的：打手归零之后，
+ * 未被退走的钱全部留在平台侧。
  */
-export function resolveFinalDecisionAmounts(
-  amounts: RefundDecisionAmounts,
-  companionEarningStatus: EarningStatus | null,
-): RefundDecisionAmounts {
-  if (companionEarningStatus !== "withdrawn") return amounts;
-
-  const companionReversalAmount = 0;
-  return {
-    refundAmount: amounts.refundAmount,
-    companionReversalAmount,
-    platformBorneAmount: amounts.refundAmount - companionReversalAmount,
-  };
+export function platformNetIncome(actualPaidAmount: number, refundAmount: number): number {
+  return actualPaidAmount - refundAmount;
 }
 
 /**
- * 该订单**此前已批准**退款累计冲回的打手收益（分）——`reversedSoFar` 的**唯一定义处**。
+ * 金额闸：退款额不得超出订单实付金额（P0-13 §一原文
+ * 「`refundedAmount <= actualPaidAmount`」）。
  *
- * 它有两个调用方，一个写、一个读：
+ * ⚠️ **P0-15 后它的第三个判据已经基本不可能触发**，但**不删**：
+ * 唯一性让「本次退款额」至多等于实付，可 `alreadyRefundedAmount` 是**订单上的
+ * 历史字段**——一张在 P0-15 之前被多次退过的单子、或任何被外部写坏的数据，
+ * 依然会走到这里。删掉一道数据异常检测**不会让异常消失，只会让它静默通过**。
  *
- * 1. **写入侧**（`lib/data/adminRefundTransaction.ts` 的 `approveRefund`）：
- *    把它作为 `computeRefundDecisionAmounts` 的钳制输入；
- * 2. **读取侧**（`lib/services/adminRefunds.ts` 的详情 DTO）：把它放进
- *    `AdminRefundOrderMoney.reversedSoFarAmount`，让管理端界面能用**同一个函数**
- *    算出与写入侧一模一样的预计金额。
- *
- * ⚠️ **必须只有这一份**：界面上要显示「本次预计冲回多少」，若读取侧照抄一遍
- * 这段 `filter + reduce`，两处只要有一处漏掉 `approved` 这个条件，
- * 界面就会显示一个服务端永远不会算出来的数——而那种不一致没人能一眼看出来。
- *
- * ⚠️ **读的是退款记录上的决策，不是收益上的 `reversedAmount`**：`serving` 订单退款时
- * 收益还不存在（D9），那种情况下只有这里读得到已冲回多少。
- *
- * ⚠️ 也**不排除本条自己**：`approved` 是终态，调用方走到「要批准这一条」时
- * 它必然还不是 `approved`。
- */
-export function sumApprovedCompanionReversal(
-  refunds: readonly {
-    status: RefundStatus;
-    decision?: { companionReversalAmount: number } | null;
-  }[],
-): number {
-  return refunds
-    .filter((item) => item.status === "approved")
-    .reduce((total, item) => total + (item.decision?.companionReversalAmount ?? 0), 0);
-}
-
-/**
- * 金额闸：累计退款不得超过订单实付金额（P0-13 §一原文
- * 「累计 `refundedAmount <= actualPaidAmount`」）。
- *
- * ⚠️ 参数是「**已经退过的累计额**」而不是「这一次退多少」：判据是**累计**，
- * 因为部分退款可以来很多次，只比这一次永远比不出问题。
+ * ⚠️ 保留「累计」口径而不是改成「这一次」：判据问的是「退完之后总共退了多少」，
+ * 而那是订单上的 `refundedAmount` 加上本次——只看本次的话，
+ * 一张已经退满的单子再退一次会**通过**这道闸。
  * 返回 `null` 表示通过。
  */
 export function assertRefundAmountWithinPaid(params: {
@@ -653,7 +651,10 @@ export function assertRefundAmountWithinPaid(params: {
   alreadyRefundedAmount: number;
   actualPaidAmount: number;
 }): string | null {
-  if (params.refundAmount <= 0) return REFUND_DECISION_AMOUNT_ZERO_MESSAGE;
+  // ⚠️ 负数必须排在 0 前面：先判 `<= 0` 会把「数据已经坏了」答成「退款金额为 0」，
+  // 把排查方向指错（见 `REFUND_DECISION_AMOUNT_NEGATIVE_MESSAGE`）。
+  if (params.refundAmount < 0) return REFUND_DECISION_AMOUNT_NEGATIVE_MESSAGE;
+  if (params.refundAmount === 0) return REFUND_DECISION_AMOUNT_ZERO_MESSAGE;
   if (params.alreadyRefundedAmount + params.refundAmount > params.actualPaidAmount) {
     return REFUND_DECISION_EXCEEDS_PAID_MESSAGE;
   }
@@ -661,13 +662,104 @@ export function assertRefundAmountWithinPaid(params: {
 }
 
 /**
- * 累计退款是否已经退满 = 订单该转 `refunded`（P0-13 §一：「cumulative full refund 才 refunded」）。
+ * 退款是否已经退满 = 订单该转 `refunded`（P0-13 §一：「full refund 才 refunded」）。
  *
- * ⚠️ **只有退满才转**：部分退款**不得**自动设 `refunded`——订单还要继续履约，
- * 打手的收益也还在。这一条由本函数单点回答，调用方不再自己写 `>=`。
+ * ⚠️ **只有退满才转**：部分退款**不得**设 `refunded`——订单还要继续履约
+ * （P0-15 指令 ②§八 原话：「`Order.status` 不因为打手收益归零而强制变成 `refunded`」）。
+ * 这一条由本函数单点回答，调用方不再自己写 `>=`。
+ *
+ * ⚠️ **P0-15 后「部分退款」变成了一个可以长期停留的终态**，而不是 §17 时代
+ * 那个「迟早会被第二次退款补上」的中间态：一个订单只退一次，所以
+ * 「退了 33%、剩下的 2004 永远留在平台」是**正常结局**（指令 ①§四：
+ * 「未退款部分归平台」），不是「订单卡住了」。
+ *
+ * ⚠️ `actualPaidAmount > 0` 这个守卫必须留着：实付为 0 的坏单子
+ * 在 `0 >= 0` 下会被判成「已退满」，从而**凭空变成 `refunded`**。
  */
 export function isFullyRefunded(alreadyRefundedAmount: number, actualPaidAmount: number): boolean {
   return actualPaidAmount > 0 && alreadyRefundedAmount >= actualPaidAmount;
+}
+
+/**
+ * 这一单**已经出过一次款**了吗？= 退款流程是否已经终结（指令 ①§一 / §八）。
+ *
+ * 判据是 `refundedAmount > 0`——**不看比例、不看状态**。这是「一单一退」在
+ * 「执行侧」的唯一定义，与申请侧的「有没有记录」（`canRequestRefund` 的第二个参数）
+ * 是同一件事的两面：
+ *
+ * | 侧 | 事实 | 谁回答 |
+ * |---|---|---|
+ * | 申请侧 | 这一单**提交过**退款申请吗 | `listRefundsForOrderSync(id).length > 0`（仓储原子区段） |
+ * | **执行侧** | 这一单**出过款**吗 | **本函数** |
+ *
+ * ⚠️ **为什么必须单独有这一条，而不是靠「退满」**：指令 ①§一 写的是
+ * 「最多**一次**实际退款执行」，①§八 写的是「**已经执行退款后,不允许再次退款**」——
+ * 两句都没有说「退满」。而 `refundedAmount >= actualPaidAmount`（退满）
+ * 在**部分退款**上不成立：一张退了 10% 的订单，`refundedAmount` 是实付的一成。
+ * 只判「退满」会放过这条路径：
+ *
+ * ```
+ * serving 单被批准部分退款（第 1 次出款，状态仍是 serving——部分退款不改状态）
+ *   → 客服把它退回公共池（P0-11，`serving → paid`，回池不碰 `refundedAmount`）
+ *   → 订单此刻是 paid ⇒ `canDirectRefund("paid")` 为真
+ *   → 用户点「直接退款」⇒ **第 2 次出款**（退的是「剩余可退额」）
+ * ```
+ *
+ * 这条路径在 2026-09-28 的交付前审查中被独立发现并逐步骤核实过。
+ * 它单看「累计不超过实付」不会多退钱，但它**是第二次实际退款执行**，
+ * 与 ①§一 / §八 直接冲突，也与 ①§九（清理「第二次退款」与 cumulative refund 逻辑）冲突。
+ *
+ * ⚠️ **「剩下的留在平台」是预期终态，不是「订单卡住了」**（①§四 / `isFullyRefunded` 的注释）：
+ * 部分退款后那笔未退的钱**本来就归平台**，因此挡住第二次出款**不是**让用户损失，
+ * 而是让订单落到它应有的终态。
+ *
+ * ⚠️ **调用方不要各写一遍 `> 0`**：本函数是这一条规则的唯一定义，
+ * 三个退款写入路径（直接退款 / 售后台审 / 公共池超时）与展示面
+ * （`buildRefundActions`、`resolveOrderNetIncome`）都走它。
+ *
+ * ⚠️ **有一处是刻意的例外**：`lib/constants/orders.ts` 的
+ * `resolveCompanionDisplayStatus` 仍然写 `order.refundedAmount > 0`。
+ * 不是漏改——`orders.ts` 头部有一条硬约束：**本文件不得出现任何运行时的 `import`**
+ * （它被客户端组件引用，加一个运行时依赖就会把服务端模块拖进浏览器产物）。
+ * 于是那里只能就地写同一个表达式。
+ *
+ * ⚠️ **写路径要的通常不是本函数，而是 `isRefundExecutionClosed`**：本函数只回答窄问题
+ * （「出过款吗」），而「这一单的退款还能不能再发生」是**并集**（还要算上状态判据）。
+ * 并集有它自己的单点定义，见下一个函数——**不要在调用点手写 `||`**。
+ */
+export function hasRefundBeenExecuted(order: { refundedAmount: number }): boolean {
+  return order.refundedAmount > 0;
+}
+
+/**
+ * 这一单的退款**还能不能再发生**？= 状态判据 ∨ `hasRefundBeenExecuted`。
+ *
+ * 这是「一单一退」在**写入侧**的完整判据，也是退款写入路径与计划层应该问的问题。
+ * 拆成两个函数不是重复，是**分工**：
+ *
+ * | 问题 | 谁回答 |
+ * |---|---|
+ * | 这一单**出过款**吗（哪怕只出了一部分） | `hasRefundBeenExecuted`——窄，回答净额与展示面 |
+ * | 这一单的退款**是否已终结** | **本函数**——宽，回答写入路径与计划层 |
+ *
+ * ⚠️ **为什么窄答案不够**：计划层若只问窄问题，`status === "refunded"` 而
+ * `refundedAmount === 0` 的订单会被判成「还欠一次退款」，于是**放行**——通知发出去、
+ * id 落进 `refundedOrderIds`，而存储层的短路会**静默拒绝**这次出款。那正是
+ * 「**账面上说退了、钱没动**」的假账（P0-15 决策 D20 点名的反模式）。并集让计划层
+ * 与存储层问同一个问题，缝就没了。
+ *
+ * ⚠️ **本函数与 `lib/constants/orders.ts` 的 `resolveCompanionDisplayStatus` 恒相等**
+ * （同一个并集，一个返回布尔、一个返回状态）。那一处仍然内联写
+ * `order.refundedAmount > 0` 并**不是**漏改——`orders.ts` 头部有一条硬约束：
+ * **本文件不得出现任何运行时的 `import`**（它被客户端组件引用，加一个运行时依赖
+ * 就会把服务端模块拖进浏览器产物）。恒等关系由
+ * `tests/refundOnePerOrder.test.mjs` 的矩阵用例逐格钉住，不靠注释提醒。
+ */
+export function isRefundExecutionClosed(order: {
+  status: OrderStatus;
+  refundedAmount: number;
+}): boolean {
+  return order.status === "refunded" || hasRefundBeenExecuted(order);
 }
 
 /**
@@ -681,4 +773,22 @@ export function isFullyRefunded(alreadyRefundedAmount: number, actualPaidAmount:
  */
 export function formatRefundRatePercent(bp: number): string {
   return formatShareRatioBpForInput(bp);
+}
+
+/**
+ * 一条**已写入**的退款决策，比例那一栏该怎么写。
+ *
+ * ⚠️ **P0-15 起它不再判断「是哪条路」**：唯一的另一种意图（「退满剩余」）
+ * 已被删除，`refundRateBp` 也从 `number | null` 收窄成 `number`。
+ * 于是它从「两条分支 + 一个占位」退化成**纯换算**——
+ * 保留这个函数而不是让调用方自己拼 `formatRefundRatePercent(x) + "%"`，
+ * 理由与原先一致：百分比在退款域里显示成什么样，只应该有一处定义。
+ *
+ * ⚠️ 连带的删除：`REFUND_RATE_UNAVAILABLE_TEXT`（「比例读不出来」的占位 `"—"`）
+ * 一并删掉。它当年存在是因为 `refundRateBp` 可能是 `null`，
+ * 而那个可能是「退满剩余」带来的；意图没了，`null` 就不再可能出现，
+ * 一个永远不会被返回的占位常量只会让人以为还有一条分支要处理。
+ */
+export function formatRefundDecisionRate(decision: Pick<RefundDecision, "refundRateBp">): string {
+  return `${formatRefundRatePercent(decision.refundRateBp)}%`;
 }

@@ -1,5 +1,10 @@
 import { apiGet, apiPatch, apiPost } from "@/lib/api/client";
 import {
+  ADMIN_AFTERSALE_PAGE_SIZE,
+  type AdminAftersaleCaseType,
+  type AdminAftersaleView,
+} from "@/lib/constants/adminAftersales";
+import {
   ADMIN_APPLICATION_PAGE_SIZE,
   type AdminApplicationStatusFilter,
 } from "@/lib/constants/adminApplications";
@@ -32,7 +37,8 @@ import {
   type AdminCompanionStateFilter,
 } from "@/lib/constants/adminCompanions";
 import { ADMIN_PRODUCT_PAGE_SIZE } from "@/lib/constants/adminProducts";
-import type { AdminLoginResult, AdminSessionUser } from "@/lib/types/admin";
+import type { AdminDashboardDTO, AdminLoginResult, AdminSessionUser } from "@/lib/types/admin";
+import type { AdminAftersaleListData } from "@/lib/types/aftersale";
 import type {
   AdminCategoryListData,
   AdminCategoryListItem,
@@ -88,6 +94,11 @@ import type {
   AdminQuickEntryItem,
   AdminQuickEntryProfilePatch,
 } from "@/lib/types/content";
+import type {
+  AdminCouponGrantOption,
+  AdminCouponGrantResult,
+  AdminGrantTargetUser,
+} from "@/lib/types/coupon";
 
 /**
  * 管理端的**浏览器端**取数。
@@ -122,6 +133,23 @@ export function mockLoginAdmin(): Promise<AdminLoginResult> {
 /** 退出登录：服务端删除管理端 Cookie。 */
 export function logoutAdmin(): Promise<{ ok: true }> {
   return apiPost<{ ok: true }>("/api/admin/auth/logout");
+}
+
+// ——————————————————————————— 经营首页（P1-1） ———————————————————————————
+
+/**
+ * 经营首页的六个数字（今日订单 / 今日 GMV / 今日退款 + 三个待办）。
+ *
+ * ⚠️ **只有 GET，而且没有参数**：这是一个纯快照，没有筛选、没有分页、没有身份字段。
+ * 它属于哪一天由**服务端**决定（北京时间），客户端不传日期也不自己算——
+ * 因此不可能出现「浏览器按本地时区算今天、服务端按 UTC+8 算今天」这种两侧不一致。
+ *
+ * ⚠️ 它**不是**首屏取数通道：`/admin` 是 Server Component，首屏数字由服务端
+ * 直接调 `getAdminDashboard()` 渲染出来（不闪占位）。这个函数服务于
+ * **页面之后的动作**——点「刷新数据」或失败后点「重试」。
+ */
+export function fetchAdminDashboard(): Promise<AdminDashboardDTO> {
+  return apiGet<AdminDashboardDTO>("/api/admin/dashboard");
 }
 
 // ——————————————————————————— 入驻审核 ———————————————————————————
@@ -599,12 +627,13 @@ export function fetchAdminRefund(id: string): Promise<AdminRefundDetail> {
  * 三个审核动作。都是 POST，请求体只有幂等键（通过与被拒绝另加审核意见）。
  *
  * ⚠️ **请求体里没有金额**（P0-13 起口径微调：通过动作传的是**比例**，仍然不是金额）。
- * 管理员填写退款比例与责任归属，三个金额由服务端按订单冻结的经济快照算出来
+ * 管理员只填写退款比例，两个金额由服务端按订单冻结的经济快照算出来
  * （`业务流程表.md` §16.B：「管理员只输入退款比例，金额由系统计算」）。
  * 类型上也没有任何字段能传金额进来。
+ * ⚠️ P0-13 到 P0-15 之间还要传一个「责任归属」；那一个随责任模型删除。
  *
  * ⚠️ 三个动作是**三个接口**，不是一个「把状态改成 X」的接口：通过会在同一次写入里
- * 写入资金决策、订单累计退款额与打手收益冲回（累计退满时才改订单状态），
+ * 写入资金决策、订单累计退款额与打手收益冲回（比例 100% 时才改订单状态），
  * 与「开始审核」这种只改一个状态的动作用途完全不同，
  * 合成一个接口就会出现「点错按钮直接把款退了」这种后果很重的错误。
  *
@@ -621,29 +650,21 @@ export function startReviewRefund(
 }
 
 /**
- * 资金决策三件套（P0-13）—— 通过动作的必填入参。
+ * 资金决策（P0-13 建立 · **P0-15 收敛为一个字段**）—— 通过动作的必填入参。
  *
  * ⚠️ **比例用字符串、不用数字**：`"0"` 与「没填」在数字口径下都是 `0` 或 `undefined`，
  * 而它们是完全不同的两件事（填了 0% 是「不退钱」，没填是「还没决定」）。
  * 服务端按整数字符串解析，`"33.5"` 一律 400（金额字段不做静默取整）。
  *
- * ⚠️ **责任比例只在分担制下存在于类型上**（判别联合，不是可选字段）：
- * `platform` / `companion` 传了责任比例会被服务端 400 拒绝，而不是被静默忽略
- * ——金额字段「填了但没生效」比报错危险得多。类型上就写不出来，比运行时再拦一道更早。
+ * ⚠️ **「全额退款」就是填 `"100"`**。P0-14 曾为「多步部分退款够不到的尾差」
+ * 引入过第二种表达方式（`refundFullRemaining` / 「退满剩余」），
+ * 而 P0-15 把一个订单的退款收敛为一次之后，`floor(实付 × 100%) === 实付`——
+ * 那个概念自动坍缩回 100%，于是第二种表达方式连同它的联合成员一起删除。
  */
-export type AdminRefundDecisionRequest =
-  | {
-      /** 0~100 的整数字符串（0% 会被服务端按「退款金额为 0」拒绝） */
-      refundRatePercent: string;
-      responsibility: "shared";
-      /** 0~100 的整数字符串 */
-      companionLiabilityRatePercent: string;
-    }
-  | {
-      refundRatePercent: string;
-      responsibility: "platform" | "companion";
-      companionLiabilityRatePercent?: never;
-    };
+export type AdminRefundDecisionRequest = {
+  /** 0~100 的整数字符串（0% 会被服务端按「退款金额为 0」拒绝） */
+  refundRatePercent: string;
+};
 
 /**
  * 审核通过：资金决策、退款记录、订单与打手收益在同一次写入里改到位。`reviewNote` 选填。
@@ -651,11 +672,24 @@ export type AdminRefundDecisionRequest =
  * ⚠️ **客户端不做金额算术**（`architecture-rules.md` §三）——但**页面会实时预览金额**。
  * 原先「页面不做金额预览、按钮只说『金额由系统计算』」的取舍已被 **P0-13 D19 取代**：
  * 管理端确认框调 `previewRefundDecisionAmounts()`（`lib/constants/adminRefunds.ts`），
- * 它复用的正是服务端写入路径上的同一对纯函数
- * （`computeRefundDecisionAmounts` → `resolveFinalDecisionAmounts`），
+ * 它复用的正是服务端写入路径上的同一个纯函数（`computeRefundDecisionAmounts`），
  * 因此「预览出来的」与「写下去的」必然是同一份公式算的。
  *
- * 客户端始终只传百分比字符串，**永不自己算钱**。
+ * 客户端始终只传**退款比例**，**永不自己算钱**。
+ *
+ * ## 这个类型从「四个成员的联合」退化成一个对象（P0-15）
+ *
+ * 它原先按两条判别轴展开：`refundFullRemaining`（退满剩余 / 按比例，P0-14）
+ * 与 `responsibility`（`platform` / `companion` / `shared`，P0-13）。
+ * 两条轴各自的**理由都消失了**：
+ * - 「退满剩余」补的是「多步部分退款留下的尾差」，一个订单只退一次之后尾差不存在；
+ * - 责任模型整体废止，管理员不再选择归属。
+ *
+ * ⚠️ 判别联合**不是为了好看**：它当时的价值是把「同时传比例与退满标志」
+ * 「选了平台承担却传了责任比例」变成**编译错误**而不是运行时 400。
+ * 现在只剩一个字段、一种可能，联合没有要区分的东西——
+ * 继续留着一个单成员联合只会让人以为「还有别的分支没写出来」，
+ * 反而比直白的对象更容易被误读。
  */
 export function approveRefund(
   id: string,
@@ -666,12 +700,10 @@ export function approveRefund(
   return apiPost<AdminRefundWriteResult>(`/api/admin/refunds/${encodeURIComponent(id)}/approve`, {
     idempotencyKey,
     reviewNote,
+    // ⚠️ **显式挑字段**（原先这里是一个三元表达式，用来在两条互斥的路之间二选一）：
+    // 直接摊开 `...decision` 会让请求体跟着客户端类型一起漂移——
+    // 界面上多一个字段，服务端就会收到一个它不认识的东西。
     refundRatePercent: decision.refundRatePercent,
-    responsibility: decision.responsibility,
-    // 只有分担制才带上责任比例：其余两种传了会 400（服务端刻意不静默忽略）
-    ...(decision.responsibility === "shared"
-      ? { companionLiabilityRatePercent: decision.companionLiabilityRatePercent }
-      : {}),
   });
 }
 
@@ -1205,5 +1237,110 @@ export function saveAdminPlatformConfig(
   return apiPatch<AdminPlatformConfigWriteResult>("/api/admin/platform-config", {
     idempotencyKey,
     ...patch,
+  });
+}
+
+// ————————————————————— 售后统一工作台（P1-3） —————————————————————
+
+/**
+ * 一页售后案件的筛选条件。`view` 与 `caseType` 都是**必填**——
+ * 与退款、投诉两个列表不同，本列表没有「不传就代表默认」的余地：
+ * 「全部 / 未完结 / 处理中 / 已结束」四档必须显式选一档，
+ * 否则服务端返回的 `counts` 与当前页面对不上，角标就成了另一个数。
+ */
+export type AdminAftersaleListRequest = {
+  view: AdminAftersaleView;
+  caseType: AdminAftersaleCaseType | "all";
+  keyword: string;
+  from: string;
+  to: string;
+  page?: number;
+};
+
+/**
+ * 取一页售后案件（退款申请与投诉的**混合**列表）。
+ *
+ * ⚠️ **只传筛选与分页**：案件属于谁、订单是什么、打手是谁全部由服务端按记录给出，
+ * 访问资格由服务端会话决定。空值不写进查询串（`?keyword=&from=` 只会让日志更难读）。
+ *
+ * ⚠️ 本函数**没有任何金额运算**：金额口径（申请金额 / 核定金额）由服务端算好放在 DTO 上，
+ * 这里只是把它搬回来。页面的金额列也照此只做展示。
+ *
+ * ⚠️ 本列表**只读**：退款与投诉的处置动作各自留在专用页面（`/admin/refunds/[id]`、
+ * `/admin/complaints/[id]`），本文件里没有也**不应有**任何「售后动作」的写函数——
+ * 那会在聚合页上出现第二条改状态的路径。
+ */
+export function fetchAdminAftersales(
+  input: AdminAftersaleListRequest,
+): Promise<AdminAftersaleListData> {
+  const params = new URLSearchParams();
+  if (input.view) params.set("view", input.view);
+  if (input.caseType) params.set("caseType", input.caseType);
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.from) params.set("from", input.from);
+  if (input.to) params.set("to", input.to);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(ADMIN_AFTERSALE_PAGE_SIZE));
+
+  return apiGet<AdminAftersaleListData>(`/api/admin/aftersales?${params.toString()}`);
+}
+
+// ————————————————————— 优惠券发放（P1-4 验收整改轮 §四） —————————————————————
+
+/**
+ * 可发放的券模板（**只有当前启用的**）。
+ *
+ * ⚠️ 过滤在**服务端**做，这里不自己筛：两个地方各筛一次，迟早分叉。
+ * 有效期不在过滤条件里——模板可能 `enabled` 但已经过期，服务端照样返回它，
+ * 并把 `withinValidity` 一并给出来供**显示**（发出去一张过期的券是废的，
+ * 管理员有权知道自己正在这么做，而不是被一个没写在裁定里的硬规则挡住）。
+ *
+ * ⚠️ 没有参数，也**不该有分页**：券模板是个位数量级的配置数据。
+ */
+export function fetchAdminCouponGrantOptions(): Promise<AdminCouponGrantOption[]> {
+  return apiGet<AdminCouponGrantOption[]>("/api/admin/coupons");
+}
+
+/**
+ * 按关键词找发放目标（匹配 id / 显示号 / 昵称，由服务端决定匹配规则与返回上限）。
+ *
+ * ⚠️ 空关键词**不写进地址栏**（与其他函数同一条规矩：`?keyword=` 只会让日志更难读），
+ * 服务端对空关键词返回空列表——「不带筛选地拉全量用户」不该是一个顺手可得的操作。
+ *
+ * ⚠️ 返回项里的 `ownedCount` 是**这个人当前已持有的券张数**：发放允许重复
+ * （§五），因此能拦住重复的不是这里，而是让管理员**看得见**「他已经有两张了」。
+ */
+export function searchAdminGrantTargets(keyword: string): Promise<AdminGrantTargetUser[]> {
+  const params = new URLSearchParams();
+  const trimmed = keyword.trim();
+  if (trimmed) params.set("keyword", trimmed);
+
+  const query = params.toString();
+  return apiGet<AdminGrantTargetUser[]>(
+    `/api/admin/coupons/grant-targets${query ? `?${query}` : ""}`,
+  );
+}
+
+/**
+ * 向指定用户发放一张券。
+ *
+ * ⚠️ 请求体只有**三个字段**：目标用户、券模板与幂等键。
+ * 券面、门槛、有效期、金额一概不由请求体决定——它们取**当前模板**的快照（§七）。
+ * 发放人更没有可传的位置：它由服务端按会话写入（`grantedByAdminId`）。
+ *
+ * ⚠️ 幂等键由**调用方**生成并在**同一次用户意图内保持不变**（见本文件开头的说明）。
+ * 这一点在发券上比别处更要紧：发放**不受**「一人一模板一次」约束（§五），
+ * 因此「请求已到达服务端、回执丢了、管理员重新点一次」若换了键，
+ * 就会真的多发一张券——服务端那边没有任何唯一索引能拦住它。
+ */
+export function grantAdminCoupon(input: {
+  userId: string;
+  couponId: string;
+  idempotencyKey: string;
+}): Promise<AdminCouponGrantResult> {
+  return apiPost<AdminCouponGrantResult>("/api/admin/coupons/grant", {
+    idempotencyKey: input.idempotencyKey,
+    userId: input.userId,
+    couponId: input.couponId,
   });
 }

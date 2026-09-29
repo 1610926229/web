@@ -472,7 +472,7 @@ test("详情 2：列表项 / 详情 / 派单摘要的 key 集合**精确相等**
       "productTitle",
       "specName",
       "quantity",
-      "totalAmount",
+      "actualPaidAmount",
       "user",
     ]),
     "列表项字段表就是边界：写成全集，以后给 Order 加字段时不会顺手漏出去",

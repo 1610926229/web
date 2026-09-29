@@ -16,6 +16,7 @@ import {
   ADMIN_REFUND_STATUS_FILTER_LABELS,
   type AdminRefundStatusFilter,
 } from "@/lib/constants/adminRefunds";
+import { OPEN_REFUND_STATUSES } from "@/lib/constants/refunds";
 import { fetchAdminRefunds } from "@/lib/services/adminHttp";
 import type { AdminRefundListData } from "@/lib/types/refund";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
@@ -265,9 +266,10 @@ export default function AdminRefundTable({
                         href={`/admin/refunds/${item.id}`}
                         className="text-[13px] text-admin-accent underline-offset-2 hover:underline"
                       >
-                        {item.status === "pending" || item.status === "reviewing"
-                          ? "去审核"
-                          : "查看详情"}
+                        {/* ⚠️ 判据取自 `OPEN_REFUND_STATUSES`，不在这里再写一遍
+                            「pending || reviewing」：这行决定操作员要不要点进去，
+                            与待办卡 / `?status=open` 必须是同一组状态。 */}
+                        {OPEN_REFUND_STATUSES.includes(item.status) ? "去审核" : "查看详情"}
                       </Link>
                     </td>
                   </tr>

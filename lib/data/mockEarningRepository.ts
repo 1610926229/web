@@ -1,3 +1,4 @@
+import { isEarningFullyReversed } from "@/lib/constants/earnings";
 import type { Earning, EarningAdjustment } from "@/lib/types/earning";
 import { getMockStore } from "./mockStore";
 import type { EarningRepository } from "./earningRepository";
@@ -95,6 +96,20 @@ export function appendEarning(earning: Earning): void {
  *
  * 已经是 `available` 的记录返回 `changed: false`，一个字节都不写（重复 sweep 幂等）；
  * 记录不存在返回 null。两者都不判断「该不该释放」——那是伪事务的事。
+ *
+ * ⚠️ **净额已归零的收益也拒绝释放**（P0-15）——这一条**是**判断「该不该释放」，
+ * 刻意放在这里当第二道闸。它与伪事务里的那道闸判的是同一件事
+ * （`isEarningFullyReversed`），区别只在**位置**：
+ *
+ * - 伪事务在**计划阶段**用它把这条收益从清单里剔掉（正常路径走的是那一处）；
+ * - 这里保证的是：**即使某个将来的调用方漏了那道判据**，存储层也不会把一笔
+ *   已经归零的收益写成「可提现」。指令 ②§六 要的正是这个——
+ *   「不得只依赖之前页面 / service 层读取到的旧状态」。
+ *
+ * 反过来说，这道闸**不能**替代计划阶段那道：`sweepMaturedEarnings` 的返回值
+ * 来自**计划清单**，一个被这里静默拒掉的 id 仍会出现在 `releasedEarningIds` 里
+ * （调用方以为释放成功了）。因此正常路径必须由计划阶段把它剔掉；
+ * 这一道只在「有人写漏了计划阶段」时兜底。
  */
 export function applyEarningRelease(
   id: string,
@@ -105,6 +120,10 @@ export function applyEarningRelease(
 
   const previous = { ...earning };
   if (earning.status === "available") {
+    return { previous, updated: previous, changed: false };
+  }
+  // 钱已经没了：状态停在 `frozen` 是**终局**，不是「还没到点」
+  if (isEarningFullyReversed(earning)) {
     return { previous, updated: previous, changed: false };
   }
 
@@ -193,14 +212,35 @@ export function appendEarningAdjustment(adjustment: EarningAdjustment): void {
  *
  * 三件事，缺一不可（P0-13 D5）：
  *
- * 1. `reversedAmount` 是**累加**，不是覆盖——同一笔收益可以被多次退款反复冲减；
- * 2. **状态规则**：`0 < reversedAmount < incomeAmount` 时**留在原状态**
- *    （`frozen` 仍 `frozen`、`available` 仍 `available`），只有**整笔冲完**
- *    才进 `reversed`。⚠️ 部分冲回**绝不能**把 `frozen` 变成 `available`——
- *    那等于用一次退款把冻结期提前结束了（`cmd_p0-13.md` 明令禁止提前释放）；
+ * 1. `reversedAmount` **在实现上仍是累加**（不是覆盖），但 ⚠️ **P0-15 起
+ *    「累加」已经不是一种业务形态**：一单一退、那次退款必然整笔冲销，
+ *    因此任何一条真实可达的路径都只会调用本函数**一次**，且 `amount === incomeAmount`。
+ *    保留加法实现是为了让「半冲」——如果真出现——表现为数据异常而不是被静默夹平。
+ *    （旧口径「同一笔收益可以被多次退款反复冲减」出自 P0-13 Q2-d，**已被 P0-15 覆盖**。）
+ * 2. **状态规则（P0-15 产品裁定，推翻了 P0-13 的 D8）**：
+ *    - 没冲完（`reversedAmount < incomeAmount`）→ **留在原状态**；
+ *    - **整笔冲完 → 状态写回 `frozen`**，**不是** `reversed`。
+ *
+ *    产品裁定原话（指令 ②§四 / §十(8)）：「退款批准后处理对象应当仍是
+ *    `Earning.status = frozen`」。理由是**这笔钱永远不会进入可提现阶段**——
+ *    「可提现」这个说法对它自始至终是假的。写回 `frozen` 同时覆盖了两种起点：
+ *    `frozen → frozen`（正常路径）与 `available → frozen`（收益先到期、
+ *    随后才有退款——见 `sweepMaturedEarnings` 的净额闸，它保证不会又被释放回去）。
+ *
+ *    ⚠️ `reversed` 因此在本批次**没有写入路径**。⚠️ 部分冲回**绝不能**
+ *    把 `frozen` 变成 `available`——那等于用一次退款把冻结期提前结束了
+ *    （`cmd_p0-13.md` 明令禁止提前释放）；
  * 3. **不变式护栏**：`0 <= reversedAmount <= incomeAmount`。伪事务已经按 D4
  *    钳制过一次，这里再夹一次是**存储层自己的不变式**：即使调用方算错，
  *    存储里也不会出现一笔「被冲回得比挣的还多」的收益。
+ *
+ * ⚠️ **这里刻意没有 `withdrawn` 分支**（P0-15）：一笔 `withdrawn` 的收益被整笔冲回时，
+ * 走的是与其它起点**同一条**规则——整笔冲完就写回 `frozen`（第 2 条），
+ * 没有为它准备的第三个取值。这不是漏写：普通退款流程里 `withdrawn`
+ * **结构上不可达**（见 `lib/data/adminRefundTransaction.ts` 与 `database-schema.md` §T2.1），
+ * 而且「已提现的收益被冲回」本来就不该复用「冻结中」这个说法。
+ * 若将来要支持「已提现后强制退款」，冲回口径（负余额 / 追偿 / 平台垫付）
+ * 必须作为一条新的特殊财务业务一并设计，而不是在这里补一个 if。
  *
  * `amount <= 0` 返回 `changed: false` 且一个字节都不写——「冲 0 元」不是一次写入，
  * 记一条明细只会让对账多出一堆空记录。
@@ -220,10 +260,12 @@ export function applyEarningReversal(
     Math.max(0, earning.reversedAmount + amount),
     earning.incomeAmount,
   );
-  const status =
-    nextReversed >= earning.incomeAmount && earning.incomeAmount > 0
-      ? "reversed"
-      : earning.status;
+  // 一眼看不出这是「退款」的存储层写法，所以解释一句：
+  // 整笔冲完 ⇒ 这笔钱已经不可能是「可提现」的了，状态回到 `frozen`（P0-15 产品裁定，
+  // 见函数头第 2 条）。⚠️ 它不是 `reversed`——那个取值本批次没有写入路径。
+  const status = isEarningFullyReversed({ incomeAmount: earning.incomeAmount, reversedAmount: nextReversed })
+    ? "frozen"
+    : earning.status;
 
   const updated: Earning = { ...earning, reversedAmount: nextReversed, status };
   current.earnings.set(id, updated);
@@ -249,6 +291,13 @@ function compareEarningsNewestFirst(a: Earning, b: Earning): number {
 }
 
 export const mockEarningRepository: EarningRepository = {
+  async listAllEarnings() {
+    // 与 `listEarningsForCompanion` 同一种排序（`frozenAt` 倒序、id 兜底），
+    // 只是不收窄归属：跨打手聚合需要一个**确定的**顺序，否则同一份数据两次查询
+    // 可能给出不同的行序，而调用方（收入榜）虽然会自己排序，测试却会因此变得不可复现。
+    return [...store().earnings.values()].sort(compareEarningsNewestFirst);
+  },
+
   async listEarningsForCompanion(companionId) {
     return [...store().earnings.values()]
       .filter((earning) => earning.companionId === companionId)

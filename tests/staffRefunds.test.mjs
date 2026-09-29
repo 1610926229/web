@@ -415,7 +415,11 @@ test("详情：补齐原因 / 说明 / 凭证 / 金额对照 / 审核信息 / �
 
   const order = await orderOf(PENDING_REFUND);
   assert.equal(detail.amount, order.totalAmount, "退款金额取申请创建时的订单实付快照");
-  assert.equal(detail.orderTotalAmount, order.totalAmount);
+  // ⚠️ 期望值取 `actualPaidAmount`（P1-4）：这个字段标着「原订单实付金额」，
+  // 原先却取自 `order.totalAmount`（优惠前应付）。种子订单没有券、两者相等，
+  // 所以这条断言在改口径前后都会绿——它只是把规则本身写下来；
+  // 真正的守门符是「有券时两个数不相等」的用例（`tests/couponCheckoutChain.test.mjs`）
+  assert.equal(detail.orderTotalAmount, order.actualPaidAmount);
   assert.equal(detail.orderStatus, order.status);
 
   const cancelled = await getStaffRefundDetail(CANCELLED_REFUND, undefined, "server");

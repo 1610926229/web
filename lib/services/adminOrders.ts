@@ -30,12 +30,11 @@ import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseReposi
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getReviewRepository } from "@/lib/data/reviewRepository";
-import { getUserRepository } from "@/lib/data/userRepository";
 import { mockEmptyApplies, withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { AdminOrderDetail, AdminOrderListData, OrderCompanionSnapshot } from "@/lib/types/order";
-import type { AdminUserSummary } from "@/lib/types/user";
+import { adminUserIndex, missingUser } from "./adminIndex";
 import { toOrderComplaintSummary } from "./complaints";
-import { buildConversationStats } from "./conversations";
+import { buildOrderConversationStats } from "./conversations";
 import { buildOrderTimeline } from "./orders";
 import { toRefundSummary } from "./refunds";
 import { toReviewSummary } from "./reviews";
@@ -70,18 +69,9 @@ async function allOrdersForAdmin() {
   return getPaymentRepository().queryOrdersForAdmin(ADMIN_ORDER_UNFILTERED_QUERY);
 }
 
-/**
- * userId → 用户摘要。
- *
- * 用户仓储（而不是 `getDataSource()`）：数据源是只读契约，只暴露 `findUserById`，
- * 而列表要按 keyword 过滤就得**一次拿到全部用户**，逐条 `findUserById` 会变成 N+1。
- */
-async function adminUserIndex(): Promise<Map<string, AdminUserSummary>> {
-  const users = await getUserRepository().listUsers();
-  return new Map(
-    users.map((user) => [user.id, { id: user.id, displayId: user.displayId, nickname: user.nickname }]),
-  );
-}
+// `adminUserIndex` / `missingUser` 的定义在 `./adminIndex`（P1-3 抽出：订单 / 退款 /
+// 投诉 / 售后四个管理列表此前各有一份**逐字节相同**的副本，四份之间没有任何机制保证
+// 它们继续相同）。本文件只是使用者。
 
 /**
  * 用户**指定**的那位护航（P0-5）——后台订单详情里「指定」那一行。
@@ -109,16 +99,9 @@ async function resolveExclusiveCompanion(orderId: string): Promise<OrderCompanio
   return companion ? toOrderCompanionSnapshot(companion) : null;
 }
 
-/**
- * 用户记录缺失时的占位摘要。
- *
- * 不返回 null、也不抛错：订单本身是有效的，少一条用户记录不该让整张列表打不开
- * （预置订单里就有刻意不指向任何用户的条目）。页面看到的是一行空昵称，
- * 而不是一整页错误。
- */
-function missingUser(userId: string): AdminUserSummary {
-  return { id: userId, nickname: "", displayId: "" };
-}
+// `missingUser` 见 `./adminIndex`。⚠️ 本文件的用法是「订单本身有效，少一条用户记录
+// 不该让整张列表打不开」（预置订单里就有刻意不指向任何用户的条目），
+// 而退款列表对**订单**缺失的处理相反——所以共用的是那个函数，不是那条规则。
 
 /**
  * 解析列表查询条件。与其它管理列表同一套约定：
@@ -264,22 +247,23 @@ export async function getAdminOrderDetail(
     const order = await getPaymentRepository().findOrderById(id);
     if (!order) return null;
 
-    const [users, refund, complaintStats, conversation, exclusiveCompanion, releaseHistory] =
+    const [users, refund, complaintStats, conversations, exclusiveCompanion, releaseHistory] =
       await Promise.all([
         adminUserIndex(),
         getRefundRepository().findRefundByOrderId(order.id),
         getComplaintRepository().summarizeComplaintsByOrder(order.id),
-        getMessageRepository().findConversation(order.userId, order.id),
+        getMessageRepository().listConversationsByOrder(order.userId, order.id),
         resolveExclusiveCompanion(order.id),
         // 履约退出历史（P0-6）：打手主动取消之后订单上的人已经清空，而客服恰恰要回答
         // 「刚才那个人为什么走了」。没有退出过就是空数组，不是「查不到」
         getCompanionReleaseRepository().listReleasesByOrderId(order.id),
       ]);
 
-    // 未读数与用户端同一个口径；会话不存在时摘要为 null
-    const conversationSummary = conversation
-      ? buildConversationStats(
-          conversation,
+    // 未读数与用户端同一个口径；会话不存在时摘要为 null。
+    // ⚠️ P0-14 起一张订单可以有多段会话，未读是**全部段落**的合计
+    const conversationSummary = conversations.length
+      ? buildOrderConversationStats(
+          conversations,
           await getMessageRepository().listMessages(order.userId, order.id),
         )
       : null;

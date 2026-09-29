@@ -177,8 +177,20 @@ export function StaffOrderContentSection({ detail }: { detail: StaffOrderDetail 
 export function StaffOrderAmountSection({ detail }: { detail: StaffOrderDetail }) {
   return (
     <Section title="金额">
+      {/*
+        ⚠️ **P1-4 删掉了「渠道实收」这一行**（原来读 `order.totalAmount`）。
+        它有两处不对：
+
+        1. **名不副实**。渠道实收是「用户实际付掉的钱」，也就是下面的 `actualPaidAmount`；
+           而 `order.totalAmount` 是**优惠前**的应付总额。接券之前两者恒等，
+           所以这句话一直是对的——满减券一生效就不对了，而且错在**多报**：
+           客服会以为平台收到的钱比用户付的多。
+        2. **与「原价」重复**。`order.totalAmount` 恒等于 `originalAmount`
+           （两者都是 `itemsAmount + addonsAmount`），页面上同时列出来
+           就是同一个数字出现两次。删掉它，剩下的六行恰好构成一条可核对的链：
+           `商品金额 + 增值服务 = 原价`，`原价 − 优惠券抵扣 = 实付金额`，`实付 − 已退 = 剩余可退`。
+      */}
       <div className="flex flex-col gap-1">
-        <DetailRow label="渠道实收" value={`¥${formatYuan(detail.order.totalAmount)}`} />
         <DetailRow label="商品金额" value={`¥${formatYuan(detail.itemsAmount)}`} />
         <DetailRow label="增值服务" value={`¥${formatYuan(detail.addonsAmount)}`} />
         <DetailRow label="原价" value={`¥${formatYuan(detail.originalAmount)}`} />

@@ -46,6 +46,19 @@ export const EXTERNAL_LINK_NOT_CONFIGURED_MESSAGE = "链接暂未配置";
 /** 小宫格入口：顺序与原型一致（4 / 4 / 3），末尾另有 P0-4 新增的打手工作台。 */
 export const MINE_GRID_ENTRIES: readonly MineEntry[] = [
   { id: "rank", label: "消费排行榜", kind: "link", href: "/rank", notice: "", icon: "rank", tile: "" },
+  /*
+   * 打手排行榜（P1-5）。
+   *
+   * ⚠️ 与「打手工作台」一样，这一条**不在原型里**（原型抓的是一个普通用户账号的宫格）。
+   * 加它的理由：三张打手榜（接单 / 完成 / 收入）是本轮新增的**公开内容**，
+   * 而它们与消费榜**是两个独立业务维度**（产品裁定 §10），因此在「我的」页占一格，
+   * 而不是塞进消费榜那一页里去。
+   *
+   * ⚠️ 它与「消费排行榜」是**两个入口、两个地址**：点进去之后再想换榜，
+   * 由页面顶部的 `RankBoardSwitch` 负责。入口分开放，是为了让「排行榜」这四个字
+   * 在宫格里不至于被读成同一个东西。
+   */
+  { id: "companion-rank", label: "打手排行榜", kind: "link", href: "/rank/companions", notice: "", icon: "rank", tile: "" },
   { id: "coupon", label: "我的优惠券", kind: "link", href: "/coupons", notice: "", icon: "coupon", tile: "" },
   { id: "review", label: "我的评价", kind: "link", href: "/reviews", notice: "", icon: "review", tile: "" },
   { id: "agreement", label: "相关协议", kind: "link", href: "/agreements", notice: "", icon: "agreement", tile: "" },

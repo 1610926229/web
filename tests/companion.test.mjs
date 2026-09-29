@@ -151,6 +151,51 @@ const COMPANION_API_MANIFEST = [
     service: "listCompanionEarnings",
     serviceModule: "@/lib/services/companionEarnings",
   },
+  // —— P0-14：打手「订单聊天」四件套 ——
+  // 与控制台其它入口同一个形状（列表 → 详情 → 发送 → 已读），因此接口一律保持「薄」：
+  // 每个文件只做 `requireCompanion()` → 调服务层 → `null` 转 404。
+  //
+  // ⚠️ 这四条**共用一个服务模块**是必须的，不是巧合：读取与写入必须用**同一条**
+  // 「这一段是不是他的当前履约段」判据（`canCompanionAccessConversation`）。
+  // 拆成两个模块，迟早会有一边只判了归属而漏了「是不是当前那一段」——
+  // 那正是本轮的 A→B→A 越权漏洞。
+  {
+    route: "conversations/route.ts",
+    methods: ["GET"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "listCompanionChats",
+    serviceModule: "@/lib/services/companionConversations",
+  },
+  {
+    // ⚠️ 地址里是 **orderId**，不是会话 id：打手不该知道内部会话键，
+    // 「当前是哪一段」由服务端现算。见该文件的说明。
+    route: "conversations/[orderId]/route.ts",
+    methods: ["GET"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "getCompanionChatDetail",
+    serviceModule: "@/lib/services/companionConversations",
+  },
+  {
+    route: "conversations/[orderId]/messages/route.ts",
+    methods: ["POST"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "sendMessageForCompanion",
+    serviceModule: "@/lib/services/companionConversations",
+  },
+  {
+    // ⚠️ 已读**按会话保存**（`companionLastReadAt`），不是按订单——
+    // `cmd_p0-14.md` §九 明文禁止继续只按 orderId 存打手已读 cursor。
+    // 换人之后新护航拿到新记录，因此继承不到旧打手的已读位置。
+    route: "conversations/[orderId]/read/route.ts",
+    methods: ["POST"],
+    guard: "requireCompanion",
+    guardModule: "@/lib/api/companionRoute",
+    service: "markCompanionChatRead",
+    serviceModule: "@/lib/services/companionConversations",
+  },
 ];
 
 /** 全仓路由里**唯一**允许被当作身份守卫的四个名字。多出来的那个就是问题所在。 */
@@ -242,14 +287,15 @@ test("清单自己先自检：没有重复地址、每个地址至少声明一�
     );
   }
 
-  // 打手端当前恰好**八个**接口（P0-5.5 两条 + P0-6 三条 + P0-7 一条 + P0-8 一条 + P0-9 一条）。
+  // 打手端当前恰好**十二个**接口
+  // （P0-5.5 两条 + P0-6 三条 + P0-7 一条 + P0-8 一条 + P0-9 一条 + P0-14 四条）。
   // 改这个数就要同步改清单，不能只是「多了一个」。
-  assert.equal(COMPANION_API_MANIFEST.length, 8);
+  assert.equal(COMPANION_API_MANIFEST.length, 12);
 });
 
 // ——————————————————————————— 二、清单与实际路由一致 ———————————————————————————
 
-test("打手接口清单固定：当前恰好八个接口，多一个 / 少一个 / 被改名都会在这里现形", () => {
+test("打手接口清单固定：当前恰好十二个接口，多一个 / 少一个 / 被改名都会在这里现形", () => {
   const routeFiles = collectFiles(COMPANION_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   assert.deepEqual(

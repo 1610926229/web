@@ -10,8 +10,13 @@ import { mockComplaintRepository } from "./mockComplaintRepository";
  * 而不是「编号在仓储筛、昵称在服务层筛」这种读到一半才发现的分工。
  */
 export type AdminComplaintQueryFilter = {
-  /** null 表示「全部」 */
-  status: ComplaintStatus | null;
+  /**
+   * 命中的**真实领域状态集合**；`null` 表示「全部」。
+   *
+   * ⚠️ 只接受 `ComplaintStatus`：地址栏上的虚拟筛选值 `all` / `open` **不得**
+   * 出现在数据层，服务层调用前已用 `complaintStatusesForFilter()` 解析完毕。
+   */
+  statuses: readonly ComplaintStatus[] | null;
   /** null 表示「全部类型」 */
   type: ComplaintTypeKey | null;
 };

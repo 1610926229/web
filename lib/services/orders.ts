@@ -22,7 +22,7 @@ import type {
   OrderTimelineEntry,
 } from "@/lib/types/order";
 import { toOrderComplaintSummary } from "./complaints";
-import { buildConversationStats } from "./conversations";
+import { buildOrderConversationStats } from "./conversations";
 import { buildRefundActions, toRefundSummary } from "./refunds";
 import { buildReviewActions, toReviewSummary } from "./reviews";
 
@@ -77,7 +77,10 @@ export function toOrderListItem(order: Order): OrderListItem {
     productCoverUrl: order.productCoverUrl,
     specName: order.specName,
     quantity: order.quantity,
-    totalAmount: order.totalAmount,
+    // 卡片上写「实付」，所以给**实付**（P1-4）。列表只带这一个金额：
+    // 优惠前的原价在详情页上叫 `originalAmount`（订单实体上那个 `totalAmount`
+    // 与它恒等，但全仓库对「原价」只保留一个名字，避免两个名字被当成两个数）
+    actualPaidAmount: order.actualPaidAmount,
     companion: order.companion,
   };
 }
@@ -117,10 +120,11 @@ export function toOrderDetail(
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
-    // 金额域（P0-3）：详情页显示「原价 / 实付 / 护航收益」三行。
+    // 金额域（P0-3）：详情页显示「原价 / 优惠 / 实付 / 护航收益」几行。
     // `clubNetIncome`（平台净收入）**刻意不在这里**：它是平台自己的账，
     // 用户端没有展示位置，放进 DTO 只会顺着接口响应流到浏览器。
-    // 当前没有优惠券，所以实付等于原价；券接入后这里会天然变成两个数，
+    //
+    // P1-4 起 `actualPaidAmount` 会真的小于 `originalAmount`（用了满减券时），
     // 页面不需要改——它读的一直是这两个不同的字段。
     originalAmount: order.originalAmount,
     couponDiscountAmount: order.couponDiscountAmount,
@@ -128,6 +132,9 @@ export function toOrderDetail(
     companionRateSnapshot: order.companionRateSnapshot,
     companionBaseIncome: order.companionBaseIncome,
     refundedAmount: order.refundedAmount,
+    // 券快照（P1-4）。⚠️ **退款不清空它**（裁定 §6）：它记录的是「这一单当初
+    // 用了哪张券」，退款改变不了这个历史事实，页面也因此能把退款单显示完整
+    coupon: order.coupon,
     timeline: buildOrderTimeline(order),
     ...extras,
   };
@@ -221,11 +228,13 @@ export async function getOrderDetailForUser(
   // 评价与退款一样属于「这一单做过什么」，因此按订单 id 查（并按用户隔离）
   const review = await getReviewRepository().findReviewByOrderId(userId, order.id);
 
-  // 会话不存在时摘要为 null（页面上不显示「订单沟通」的进度），存在就带上未读数
-  const conversation = await getMessageRepository().findConversation(userId, order.id);
-  const conversationSummary = conversation
-    ? buildConversationStats(
-        conversation,
+  // 会话不存在时摘要为 null（页面上不显示「订单沟通」的进度），存在就带上未读数。
+  // ⚠️ P0-14 起一张订单可以有多段会话（客服会话 + 各段履约会话），
+  // 因此未读是**全部段落**的合计，不是某一段的数字
+  const conversations = await getMessageRepository().listConversationsByOrder(userId, order.id);
+  const conversationSummary = conversations.length
+    ? buildOrderConversationStats(
+        conversations,
         await getMessageRepository().listMessages(userId, order.id),
       )
     : null;

@@ -175,6 +175,14 @@ function build(input: PresetOrderInput): Order {
     createdAt: times.paidAt,
     paidAt: times.paidAt,
     acceptedAt: times.acceptedAt,
+    // 「曾经被承接」的历史事实（P1-4 验收整改轮）。预置数据里它**恒等于** `acceptedAt`：
+    // 这批种子描述的都是一条直路（下单 → 接单 → 履约 / 退款），
+    // **没有任何一条走过「接单后又回到 paid」**（那才会让两个字段分叉）。
+    //
+    // ⚠️ 因此这一行**不是**一条可以直接抄进生产代码的公式。真实订单里
+    // `everAcceptedAt` 一旦写上就不再变，而 `acceptedAt` 会随回池清空——
+    // 生产侧的唯一写入点是 `applyOrderAccepted()`，不是这里。
+    everAcceptedAt: times.acceptedAt,
     servingAt: times.servingAt,
     completedAt: times.completedAt,
     refundedAt: times.refundedAt,
@@ -203,6 +211,11 @@ function build(input: PresetOrderInput): Order {
     // 其余状态一笔没退。这一条与「全额退款后 refundedAmount === actualPaidAmount」
     // 的规则一致（见 lib/types/order.ts）。
     refundedAmount: input.status === "refunded" ? money.actualPaidAmount : 0,
+
+    // 预置订单没有用过券（与上面 `couponDiscountAmount: 0` 是同一件事的两面）。
+    // 想验证有券的展示与金额，走真实下单链路，不在这里造数据——
+    // 种子里的券快照一旦与 `couponDiscountAmount` 对不上，验收看到的就只是巧合。
+    coupon: null,
 
     actualCompanionId: companion ? companion.id : null,
     companion: companion

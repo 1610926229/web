@@ -9,6 +9,7 @@ import {
   COUPON_CLAIMED_LABEL,
   COUPON_MOCK_NOTICE,
   COUPON_PAGE_SIZE,
+  COUPON_SETTLEMENT_USABLE_LABEL,
   COUPON_STATUS_CLASS,
   COUPON_TABS,
   mergeCouponPage,
@@ -353,14 +354,42 @@ function CouponCard({
   );
 }
 
-/** 已拥有的券：右侧只显示状态。 */
+/**
+ * 已拥有的券：右侧显示状态，外加一行**「能不能用于结算」**。
+ *
+ * ## 为什么状态之外还要再说一句（P1-4 验收整改轮 §九）
+ *
+ * 人工验收发现的缺陷是：账户页把这些券全显示成「未使用」（= 看起来可用），
+ * 而结算页永远选不到它们。根因是两处用了**两套口径**（见
+ * `lib/constants/coupons.ts` 的 `resolveCouponClaimGate`）。口径已经统一成一套，
+ * 但页面上还必须**说出来**——否则一张折扣券仍然只显示「未使用」，
+ * 用户照样会以为它能在结算时抵钱。
+ *
+ * ⚠️ **只在 `status === "unused"` 时显示这一行**：
+ *
+ * - `used` / `expired` 的券已经有状态文案（「已使用」「已过期」），
+ *   再叠一句「该券已使用」只是噪音；
+ * - 而 `unused` 恰恰是**唯一会误导人**的那一档——它看起来能用。
+ *   「已停用」「非满减券」这两种情况在这一档下才会出现，也才需要解释。
+ */
 function OwnedCouponCard({ coupon }: { coupon: OwnedCouponItem }) {
   return (
     <CouponCard {...coupon} status={coupon.status}>
       <p className={`mt-1.5 text-[13px] font-medium ${COUPON_STATUS_CLASS[coupon.status]}`}>
         {coupon.statusLabel}
         {coupon.usedAt ? ` · ${formatDateTime(coupon.usedAt)}` : ""}
+        {/* 来源写在状态后面：同一个人手里可能同时有自己领的和平台发的两张一样的券 */}
+        <span className="ml-1.5 font-normal text-ink-3">· {coupon.sourceLabel}</span>
       </p>
+      {coupon.status === "unused" ? (
+        <p
+          className={`mt-1 text-[12px] leading-4 ${
+            coupon.settlementUsable ? "text-status-pending" : "text-ink-3"
+          }`}
+        >
+          {coupon.settlementUsable ? COUPON_SETTLEMENT_USABLE_LABEL : coupon.settlementReason}
+        </p>
+      ) : null}
     </CouponCard>
   );
 }

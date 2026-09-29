@@ -1,8 +1,10 @@
 import { canDirectRefund } from "@/lib/constants/refunds";
+import { hasRefundBeenExecuted } from "@/lib/constants/refunds";
 import { REFUND_NOTIFICATION_COMPANION_REFUNDED } from "@/lib/constants/refunds";
 import { parseNotificationInput } from "@/lib/constants/service";
 import type { Notification, NotificationInput } from "@/lib/types/notification";
 import type { OrderStatus } from "@/lib/types/order";
+import { restoreCouponClaimForOrder } from "./couponRedemptionTransaction";
 import { readCompanionRecord } from "./mockCompanionRepository";
 import { applyDispatchTimedOut, dispatchStore } from "./mockDispatchRepository";
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
@@ -39,10 +41,15 @@ import { applyOrderRefund, paymentStore } from "./mockPaymentRepository";
  * ## 幂等：靠状态，不靠幂等键
  *
  * 「同一个意图第二次到达」在这里的判据是**订单状态与已退金额**，不是幂等键：
- * `refunded` 或 `refundedAmount >= actualPaidAmount` 都直接返回 `already-refunded`，
- * 一个字节都不写。这比幂等键更强——键是调用方给的一个串，而状态是**事实**；
- * 而且它天然覆盖了「不是同一个人点的第二次」：超时清扫与管理员退款
- * 都会把订单写成 `refunded`，之后用户再点一次同样落回 `already-refunded`。
+ * `refunded` **或** `hasRefundBeenExecuted(order)`（`refundedAmount > 0`）
+ * 都直接返回 `already-refunded`，一个字节都不写。这比幂等键更强——键是调用方
+ * 给的一个串，而状态是**事实**；而且它天然覆盖了「不是同一个人点的第二次」：
+ * 超时清扫与管理员退款都会把订单写成 `refunded`，之后用户再点一次同样落回
+ * `already-refunded`。
+ *
+ * ⚠️ **第二条是 P0-15 补的，不是「将来可能需要」**：`refundedAmount > 0` 而状态
+ * 仍不是 `refunded` 的订单**今天就存在**（部分退款不改状态）。只按状态判，
+ * 这条路径就是第二次实际退款执行——指令 ①§一 / §八 明文禁止。
  *
  * 与超时自动退款的并发（EX-REFUND-02）因此是**两道**独立的锁：
  * ① 派单被关闭后 `sweepExpiredDispatches` 根本不会再看它（它只处理开着的池）；
@@ -207,11 +214,16 @@ export async function directRefundOrder(
     return { kind: "amount-invalid", orderId: order.id };
   }
 
-  // ③ 幂等的第二道，也是「未全额退款」这条前置本身：
-  //    状态还没变、但钱已经退满了（例如将来某条部分退款路径恰好退到 100%）。
-  //    少了这一句，下面的写入会把退款时刻**刷新成本次**，用户看到的退款时间就变了。
-  //    ⚠️ 能走到这里已经保证 `actualPaidAmount > 0`（② 刚拦过），因此这个比较是有意义的
-  if (order.refundedAmount >= order.actualPaidAmount) {
+  // ③ 幂等的第二道，也是**一单一退**（指令 ①§一 / §八）在这条路径上的落点：
+  //    状态还没变、但钱已经出过一次了。部分退款**不改订单状态**，
+  //    因此一张被部分退过款的单完全可能停在 `paid`（P0-11 的退回公共池会把它打回来），
+  //    只看 ① 的状态判据会放它再退一次——那就是第二次实际退款执行。
+  //  ⚠️ 判据是 `hasRefundBeenExecuted`（`refundedAmount > 0`），**不是**「退满」：
+  //    「退满」在部分退款上不成立，挡不住这条路径。这一点在 2026-09-28 的
+  //    交付前审查中是一条真实的 MAJOR。
+  //    少了这一句，下面的写入还会把退款时刻**刷新成本次**，用户看到的退款时间也变了。
+  //  ⚠️ 能走到这里已经保证 `actualPaidAmount > 0`（② 刚拦过）
+  if (hasRefundBeenExecuted(order)) {
     return { kind: "already-refunded", orderId: order.id, refundedAt: order.refundedAt };
   }
 
@@ -246,11 +258,10 @@ export async function directRefundOrder(
   // ① 订单：状态 + 退款金额 + 退款时刻。金额取**订单自己还剩多少**
   //    （实付 − 累计已退），没有任何参数能把金额传进来——同一事实只有一个真值源。
   //
-  //    ⚠️ **必须是剩余额，不是实付全额**（P0-13 整改）：第三个参数现在的语义是
-  //    「这一次退多少（增量）」。一张 `serving` 单被部分退款后又经 P0-11 打回 `paid`
-  //    时，`refundedAmount` 不是 0——传实付会把它加成「已退 300 + 实付 1000 = 1300」，
-  //    超过实付。`applyOrderRefund` 里那一次钳制是第二道保险，不是这里的依据。
-  //    上面的 ③ 只挡住「已经退满」，挡不住「部分已退」
+  //    ⚠️ **写法仍是剩余额，但「剩余」在一单一退下就等于实付**：上面的 ③
+  //    已经保证 `refundedAmount === 0`。保留减法是因为它**形式上正确且不依赖 ③**
+  //    ——万一 ③ 哪天被改窄，这里不会跟着变成「加成两倍」。`applyOrderRefund`
+  //    里那一次钳制是第三道保险。
   const refundableAmount = order.actualPaidAmount - order.refundedAmount;
   const written = applyOrderRefund(order.id, at, refundableAmount);
   // 上面刚确认过订单存在且未退款，真发生只能说明存储被换掉了（resetMockStore）。
@@ -260,6 +271,22 @@ export async function directRefundOrder(
   if (!written.changed) {
     return { kind: "already-refunded", orderId: order.id, refundedAt: written.updated.refundedAt };
   }
+
+  // ①' 退券（P1-4 验收整改轮 §一 / §十二）。
+  //
+  //     ⚠️ **紧跟在 `changed === true` 之后**，因为裁定要求「退款实际成功 → 才恢复 Claim」：
+  //     上面那两行已经排掉了「已经退过款」的情形，走到这里退款是**真的发生了**。
+  //     把这一步提到 ① 之前（或提到 `changed` 判断之前）就会出现
+  //     「退款被拒、券却已经还回去」——用户白得一次打折资格。
+  //
+  //     ⚠️ 传 `written.previous`（**退款前**那一份）：`everAcceptedAt` 与 `coupon`
+  //     都要读它，而 `written.updated` 已经是退款后的版本。当前这一版两者的这两个字段
+  //     恰好相同（退款不改它们），但依赖那个巧合就是在赌写入器永远不改——传对的那一份。
+  //
+  //     能不能还、还不还，全由那个函数判（判据是订单历史上有没有被承接），
+  //     这里**不写 `status === "paid"`**：这条路径上的订单确实都是 `paid`，
+  //     但那是本条路径今天的性质，不是规则。
+  if (written.changed) restoreCouponClaimForOrder(written.previous);
 
   // ② 派单：关闭。这是「不得继续接单」的第一道 + 「超时清扫不得再次退款」的机制依据
   //    （sweep 只处理 `exclusive` / `public` 两种「还开着」的池）

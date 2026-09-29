@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   COMPLAINT_WINDOW_DEFAULT_MINUTES,
   COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES,
   COMPLETION_AUTO_APPROVAL_MAX_MINUTES,
   COMPLETION_AUTO_APPROVAL_MIN_MINUTES,
+  EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+  EXCLUSIVE_POOL_TIMEOUT_MAX_MINUTES,
+  EXCLUSIVE_POOL_TIMEOUT_MIN_MINUTES,
   PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE,
+  PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT,
   PLATFORM_CONFIG_ID,
   PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE,
+  PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE,
   PLATFORM_CONFIG_OPERATION_CONFLICT_MESSAGE,
@@ -16,6 +22,7 @@ import {
   PUBLIC_POOL_TIMEOUT_MAX_MINUTES,
   PUBLIC_POOL_TIMEOUT_MIN_MINUTES,
   isValidCompletionAutoApprovalMinutes,
+  isValidExclusivePoolTimeoutMinutes,
   isValidPublicPoolTimeoutMinutes,
 } from "../lib/constants/platformConfig.ts";
 import { getAdminAuditRepository } from "../lib/data/adminAuditRepository.ts";
@@ -23,6 +30,7 @@ import { updatePlatformConfig } from "../lib/data/adminPlatformConfigTransaction
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import {
   mockPlatformConfigRepository,
+  platformConfigStore,
   readPlatformConfig,
   writePlatformConfig,
 } from "../lib/data/mockPlatformConfigRepository.ts";
@@ -31,6 +39,9 @@ import {
   getAdminPlatformConfig,
   updateAdminPlatformConfig,
 } from "../lib/services/adminPlatformConfig.ts";
+import { collectFiles, readSource, stripComments } from "./source-text.mjs";
+
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
  * 平台参数的持续测试（P0-1）。
@@ -667,4 +678,733 @@ test("规则常量文件没有任何 import：浏览器端可以安全引用", (
 test("服务层不重复导出取值上下限", async () => {
   const service = await import("../lib/services/adminPlatformConfig.ts");
   assert.equal("ADMIN_PLATFORM_CONFIG_LIMITS" in service, false);
+});
+
+// ————————————————————————— P1-2：专属池超时 —————————————————————————
+//
+// 本批次把「指定打手独占接单权持续多久」从源码常量改成**可配置的平台参数**。
+// 这一节的用例分四层，缺一层就有一种错误看不见：
+//   · 常量层：默认值与区间（改错了默认值，所有新单都跟着错）
+//   · 存储层：旧 store 缺字段时补 10（读边界兜底，否则算出 `NaN` 截止时间 = 永不过期）
+//   · 服务层：校验、白名单、no-op 判据都要把**第四个**字段算进去
+//   · 结构层：业务路径不再硬编码 10，且仓库里没有第二份取值定义
+//
+// ⚠️ 快照语义（「改了配置，已进入专属池的旧单不变」）的用例在
+// `dispatch.test.mjs` 的「专属池 1b / 1c / 1d」里——那里有真实的派单记录可断言，
+// 而这里只做配置本身。两份文件合起来才是完整的证据。
+
+test("专属池超时默认值是 10 分钟（P1-2）", () => {
+  // 前身是源码常量 `EXCLUSIVE_WAIT_MINUTES = 10`。改成可配置**不改变默认值**：
+  // 默认值一变，所有没进过后台的服务实例的业务行为都会跟着变。
+  assert.equal(EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES, 10);
+});
+
+test("专属池超时上下限与公共池超时是同一套 1 ~ 1440 分钟（P1-2）", () => {
+  // 不是各写一遍数字，而是**引用**公共池那一对常量：区间恰好相同这件事
+  // 只能有一个数字归属，写两遍迟早有一遍被改。
+  assert.equal(EXCLUSIVE_POOL_TIMEOUT_MIN_MINUTES, PUBLIC_POOL_TIMEOUT_MIN_MINUTES);
+  assert.equal(EXCLUSIVE_POOL_TIMEOUT_MAX_MINUTES, PUBLIC_POOL_TIMEOUT_MAX_MINUTES);
+  assert.equal(EXCLUSIVE_POOL_TIMEOUT_MIN_MINUTES, 1);
+  assert.equal(EXCLUSIVE_POOL_TIMEOUT_MAX_MINUTES, 1440);
+});
+
+test("专属池超时只接受 1~1440 的整数分钟（P1-2）", () => {
+  // ⚠️ 专属池与公共池**今天**区间相同，但它们仍是两个字段各自的规则：
+  // 共用函数会让「将来只放宽其中一个」变成一次误伤另一边的改动。
+  // 这一条断言的是**专属池自己的那个函数**，不是公共池那个。
+  for (const bad of [
+    0,
+    -1,
+    1441,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    "10",
+    null,
+    undefined,
+    {},
+    [],
+  ]) {
+    assert.equal(isValidExclusivePoolTimeoutMinutes(bad), false, `${String(bad)} 不该通过`);
+  }
+  for (const good of [1, 2, 10, 1439, 1440]) {
+    assert.equal(isValidExclusivePoolTimeoutMinutes(good), true, `${good} 应当通过`);
+  }
+});
+
+test("专属池超时的界面文案说清了业务含义与「只影响之后」（P1-2）", () => {
+  // 产品裁定：「不得只显示『超时：10』」。提示语必须回答三件事——
+  // 这段时间里打手拥有什么、超时之后订单去哪、改了之后影响谁。
+  assert.equal(
+    PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT,
+    "指定打手在此时间内拥有独占接单权；超时后进入公共接单池。修改后仅影响之后进入专属池的订单。",
+  );
+  assert.match(PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT, /独占接单权/);
+  assert.match(PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT, /公共接单池/);
+  assert.match(PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT, /仅影响之后/);
+  assert.match(PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE, /1~1440/);
+});
+
+test("预置配置带专属池超时，且是默认值（P1-2）", () => {
+  resetMockStore("platformConfig");
+  assert.equal(readPlatformConfig().exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+});
+
+test("resetMockStore 之后专属池超时回到默认 10（P1-2）", async () => {
+  resetMockStore("platformConfig");
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: 45,
+    idempotencyKey: "op-pc-reset-exclusive",
+  });
+  assert.equal(readPlatformConfig().exclusivePoolTimeoutMinutes, 45, "先确认真的写进去了");
+
+  // 重置必须回到**种子**，而不是回到「上一次被写过的值」：
+  // 否则后面每一条依赖默认值的用例都会拿到上一条用例留下的残留
+  resetMockStore("platformConfig");
+  assert.equal(
+    readPlatformConfig().exclusivePoolTimeoutMinutes,
+    EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+  );
+});
+
+test("旧 store 缺 exclusivePoolTimeoutMinutes：读边界补齐为默认 10，不产生 undefined（P1-2）", () => {
+  resetMockStore("platformConfig");
+
+  // 模拟一个「在 P1-2 之前就被创建、之后代码升级」的 `globalThis` store：
+  // 内存存储不随代码更新重建，字段是真的会缺的
+  const store = platformConfigStore();
+  delete store.config.exclusivePoolTimeoutMinutes;
+
+  const read = readPlatformConfig();
+  assert.equal(read.exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+
+  // ⚠️ 这一条才是这段兜底存在的理由：缺字段不补，派单进入专属池时会算出
+  // `new Date(NaN)` 的截止时间，而那意味着**这张单永远不会超时**——
+  // 一个不报错的静默故障。这里同时断言它不是 NaN / undefined。
+  assert.equal(Number.isInteger(read.exclusivePoolTimeoutMinutes), true);
+  assert.notEqual(read.exclusivePoolTimeoutMinutes, undefined);
+
+  // 兜底只发生在**读**这一侧：存储里那份脏数据不被就地「修正」，
+  // 因为写入是仓储的职责，读函数偷偷写回去会让一次查询产生副作用
+  assert.equal(store.config.exclusivePoolTimeoutMinutes, undefined);
+});
+
+test("旧 store 里该字段是 0 / NaN / 非数字：同样补齐为 10（P1-2）", () => {
+  resetMockStore("platformConfig");
+  const store = platformConfigStore();
+
+  // 这三个值都**不可能由一次合法写入产生**（服务层校验拦得住），
+  // 因此它们只可能来自脏数据；补齐而不是抛错，是为了不让一次配置读
+  // 把整个用户端页面打成 500
+  for (const dirty of [0, -1, Number.NaN, "10", null, undefined]) {
+    store.config.exclusivePoolTimeoutMinutes = dirty;
+    assert.equal(
+      readPlatformConfig().exclusivePoolTimeoutMinutes,
+      EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+      `${String(dirty)} 应当被补齐为默认值`,
+    );
+  }
+
+  // 但**合法值必须原样保留**：兜底写成「一律取默认值」会让管理员的设置全部失效
+  store.config.exclusivePoolTimeoutMinutes = 1440;
+  assert.equal(readPlatformConfig().exclusivePoolTimeoutMinutes, 1440);
+});
+
+test("平台参数 DTO 的字段集恰好是那六项（exact keys，P1-2）", async () => {
+  resetMockStore("platformConfig");
+  const config = await getAdminPlatformConfig();
+
+  assert.deepEqual(Object.keys(config).sort(), [
+    "complaintWindowMinutes",
+    "completionAutoApprovalMinutes",
+    "exclusivePoolTimeoutMinutes",
+    "publicPoolTimeoutMinutes",
+    "updatedAt",
+    "updatedByAdminId",
+  ]);
+
+  // ⚠️ `updatedAt` / `updatedByAdminId` 在**读**的 DTO 里，但**不在**可提交的白名单里：
+  // 它们由服务端按会话与时钟填，客户端没有声称自己是谁的位置。
+  // 这条用源码探针而不是运行时断言——白名单是一个类型，运行时看不到它的键
+  const patchType = stripComments(
+    readSource(new URL("../lib/types/platformConfig.ts", import.meta.url)),
+  );
+  const patchBlock = patchType.slice(patchType.indexOf("export type AdminPlatformConfigPatch"));
+  assert.equal(patchBlock.includes("updatedAt"), false, "客户端没有提交 updatedAt 的位置");
+  assert.equal(patchBlock.includes("updatedByAdminId"), false);
+  assert.equal(patchBlock.includes("exclusivePoolTimeoutMinutes?: number"), true);
+});
+
+test("旧 store 缺字段时，写路径的 no-op 分支也不能把 undefined 交给调用方（P1-2）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 场景：P1-2 之前创建的 store 升到新代码。字段是**真的会缺**的——
+  // `globalThis` 内存存储不随代码更新重建（`readPlatformConfig()` 那条读兜底
+  // 就是为它写的）。
+  const store = platformConfigStore();
+  delete store.config.exclusivePoolTimeoutMinutes;
+
+  // —— 分支一：这次 PATCH 的净效果为零（送进来的字段与现状相同）——
+  // 伪事务走的是 `replay?.kind === "replay" || nothingChanged` 那条**不经过
+  // `writePlatformConfig()`** 的返回路径。修复前它把从 store 展开出来的原始记录
+  // 直接交回去，`exclusivePoolTimeoutMinutes` 是 `undefined`；JSON 序列化后
+  // **键直接消失**，管理端页面 `setConfig(result.config)` 会显示「undefined 分钟」。
+  // 这条用例钉住的就是这条分支——它是唯一一条绕过读边界归一化的返回路径。
+  const noop = await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: readPlatformConfig().publicPoolTimeoutMinutes,
+    idempotencyKey: "op-pc-p12-dirty-noop",
+  });
+
+  assert.equal(noop.changed, false);
+  assert.deepEqual(Object.keys(noop.config).sort(), [
+    "complaintWindowMinutes",
+    "completionAutoApprovalMinutes",
+    "exclusivePoolTimeoutMinutes",
+    "publicPoolTimeoutMinutes",
+    "updatedAt",
+    "updatedByAdminId",
+  ]);
+  assert.equal(noop.config.exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+  // ⚠️ 断言的是 **JSON 往返之后**键还在：客户端拿到的就是这一份，
+  // `undefined` 在序列化时会让键整个消失，而 `deepEqual` 看不见这一步
+  assert.equal("exclusivePoolTimeoutMinutes" in JSON.parse(JSON.stringify(noop.config)), true);
+
+  // —— 分支二：脏 store + 恰好提交默认值 ——
+  // 这一条钉住「**只归一化返回值，不动 `previous`**」这个约束：若实现顺手把
+  // `previous` 也归一化了，`next` 与 `previous` 就会相等，请求落进 `nothingChanged`，
+  // **永远不写盘**——旧 store 再也修不好，而管理员看到的是「取值没有变化，未写入」。
+  const written = await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+    idempotencyKey: "op-pc-p12-dirty-default-write",
+  });
+
+  assert.equal(written.changed, true, "脏 store 提交默认值必须真的写盘，而不是被判成 no-op");
+  assert.equal(written.config.exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+  assert.equal(store.config.exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+});
+
+test("服务层写入：只带专属池超时 → 另外三项保持原值（不被带回默认）（P1-2）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 先把另外三项改成非默认值，好让「被顺手重置回默认」这种错误暴露出来
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    publicPoolTimeoutMinutes: 90,
+    completionAutoApprovalMinutes: 20,
+    complaintWindowMinutes: 2880,
+    idempotencyKey: "op-pc-p12-baseline",
+  });
+
+  const result = await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: 25,
+    idempotencyKey: "op-pc-p12-exclusive-only",
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.config.exclusivePoolTimeoutMinutes, 25);
+  assert.equal(result.config.publicPoolTimeoutMinutes, 90);
+  assert.equal(result.config.completionAutoApprovalMinutes, 20);
+  assert.equal(result.config.complaintWindowMinutes, 2880);
+});
+
+test("服务层写入：专属池超时取值非法 → 400 专属池文案，配置一个字节都不动（P1-2）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: 30,
+    idempotencyKey: "op-pc-p12-valid-first",
+  });
+  const before = readPlatformConfig();
+  const auditsBefore = await getAdminAuditRepository().countAudits();
+
+  for (const [index, bad] of [
+    0,
+    -1,
+    1441,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "10",
+    null,
+  ].entries()) {
+    await assert.rejects(
+      () =>
+        updateAdminPlatformConfig(ADMIN_ID, {
+          exclusivePoolTimeoutMinutes: bad,
+          // ⚠️ 键用**序号**而不是 `String(bad)`：`String(1.5)` 里的那个小数点
+          // 不符合幂等键的字符合集，服务层会先报「缺少幂等键」——
+          // 于是这一条断言会因为一个**与取值校验无关**的原因通过或失败
+          idempotencyKey: `op-pc-p12-bad-${index}`,
+        }),
+      (error) => {
+        assert.equal(error.code, "BAD_REQUEST", `${String(bad)} 应当是 BAD_REQUEST`);
+        assert.equal(error.status, 400, `${String(bad)} 应当是 400`);
+        // ⚠️ 文案必须是**专属池自己的**那一条：两池共用区间，判错文案说明
+        // 校验函数用错了对象——那正是「改专属池却按公共池判」这类错误唯一的外显
+        assert.equal(error.message, PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE);
+        return true;
+      },
+      `${String(bad)} 不该被接受`,
+    );
+  }
+
+  // 全部被拒之后，配置仍是那一次合法写入后的状态：非法请求不留半个脚印
+  assert.deepEqual(readPlatformConfig(), before);
+  assert.equal(await getAdminAuditRepository().countAudits(), auditsBefore);
+});
+
+test("服务层写入：no-op 判据覆盖专属池超时（同一取值再保存一次不算改动）（P1-2）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: 35,
+    idempotencyKey: "op-pc-p12-set-35",
+  });
+  const baselineUpdatedAt = readPlatformConfig().updatedAt;
+
+  const same = await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: 35,
+    idempotencyKey: "op-pc-p12-same-35",
+  });
+  assert.equal(same.changed, false);
+  assert.equal(readPlatformConfig().updatedAt, baselineUpdatedAt, "no-op 不该刷新最后修改时间");
+  assert.equal(await getAdminAuditRepository().countAudits(), 1);
+
+  // ⚠️ 反例：`PATCHABLE_FIELDS` 漏登记第四个字段时，这条会把一次**真改动**
+  // 判成「没有变化」——接口返回成功、配置却没写入，只看返回值发现不了
+  const changed = await updateAdminPlatformConfig(ADMIN_ID, {
+    exclusivePoolTimeoutMinutes: 36,
+    idempotencyKey: "op-pc-p12-36",
+  });
+  assert.equal(changed.changed, true);
+  assert.equal(readPlatformConfig().exclusivePoolTimeoutMinutes, 36);
+});
+
+test("伪事务：改专属池超时写一条审计，快照里带该字段（P1-2）", async () => {
+  resetMockStore("platformConfig");
+  resetMockStore("adminAudit");
+
+  // 直接调事务层：服务层已在上面的用例里验过，这里只关心审计落盘
+  await updatePlatformConfig(
+    { exclusivePoolTimeoutMinutes: 50 },
+    { ...ctx, operationId: "op-pc-p12-audit" },
+  );
+
+  const audits = await getAdminAuditRepository().listAudits({ targetType: "platformConfig" });
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].targetId, PLATFORM_CONFIG_ID);
+  assert.equal(audits[0].after.exclusivePoolTimeoutMinutes, 50);
+  // `before` 记的是**上一次的值**：没有它，事后只看 `after` 无法回答「这次改动
+  // 把专属池超时从多少改成了多少」——而审计的全部意义就是这个
+  assert.equal(audits[0].before.exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+});
+
+// ————————————————————————— P1-2：结构门禁 —————————————————————————
+
+test("结构：专属池时长不再由常量参与计算，业务路径读配置快照（P1-2）", () => {
+  // ⚠️ 断言前先 `stripComments`：常量名现在仍出现在注释里（注释写着「它已被删除」），
+  // 而注释不是代码。门禁看的是**代码里**还有没有这个常量。
+  const dispatchTransaction = stripComments(
+    readSource(new URL("../lib/data/companionDispatchTransaction.ts", import.meta.url)),
+  );
+  assert.equal(
+    dispatchTransaction.includes("EXCLUSIVE_WAIT_MINUTES"),
+    false,
+    "专属池时长必须来自配置，不能再有源码常量",
+  );
+  assert.equal(
+    dispatchTransaction.includes("config.exclusivePoolTimeoutMinutes"),
+    true,
+    "进入专属池时必须读当下配置",
+  );
+  assert.equal(
+    dispatchTransaction.includes("exclusiveTimeoutMinutesSnapshot: exclusive ? config.exclusivePoolTimeoutMinutes : null"),
+    true,
+    "读到的值必须同时冻结成快照——只算截止时间不存快照，事后无法证明旧单没被追溯",
+  );
+
+  // 派单域的纯常量文件里也不该再有这个常量（既没有声明，也没有引用）
+  const dispatchConstants = stripComments(
+    readSource(new URL("../lib/constants/dispatch.ts", import.meta.url)),
+  );
+  assert.equal(dispatchConstants.includes("EXCLUSIVE_WAIT_MINUTES"), false);
+});
+
+test("结构：全仓没有第二处定义专属池时长的取值（P1-2）", () => {
+  // ⚠️ `collectFiles()` 内部用 `path.join()` 拼路径（它要的是字符串），
+  // 传 URL 会在递归的第一层就抛 `ERR_INVALID_ARG_TYPE`
+  const files = [
+    ...collectFiles(fileURLToPath(new URL("../lib", import.meta.url))),
+    ...collectFiles(fileURLToPath(new URL("../app", import.meta.url))),
+    ...collectFiles(fileURLToPath(new URL("../components", import.meta.url))),
+  ].filter((file) => file.endsWith(".ts") || file.endsWith(".tsx"));
+
+  // 唯一允许出现「专属池时长的取值」的地方：规则常量文件的默认值，
+  // 以及类型定义里的字段声明。其余任何地方都不许再写一个 10。
+  const allowed = new Set([
+    fileURLToPath(new URL("../lib/constants/platformConfig.ts", import.meta.url)),
+    fileURLToPath(new URL("../lib/types/platformConfig.ts", import.meta.url)),
+  ]);
+
+  const offenders = files.filter((file) => {
+    if (allowed.has(file)) return false;
+    const code = stripComments(readSource(file));
+    // 赋值式硬编码：`exclusivePoolTimeoutMinutes = 10` / `: 10`
+    return /exclusive(?:Pool)?TimeoutMinutes\s*[:=]\s*\d/.test(code);
+  });
+
+  assert.deepEqual(
+    offenders.map((file) => file.replace(ROOT, "")),
+    [],
+    "专属池时长只允许有一个取值归属（PlatformConfig 的默认值）",
+  );
+
+  // 旧常量名在**整个仓库的代码里**都不存在了（注释可以提它，代码不行）
+  const leftover = files.filter((file) => stripComments(readSource(file)).includes("EXCLUSIVE_WAIT_MINUTES"));
+  assert.deepEqual(
+    leftover.map((file) => file.replace(ROOT, "")),
+    [],
+    "EXCLUSIVE_WAIT_MINUTES 已被 P1-2 删除，不该还有代码引用它",
+  );
+});
+
+test("结构：后台表单不许只显示「超时：10」，必须显示当前值与单位（P1-2）", () => {
+  const console = stripComments(
+    readSource(new URL("../components/admin/AdminPlatformConfigConsole.tsx", import.meta.url)),
+  );
+
+  // 四个字段各自的当前值都要露出，且带单位。只给一个输入框等于让管理员
+  // 从 placeholder 里猜当前是多少
+  assert.equal(console.includes("专属池超时当前值"), true);
+  assert.equal(console.includes("{config.exclusivePoolTimeoutMinutes} 分钟"), true);
+  // 提示语引用**常量**而不是就地写一段新的说明：文案只有一个归属
+  assert.equal(console.includes("PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT"), true);
+  // 校验也复用服务端那一份函数，页面不另写一套区间
+  assert.equal(console.includes("isValidExclusivePoolTimeoutMinutes"), true);
+
+  // §十 要求**每一项**都有「修改后生效范围」。公共池那一项曾经只有业务说明、
+  // 没有「只影响之后」——四个框并排时，管理员会以为只有三项有这条性质
+  const hints = console.split("hint={").slice(1).map((part) => part.slice(0, 900));
+  assert.equal(hints.length, 4, "四个字段各有一条提示");
+  for (const [index, hint] of hints.entries()) {
+    assert.equal(
+      hint.includes("只影响") ||
+        hint.includes("修改后仅影响") ||
+        // 专属池那一条的文案住在常量里（`PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT`），
+        // 它包含「修改后仅影响之后进入专属池的订单」——那句话由常量测试逐字钉住。
+        // 这里只要求页面**引用了**那份文案，不要求在页面里再抄一遍
+        hint.includes("PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT"),
+      true,
+      `第 ${index + 1} 个字段的提示缺少「修改后生效范围」`,
+    );
+  }
+});
+
+test("结构：保存的三个分支都在页面上，且失败后沿用同一个幂等键重试（P1-2）", () => {
+  const source = stripComments(
+    readSource(new URL("../components/admin/AdminPlatformConfigConsole.tsx", import.meta.url)),
+  );
+
+  // ① 成功：必须列出**保存后的值**，并说清「只影响之后」
+  assert.equal(source.includes("已保存：专属订单池超时"), true);
+  assert.equal(source.includes("此后新发生的事按新值判定"), true);
+  // ② 无变化：不能说成「已保存」——那会让管理员相信一个并不存在的时间戳变动
+  assert.equal(source.includes("取值没有变化，未写入"), true);
+  // ③ 失败：必须有**可见**反馈，而不是静默吞掉
+  assert.equal(source.includes('setSubmitError(cause instanceof Error ? cause.message : "保存失败，请稍后重试")'), true);
+
+  // 两条消息的角色要分开：`role="alert"` 会打断读屏，`role="status"` 不会。
+  // 用反了的话，每次保存成功都会把整段摘要念一遍
+  assert.equal(source.includes('role="alert"'), true);
+  assert.equal(source.includes('role="status"'), true);
+
+  // ⚠️ 失败分支**不得**清掉幂等键：上一次请求可能已经到达服务端，只是回执丢了。
+  // 沿用同一个键重试，服务端把它认成重放并返回第一次的结果；
+  // 换一个键就等于让服务端按第二次写入再写一遍。因此「重试」这个能力
+  // 不靠一个按钮，而靠**保留键**——这也是本页没有「重试」按钮的原因。
+  const catchBlock = source.slice(source.indexOf("} catch (cause) {"), source.indexOf("} finally {"));
+  assert.ok(catchBlock.length > 0, "必须能找到失败分支");
+  assert.equal(catchBlock.includes("keyRef.current = null"), false, "失败后必须保留幂等键");
+});
+
+test("结构：页面不自己取数、也不碰 Mock 存储（P1-2）", () => {
+  const source = stripComments(
+    readSource(new URL("../components/admin/AdminPlatformConfigConsole.tsx", import.meta.url)),
+  );
+
+  // §十一「页面不得直接操作 mock store」：写只走 `saveAdminPlatformConfig`（→ Route → Service）
+  assert.equal(source.includes("lib/mocks"), false);
+  assert.equal(source.includes("saveAdminPlatformConfig"), true);
+
+  // ⚠️ 这一页**没有**骨架屏，也没有「重试」按钮，而这不是缺一个状态：
+  // 首屏的四个值由**服务端组件**取好传进来（`initialConfig`），组件挂载后**不再取数**，
+  // 因此不存在「正在加载」这段时间；保存失败用就地红字反馈，重试就是再点一次保存
+  // （幂等键被保留，上面那条用例钉住了它）。
+  // 断言的是那个**原因**：组件里没有 `useEffect`。加一个挂载后取数的 effect，
+  // 就同时需要骨架屏、错误态与重试按钮——那三种状态是**取数**带来的，不是这一页需要的。
+  assert.equal(source.includes("useEffect"), false);
+});
+
+// ————————————————————————— P1-2：HTTP 权限与契约 —————————————————————————
+//
+// ⚠️ 这一节跑的是**真实服务**（`APP_BASE_URL`），因此它会改到进程里的内存配置。
+// 唯一的破坏性用例（PATCH 成功那条）在结尾把值**改回默认**，理由写在它自己的注释里。
+
+const BASE = process.env.APP_BASE_URL;
+const SKIP_HTTP = BASE
+  ? false
+  : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过平台参数 HTTP 用例";
+
+/** 四种非管理端身份的 Cookie：匿名 / 用户 / 打手（也是用户）/ 客服。 */
+const NON_ADMIN_COOKIES = [
+  ["匿名", ""],
+  ["普通用户", "mock_user_id=u-1001"],
+  ["打手", "mock_user_id=u-1022"],
+  ["客服", "mock_staff_id=staff-1"],
+];
+
+const CONFIG_PATH = "/api/admin/platform-config";
+
+async function requestJson(pathname, cookie, init = {}) {
+  const response = await fetch(new URL(pathname, BASE), {
+    redirect: "manual",
+    ...init,
+    headers: { ...(cookie ? { cookie } : {}), ...(init.headers ?? {}) },
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // 非 JSON 响应（重定向等）留给断言去判
+  }
+  return { status: response.status, text, json };
+}
+
+/**
+ * 幂等键**每次运行都必须不同**。
+ *
+ * ⚠️ 这一节打的是常驻服务：写死一个键，第二次跑同一份测试时事务层会把请求
+ * 认成重放——返回第一次的结果却**什么也不写**，于是「改完再读要读到新值」
+ * 那条断言会在第二次运行时红。重放是**正确行为**，错的是拿同一个键做两次意图。
+ */
+function uniqueKey(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+/**
+ * 拿一个管理员 Cookie。**取不到就直接失败，绝不返回 `null` 让调用方「静默跳过」。**
+ *
+ * ⚠️ 这一节里的管理员 Cookie 是**权限矩阵唯一的放行证据**（`04-acceptance.md` §F
+ * 要求「四条拒绝 + 一条放行」，而「一条放行」只在这些用例里）。若目标实例没开
+ * `ENABLE_MOCK_ADMIN`，`mock-login` 返回非 200；此时若写成 `return null` + 调用方
+ * `if (!cookie) return;`，`node --test` **既不计 skip 也不计 fail**——整段权限门禁
+ * 会在读数上「全绿」而实际一条都没跑，而读数正是交付证据（指令 §二十二 要求
+ * 「生产跳过 = 0」，`skipped 0` 本该证明权限矩阵真的被打过）。
+ *
+ * 因此这里改成**断言失败**：宁可让读数变红，也不能让一段没跑过的门禁冒充跑过。
+ * 报错信息直接说清补救办法（给目标实例开 `ENABLE_MOCK_ADMIN=true`）。
+ */
+async function loginAdmin() {
+  const response = await fetch(new URL("/api/admin/auth/mock-login", BASE), { method: "POST" });
+  assert.equal(
+    response.status,
+    200,
+    "取不到管理员 Cookie：这一组用例需要目标实例 `ENABLE_MOCK_ADMIN=true`。" +
+      "否则权限矩阵（四条拒绝 + 一条放行）无法被证明，本节读数不能算通过。",
+  );
+  const cookie = response.headers.getSetCookie()[0]?.split(";")[0] ?? null;
+  assert.ok(cookie, "mock-login 返回 200 却没有 set-cookie：拿不到可用于后续请求的会话");
+  return cookie;
+}
+
+test("平台参数 1：读接口对匿名 / 用户 / 打手 / 客服一律 401（P1-2）", { skip: SKIP_HTTP }, async () => {
+  for (const [label, cookie] of NON_ADMIN_COOKIES) {
+    const { status, json } = await requestJson(CONFIG_PATH, cookie);
+    assert.equal(status, 401, `${label}读到了平台参数`);
+    assert.equal(json?.error?.code, "UNAUTHORIZED");
+    // 拒绝响应里不能**顺带**回一份配置：那等于用错误码包裹了一次成功的读取
+    assert.equal(json?.data, undefined);
+  }
+});
+
+test("平台参数 2：写接口对匿名 / 用户 / 打手 / 客服一律 401，且一个字节都没写（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const body = JSON.stringify({ exclusivePoolTimeoutMinutes: 999, idempotencyKey: "op-pc-http-401" });
+
+  for (const [label, cookie] of NON_ADMIN_COOKIES) {
+    const { status, json } = await requestJson(CONFIG_PATH, cookie, {
+      method: "PATCH",
+      body,
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(status, 401, `${label}改动了平台参数`);
+    assert.equal(json?.error?.code, "UNAUTHORIZED");
+  }
+
+  // 正例放最后：上面全是拒绝，没有这一条就无法排除「所有人读到的都是 401」
+  const cookie = await loginAdmin();
+  const { json } = await requestJson(CONFIG_PATH, cookie);
+  assert.notEqual(json?.data?.exclusivePoolTimeoutMinutes, 999, "被拒的请求不该留下任何痕迹");
+});
+
+test("平台参数 3：管理端账号但角色不是 admin → 403（P1-2）", { skip: SKIP_HTTP }, async () => {
+  // 这一条**不需要**管理员 Cookie，但需要「开关是开的」这件事成立：
+  // 关掉 `ENABLE_MOCK_ADMIN` 时 `getSessionAdmin()` 一律返回 null，
+  // `admin-2/3/4` 会走 **401** 而不是 403——那已经是另一条契约（见 `tests/admin.test.mjs`），
+  // 本文档这一条断言的是**「有会话但没权限」**。因此先确认登录可用（取不到会在这里直接失败）。
+  await loginAdmin();
+
+  for (const adminId of ["admin-2", "admin-3", "admin-4"]) {
+    const read = await requestJson(CONFIG_PATH, `mock_admin_id=${adminId}`);
+    assert.equal(read.status, 403, `${adminId} 不该读得到平台参数`);
+    assert.equal(read.json?.error?.code, "FORBIDDEN");
+
+    const write = await requestJson(CONFIG_PATH, `mock_admin_id=${adminId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ exclusivePoolTimeoutMinutes: 999, idempotencyKey: `op-pc-403-${adminId}` }),
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(write.status, 403, `${adminId} 不该改得动平台参数`);
+    assert.equal(write.json?.error?.code, "FORBIDDEN");
+  }
+});
+
+test("平台参数 4：管理员读到的字段集恰好是那六项（exact keys）且含专属池超时（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const cookie = await loginAdmin();
+
+  const { status, json } = await requestJson(CONFIG_PATH, cookie);
+  assert.equal(status, 200);
+  // ⚠️ 这里没有 `id`：平台参数是**单例**，记录上没有 id 字段（审计里的目标 id
+  // 是 `PLATFORM_CONFIG_ID` 这个常量）。凭空加一个 id 会让它看起来「可以有多条」
+  assert.deepEqual(Object.keys(json.data).sort(), [
+    "complaintWindowMinutes",
+    "completionAutoApprovalMinutes",
+    "exclusivePoolTimeoutMinutes",
+    "publicPoolTimeoutMinutes",
+    "updatedAt",
+    "updatedByAdminId",
+  ]);
+  // 接口返回的就是**生效中**的那份值：DTO 里少一个字段，管理端页面会显示 undefined 分钟
+  assert.equal(Number.isInteger(json.data.exclusivePoolTimeoutMinutes), true);
+});
+
+test("平台参数 5：管理员改专属池超时 → 读回新值 → 改回默认（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const cookie = await loginAdmin();
+
+  const before = (await requestJson(CONFIG_PATH, cookie)).json.data;
+
+  // 取一个与当前值不同的合法值，否则会落进「没有变化，未写入」分支而看不到写入效果
+  const next = before.exclusivePoolTimeoutMinutes === 37 ? 38 : 37;
+  const patched = await requestJson(CONFIG_PATH, cookie, {
+    method: "PATCH",
+    body: JSON.stringify({
+      exclusivePoolTimeoutMinutes: next,
+      idempotencyKey: uniqueKey("op-pc-http-ok"),
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.json.data.changed, true);
+  assert.equal(patched.json.data.config.exclusivePoolTimeoutMinutes, next);
+  // 只改这一项：另外三项必须原样返回，不能被顺手重置成默认值
+  assert.equal(patched.json.data.config.publicPoolTimeoutMinutes, before.publicPoolTimeoutMinutes);
+  assert.equal(patched.json.data.config.completionAutoApprovalMinutes, before.completionAutoApprovalMinutes);
+  assert.equal(patched.json.data.config.complaintWindowMinutes, before.complaintWindowMinutes);
+
+  // 再读一次：写进去的值必须被下一次读看见（写进了一个没人读的副本是看不见的）
+  const after = await requestJson(CONFIG_PATH, cookie);
+  assert.equal(after.json.data.exclusivePoolTimeoutMinutes, next);
+
+  // 💡 把值改回默认的动作在**下一条独立的用例**（「平台参数 5c」）里，而不是写在这一条的结尾。
+  // 理由：这一条跑的是**真实服务的进程内存**，而配置是全局单例（`node --test` 按文件并行、
+  // 共用同一个服务）。恢复语句写在成功路径的末尾时，**上面任何一条断言失败都会让它不执行**，
+  // 于是后面所有依赖默认时长的用例跟着无故变红，把一次失败放大成一片噪声。
+  // 拆成独立用例之后，即使这一条红，下一条照常把服务收拾干净。
+});
+
+test("平台参数 5b：PATCH 一个与现状相同的值 → 200 + changed:false + 不刷新最后修改（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const cookie = await loginAdmin();
+
+  const before = (await requestJson(CONFIG_PATH, cookie)).json.data;
+  const { status, json } = await requestJson(CONFIG_PATH, cookie, {
+    method: "PATCH",
+    body: JSON.stringify({
+      exclusivePoolTimeoutMinutes: before.exclusivePoolTimeoutMinutes,
+      idempotencyKey: uniqueKey("op-pc-http-noop"),
+    }),
+    headers: { "content-type": "application/json" },
+  });
+
+  // 「值没变」既不是错误、也不是「已保存」：服务端必须把这个区别如实告诉页面，
+  // 否则页面只能显示「已保存」——而那会让管理员相信一个并不存在的改动
+  assert.equal(status, 200);
+  assert.equal(json.data.changed, false);
+  assert.equal(json.data.config.updatedAt, before.updatedAt, "no-op 不该刷新最后修改时间");
+});
+
+test("平台参数 5c：收尾——把专属池超时改回默认，并确认读回来的就是 10（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const cookie = await loginAdmin();
+
+  const current = (await requestJson(CONFIG_PATH, cookie)).json.data;
+
+  if (current.exclusivePoolTimeoutMinutes !== EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES) {
+    const restored = await requestJson(CONFIG_PATH, cookie, {
+      method: "PATCH",
+      body: JSON.stringify({
+        exclusivePoolTimeoutMinutes: EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+        idempotencyKey: uniqueKey("op-pc-http-restore"),
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(restored.status, 200);
+  }
+
+  // ⚠️ 断言「改回去的那次 PATCH 返回了 10」是不够的——返回的是返回值，不是**下一次读**
+  // 会看到的东西。这一条重新 GET 一次，把「写真的落到了这一份单例上」钉住。
+  const after = (await requestJson(CONFIG_PATH, cookie)).json.data;
+  assert.equal(after.exclusivePoolTimeoutMinutes, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES);
+});
+
+test("平台参数 6：非法取值一律 400 且带专属池文案，服务端不夹取（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const cookie = await loginAdmin();
+
+  const before = (await requestJson(CONFIG_PATH, cookie)).json.data;
+  const beforeUpdatedAt = before.updatedAt;
+
+  // ⚠️ JSON 里没有 `NaN` / `Infinity` 字面量（`JSON.stringify(NaN)` 就是 `null`），
+  // 因此这两个值由服务层用例覆盖；这里覆盖**能从网络上真的发出去**的那几种。
+  const badValues = [0, -1, 1441, 1.5, "10", null, true, []];
+  for (const [index, value] of badValues.entries()) {
+    const { status, json } = await requestJson(CONFIG_PATH, cookie, {
+      method: "PATCH",
+      body: JSON.stringify({ exclusivePoolTimeoutMinutes: value, idempotencyKey: `op-pc-http-bad-${index}` }),
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(status, 400, `${JSON.stringify(value)} 不该被接受`);
+    assert.equal(json?.error?.message, PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE);
+  }
+
+  // 全部被拒之后配置一点没动：被拒的请求不能留下半个脚印
+  const after = (await requestJson(CONFIG_PATH, cookie)).json.data;
+  assert.equal(after.exclusivePoolTimeoutMinutes, before.exclusivePoolTimeoutMinutes);
+  assert.equal(after.updatedAt, beforeUpdatedAt, "被拒的写入不该刷新最后修改时间");
+});
+
+test("平台参数 7：只读 + PATCH，没有 PUT / POST / DELETE（P1-2）", { skip: SKIP_HTTP }, async () => {
+  const cookie = await loginAdmin();
+
+  // PUT 的语义是「整份替换」，而请求体里没带的三项会被它理解成「清空」——
+  // 这个地址一旦有 PUT，管理员保存一个字段就会静默重置另外三个
+  for (const method of ["PUT", "POST", "DELETE"]) {
+    const { status } = await requestJson(CONFIG_PATH, cookie, {
+      method,
+      body: method === "DELETE" ? undefined : JSON.stringify({ exclusivePoolTimeoutMinutes: 20 }),
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(status, 405, `${method} 不该存在`);
+  }
 });

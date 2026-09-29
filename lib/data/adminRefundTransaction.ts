@@ -8,8 +8,6 @@ import {
   assertRefundApprovalOrderStatus,
   computeRefundDecisionAmounts,
   isFullyRefunded,
-  resolveFinalDecisionAmounts,
-  sumApprovedCompanionReversal,
   type RefundDecisionInput,
 } from "@/lib/constants/refunds";
 import { parseNotificationInput } from "@/lib/constants/service";
@@ -18,6 +16,7 @@ import type { Notification, NotificationInput } from "@/lib/types/notification";
 import type { Order } from "@/lib/types/order";
 import type { RefundDecision, RefundRequest, RefundStatus } from "@/lib/types/refund";
 import { takeReplayForAction, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
+import { restoreCouponClaimForOrder } from "./couponRedemptionTransaction";
 import { readCompanionRecord } from "./mockCompanionRepository";
 import { applyDispatchTimedOut, dispatchStore } from "./mockDispatchRepository";
 import {
@@ -29,7 +28,7 @@ import {
 } from "./mockEarningRepository";
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
 import { applyOrderRefund, paymentStore } from "./mockPaymentRepository";
-import { applyRefundReview, listRefundsForOrderSync, refundStore } from "./mockRefundRepository";
+import { applyRefundReview, refundStore } from "./mockRefundRepository";
 
 /**
  * 管理端退款审核的**伪事务** —— 三个审核动作的唯一写入入口。
@@ -357,22 +356,29 @@ function planCompanionRefundNotification(input: {
 }
 
 /**
- * 审核通过 —— 五处写入在**同一段无 `await` 的同步区段**里完成（P0-13 起由四处变五处）：
+ * 审核通过 —— 六件事在**同一段无 `await` 的同步区段**里完成（P0-15 起由 P0-13 的五处变六处）：
  *
  * 1. 退款申请状态改成 `approved`，并写入**资金决策**（`decision`）；
  * 2. 记录管理者（`reviewedBy`）、审核意见与审核时间（`reviewedAt`）；
- * 3. 订单**累计**写入 `refundedAmount`，累计退满时才改 `status` / `refundedAt`；
- * 4. 该订单的 Earning 上累计冲回 `reversedAmount` 并补一条 `EarningAdjustment`；
- * 5. 累计退满时：关闭仍在开着的派单 + 通知被退单的打手；
+ * 3. 订单写入 `refundedAmount`——**一单一退，这个字段只被写一次**；
+ * 4. 该订单的 Earning **整笔**冲销（`reversedAmount = incomeAmount`）并补一条 `EarningAdjustment`；
+ * 5. **只有全额退款（比例 100%）时**：关闭仍在开着的派单 + 通知被退单的打手；
  * 6. 写一条管理审计（before/after 里同时带着退款状态与订单状态）。
  *
- * ## 金额：入参是**比例**，金额是算出来的
+ * ## 金额：入参是**比例**，金额是算出来的（P0-15）
  *
- * 请求体里没有金额字段（`业务流程表.md` §16.B：「管理员只输入退款比例，金额由系统计算」）。
- * 三个金额一律由 `computeRefundDecisionAmounts` 按**订单冻结经济快照**算：
- * `refundAmount = floor(actualPaidAmount × rate / 10000)`，
- * 冲回额按责任归属（`platform` / `companion` / `shared`）走三条已冻结的公式，
- * 平台承担额 = 前者 − 后者（允许为负，§17 原文）。
+ * 请求体里**只有** `refundRatePercent` 一个业务字段（`业务流程表.md` §16.B：
+ * 「管理员只输入退款比例，金额由系统计算」）。两个金额一律由 `computeRefundDecisionAmounts`
+ * 按**订单冻结经济快照**算：
+ *
+ * - `refundAmount = floor(actualPaidAmount × rate / 10000)`（比例 100% 时即实付全额）；
+ * - `companionReversalAmount` **恒等于** `order.companionBaseIncome`——**整笔**，
+ *   **与退款比例无关**（10% 与 100% 对打手的结果相同，都是 0 净收益）。
+ *
+ * ⛔ **P0-15 起没有「责任归属」这个输入**：`platform` / `companion` / `shared`、
+ * `companionLiabilityRate`、`platformBorneAmount`、`refundFullRemaining` 已从类型、常量、
+ * 仓储、事务、DTO、界面**全部删除**，新写入路径不得依赖。
+ * 平台最终收入是一个**算出来的**派生量：`actualPaidAmount − refundAmount`。
  *
  * ⚠️ **不重查商品现价、不重查当前分账比例**：`order.actualPaidAmount` 与
  * `order.companionBaseIncome` 是下单那一刻冻结的承诺，事后用今天的规则重算等于改承诺
@@ -381,23 +387,38 @@ function planCompanionRefundNotification(input: {
  * ⚠️ **冲回额不在这里重算**：它算一次、写两处（退款决策 + 收益/明细）。
  * 两处各算一遍正是「两处不一致」的来源。
  *
- * ## 累计语义与幂等
+ * ## 唯一性与幂等（P0-15）
  *
- * - 累计退满（`refundedAmount + 本次 >= actualPaidAmount`）才把订单改成 `refunded`；
- *   部分退款**不改订单状态**，这一单按原进度继续（`architecture-rules.md:191`）。
- * - `applyOrderRefund` 对「已退满」的订单短路返回 `changed: false`，既不重复累计
- *   也不刷新 `refundedAt`；重复批准本身由 `canTransitionRefund` + 重放判定挡住
- *   （`approved` 是终态），这里不新增第二套判定。
+ * - **一个订单至多一次退款申请、至多执行一次退款**。这条约束的落点在**仓储层**：
+ *   `createRefundRequest` 只要该订单已有**任何**记录（不论状态）就拒绝
+ *   （`order_already_has_refund`），因此「第二次退款」在结构上不存在，
+ *   本函数也就不需要任何「累计」语义——它最多被正确执行一次。
+ * - 订单改为 `refunded` 的判据只有一个：`isFullyRefunded`，且**只有比例 100% 才成立**。
+ *   部分退款（10% / 50%）**不改 `Order.status`**——这一单按原进度继续，
+ *   打手端看到的「已退款」是**派生展示状态**（`resolveCompanionDisplayStatus`），
+ *   与订单状态不是同一条线，且**不参与任何可写性判断**。
+ * - 重复批准由 `canTransitionRefund` + 重放判定挡住（`approved` 是终态），
+ *   这里不新增第二套判定；`applyOrderRefund` 自身的短路返回是第二层保险——
+ *   ⚠️ P0-15 后这道保险的含义变宽了：它挡的不再只是「订单已经是 `refunded`」，
+ *   而是「**这一单已经出过款**」（`hasRefundBeenExecuted`）。因此即便钱是
+ *   被**另一条路径**（公共池超时）先退掉的，批准也不会再多退一笔。
  * - 收益冲回的幂等键是 `refundId`（一次决策最多一条 `EarningAdjustment`，
- *   见 `lib/types/earning.ts`）。`approved` 是终态，因此同一笔退款走不到第二次冲回。
+ *   见 `lib/types/earning.ts`）。
  *
- * ## 冲回的对象（D5 / D17）
+ * ## 冲回的对象
  *
  * - `frozen` 与 `available` **都要冲**：`completed` 订单的 Earning 在售后窗口内必然还是
  *   `frozen`，只阻塞不冲减等于「售后白做」——窗口一到照样按全额解冻。
- * - `withdrawn` **不冲**（Q3 DEFER）：往一条已提现的收益上写冲回，等于**追回已提现的钱**，
- *   正是本轮被划出去的那件事。此时冲回额按 0 记，多出来的部分由平台承担，
- *   决策里照实记录（`responsibility` 仍是管理员选的那个，可审计）。
+ * - 冲完**状态仍是 `frozen`**（P0-15 产品裁定，见 `02-decisions.md` §二 Q5）：
+ *   净额归零的收益不该被说成「可提现」，但也不该被说成别的什么——
+ *   它**永远不会进入可提现阶段**，而「冻结中」正是这个事实。释放侧因此多了一道
+ *   净额闸（`isEarningFullyReversed()`），保证它不会被 `sweepMaturedEarnings` 放出去。
+ * - `withdrawn` **不冲，且这里不写分支**：普通退款业务下 `withdrawn` **结构上不可达**——
+ *   收益只在 `completed` 时以 `frozen` 生成，它通往 `available` 的唯一出口
+ *   （`sweepMaturedEarnings`）谓词含 `hasActiveRefund`，而 `pending` / `reviewing`
+ *   的退款申请**本身就是** active refund；一旦批准，收益当场归零，
+ *   而净额归零的收益**再也不可能**通过那个出口（P0-15 补的第三道判据）。
+ *   完整论证见 `EX-WITHDRAW-03`。
  * - 收益**不存在**时不写（`serving` 订单还没结算）：冲回额已经写在退款决策上，
  *   由结算那条路径补记（D9，见 `earningTransaction.ts`）。
  *
@@ -407,10 +428,11 @@ function planCompanionRefundNotification(input: {
  *   `actualCompanionId`，不得为代码统一抹平」。`applyOrderRefund` 不碰它。
  * - **不改用户的累计消费字段**：订单变成 `refunded` 之后就不再计入累计有效消费
  *   （`sumEffectiveSpend` 只累计 `completed`），消费等级与排行榜因此自然排除这一单。
- * - **不动 `Earning.incomeAmount`**：冲回是另记一笔调整，不是把原始承诺改小（Q2-a）。
+ * - **不动 `Earning.incomeAmount`**：冲回是另记一笔调整，不是把原始承诺改小。
+ *   它是**历史快照**，净收益 = `incomeAmount − reversedAmount` 是**派生值、不落库**。
  *
- * ⚠️ 所有失败判定（记录不存在 / 订单不存在 / 非法迁移 / 金额过不了闸）都排在
- * **任何写入之前**，因此不存在「退款已通过但订单未退款」这类半完成状态；
+ * ⚠️ 所有失败判定（记录不存在 / 订单不存在 / 非法迁移 / 订单档位不可批 / 金额过不了闸）
+ * 都排在**任何写入之前**，因此不存在「退款已通过但订单未退款」这类半完成状态；
  * 反过来也不可能——订单的写入排在退款写入之后，而它不会失败。
  */
 export async function approveRefund(
@@ -465,21 +487,24 @@ export async function approveRefund(
     return { kind: "order-status-not-eligible", message: orderStatusMessage };
   }
 
-  /* —— 决策：先读既往冲回额，再按冻结公式算三个金额 —— */
+  /* —— 决策：按冻结公式算两个金额（P0-15 起不再有「既往冲回额」这一项） —— */
 
-  // 这一单**此前已批准**退款的累计冲回额（定义与理由见
-  // `sumApprovedCompanionReversal()`）。管理端详情 DTO 读的是**同一个函数**，
-  // 因此界面上显示的「本次预计冲回」与这里真正写下去的数出自同一份规则
-  const reversedSoFar = sumApprovedCompanionReversal(listRefundsForOrderSync(order.id));
-
+  // ⚠️ P0-15 删掉了 `sumApprovedCompanionReversal(...)`：它是「累计冲回」模型的产物
+  //    （冲回额 = 本次应冲 − 此前已冲）。一个订单只退一次之后，
+  //    「此前」恒为空，那个函数**没有任何输入**——留着它只会让读的人以为
+  //    这一单可能退过第二次。
   const amounts = computeRefundDecisionAmounts({
     actualPaidAmount: order.actualPaidAmount,
     companionBaseIncome: order.companionBaseIncome,
-    reversedSoFar,
     input: decisionInput,
   });
+  const companionReversalAmount = amounts.companionReversalAmount;
 
-  // 金额闸：单次 > 0，且**累计**不超过订单实付
+  // 金额闸：本次 > 0，且不超过订单实付。
+  // ⚠️ 它今天**只在一种情况下**会拦下东西：订单身上已经带着一笔历史
+  //    `refundedAmount`（来自免审批直接退款那条不产生申请的路径），
+  //    而管理员填的比例算出来超过了「实付 − 已退」。正常的一单一退流程里
+  //    `refundedAmount` 是 0，任何合法比例都过得去。
   const amountMessage = assertRefundAmountWithinPaid({
     refundAmount: amounts.refundAmount,
     alreadyRefundedAmount: order.refundedAmount,
@@ -491,22 +516,16 @@ export async function approveRefund(
   const earningId = earnings.earningIdByOrder.get(order.id);
   const earning = earningId ? (earnings.earnings.get(earningId) ?? null) : null;
 
-  // D17：已提现的收益本轮不冲回（Q3 DEFER），多出来的部分由平台承担。
-  // ⚠️ 这一步**不在这里自己写 `if`**：管理端界面的「本次预计退款金额」调用的是
-  // 同一个 `resolveFinalDecisionAmounts()`，两处各写一遍的话，
-  // 界面上会出现一个服务端永远不会写下去的数
-  const finalAmounts = resolveFinalDecisionAmounts(amounts, earning?.status ?? null);
-  const companionReversalAmount = finalAmounts.companionReversalAmount;
-
-  // 决策写进退款记录（D7）。六项 + 决策人与时刻，一项不少
+  // 决策写进退款记录（D7）。三项 + 决策人与时刻，一项不少
   const decision: RefundDecision = {
+    // 比例**原样存下**。⚠️ P0-15 之前这里有一个三元：走「退满剩余」那条路时
+    // 存 `null`，因为那条路管理员没填比例，真正的比例是「剩余 / 实付」
+    // （2004/2990 = 67.023…%），写不成整数基点。那条路整体删除之后
+    // `refundRateBp` 恒为一个真实填过的整数基点，不存在「没有比例」的决策。
     refundRateBp: decisionInput.refundRateBp,
-    refundAmount: finalAmounts.refundAmount,
-    responsibility: decisionInput.responsibility,
-    companionLiabilityRateBp: decisionInput.companionLiabilityRateBp,
+    refundAmount: amounts.refundAmount,
+    // 整笔归零，与比例无关（P0-15 §三）
     companionReversalAmount,
-    // 用减法构造，让 §17 的恒等式在定义上成立
-    platformBorneAmount: finalAmounts.platformBorneAmount,
     decidedBy: ctx.actorId,
     decidedAt: ctx.at,
   };
@@ -562,13 +581,58 @@ export async function approveRefund(
   const orderWritten = applyOrderRefund(existing.orderId, ctx.at, decision.refundAmount);
   if (!orderWritten) throw new Error("退款审核通过时订单写入失败");
 
-  // ④ 收益：累计冲回 + 一条明细。两者必须同段落库——只写其中一个，
+  // ③' 退券（P1-4 验收整改轮 §一 / §十二）：**退款实际发生之后**才恢复 Claim。
+  //
+  //     ⚠️ 这里**必须**传 `orderWritten.previous`，比另外两条退款路径更要紧：
+  //     本函数的 `decision.refundRateBp` 允许 10% / 50% / 100%（**部分退款不改订单状态**），
+  //     而裁定 §一 明文「不看退款比例」——判据只有 `everAcceptedAt` 一个。
+  //
+  //     ⚠️ 也不在这里写 `existing.` 上读到的订单：那是**本次事务开始时**读的那一份，
+  //     与「写入时的那一份」在并发下可能不同；`previous` 才是写入器亲眼看到的前一状态。
+  if (orderWritten.changed) restoreCouponClaimForOrder(orderWritten.previous);
+
+  // ④ 收益：整笔冲回 + 一条明细。两者必须同段落库——只写其中一个，
   //    「读用总数、审计用明细」这条关系就断了（不变式用例会当场抓住）。
+  //
+  //    ## 冲回额与退款比例**无关**（P0-15 §三/§四）
+  //
+  //    不论管理员批的是 10% 还是 100%，打手本单收益**全部取消**，
+  //    冲回额恒为 `Order.companionBaseIncome`——它同时就是 `Earning.incomeAmount`
+  //    （`settleOrderCompletion` 是直接搬过去的），因此冲完必然 `reversedAmount === incomeAmount`。
+  //    ⚠️ **状态不改成 `reversed`，而是留在 `frozen`**（P0-15 产品裁定，见 §二 Q5）：
+  //    这笔钱永远不会变成可提现，「冻结中」就是这个事实。
+  //    它不会再被释放——`sweepMaturedEarnings` 里有净额闸。
+  //    ⚠️ 原先这里是「按比例部分冲减」，随责任模型一并删除。
+  //
+  //    ## 为什么这里**不看** `earning.status`（P0-15 §五）
+  //
+  //    P0-13 在这里调用 `resolveFinalDecisionAmounts(amounts, earning?.status ?? null)`，
+  //    为的是 D17「已提现的收益本轮不冲回、多出的由平台承担」。**那一层已整体删除**，
+  //    因为「普通退款时收益是什么状态」有唯一答案：
+  //    **必然是 `frozen`**。理由是结构性的，不是时序上的巧合：
+  //      ① 只有 `completed` 订单才会有 Earning（`settleOrderCompletion` 只在
+  //         `serving → completed` 那一次迁移里建它），而它建出来就是 `frozen`；
+  //      ② 它变成 `available` 的**唯一**出口是 `sweepMaturedEarnings`，
+  //         而那个出口的判据里有 `hasActiveRefund`（B§三）；
+  //      ③ 一条 `pending` / `reviewing` 的退款申请**本身就是** active refund，
+  //         于是「有人能批这条申请」蕴含「收益被那个判据挡着，出不去」；
+  //      ④ 申请被批掉之后收益当场归零，**仍然不经过 `available`**：
+  //         它留在 `frozen`，而净额闸让它在 ② 那个出口上永远出不去。
+  //    因此 `withdrawn` 在这条路径上**不可达**——它不是「碰巧不会发生」，
+  //    而是被 ②③ 这两道闸锁死的。既然不可达，为它写分支就是在**设计**
+  //    B§五 明确不做的「已提现追偿」（哪怕只是「不冲回」这种消极设计）。
+  //    ⚠️ 若将来要支持「结算完成、甚至已提现后由后台强制退款」，那是一条
+  //    **新的特殊财务业务**，届时连同它的冲回口径与文案一起设计，
+  //    不要在这一层偷偷加回来。
   //
   //    ⚠️ **先验证再动钱**（P0-13 后续 fix）：同一退款决策只能冲一次（幂等键 = refundId）。
   //    已经冲过就**跳过而不是报错**——「重放不重复冲回」是业务规则，报错会把一次
   //    本来正确的重放变成 500。判定必须在 `applyEarningReversal` **之前**：
   //    放到之后，存储层那道重复抛错留下的就是「钱冲了、明细没写」的悬空状态。
+  //    ⚠️ P0-15 之后这一层还挡得住什么：`canTransitionRefund` 已经不许
+  //    `approved → approved`，重放也在更早处返回，因此它是**第三道**保险。
+  //    留着是因为它守的是「钱只能动一次」这条**资金不变式**，
+  //    而资金不变式的守护层数不该按「今天还需要几层」来定。
   const alreadyReversed = findEarningAdjustmentIdByRefund(refundId) !== null;
   if (earning && companionReversalAmount > 0 && !alreadyReversed) {
     const reversal = applyEarningReversal(earning.id, companionReversalAmount);
@@ -582,7 +646,6 @@ export async function approveRefund(
       refundId,
       type: "refund_reversal",
       amount: companionReversalAmount,
-      responsibility: decision.responsibility,
       createdAt: ctx.at,
       adminId: ctx.actorId,
     });

@@ -5,9 +5,9 @@ import {
   DISPATCH_ACCEPT_FAILURE_LABELS,
   DISPATCH_NOTIFICATION_ACCEPTED,
   DISPATCH_NOTIFICATION_EXCLUSIVE_TIMEOUT,
-  EXCLUSIVE_WAIT_MINUTES,
   plusMinutes,
 } from "../lib/constants/dispatch.ts";
+import { EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES } from "../lib/constants/platformConfig.ts";
 import { sweepExpiredDispatches } from "../lib/data/companionDispatchTransaction.ts";
 import { getCompanionRepository } from "../lib/data/companionRepository.ts";
 import { getDispatchRepository } from "../lib/data/dispatchRepository.ts";
@@ -240,8 +240,13 @@ test("自接单 2：专属池——用户把自己指定成护航时，专属资
   );
   assert.equal(
     dispatch.exclusiveDeadlineAt,
-    plusMinutes(order.paidAt, EXCLUSIVE_WAIT_MINUTES),
-    "专属窗口固定 10 分钟",
+    plusMinutes(order.paidAt, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES),
+    "专属窗口取进池时的平台配置（默认 10 分钟）",
+  );
+  assert.equal(
+    dispatch.exclusiveTimeoutMinutesSnapshot,
+    EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+    "P1-2：进专属池时必须冻结当时的配置值",
   );
 
   const at = plusMinutes(order.paidAt, 1);

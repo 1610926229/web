@@ -8,14 +8,19 @@ import {
   COMPLAINT_WINDOW_MIN_MINUTES,
   COMPLETION_AUTO_APPROVAL_MAX_MINUTES,
   COMPLETION_AUTO_APPROVAL_MIN_MINUTES,
+  EXCLUSIVE_POOL_TIMEOUT_MAX_MINUTES,
+  EXCLUSIVE_POOL_TIMEOUT_MIN_MINUTES,
+  PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT,
   PLATFORM_CONFIG_INVALID_COMPLAINT_WINDOW_MESSAGE,
   PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE,
+  PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_NOTICE,
   PUBLIC_POOL_TIMEOUT_MAX_MINUTES,
   PUBLIC_POOL_TIMEOUT_MIN_MINUTES,
   isValidComplaintWindowMinutes,
   isValidCompletionAutoApprovalMinutes,
+  isValidExclusivePoolTimeoutMinutes,
   isValidPublicPoolTimeoutMinutes,
 } from "@/lib/constants/platformConfig";
 import { ADMIN_PLATFORM_CONFIG_PAGE_TITLE } from "@/lib/constants/admin";
@@ -30,10 +35,11 @@ import { formatDateTime } from "@/lib/utils/format";
  *
  * 改的是**规则**，不是某一条数据。因此页面必须把两件事说清楚，否则管理员会误判：
  *
- * 1. **改了之后只影响之后发生的事。** 公共池超时只影响此后进入公共池的订单；
- *    完成材料自动审核时长只影响此后提交的完成材料。已经在途的订单与已在审核中的
- *    完成材料各自在「进入 / 提交那一刻」把当时的分钟数冻结成了快照，界面上的数字
- *    变化**不会**动到它们。
+ * 1. **改了之后只影响之后发生的事。** 专属池超时只影响此后进入专属池的订单；
+ *    公共池超时只影响此后进入公共池的订单；完成材料自动审核时长只影响此后提交的
+ *    完成材料；投诉窗口只影响此后完成的订单。已经在途的订单与已在审核中的
+ *    完成材料各自在「进入 / 提交那一刻」把当时的分钟数冻结成了快照，
+ *    界面上的数字变化**不会**动到它们。
  * 2. **「值没变」不是「保存成功」。** 服务端对「提交的值与现状完全相同」不写数据、
  *    不写审计、也不刷新最后修改时间。页面据此显示「没有变化，未写入」——
  *    显示成「已保存」会让管理员相信一个并不存在的时间戳变动。
@@ -42,21 +48,26 @@ import { formatDateTime } from "@/lib/utils/format";
  * 用户可投诉的期限，以及打手该单收益的冻结期限。只提投诉会让管理员以为
  * 调小它只改变投诉策略，而实际上它提前放款——一次看不出来的资金规则改动。
  *
- * ## 三个字段独立保存
+ * ## 四个字段独立保存
  *
- * `AdminPlatformConfigPatch` 的三个字段都是**可选**的，PATCH 只带改了的那一项：
- * 只改公共池超时、不动另外两项，照样能保存（不能因为别的字段没动就拦下提交）。
+ * `AdminPlatformConfigPatch` 的四个字段都是**可选**的，PATCH 只带改了的那一项：
+ * 只改专属池超时、不动另外三项，照样能保存（不能因为别的字段没动就拦下提交）。
  * 提交时只把「草稿与现状不同」的字段放进 patch，其余字段保持现状。
  *
  * ## 校验用的是服务端那一份
  *
- * `isValidPublicPoolTimeoutMinutes()` / `isValidCompletionAutoApprovalMinutes()` /
- * `isValidComplaintWindowMinutes()` 与
+ * `isValidExclusivePoolTimeoutMinutes()` / `isValidPublicPoolTimeoutMinutes()` /
+ * `isValidCompletionAutoApprovalMinutes()` / `isValidComplaintWindowMinutes()` 与
  * 服务端接口调用的是**同一个函数**、错误文案也是同一个常量。这里不重写一遍
  * 「1~1440 的整数」——复制一份规则就等于给将来留一个分叉。
  *
- * ⚠️ 三个函数的区间**各不相同**（投诉窗口是 60~10080）：提示文案与 `min`/`max`
- * 一律从常量取，不在这里写数字。写错一处会让表单把合法的 7 天判成非法。
+ * ⚠️ 四个函数的区间**不是同一套**（投诉窗口是 60~10080，其余三项是 1~1440）：
+ * 提示文案与 `min`/`max` 一律从常量取，不在这里写数字。写错一处会让表单
+ * 把合法的 7 天判成非法。
+ *
+ * ⚠️ 专属池与公共池的区间**今天恰好相同**，但仍然是两个字段各自的规则
+ * （`isValidExclusivePoolTimeoutMinutes` 与 `isValidPublicPoolTimeoutMinutes`）——
+ * 这里按字段各调各的，不要图省事共用一个函数。
  *
  * ⚠️ 不做隐式转换：`Number("60abc")` 是 `NaN`、`parseInt("60abc")` 是 `60`，
  * 因此解析只走 `Number()`，非整数一律拒。这与服务端的口径一致（`"60"` 也会被拒，
@@ -75,6 +86,9 @@ export default function AdminPlatformConfigConsole({
 }) {
   const [config, setConfig] = useState(initialConfig);
   /** 输入框里的**文本**，不是数字：用户正在输入的 `""` 或 `"6a"` 都要能如实显示出来 */
+  const [draftExclusive, setDraftExclusive] = useState(
+    String(initialConfig.exclusivePoolTimeoutMinutes),
+  );
   const [draftTimeout, setDraftTimeout] = useState(String(initialConfig.publicPoolTimeoutMinutes));
   const [draftCompletion, setDraftCompletion] = useState(
     String(initialConfig.completionAutoApprovalMinutes),
@@ -82,6 +96,7 @@ export default function AdminPlatformConfigConsole({
   const [draftComplaint, setDraftComplaint] = useState(
     String(initialConfig.complaintWindowMinutes),
   );
+  const [exclusiveError, setExclusiveError] = useState<string | null>(null);
   const [timeoutError, setTimeoutError] = useState<string | null>(null);
   const [completionError, setCompletionError] = useState<string | null>(null);
   const [complaintError, setComplaintError] = useState<string | null>(null);
@@ -97,6 +112,7 @@ export default function AdminPlatformConfigConsole({
   const keyRef = useRef<string | null>(null);
 
   const changed =
+    String(config.exclusivePoolTimeoutMinutes) !== draftExclusive ||
     String(config.publicPoolTimeoutMinutes) !== draftTimeout ||
     String(config.completionAutoApprovalMinutes) !== draftCompletion ||
     String(config.complaintWindowMinutes) !== draftComplaint;
@@ -105,6 +121,12 @@ export default function AdminPlatformConfigConsole({
     keyRef.current = null;
     setMessage(null);
     setSubmitError(null);
+  }
+
+  function handleExclusiveChange(value: string) {
+    setDraftExclusive(value);
+    setExclusiveError(null);
+    invalidateKey();
   }
 
   function handleTimeoutChange(value: string) {
@@ -131,6 +153,17 @@ export default function AdminPlatformConfigConsole({
 
     // 只把「草稿与现状不同」的字段放进 patch：只改一个字段也必须能保存。
     const patch: AdminPlatformConfigPatch = {};
+
+    if (draftExclusive !== String(config.exclusivePoolTimeoutMinutes)) {
+      const next = Number(draftExclusive);
+      if (!isValidExclusivePoolTimeoutMinutes(next)) {
+        setExclusiveError(PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE);
+        setMessage(null);
+        setSubmitError(null);
+        return;
+      }
+      patch.exclusivePoolTimeoutMinutes = next;
+    }
 
     if (draftTimeout !== String(config.publicPoolTimeoutMinutes)) {
       const next = Number(draftTimeout);
@@ -171,6 +204,7 @@ export default function AdminPlatformConfigConsole({
       return;
     }
 
+    setExclusiveError(null);
     setTimeoutError(null);
     setCompletionError(null);
     setComplaintError(null);
@@ -186,17 +220,19 @@ export default function AdminPlatformConfigConsole({
       // 以**服务端返回的那份记录**为新基准，而不是本地拼出来的状态：
       // `updatedAt` 与 `updatedByAdminId` 只有服务端知道
       setConfig(result.config);
+      setDraftExclusive(String(result.config.exclusivePoolTimeoutMinutes));
       setDraftTimeout(String(result.config.publicPoolTimeoutMinutes));
       setDraftCompletion(String(result.config.completionAutoApprovalMinutes));
       setDraftComplaint(String(result.config.complaintWindowMinutes));
       keyRef.current = null;
       setMessage(
         result.changed
-          ? `已保存：公共订单池超时 ${result.config.publicPoolTimeoutMinutes} 分钟，` +
+          ? `已保存：专属订单池超时 ${result.config.exclusivePoolTimeoutMinutes} 分钟，` +
+              `公共订单池超时 ${result.config.publicPoolTimeoutMinutes} 分钟，` +
               `完成材料自动审核时长 ${result.config.completionAutoApprovalMinutes} 分钟，` +
               `投诉窗口 ${result.config.complaintWindowMinutes} 分钟。` +
-              "此后新发生的事按新值判定；已在途的订单、已在审核中的完成材料与已完成的订单" +
-              "沿用各自冻结的快照，不受这次修改影响。"
+              "此后新发生的事按新值判定；已进入专属池 / 公共池的订单、已在审核中的完成材料" +
+              "与已完成的订单沿用各自冻结的快照，不受这次修改影响。"
           : "取值没有变化，未写入。最后修改时间也没有变动。",
       );
     } catch (cause) {
@@ -219,9 +255,40 @@ export default function AdminPlatformConfigConsole({
         className="flex flex-col gap-4 rounded-xl border border-admin-line bg-surface p-4"
       >
         <AdminField
+          label="专属订单池超时（分钟）"
+          htmlFor="platform-config-exclusive"
+          hint={`${PLATFORM_CONFIG_EXCLUSIVE_POOL_HINT}` +
+            `可填 ${EXCLUSIVE_POOL_TIMEOUT_MIN_MINUTES}~${EXCLUSIVE_POOL_TIMEOUT_MAX_MINUTES} 之间的整数分钟。` +
+            "已进入专属池的订单沿用进入时冻结的时长，不受本次修改影响。"}
+          error={exclusiveError}
+          errorId="platform-config-exclusive-error"
+        >
+          <input
+            id="platform-config-exclusive"
+            name="exclusivePoolTimeoutMinutes"
+            type="number"
+            inputMode="numeric"
+            step={1}
+            min={EXCLUSIVE_POOL_TIMEOUT_MIN_MINUTES}
+            max={EXCLUSIVE_POOL_TIMEOUT_MAX_MINUTES}
+            value={draftExclusive}
+            disabled={busy}
+            onChange={(event) => handleExclusiveChange(event.target.value)}
+            aria-invalid={exclusiveError ? true : undefined}
+            aria-describedby={exclusiveError ? "platform-config-exclusive-error" : undefined}
+            className={`h-9 w-40 rounded-lg border px-3 text-[13px] text-ink outline-none ${
+              exclusiveError ? "border-status-danger" : "border-admin-line focus:border-admin-accent"
+            }`}
+          />
+        </AdminField>
+
+        <AdminField
           label="公共订单池超时（分钟）"
           htmlFor="platform-config-timeout"
-          hint={`可填 ${PUBLIC_POOL_TIMEOUT_MIN_MINUTES}~${PUBLIC_POOL_TIMEOUT_MAX_MINUTES} 之间的整数分钟。超时后订单停止被接取，并自动全额退款。`}
+          hint={`可填 ${PUBLIC_POOL_TIMEOUT_MIN_MINUTES}~${PUBLIC_POOL_TIMEOUT_MAX_MINUTES} 之间的整数分钟。` +
+            "超时后订单停止被接取，并自动全额退款。" +
+            "只影响此后进入公共池的订单；已进入公共池的订单沿用入池时冻结的时长。" +
+            "从专属池超时转进来的订单会重新冻结一次——本项是每次进入公共池时都冻结，不是一单只冻结一次。"}
           error={timeoutError}
           errorId="platform-config-timeout-error"
         >
@@ -304,6 +371,10 @@ export default function AdminPlatformConfigConsole({
 
         <dl className="flex flex-wrap gap-x-6 gap-y-1 text-[12px] leading-5 text-ink-3">
           <div className="flex gap-1">
+            <dt>专属池超时当前值：</dt>
+            <dd className="text-ink-2">{config.exclusivePoolTimeoutMinutes} 分钟</dd>
+          </div>
+          <div className="flex gap-1">
             <dt>公共池超时当前值：</dt>
             <dd className="text-ink-2">{config.publicPoolTimeoutMinutes} 分钟</dd>
           </div>
@@ -351,6 +422,7 @@ export default function AdminPlatformConfigConsole({
             type="button"
             disabled={busy || !changed}
             onClick={() => {
+              handleExclusiveChange(String(config.exclusivePoolTimeoutMinutes));
               handleTimeoutChange(String(config.publicPoolTimeoutMinutes));
               handleCompletionChange(String(config.completionAutoApprovalMinutes));
               handleComplaintChange(String(config.complaintWindowMinutes));

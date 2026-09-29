@@ -1,5 +1,5 @@
 import { isCompletionAutoApprovalBlocked } from "@/lib/constants/completions";
-import { isEarningMatured } from "@/lib/constants/earnings";
+import { isEarningFullyReversed, isEarningMatured } from "@/lib/constants/earnings";
 import type { Earning } from "@/lib/types/earning";
 import type { Order } from "@/lib/types/order";
 import { currentPlatformConfig } from "./adminPlatformConfigTransaction";
@@ -207,18 +207,21 @@ export function settleOrderCompletion(input: { orderId: string; at: string }):
  * `reversedAmount`，并逐条补写明细。
  *
  * ⚠️ 走 `applyEarningReversal` 而不是自己给 `reversedAmount` 赋值：
- * 「部分冲回**不改状态**、整笔冲完才 `reversed`」这条规则只在存储层那一处（D5）。
- * 抄一份到这里，意味着以后改这条规则要改两个地方——而漏掉一处不会有任何报错。
+ * 「部分冲回**不改状态**、整笔冲完**写回 `frozen`**」这条规则只在存储层那一处
+ * （P0-13 D5，状态那一半已被 P0-15 的 Q5 裁定改写）。抄一份到这里，
+ * 意味着以后改这条规则要改两个地方——而漏掉一处不会有任何报错。
  *
  * ⚠️ 逐条补写明细，不合成一条：`EarningAdjustment` 的粒度是**一次退款决策**
- * （D8 用 `refundId` 唯一索引钉住），合成一条会让「这笔冲回是哪几笔退的、谁的责任」
- * 再也答不出来，而那正是 Q1-c 要求留下这份记录的原因。
+ * （D8 用 `refundId` 唯一索引钉住）。⚠️ **P0-15 之后这个循环至多跑一轮**
+ * （一个订单最多一次退款），但循环本身**不改成「只取那一条」**：
+ * 「明细与决策一一对应」这条规则由 `refundId` 唯一索引表达，
+ * 把读取收窄成单条会让这条规则从索引退回成一个假设。
  *
- * ⚠️ 这里**不再钳制**累计额：不变式 `0 <= reversedAmount <= incomeAmount` 的唯一
- * 保证点是 D4 的钳制，而它读的 `companionBaseIncome` 与这里 `incomeAmount` 的来源
- * 是同一张订单上的同一个字段，中间不可能变。多夹一次只会让「谁在保证这个不变式」
- * 多出一个答案。（存储层的 `applyEarningReversal` 自带一道护栏，那是**存储层自己的**
- * 不变式，不是这里的。）
+ * ⚠️ 这里**不钳制**累计额：`applyEarningReversal` 自带一道护栏，
+ * 那是**存储层自己的**不变式，不是这里的。业务侧再夹一次只会让
+ * 「谁在保证这个不变式」多出一个答案。
+ * ⚠️ P0-15 之前这里还写着「唯一保证点是 D4 的钳制」——**D4 的钳制已删除**
+ * （冲回额现在就是 `incomeAmount`，构造上不可能越界），守护者只剩存储层那一道。
  *
  * ⚠️ 若该订单**永远不完成**（`serving` 全额退款 → 订单直接 `refunded`），
  * 冲回就不会物化——这是正确的：`cmd_p0-13.md` 要求这种情况不产生 completed Earning，
@@ -240,8 +243,12 @@ function backfillRefundReversals(input: {
 
   for (const refund of approved) {
     const decision = refund.decision;
-    // 平台全额承担的退款没有从打手身上冲任何钱：`amount <= 0` 时
-    // `applyEarningReversal` 一个字节都不写，也不需要一条空明细
+    // `amount <= 0` 时 `applyEarningReversal` 一个字节都不写，也不需要一条空明细。
+    // ⚠️ P0-15 之后这条守卫**只可能被坏数据触发**（冲回额恒为 `companionBaseIncome`，
+    //    而它是正数——见 `Earning.incomeAmount` 的注释「不存在 0 元记录」）。
+    //    原先它还会被「平台全额承担」那条责任分支触发，**那条分支已删除**。
+    //    守卫留着：`appendEarningAdjustment` 对重复 `refundId` 抛错，
+    //    而写一条 `amount: 0` 的空明细只会给对账多添一行噪音。
     if (!decision || decision.companionReversalAmount <= 0) continue;
 
     applyEarningReversal(input.earningId, decision.companionReversalAmount);
@@ -252,7 +259,6 @@ function backfillRefundReversals(input: {
       refundId: refund.id,
       type: "refund_reversal",
       amount: decision.companionReversalAmount,
-      responsibility: decision.responsibility,
       // 明细的 `createdAt` 取**写入时刻**，与即时冲回那条路一致：同一个字段在两条路上
       // 必须是同一个意思——「这一行是什么时候写下的」。决策发生的时间在退款记录
       // 自己的 `decidedAt` 上，这里不再抄一遍（抄两份就会出现两个可能的答案）
@@ -290,6 +296,22 @@ function backfillRefundReversals(input: {
  *
  * 先只读地挑出「本次要释放哪些」，再逐一写入。两段之间没有 `await`，
  * 因此「挑的时候没阻塞、写之前投诉才进来」在结构上产生不出来。
+ *
+ * ## 释放的唯一条件：三条同时成立（P0-15 补齐第三条）
+ *
+ * 1. **到期** —— `isEarningMatured()`（状态 `frozen` + `availableAt <= at`）；
+ * 2. **没有阻塞** —— `isCompletionAutoApprovalBlocked(readOrderBlockingFacts(...))`
+ *    （进行中的退款 / 未完结的投诉）；
+ * 3. **净额还在** —— `!isEarningFullyReversed(earning)`。
+ *
+ * ⚠️ 第三条是 P0-15 的产品裁定带出来的（指令 ②§四：退款批准后收益**仍停在 `frozen`**）。
+ * 前两条判不出「这笔钱已经没了」：一笔被退款冲光的收益状态照样是 `frozen`、
+ * `availableAt` 也早已到点，旧判据会对它返回 `true` 并把它写成 `available`——
+ * 那正是 §十(10) 明令禁止的「refund approved 后又被释放」。
+ *
+ * ⚠️ **三条的判据都在这一段里现读**（不接收调用方传入的「某处读到的状态」）：
+ * 这是 §六 要求的「不得只依赖之前页面 / service 层读取到的旧状态」——
+ * 计划与提交之间没有 `await`，因此这三条一经判成立，在写入前不可能被推翻。
  */
 export function sweepMaturedEarnings(at: string): { releasedEarningIds: string[] } {
   const earnings = earningStore();
@@ -302,6 +324,8 @@ export function sweepMaturedEarnings(at: string): { releasedEarningIds: string[]
       continue;
     }
     if (isCompletionAutoApprovalBlocked(readOrderBlockingFacts(earning.orderId))) continue;
+    // 钱已经归零：状态停在 frozen 是终局，不是「还没到点」
+    if (isEarningFullyReversed(earning)) continue;
     plan.push(earning.id);
   }
 

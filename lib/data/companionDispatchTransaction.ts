@@ -3,12 +3,14 @@ import {
   DISPATCH_NOTIFICATION_ACCEPTED,
   DISPATCH_NOTIFICATION_EXCLUSIVE_TIMEOUT,
   DISPATCH_NOTIFICATION_PUBLIC_TIMEOUT,
-  EXCLUSIVE_WAIT_MINUTES,
   plusMinutes,
 } from "@/lib/constants/dispatch";
+import { isRefundExecutionClosed } from "@/lib/constants/refunds";
 import { parseNotificationInput } from "@/lib/constants/service";
 import type { CompanionWriteContext, DispatchAcceptResult, DispatchRecord } from "@/lib/types/dispatch";
 import type { Notification, NotificationInput } from "@/lib/types/notification";
+import { restoreCouponClaimForOrder } from "./couponRedemptionTransaction";
+import { appendCompanionAccept } from "./mockCompanionAcceptRepository";
 import { readCompanionRecord } from "./mockCompanionRepository";
 import {
   applyDispatchAccepted,
@@ -74,8 +76,13 @@ export type CreateDispatchInput = {
  * 业务按什么规则走」，读到的这一刻就冻结进快照，之后后台改参数不影响这一单。
  *
  * 两条分支的区别只有一件事：**在哪一个池子里开始等人**。
- * - 指定了打手 → 专属池，固定 10 分钟（`EXCLUSIVE_WAIT_MINUTES`，不可配置）；
- * - 没指定 → 公共池，时长取当下的平台配置。
+ * - 指定了打手 → 专属池，时长取**当下**配置的 `exclusivePoolTimeoutMinutes`；
+ * - 没指定 → 公共池，时长取**当下**配置的 `publicPoolTimeoutMinutes`。
+ *
+ * ⚠️ 两条分支**各自冻结自己那一份快照**（P1-2）。这里的「冻结」是这一整套设计的
+ * 支点：`PlatformConfig` 是**未来事件的模板**，而记录上的 snapshot / deadline 才是
+ * **历史事实**。管理员 12:05 把专属池从 10 改成 20，12:01 进的这一单仍然是 12:11 到期——
+ * 用今天的配置去重算旧 deadline 不是「修正」，是把已经承诺给用户的规则事后改掉。
  *
  * 两条分支都**不写** `acceptedByCompanionId`：那一刻还没有人接单。
  * 用户指定 A 只是「用户想要 A」，A 随时可以不接。
@@ -92,7 +99,8 @@ export function createDispatchForOrder(input: CreateDispatchInput): DispatchReco
     // 指定值原样存下：它是**历史事实**，此后无论发生什么都不会被覆盖
     exclusiveCompanionId: input.exclusiveCompanionId,
     exclusiveEnteredAt: exclusive ? input.at : null,
-    exclusiveDeadlineAt: exclusive ? plusMinutes(input.at, EXCLUSIVE_WAIT_MINUTES) : null,
+    exclusiveDeadlineAt: exclusive ? plusMinutes(input.at, config.exclusivePoolTimeoutMinutes) : null,
+    exclusiveTimeoutMinutesSnapshot: exclusive ? config.exclusivePoolTimeoutMinutes : null,
 
     publicPoolEnteredAt: exclusive ? null : input.at,
     publicDeadlineAt: exclusive ? null : plusMinutes(input.at, config.publicPoolTimeoutMinutes),
@@ -100,6 +108,8 @@ export function createDispatchForOrder(input: CreateDispatchInput): DispatchReco
 
     acceptedByCompanionId: null,
     acceptedAt: null,
+    // 新单还没人接，也就没有「谁发起的绑定」可言（P1-5 §九-F）
+    acceptedVia: null,
     timedOutAt: null,
 
     createdAt: input.at,
@@ -230,7 +240,7 @@ export async function acceptDispatch(
 
   if (Date.parse(deadlineAt) <= Date.parse(ctx.at)) return { kind: "expired" };
 
-  // 专属池是**一对一**的：用户指定了谁，就只有谁能在十分钟里接。
+  // 专属池是**一对一**的：用户指定了谁，就只有谁能在独占期里接。
   // 这里比对的是 `exclusiveCompanionId`（用户指定的人），不是「谁先来谁接」
   if (record.state === "exclusive" && record.exclusiveCompanionId !== ctx.companionId) {
     return { kind: "not-eligible" };
@@ -287,7 +297,9 @@ export async function acceptDispatch(
   });
 
   // —— 写入：派单与订单**同段**写完 ——
-  const accepted = applyDispatchAccepted(dispatchId, ctx.companionId, ctx.at);
+  // `"companion"`：这是打手**自己**的接单动作，也只有它计入接单榜（P1-5 §九-F）。
+  // 另一个调用方 `replaceOrderCompanionByStaff` 传的是 `"staff"`，不计数。
+  const accepted = applyDispatchAccepted(dispatchId, ctx.companionId, ctx.at, "companion");
   if (!accepted) return { kind: "not-found" };
 
   applyOrderAccepted(order.id, {
@@ -299,6 +311,26 @@ export async function acceptDispatch(
   });
 
   appendNotification(notification);
+
+  /*
+   * 接单事件（P1-5）。
+   *
+   * ⚠️ **必须在同一段无 `await` 的代码里**，与上面三件事一起落库：
+   * 「派单被接走」与「留下一条接单历史」是同一个动作的两半。分开写就会出现
+   * 「接单成功了但没有历史」——而接单榜数的正是历史条数，那种不一致在榜单上
+   * 表现为**少算一次接单**，且事后无法从任何字段补回来（见该类型文件的说明：
+   * 派单记录只保留当前那一位接单人）。
+   *
+   * ⚠️ 放在**重放分支之后**：`replayed: true` 的那条路径在上面就已经返回，
+   * 因此「重复提交同一次接单」结构上**不可能**留下第二条事件。
+   * 幂等性因此是**按状态**成立的（派单已经是 `accepted`），不需要额外的幂等键。
+   */
+  appendCompanionAccept({
+    dispatchId,
+    orderId: order.id,
+    companionId: companion.id,
+    acceptedAt: ctx.at,
+  });
   // —— 原子区段结束 ——
 
   return { kind: "ok", dispatch: accepted, replayed: false };
@@ -340,8 +372,13 @@ export type DispatchSweepResult = {
  * 只处理「当前池的 deadline 已到、且 `state` **仍然**是那个池」的记录。
  * 处理完 `state` 就变了（转 `public` / 转 `timed_out`），第二遍扫到它时
  * 状态与池已经对不上，直接跳过——不重复转池、不重复退款、不重复发通知。
- * 订单那一侧还有第二道锁：`applyOrderRefund` 对已经是 `refunded` 的订单返回
+ * 订单那一侧还有第二道锁：`applyOrderRefund` 对已经出过款的订单返回
  * `changed: false`，重复调用不会刷新退款时间。
+ *
+ * ⚠️ **但那道锁不是本函数的判据**（P0-15 一单一退）：退款**已经终结**的订单
+ * （`isRefundExecutionClosed`——部分退款不改状态，因此它可能停在 `paid`
+ * 并回到公共池）在计划阶段就被判为「只关池、不出款」，
+ * 而不是放它走到写入段再被静默拒掉。
  */
 export function sweepExpiredDispatches(at: string): DispatchSweepResult {
   const dispatches = dispatchStore();
@@ -358,7 +395,22 @@ export function sweepExpiredDispatches(at: string): DispatchSweepResult {
         kind: "timed-out";
         dispatchId: string;
         orderId: string;
-        refundedAmount: number;
+        /**
+         * 这一单**本次要不要出款**，以及出多少。
+         *
+         * `null` = 本次**只关池、不出款、不通知**，两种情况会走到这里：
+         * 退款**已经终结**（出过款，一单一退 / 指令 ①§一 / §八），
+         * 或者实付为 0、根本没有可退的钱。非 `null` 时**一定是正数**。
+         *
+         * 在计划阶段就把结论定死，理由与「`applyOrderRefund` 会静默拒掉」无关：
+         * 那种写法会让本函数把 `refundedOrderIds` 里一个**根本没退成**的 id
+         * 报给调用方，也就是「计划层放行、存储层静默拒绝」。
+         *
+         * 用 `null` 而不是 `0` 是因为 `0` 本身是一个**合法的应退金额**
+         * （一张实付为 0 的坏单子，见 `applyOrderRefund` 的第二条短路），
+         * 两者混在一个字段里就分不清「不该退」与「该退 0 元」。
+         */
+        refundAmount: number | null;
         timedOutAt: string;
       }
     | { kind: "notify"; notification: Notification };
@@ -401,23 +453,35 @@ export function sweepExpiredDispatches(at: string): DispatchSweepResult {
         continue;
       }
 
-      // 公共池到点：停止接取 + **自动退到实付为止**。不是售后、不是等客服审核、不是等管理员点一下
+      // 公共池到点：停止接取 + **自动退款**（未出过款时）。不是售后、不是等客服审核、
+      // 不是等管理员点一下
       //
-      // ⚠️ 传的是**本次应退的增量**（实付 − 累计已退），不是实付全额（P0-13 整改）：
-      //    `applyOrderRefund` 的第三个参数现在是增量语义，而一张被部分退款过的订单
-      //    完全可能回到公共池（部分退款不改状态，P0-11 的回池也不碰 `refundedAmount`）。
-      //    传实付会把它加成「已退 + 实付」，超过实付。
-      //    在**计划阶段**就把差值捕获进 `plan`——原子区段里不能再读存储。
+      // ⚠️ **一单一退**（P0-15 / 指令 ①§一 / §八）：「出过款」是一个**独立的判据**，
+      //    不能用 `order.status !== "refunded"` 代替——部分退款**不改订单状态**，
+      //    一张被部分退过款的单可以停在 `paid` 并回到公共池（P0-11 的回池不碰
+      //    `refundedAmount`），只看状态就会在这里**再出一次款**。
+      //    判据是 `isRefundExecutionClosed`——**并集的单点定义**，与存储层的短路
+      //    （`applyOrderRefund`）问的是同一句话，因此两处不可能各说各话。
+      //    在**计划阶段**就判好（原子区段里不能再读存储），并把结论写进 `refundAmount`
+      //    为 `null`——**不要让存储层去静默拒掉**，那样 `refundedOrderIds` 会报假账。
+      //
+      //    `actualPaidAmount > 0` 这一半是同一个道理的另一面：实付 0 的坏单子在这里
+      //    必然算出一个 `0` 元的「退款」，而存储层会以 `0 >= 0`（退满）把它静默拒掉
+      //    ——又一次「放行 + 拒绝」。今天走不到（下单链强制券抵为 0，种子单价为正），
+      //    但计划层不该把正确性押在一条上游不变式上，所以这里直接不出款、也不通知。
+      const refundDue = !isRefundExecutionClosed(order) && order.actualPaidAmount > 0;
       plan.push({
         kind: "timed-out",
         dispatchId: record.id,
         orderId: order.id,
-        refundedAmount: order.actualPaidAmount - order.refundedAmount,
+        // 未出过款时 `refundedAmount` 必为 0，因此这里就是实付。仍然写成差值：
+        // 形式正确，且不依赖「还没出过款」这个前提在本处成立
+        refundAmount: refundDue ? order.actualPaidAmount - order.refundedAmount : null,
         timedOutAt: atDeadline,
       });
-      // 已经被退过的订单不再发一条重复的退款通知——它当初退款时的通知已经发过了。
+      // 已经出过款的订单不再发一条重复的退款通知——它当初退款时的通知已经发过了。
       // 这里仍然要把派单关掉，否则它会一直挂在公共池里
-      if (order.status !== "refunded") {
+      if (refundDue) {
         plan.push({
           kind: "notify",
           notification: planNotification({
@@ -442,7 +506,15 @@ export function sweepExpiredDispatches(at: string): DispatchSweepResult {
     if (step.kind === "timed-out") {
       // 关闭与退款写的都是**到点那一刻**，不是「扫到它的那一刻」
       applyDispatchTimedOut(step.dispatchId, step.timedOutAt);
-      applyOrderRefund(step.orderId, step.timedOutAt, step.refundedAmount);
+      // `null` = 这一单已经出过款（一单一退）。**关池照做**——池子里的记录必须收掉，
+      // 否则下一次清扫还会看到它；只是不再出第二笔钱
+      if (step.refundAmount !== null) {
+        const written = applyOrderRefund(step.orderId, step.timedOutAt, step.refundAmount);
+        // 退券（P1-4 验收整改轮 §一）。这一段里的订单全部是**在公共池里等到超时**的，
+        // 自然是「从未被承接」，因此一定会还券；判据仍然交给同一个函数，
+        // 不在这里手写「超时 ⇒ 没接过」——那是本条路径今天的性质，不是规则
+        if (written?.changed) restoreCouponClaimForOrder(written.previous);
+      }
       continue;
     }
     appendNotification(step.notification);

@@ -1,9 +1,12 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { isUnresolvedComplaintStatus } from "@/lib/constants/completions";
 import { beijingDayStart } from "@/lib/constants/rankingPeriods";
+import { OPEN_REFUND_STATUSES } from "@/lib/constants/refunds";
 import { normalizeMessageBody } from "@/lib/constants/service";
 import {
   STAFF_CONVERSATION_LIST_NOTICE,
   STAFF_CONVERSATION_NOT_FOUND_MESSAGE,
+  STAFF_MESSAGE_TARGET_NOTICE,
   STAFF_ORDER_STATUS_INVALID_MESSAGE,
   STAFF_OVERVIEW_NOTICE,
   buildStaffConversationListQuery,
@@ -14,6 +17,7 @@ import {
   toStaffCompanionReleaseEntry,
   toStaffConversationListItem,
   toStaffConversationMessage,
+  toStaffConversationSegments,
   toStaffOrderSummary,
   type StaffConversationListQuery,
   type StaffOrderStatusFilter,
@@ -28,7 +32,7 @@ import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getDataSource } from "@/lib/data/source";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { Order } from "@/lib/types/order";
-import type { OrderMessage } from "@/lib/types/message";
+import type { OrderConversationRecord, OrderMessage } from "@/lib/types/message";
 import type {
   StaffCompanionReleaseEntry,
   StaffConversationDetail,
@@ -37,6 +41,7 @@ import type {
   StaffConversationMetrics,
   StaffSessionUser,
 } from "@/lib/types/staff";
+import { resolveOrderAssignmentState } from "./conversations";
 
 /**
  * 客服工作台服务 —— 工作台首页、会话列表、会话详情与客服发消息共用的唯一入口。
@@ -78,6 +83,20 @@ type StaffConversationRow = {
   staffLastReadAt: string | null;
 };
 
+/**
+ * 工作台的会话行：**一单一行**。
+ *
+ * ⚠️ 仓储返回的是**会话**（P0-14 起一单可以有多段），而工作台列表回答的是
+ * 「有哪几笔订单在沟通」——因此这里必须**按订单合并**。不合并的话，一条换过人的订单
+ * 会在列表里出现两次、`total` 会把一单数成两单、「分页不重不漏」当场失效，
+ * 而首页的「会话总数」会莫名其妙地比实际多。
+ *
+ * ⚠️ 保留哪一段**不影响这一行的任何字段**：`messages` 与 `staffLastReadAt` 都按
+ * `orderId` 取（前者来自 `listMessagesGroupedForStaff()` 的跨段合并，后者是订单级游标），
+ * 段身份只用来拿到 `orderId`。因此这里**不挑选代表会话**，只是按订单去重——
+ * 「取客服会话还是取第一段」在这一层是一个没有后果的选择，写出来只会让人以为它有。
+ * 真正需要代表会话的是详情页的存在性判定（`findConversationForStaff()`）。
+ */
 async function loadStaffConversationRows(
   staffId: string,
   params: URLSearchParams | undefined,
@@ -85,13 +104,20 @@ async function loadStaffConversationRows(
 ): Promise<StaffConversationRow[]> {
   const repository = getMessageRepository();
 
-  const [conversations, grouped, reads] = await withMockDebug(params, surface, () =>
+  const [allConversations, grouped, reads] = await withMockDebug(params, surface, () =>
     Promise.all([
       repository.listConversationsForStaff(),
       repository.listMessagesGroupedForStaff(),
       repository.listStaffReads(staffId),
     ]),
   );
+
+  // 同一条订单只保留一段（哪一段都行，见上面说明）
+  const byOrder = new Map<string, OrderConversationRecord>();
+  for (const conversation of allConversations) {
+    if (!byOrder.has(conversation.orderId)) byOrder.set(conversation.orderId, conversation);
+  }
+  const conversations = [...byOrder.values()];
 
   const orders = await Promise.all(
     conversations.map((conversation) => getPaymentRepository().findOrderById(conversation.orderId)),
@@ -179,6 +205,31 @@ async function releaseHistoryFor(orderId: string): Promise<StaffCompanionRelease
   );
 }
 
+/**
+ * 分段视图里那几位护航的展示名（P0-14）。
+ *
+ * ⚠️ 判据是**会话记录上的 `companionId`**，不是订单当前的履约人：历史段落的护航
+ * 早就不是这一单的人了（`actualCompanionId` 上查不到他），而客服恰恰要看那段历史。
+ *
+ * ⚠️ 用 `findCompanionById()` 而不是任何「有效护航」口径的查询：事后被下架的护航
+ * 照样要显示得出名字——这一步与 `releaseHistoryFor()` 是同一条理由、同一个口径。
+ * 查不到时**不放进 map**，由 `toStaffConversationSegments()` 走
+ * `resolveCompanionDisplayName()` 回落到 id——**回落规则不在本文件**，
+ * 它与退出历史条目共用同一份实现（`tests/staffReleaseHistory.test.mjs` 守着这一点）。
+ */
+async function displayNamesFor(
+  conversations: readonly OrderConversationRecord[],
+): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  for (const conversation of conversations) {
+    const companionId = conversation.companionId;
+    if (!companionId || names.has(companionId)) continue;
+    const companion = await getCompanionRepository().findCompanionById(companionId);
+    if (companion) names.set(companionId, companion.displayName);
+  }
+  return names;
+}
+
 // ——————————————————————————— 工作台首页 ———————————————————————————
 
 /**
@@ -194,6 +245,16 @@ async function releaseHistoryFor(orderId: string): Promise<StaffCompanionRelease
  * 只数 `pending` 的话，一笔被客服认领过的退款会从待办里消失——
  * 那正是「认领即遗忘」这个最容易被忽略的漏单形态。
  *
+ * ⚠️ **这组状态不在这里定义**：判据分别取自 `OPEN_REFUND_STATUSES`
+ * （`lib/constants/refunds.ts`）与 `isUnresolvedComplaintStatus()`
+ * （`lib/constants/completions.ts`，它同样指向 `OPEN_COMPLAINT_STATUSES`）。
+ * 这里曾经写着 `=== "pending" || === "reviewing"` 这样的字面量——与后台首页
+ * 待办卡、与 `?status=open` 列表各存一份「未处理」的定义。今天三处取值相同，
+ * 所以不会出错；但只要产品把某个新状态并入「待处理」，三处就会**静默分叉**：
+ * 首页卡片说 4 条、客服工作台说 3 条，而没有任何测试会失败。
+ * P1-1 的 R6 裁定（「每个领域必须确立唯一的状态集合 / 纯函数，禁止复制第二套」）
+ * 就是针对这种形态，故此处的重复已收掉。
+ *
  * ⚠️ 这两个数**对每位客服相同**（本阶段不做工单派发），与会话未读数按当前客服统计
  * 的口径不同。这一点写在 `STAFF_OVERVIEW_NOTICE` 里，页面会原样展示。
  */
@@ -202,16 +263,14 @@ async function countPendingPlatformWork(): Promise<{
   pendingComplaintCount: number;
 }> {
   const [refunds, complaints] = await Promise.all([
-    getRefundRepository().queryRefundsForAdmin({ status: null }),
-    getComplaintRepository().queryComplaintsForAdmin({ status: null, type: null }),
+    getRefundRepository().queryRefundsForAdmin({ statuses: null }),
+    getComplaintRepository().queryComplaintsForAdmin({ statuses: null, type: null }),
   ]);
 
   return {
-    pendingRefundCount: refunds.filter(
-      (refund) => refund.status === "pending" || refund.status === "reviewing",
-    ).length,
-    pendingComplaintCount: complaints.filter(
-      (complaint) => complaint.status === "pending" || complaint.status === "processing",
+    pendingRefundCount: refunds.filter((refund) => OPEN_REFUND_STATUSES.includes(refund.status)).length,
+    pendingComplaintCount: complaints.filter((complaint) =>
+      isUnresolvedComplaintStatus(complaint.status),
     ).length,
   };
 }
@@ -363,17 +422,23 @@ export async function getStaffConversationDetail(
   // 免得出现「有消息记录但没有订单号」这种解释不清的页面
   if (!order || order.userId !== conversation.userId) return null;
 
-  const [messages, staffLastReadAt, user] = await withMockDebug(params, surface, () =>
+  const [messages, staffLastReadAt, user, conversations] = await withMockDebug(params, surface, () =>
     Promise.all([
       repository.listMessagesForStaff(orderId),
       repository.findStaffLastReadAt(orderId, staffId),
       getDataSource().findUserById(order.userId),
+      repository.listConversationsByOrderForStaff(orderId),
     ]),
   );
 
   // 履约退出历史（P0-6）：会话页是客服与订单之间的主界面，也是「是不是有人中途退出过」
   // 最先被问到的地方。它与消息、用户同属「这一单发生过什么」，因此在这里一并取好
   const releaseHistory = await releaseHistoryFor(order.id);
+
+  // 当前履约段（P0-14）：只用来给分段打「是不是当前那一段」的标记。
+  // ⚠️ 订单此刻的 `actualCompanionId` 是**唯一**判据——旧段落的身份不靠会话上的历史字段，
+  // 那样会在换人之后继续把旧段标成「当前」
+  const assignmentState = await resolveOrderAssignmentState(order.id, order.actualCompanionId);
 
   return {
     order: toStaffOrderSummary(order, user ? user.nickname : "用户", releaseHistory),
@@ -384,6 +449,14 @@ export async function getStaffConversationDetail(
     },
     // 消息实体不直接作为响应：每一条都经过展示层加工（称呼 + 是不是自己发的）
     messages: messages.map((message) => toStaffConversationMessage(message, staffId)),
+    segments: toStaffConversationSegments(
+      conversations,
+      messages,
+      staffId,
+      assignmentState.assignmentKey,
+      await displayNamesFor(conversations),
+    ),
+    messageTargetNotice: STAFF_MESSAGE_TARGET_NOTICE,
     staffLastReadAt,
   };
 }
@@ -444,18 +517,41 @@ export async function sendMessageForStaff(
   if (!text.ok) throw new ApiError("BAD_REQUEST", text.message);
 
   const repository = getMessageRepository();
-  const conversation = await repository.findConversationForStaff(orderId);
-  if (!conversation) throw new ApiError("NOT_FOUND", STAFF_CONVERSATION_NOT_FOUND_MESSAGE);
-
   const now = new Date().toISOString();
+
+  /**
+   * ⚠️ 客服的消息**只进客服会话**（P0-14）。
+   *
+   * 一张订单现在可以同时有客服会话与若干段履约会话，因此「这一单的会话」不再是一个
+   * 唯一的对象——P0-14 之前那句 `findConversationForStaff(orderId)` 拿到的
+   * 「那一个会话」在本轮之后可能是**某一段履约会话**，把客服消息写进去就成了
+   * 「用户与打手的私聊里插进一条客服的话」，而且打手会读到一段与他无关的对话。
+   *
+   * 因此这里显式挑 `service` 那一段。它与用户端 `getMessagesForUser()` 建立的是
+   * 同一段会话（id 就是订单号），客服在页面上看到的「客服沟通」正是它。
+   */
+  const conversations = await repository.listConversationsByOrderForStaff(orderId);
+  // 一条会话都没有时仍然 404：**客服不能凭空给一笔订单造出会话**，
+   // 那是用户发起沟通时才会发生的事（P8D-1 的既有保证，这里原样保留）
+  const anchor = conversations[0];
+  if (!anchor) throw new ApiError("NOT_FOUND", STAFF_CONVERSATION_NOT_FOUND_MESSAGE);
+
+  const service =
+    conversations.find((conversation) => conversation.kind === "service") ??
+    // 只有履约会话、客服会话还没建：**补建客服会话**而不是退回 404。
+    // 补建不改订单、不改金额，它建的是一段本来就该存在的沟通渠道；
+    // 而退回 404 会让客服无法回复一位正在等回答的用户，只因为打手先打开了聊天页
+    (await repository.ensureConversation(anchor.userId, orderId, now));
+
   const outcome = await withMockDebug(params, surface, () =>
     repository.createMessage(
       {
         id: `msg_${crypto.randomUUID()}`,
         orderId,
+        conversationId: service.id,
         // 消息归属**会话所属的用户**，不是发消息的客服：
         // 这样用户端按自己的 userId 就能读到客服发来的消息
-        userId: conversation.userId,
+        userId: service.userId,
         // 发送者身份全部由服务端写入，客户端无从指定
         senderId: staff.id,
         senderRole: "customer_service",

@@ -242,7 +242,8 @@ function OrderSection({ complaint }: { complaint: StaffComplaintDetail }) {
         </div>
         <Row label="订单号" value={order.orderNo} mono />
         <Row label="商品" value={order.productTitle} />
-        <Row label="实付金额" value={`¥${formatYuan(order.totalAmount)}`} />
+        {/* 「实付金额」读实付（P1-4）：`totalAmount` 是**优惠前**应付总额 */}
+        <Row label="实付金额" value={`¥${formatYuan(order.actualPaidAmount)}`} />
       </div>
 
       <div className="mt-2 flex flex-wrap gap-3 text-[13px]">

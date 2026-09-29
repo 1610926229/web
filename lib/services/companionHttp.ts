@@ -1,5 +1,6 @@
 import { apiGet, apiPost } from "@/lib/api/client";
 import type { EvidenceDraft } from "@/lib/constants/evidence";
+import type { CompanionChatDetail, CompanionChatListData } from "@/lib/types/companionChat";
 import type { CompanionCompletionSubmitOutcome } from "@/lib/types/completion";
 import type { CompanionPoolData, DispatchAcceptOutcome } from "@/lib/types/dispatch";
 import type { CompanionCancelOutcome, CompanionStartOutcome } from "@/lib/types/order";
@@ -144,5 +145,61 @@ export function submitCompanionCompletionRequest(
   return apiPost<CompanionCompletionSubmitResult>(
     `/api/companion/orders/${encodeURIComponent(orderId)}/completion`,
     input,
+  );
+}
+
+// ——————————————————————————— 订单聊天（P0-14）———————————————————————————
+
+/**
+ * 打手「订单聊天」的**浏览器端**取数。
+ *
+ * 与服务端模块 `lib/services/companionConversations.ts` 分开的原因与上面三个写交互相同：
+ * 那个模块依赖 `lib/data` 与 `lib/mocks`，一旦被客户端组件引用，Mock 存储与种子数据
+ * 就会被打进浏览器产物。因此本文件只 import `lib/api`、`lib/types` 与 `lib/constants`。
+ *
+ * 列表与详情页的首屏都由 Server Component 直接取数（不经过本文件）；
+ * 这里服务于「刷新 / 发送 / 标记已读」三个浏览器端交互。
+ *
+ * ⚠️ 请求里没有打手标识：以谁的身份读/写由服务端会话（`requireCompanion()`）决定。
+ * ⚠️ 打手只能看到当前那一段履约会话；换人 / 回池之后这些请求对旧打手一律 404，
+ * 因此「看别人的聊天」在结构上就不存在（见 `lib/services/companionConversations.ts`）。
+ */
+
+/** 当前打手的订单聊天列表（含每单未读与合计未读）。 */
+export function fetchCompanionChats(): Promise<CompanionChatListData> {
+  return apiGet<CompanionChatListData>("/api/companion/conversations");
+}
+
+/** 读取某一单的聊天（打手视角：只含当前那一段履约会话的消息）。 */
+export function fetchCompanionChat(orderId: string): Promise<CompanionChatDetail> {
+  return apiGet<CompanionChatDetail>(
+    `/api/companion/conversations/${encodeURIComponent(orderId)}`,
+  );
+}
+
+/**
+ * 打手发送一条消息。
+ *
+ * `idempotencyKey` 由页面在**一次发送意图开始时**生成并保持不变：失败重试沿用同一个键，
+ * 服务端因此不会因为重试多出一条消息。发送者身份（companion）与落点（当前履约会话）
+ * 都由服务端决定，请求体里只有正文与幂等键。
+ */
+export function sendCompanionMessage(
+  orderId: string,
+  body: string,
+  idempotencyKey: string,
+): Promise<{ messageId: string; created: boolean }> {
+  return apiPost<{ messageId: string; created: boolean }>(
+    `/api/companion/conversations/${encodeURIComponent(orderId)}/messages`,
+    { body, idempotencyKey },
+  );
+}
+
+/** 标记当前打手已读（进入聊天页时调用；已读位置记在当前这一段会话上）。 */
+export function markCompanionChatRead(
+  orderId: string,
+): Promise<{ orderId: string; read: boolean }> {
+  return apiPost<{ orderId: string; read: boolean }>(
+    `/api/companion/conversations/${encodeURIComponent(orderId)}/read`,
   );
 }

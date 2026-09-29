@@ -17,7 +17,7 @@
  * | 用户**指定**过谁 | `exclusiveCompanionId` | 下单那一刻（结算页选的人） |
  * | 实际**接到**这单的是谁 | `acceptedByCompanionId` | 接单那一刻 |
  *
- * 一条真实路径：用户指定 A → A 十分钟内没接 → 自动进公共池 → B 接单。
+ * 一条真实路径：用户指定 A → A 在独占期内没接 → 自动进公共池 → B 接单。
  * 此时两个字段分别是 A 和 B，**两个事实都要留得住**——管理端与客服以后要能回答
  * 「用户当初想要的人是谁、最后履约的是谁」。
  *
@@ -25,7 +25,8 @@
  *
  * ## 没有「拒绝 / 放弃」这条能力
  *
- * 打手不想接专属单时**什么都不做**，十分钟到点系统自动转公共池。
+ * 打手不想接专属单时**什么都不做**，独占期（默认 10 分钟，可由管理员配置）
+ * 到点系统自动转公共池。
  * 「不接」本身就是拒绝。因此这里**没有** `declinedByCompanionIds` / `declinedAt`，
  * 服务层也没有对应的动作与接口——多了这两个字段，就等于承认存在一条
  * 「主动退回」的写入路径，而那条路径在需求里并不存在。
@@ -37,7 +38,8 @@
  * 四种取值**互斥**，而且「在哪个池」与「有没有被接 / 有没有超时」是同一件事的
  * 两种说法，因此只有一个字段：
  *
- * - `exclusive` —— 在**专属池**里等用户指定的那位打手，固定 10 分钟；
+ * - `exclusive` —— 在**专属池**里等用户指定的那位打手，时长为进入时冻结的
+ *   `exclusiveTimeoutMinutesSnapshot`（默认 10 分钟，可由管理员配置）；
  * - `public`    —— 在**公共池**里等任何一位有资格的打手，时长来自平台配置快照；
  * - `accepted`  —— 已被某位打手接走，两个池都不再接受接单；
  * - `timed_out` —— 派单已关闭，不能再被接单。**两种来路**：公共池到点仍无人接
@@ -53,6 +55,34 @@
  * 而它们分叉的那一天，页面上会出现一张既在公共池、又已经被接走的订单。
  */
 export type DispatchState = "exclusive" | "public" | "accepted" | "timed_out";
+
+/**
+ * 「这一次绑定是**谁发起的**」（P1-5 §九-F 产品裁定）。
+ *
+ * ## 为什么必须把它写下来
+ *
+ * 订单进入 `accepted` 有**两条来路**，而它们**复用了同一个状态迁移写入器**
+ * （`applyDispatchAccepted`）：
+ *
+ * | 来路 | 入口 | 是不是打手的主动接单行为 |
+ * |---|---|---|
+ * | 打手**自己**接单 | `acceptDispatch` | **是** ⇒ 接单榜 +1 |
+ * | 客服 / 管理员**直接换人、直接指定** | `replaceOrderCompanionByStaff` | **不是** ⇒ 接单榜 +0 |
+ *
+ * 产品裁定写得很直白：**「不得因为复用了同一个状态迁移函数，就把 Staff assignment
+ * 当成 Companion accept event」**。因此「订单进入了 `accepted`」与「产生了接单事件」
+ * 必须成为**两个概念**——字段在，两者才分得开。
+ *
+ * ⚠️ **不写下来就只能靠猜**：两条来路写完之后，派单记录上的
+ * `acceptedByCompanionId` / `acceptedAt` / `state` **完全一样**，
+ * 从记录本身反推不出是谁发起的。而存量派生通道
+ * （`deriveLegacyAcceptEvents`）恰恰就是「从记录反推」，所以它**必须有这个字段才敢派生**。
+ *
+ * ⚠️ `null` 的存在本身就是一条规则，不是一个占位：**认不出来源时不得当作接单事件**。
+ * 宁可让存量接单榜继续是**历史下界**，也不为了让历史数字好看而**凭空补**一次
+ * 从未发生过的主动接单。
+ */
+export type DispatchAcceptSource = "companion" | "staff";
 
 /**
  * 派单记录（仓储内部类型）。
@@ -75,8 +105,22 @@ export type DispatchRecord = {
 
   /** 进入专属池的时刻；未指定打手时为 null */
   exclusiveEnteredAt: string | null;
-  /** 进入专属池时刻 + 固定等待时长（见 `EXCLUSIVE_WAIT_MINUTES`） */
+  /** 进入专属池时刻 + 当次冻结的专属池超时长快照 */
   exclusiveDeadlineAt: string | null;
+  /**
+   * 进入专属池时冻结的那一份「专属池超时」配置值（分钟，P1-2）。
+   *
+   * 与 `publicTimeoutMinutesSnapshot` 完全对仗：冻结之后，后台再改参数
+   * **不影响这一单**——用户被承诺的是「指定打手那一刻的规则」。
+   *
+   * ⚠️ 这一项此前**不存在**：专属池时长当时是一个源码常量
+   * （`EXCLUSIVE_WAIT_MINUTES = 10`，注释写着「固定 10 分钟，不可配置」），
+   * 常量不会变，因此没有东西需要冻结。产品裁定它必须可配置之后，冻结就成了必需——
+   * 没有它，「管理员改了配置，旧单还按老规则走」这条要求没有任何东西可依。
+   *
+   * ⚠️ 未指定打手时为 null（这一单从未进过专属池）。
+   */
+  exclusiveTimeoutMinutesSnapshot: number | null;
 
   /**
    * 进入公共池的时刻。**每次进入公共池都会重写**：
@@ -96,6 +140,26 @@ export type DispatchRecord = {
 
   acceptedByCompanionId: string | null;
   acceptedAt: string | null;
+  /**
+   * 当前这一次绑定**由谁发起**（P1-5 §九-F）。见 `DispatchAcceptSource`。
+   *
+   * ⚠️ **回公共池时必须与 `acceptedByCompanionId` 一起清成 `null`**：
+   * `applyDispatchToPublic()` 把绑定清空时不清它，就会出现「没人接、却记着上次是谁发起的」
+   * 这种自相矛盾——而那条矛盾正好会被存量派生通道读到，变成一次**不存在的接单**。
+   *
+   * ⚠️ **但不要说成「与 `acceptedByCompanionId` 永远同生共死」，那句话是假的**：
+   * `applyDispatchTimedOut()`（公共池到点无人接 / 已接单后被用户直接退款，P0-12）
+   * **不清绑定**，因此一条 `state === "timed_out"` 的记录上会发现
+   * `acceptedByCompanionId` / `acceptedAt` / `acceptedVia` **三者都还留着旧值**
+   * （这是 P0-6 起的既有行为，**不是本轮引入的**，本轮**刻意不改**它——
+   * 改它会动到别的 Round 的既有语义）。
+   *
+   * → 因此**读者必须把 `state` 当第一道闸**，不能只凭本字段非空就认定「有人接单」。
+   * 现存的唯一读者 `deriveLegacyAcceptEvents()` 正是这么做的
+   * （第一句就是 `if (record.state !== "accepted") continue;`）。
+   * **将来新增读者时，这条规矩同样适用。**
+   */
+  acceptedVia: DispatchAcceptSource | null;
   /**
    * **派单关闭的时刻**（`state` 变成 `timed_out` 的那一刻）；没关闭过时为 null。
    *

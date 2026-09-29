@@ -21,6 +21,22 @@ export const COMPLAINT_STATUSES: readonly ComplaintStatus[] = [
   "closed",
 ];
 
+/**
+ * **未完结**的投诉状态——管理端 `status=open` 的口径，也是首页待办卡的计数口径。
+ *
+ * ⚠️ **这是这组状态的唯一定义处。** `isUnresolvedComplaintStatus()`（在
+ * `lib/constants/completions.ts`，被订单阻塞与完成材料自动审核使用）也指向它，
+ * 因此「管理端待办数」与「自动审核是否被投诉挡住」不会各自维护一份
+ * `["pending","processing"]` 而悄悄分叉。
+ *
+ * `satisfies` 钉住元素类型：将来新增投诉状态时，这里会编译报错提醒判断它算不算未完结，
+ * 而不是默认把它漏出待办。
+ */
+export const OPEN_COMPLAINT_STATUSES = [
+  "pending",
+  "processing",
+] as const satisfies readonly ComplaintStatus[];
+
 export const COMPLAINT_STATUS_LABELS: Record<ComplaintStatus, string> = {
   pending: "待处理",
   processing: "处理中",

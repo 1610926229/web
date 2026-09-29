@@ -273,7 +273,28 @@ function releaseCurrentAssignment(input: {
   // 中间态同样不暴露：这一段没有 await。
   applyOrderAcceptanceReleased(input.order.id);
   if (input.reassign) {
-    applyDispatchAccepted(input.dispatchId, input.reassign.companionId, input.at);
+    /*
+     * `"staff"`：**订单进入 `accepted`，但不产生接单事件**（P1-5 §九-F 产品裁定）。
+     *
+     * 这一行曾经传的是 `"companion"` 并**额外写了一条接单事件**——那是本批次实现期
+     * 自己收紧的口径（原 §九-F「待追认」项），产品负责人已裁定**改掉**：
+     *
+     * > 客服「直接换人 / 直接指定新打手」**不计入接单榜**。接单榜统计的是
+     * > **Companion 自己成功执行接单动作的次数**，Staff assignment 不属于打手主动接单行为。
+     * > 即使底层为了订单状态迁移复用了 `applyDispatchAccepted()`，也不得因为复用了
+     * > 同一个状态迁移函数，就把 Staff assignment 当成 Companion accept event。
+     *
+     * 所以这里**只写状态**：订单要照常变 `accepted`（B 的处境与他接单后完全一样），
+     * 但接单榜那一栏与他无关——**「订单进入 accepted」与「产生接单事件」是两个概念**。
+     *
+     * ⚠️ 注意 `acceptedVia: "staff"` **不是备注，是防线的另一半**：存量派生通道
+     * （`deriveLegacyAcceptEvents`）会从派单记录反推接单历史，而它**只能**靠这个字段
+     * 分辨这张单是被换进来的还是被打手自己接的。不写 `"staff"` 而写 `null`，
+     * 就等于把这次直换交给「无法区分 ⇒ 不派生」那条更粗的闸——
+     * 结果虽然同样不计数，但**新数据与存量数据会落进两条不同的规则**，
+     * 将来想收紧哪一条都会发现两边的定义域不一样。
+     */
+    applyDispatchAccepted(input.dispatchId, input.reassign.companionId, input.at, "staff");
     applyOrderAccepted(input.order.id, {
       companionId: input.reassign.companionId,
       companion: input.reassign.companion,

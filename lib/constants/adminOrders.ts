@@ -230,7 +230,9 @@ export function toAdminOrderListItem(order: Order, user: AdminUserSummary): Admi
     productTitle: order.productTitle,
     specName: order.specName,
     quantity: order.quantity,
-    totalAmount: order.totalAmount,
+    // 列表那一列的表头是「实付金额」，因此给**实付**（P1-4）：
+    // 优惠前的 `totalAmount` 在用了券的订单上会比用户真正付掉的钱大
+    actualPaidAmount: order.actualPaidAmount,
     user,
   };
 }
@@ -270,6 +272,11 @@ export function toAdminOrderDetail(
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
+    // 金额域的另外三项（P1-4）：`actualPaidAmount` 已随列表项带过来。
+    // 三项一起给，后台才能当场核对「原价 − 券 = 实付」这条恒等式
+    originalAmount: order.originalAmount,
+    couponDiscountAmount: order.couponDiscountAmount,
+    coupon: order.coupon,
     // 订单上只记着「谁在履约」；「用户当初指定了谁」在 extras 里（来自派单记录）
     actualCompanion: order.companion,
     ...extras,

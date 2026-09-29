@@ -1380,3 +1380,110 @@ test("P7B 在调试参数下也不 500：空名单是空态，不是错误", { s
   assert.ok(html.includes("当前可接单"), "空态不该把筛选栏一起隐藏");
 });
 
+
+// ————————————————— P1-5：打手排行榜（三张榜） —————————————————
+
+test("P1-5 打手榜接口游客可访问，三张榜都返回，且条目只有六项", { skip: SKIP }, async () => {
+  for (const board of ["dispatch", "completion", "income"]) {
+    const response = await fetch(new URL(`/api/rankings/companions?board=${board}`, BASE));
+    assert.equal(response.status, 200, `${board} 榜是公开数据，不该 401`);
+
+    const { data } = await response.json();
+    assert.equal(data.board, board);
+    assert.equal(typeof data.boardLabel, "string");
+    assert.equal(typeof data.metricName, "string");
+    // 打分榜**没有**「我的排名」：接口不读会话，因此连这个字段都不存在
+    assert.equal("me" in data, false);
+    assert.equal("viewerLoggedIn" in data, false);
+
+    for (const item of data.items) {
+      assert.deepEqual(Object.keys(item).sort(), [
+        "avatarUrl",
+        "companionId",
+        "metricLabel",
+        "metricValue",
+        "nickname",
+        "rank",
+      ]);
+      assert.equal(Number.isInteger(item.metricValue), true);
+      assert.ok(item.rank >= 1);
+    }
+
+    // 名次是竞赛排名：同值并列，因此**不要求** rank === index+1
+    for (let index = 1; index < data.items.length; index += 1) {
+      assert.ok(
+        data.items[index - 1].metricValue >= data.items[index].metricValue,
+        `${board} 榜的指标必须降序`,
+      );
+    }
+
+    const serialized = JSON.stringify(data);
+    for (const forbidden of [
+      "userId",
+      "realName",
+      "phone",
+      "wechat",
+      "companionRate",
+      "RateBp",
+      "intro",
+      "applicationId",
+      "removedAt",
+      "banReason",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `${board} 榜响应不该出现 ${forbidden}`);
+    }
+  }
+});
+
+test("P1-5 打手榜：非法 board / period 回 400，不传则用默认值", { skip: SKIP }, async () => {
+  const bare = await fetch(new URL("/api/rankings/companions", BASE));
+  assert.equal(bare.status, 200);
+  assert.equal((await bare.json()).data.board, "dispatch", "不传 board 应当落到默认的接单榜");
+
+  const badBoard = await fetch(new URL("/api/rankings/companions?board=revenue", BASE));
+  assert.equal(badBoard.status, 400);
+  assert.equal((await badBoard.json()).error.code, "BAD_REQUEST");
+
+  const badPeriod = await fetch(new URL("/api/rankings/companions?period=lastWeek", BASE));
+  assert.equal(badPeriod.status, 400);
+});
+
+test("P1-5 打手榜：客户端传指标或名次都不影响结果（服务端重算）", { skip: SKIP }, async () => {
+  const response = await fetch(
+    new URL("/api/rankings/companions?metricValue=999999&rank=1&nickname=hack", BASE),
+  );
+  assert.equal(response.status, 200);
+
+  const { data } = await response.json();
+  for (const item of data.items) {
+    assert.ok(item.metricValue < 999999, "指标必须由服务端按事件 / 订单 / 收益重算");
+    assert.equal(item.nickname.includes("hack"), false);
+  }
+});
+
+test("P1-5 两页都在：打手榜自带标题与切换条，消费榜不受影响", { skip: SKIP }, async () => {
+  const companion = await get("/rank/companions");
+  assert.equal(companion.status, 200, "/rank/companions 不该 404");
+  assert.equal(companion.html.includes(LOGIN_GATE_TEXT), false, "打手榜不该要求登录");
+  assert.ok(companion.html.includes("打手排行榜"));
+  assert.ok(companion.html.includes("接单榜"));
+  // 两页之间互相跳得过去
+  assert.ok(companion.html.includes("/rank"), "缺少回消费榜的切换条");
+
+  const consumption = await get("/rank");
+  assert.equal(consumption.status, 200, "消费榜必须保持原样可访问");
+  assert.ok(consumption.html.includes("消费排行榜"));
+  assert.ok(consumption.html.includes("/rank/companions"), "消费榜顶部应有去打手榜的切换条");
+});
+
+test("P1-5 打手榜空态：?mockEmpty=companionRankings 只清打手榜，不动消费榜", { skip: SKIP_SESSION }, async () => {
+  const empty = await get("/rank/companions?mockEmpty=companionRankings&mockDelay=0", SESSION);
+  assert.equal(empty.status, 200, "空榜不该 500");
+  assert.equal(empty.html.includes("__next_error__"), false);
+  assert.ok(empty.html.includes("暂无"), "缺少空态文案");
+
+  // 反向：打手榜的空榜键不该把消费榜也清空
+  const consumption = await get("/rank?mockEmpty=companionRankings&mockDelay=0", SESSION);
+  assert.equal(consumption.status, 200);
+  assert.equal(consumption.html.includes("本周暂无有效消费"), false, "两个空榜键必须互不影响");
+});

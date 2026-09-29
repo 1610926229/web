@@ -1,5 +1,4 @@
 import type { ActorRole } from "./actor";
-import type { EarningStatus } from "./earning";
 import type { SupportEvidence } from "./evidence";
 import type { OrderStatus } from "./order";
 import type { StaffCompanionReleaseEntry, StaffUserSummary } from "./staff";
@@ -33,48 +32,70 @@ export type RefundReasonKey =
   | "other";
 
 /**
- * 退款的**资金责任**归属（P0-13，产品负责人 2026-09-25 裁定）。
+ * 一次退款的**最终资金决策**（P0-13 建立，**P0-15 收敛**）。
  *
- * 由**管理员**在最终退款决策时认定；客服只能调查、记录、提出意见。
- * 它决定打手要冲回多少：`platform` 不冲回，`companion` / `shared` 按
- * `业务流程表.md` §17 的冻结公式冲回。
- */
-export type RefundResponsibility = "platform" | "companion" | "shared";
-
-/**
- * 一次退款的**最终资金决策**（P0-13）。
- *
- * ⚠️ 它回答的是「这一次退了多少、这笔钱谁承担」，而 `RefundRequest.amount`
- * 回答的是「申请时这一单实付多少」——两个数在部分退款下**不再相等**，
+ * ⚠️ 它回答的是「这一次退了多少」，而 `RefundRequest.amount` 回答的是
+ * 「申请时这一单实付多少」——两个数在部分退款下**不再相等**，
  * 因此必须分开存、分开给，不能拿一个去顶另一个。
  *
- * 六项字段对应产品裁定「Refund 最终决策至少应能表达」的清单
- * （`P0-13/02-decisions.md` §十 D-Q1 ③），另加决策人与时刻用于可审计。
+ * ## P0-15：四项字段被删除，不是被改名
+ *
+ * 产品负责人 2026-09-28 正式裁定「一个订单最多只允许一次退款」，
+ * 并废弃责任模型。因此下面四项**连语义一起消失**，本类型不再声明它们：
+ *
+ * | 删除的字段 | 为什么它不再有意义 |
+ * |---|---|
+ * | `refundFullRemaining` | 它的存在理由是「多步部分退款会留下 1–99 分尾差，整数百分比表达不了」（P0-14）。**只有一次退款时不存在尾差**：`floor(实付 × n/100)` 一步到位。 |
+ * | `responsibility` | 管理员不再选择责任归属（P0-15 §五）。 |
+ * | `companionLiabilityRateBp` | 只有 `shared` 才有值，而 `shared` 已被废弃。 |
+ * | `platformBorneAmount` | 它回答「本次退款里平台担了多少」，而新口径问的是「平台最终净收入 = 实付 − 退款额」，**是两个不同的问题**，且新问题由订单与退款额就能算出来，不需要存。 |
+ *
+ * ⚠️ **不是「保留但弃用」而是直接删除**：本仓库没有真库、没有历史持久化数据
+ * （`globalThis` 内存存储，重启即清空），唯一的历史载体是种子 fixture，
+ * 而它随本批次一并更新。产品裁定允许「迁移成本高时只读兼容」，
+ * 这里迁移成本为**零**，因此不做半吊子的兼容层——
+ * 留一个永远不会被写入的字段，只会让后来的人以为它还有用。
+ *
+ * ⚠️ `EarningAdjustment.responsibility` 同批删除，理由相同。
  */
 export type RefundDecision = {
   /**
    * 这一次退回用户的比例（**基点**，1..10000）。
-   * ⚠️ 管理员输入的**就是这个比例**，不是金额——金额由服务端按 §17 算
-   * （「管理员只输入退款比例，金额由系统计算」）。
+   *
+   * ⚠️ 管理员输入的**就是这个比例**，不是金额——金额由服务端按
+   * `floor(actualPaidAmount × refundRateBp / 10000)` 算。
+   *
+   * ⚠️ **P0-15 起它不再是 `number | null`**：唯一的另一种意图
+   * （「退满剩余」）已被删除，因此**每一次决策都必然带一个比例**。
+   * 这个收窄是有意的——`null` 一旦不可能出现，把它留在类型里就是在
+   * 邀请调用方写一个永远走不到的分支。
    */
   refundRateBp: number;
-  /** 这一次实际退给用户的金额（分）= `floor(actualPaidAmount × refundRateBp / 10000)` */
-  refundAmount: number;
-  responsibility: RefundResponsibility;
-  /** 打手责任比例（基点，0..10000）。**只有 `shared` 时有值**，其余两种为 null */
-  companionLiabilityRateBp: number | null;
   /**
-   * 这一次从打手收益冲回的金额（分）。
-   * `platform` 恒为 0；其余两种按 §17 公式算，并**钳制**在「该单剩余可冲回额」以内
-   * （产品裁定要求 `0 <= 累计冲回 <= incomeAmount` 必须成立，见 `P0-13/02-decisions.md` §十一 D4）。
+   * 这一次实际退给用户的金额（分）= `floor(actualPaidAmount × refundRateBp / 10000)`。
+   *
+   * ⚠️ 100% 时它**精确等于** `actualPaidAmount`（`floor(x × 10000 / 10000) === x`），
+   * 这正是「全额退款」不需要单独意图的原因。
+   */
+  refundAmount: number;
+  /**
+   * 这一次从打手收益冲回的金额（分）。**P0-15 起恒为该单打手收益的整笔**
+   * （= `Order.companionBaseIncome` = `Earning.incomeAmount`），
+   * **与退款比例无关**：退 10% 也是整笔归零。
+   *
+   * ⚠️ **它是从订单快照算的，不是从 `Earning` 上读的**——这一点是刻意的：
+   * 退款可以在订单还在 `serving` 时就被批准（EX-REFUND-07），那时 `Earning`
+   * **根本还不存在**（收益在订单进入 `completed` 时才由 `settleOrderCompletion()`
+   * 生成）。若这里读 `Earning.incomeAmount`，serving 期退款会记成 0，
+   * 而实际上那笔收益终将被全额冲掉——账上就会少一笔。
+   * `Earning.incomeAmount` 本来就**直接搬** `Order.companionBaseIncome`（不重算），
+   * 所以拿订单快照是同一个数，而且**任何时候都拿得到**。
+   *
+   * 因此不变式是：**该订单最终那条 `Earning` 的 `reversedAmount` 必须精确等于本字段**。
+   * 哪条路径去写那次冲销（批准时写 / 完成生成收益时补写）不由本字段决定，
+   * 见 `lib/data/earningTransaction.ts`。
    */
   companionReversalAmount: number;
-  /**
-   * 这一次由**平台**承担的部分（分）= `refundAmount − companionReversalAmount`。
-   * ⚠️ **允许为负**（§17 原文「允许 `clubIncomeAdjustment < 0`」）：
-   * 打手按**原价**分账（§18），券由平台承担，因此冲回额可能大于实际退给用户的钱。
-   */
-  platformBorneAmount: number;
   /** 做出决策的管理员账号 id（`AdminAccount.id`） */
   decidedBy: string;
   decidedAt: string;
@@ -178,6 +199,14 @@ export type RefundDetail = RefundSummary & {
   productCoverUrl: string;
   specName: string;
   quantity: number;
+  /**
+   * 单位：分。关联订单**当前的实付金额**（用户端详情页那一行「订单实付」）。
+   *
+   * ⚠️ P1-4 修正：它原先取自 `order.totalAmount`（**优惠前**应付总额），
+   * 接满减券之后那比用户实际付掉的钱大，而它的注释与页面标签一直写着「实付」。
+   * 与 `amount`（申请那一刻的实付快照）是两个数：订单实付可能随退款而变，
+   * 申请金额冻结在申请那一刻。
+   */
   orderTotalAmount: number;
 
   reasonKey: RefundReasonKey;
@@ -296,33 +325,37 @@ export type AdminRefundOrderMoney = {
   couponDiscountAmount: number;
   /** 用户实际支付金额 = 原价 − 券。**退款比例与退款金额的基数** */
   actualPaidAmount: number;
-  /** 该订单**累计**已退金额（本单之前的每一次批准累加，不是本次） */
-  refundedAmount: number;
   /**
-   * 当前还能再退多少 = `actualPaidAmount − refundedAmount`。
+   * 该订单**累计**已退金额。
    *
-   * ⚠️ 刻意**不加 `Math.max(0, …)`**：`refundedAmount <= actualPaidAmount`
-   * 是由金额闸（`assertRefundAmountWithinPaid`）保证的不变式。若它真的变成负数，
-   * 那是数据出了问题，界面上显示一个负数比显示 0 更有用——后者会把它藏起来。
+   * ⚠️ **P0-15 起它在正常流程里恒为 0**：一个订单只退一次，而管理端看到这张表时
+   * 那唯一一次还没执行。它非 0 只有两种来源——**免审批直接退款**（P0-12，
+   * 不产生申请记录，因此没有这张详情页）或 P0-15 之前的历史数据。
+   * 保留它是为了如实显示订单自身的历史，**新业务路径不再用它做金额计算**。
    */
-  remainingRefundableAmount: number;
-  /** 订单冻结的打手分账基数收益（护航收益）。`shared` / `companion` 的冲回基数 */
+  refundedAmount: number;
+  /** 订单冻结的打手分账基数收益（护航收益）。**退款批准后整笔冲回的金额** */
   companionBaseIncome: number;
   /** 订单冻结的平台净收入 = 实付 − 打手收益。**允许为负** */
   clubNetIncome: number;
-  /** 该订单此前**已批准**退款累计冲回的打手收益。只为钳制服务，见 `sumApprovedCompanionReversal` */
-  reversedSoFarAmount: number;
-  /**
-   * 该订单打手收益的当前状态；**没有收益**时为 `null`
-   * （`serving` 订单退款时收益尚未结算，D9）。
-   *
-   * ⚠️ 界面需要它才能把「本次预计冲回」说准：D17 规定
-   * **已提现（`withdrawn`）的收益本轮不冲回**，那一笔由平台全额承担。
-   * 少了这个字段，界面会对一笔已经提现的收益显示「预计冲回 ¥X」，
-   * 而服务端实际写下去的是 0——这正是本次整改要消灭的那类歧义。
-   */
-  companionEarningStatus: EarningStatus | null;
 };
+
+/**
+ * ⚠️ **P0-15 从 `AdminRefundOrderMoney` 上删掉了三个字段**，理由各不相同：
+ *
+ * | 删掉的字段 | 原用途 | 为什么不再需要 |
+ * |---|---|---|
+ * | `remainingRefundableAmount` | 「当前剩余可退款」= 实付 − 已退 | 「剩余」是多步退款模型的概念。一单一退、管理员一次性核定比例之后，**不存在「最多能退多少」这个上限**——填 100% 就是全额退款 |
+ * | `reversedSoFarAmount` | 累计已冲回，用于钳制本次冲回额 | 冲回额恒等于 `companionBaseIncome`（整笔），没有可加的对象，也没有需要钳制的累计量 |
+ * | `companionEarningStatus` | 让界面把「已提现不冲回」（D17）说准 | **D17 的问题被 P0-15 取消了**：普通退款下收益不可能已经提现（见 `02-decisions.md` Q1），因此没有需要解释的例外 |
+ *
+ * ⚠️ 三个字段**一起删**不是「顺手清理」：留着它们会让界面继续渲染
+ * 「剩余可退 ¥X」「已冲回 ¥Y」这些**新规则下没有对应事实**的数字，
+ * 而管理员会照着这些数字做决定。
+ *
+ * ⚠️ 随之去掉的还有 `EarningStatus` 这个 import：`AdminRefundOrderMoney`
+ * 是它在本文件里**唯一**的使用者，没有别的字段需要它。
+ */
 
 export type AdminRefundDetail = AdminRefundListItem & {
   /**
@@ -330,14 +363,17 @@ export type AdminRefundDetail = AdminRefundListItem & {
    *
    * 与 `amount` / `decidedAmount` 的关系：那两个是**这笔退款申请**的金额，
    * 这一组是**整张订单**的金额。界面要同时回答「这次退多少」与
-   * 「这一单本来多少钱、已经退了多少、还能退多少」，两组缺一不可。
+   * 「这一单本来多少钱、打手收益是多少」，两组缺一不可。
+   * ⚠️ P0-15 删掉「还能退多少」——一单一退，不存在第二次，见类型上的那张表。
    */
   orderMoney: AdminRefundOrderMoney;
   /**
    * 这一次退款的完整资金决策；还没决策时为 `null`。
    *
-   * ⚠️ 六项字段里**只有管理端看得到**责任归属与平台承担额
-   * （产品裁定：责任认定权属于管理员；客服与用户只知道自己退了多少）。
+   * ⚠️ 三项字段（比例 / 退款额 / 打手冲回额）**只有管理端看得到**：
+   * 客服与用户只知道自己退了多少（`decidedAmount`）。
+   * ⚠️ P0-15 之前这里写的是「责任归属与平台承担额**只有管理端看得到**」，
+   * 那两项已随责任模型删除；前一句的**可见性边界本身没变**。
    */
   decision: RefundDecision | null;
   reasonKey: RefundReasonKey;
@@ -441,10 +477,12 @@ export type StaffRefundListItem = {
   /**
    * 管理员最终决定退给用户的金额（分）；还没决策时为 `null`。
    *
-   * ⚠️ 客服看得到**结果金额**，看不到责任归属与平台承担额——那两项是
+   * ⚠️ 客服看得到**结果金额**，看不到退款比例与打手冲回额——那两项属于
    * 管理员的决策依据（产品裁定：客服只能调查、记录、提出意见）。
    * 在列表上就给，是因为 P0-13 之后「申请金额」不再等于「实退金额」：
    * 只显示前者的表格会把一笔已决策的部分退款显示成它实际不是的样子。
+   * ⚠️ P0-15 之前这条注释举的例子是「责任归属与平台承担额」，
+   * 那两项已删；可见性边界本身没变，仍是「只给结果，不给决策依据」。
    */
   decidedAmount: number | null;
   createdAt: string;

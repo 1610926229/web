@@ -348,7 +348,8 @@ export type StaffComplaintOrderInput = {
   orderNo: string;
   status: OrderStatus;
   productTitle: string;
-  totalAmount: number;
+  /** 用户实付（P1-4）。投诉页写的「实付金额」读的是它 */
+  actualPaidAmount: number;
   releaseHistory: StaffCompanionReleaseEntry[];
 };
 
@@ -361,7 +362,7 @@ export function toStaffComplaintOrderSummary(
     status: order.status,
     statusLabel: ORDER_STATUS_LABELS[order.status],
     productTitle: order.productTitle,
-    totalAmount: order.totalAmount,
+    actualPaidAmount: order.actualPaidAmount,
     releaseHistory: order.releaseHistory,
   };
 }

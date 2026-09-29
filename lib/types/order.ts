@@ -17,6 +17,7 @@
 
 import type { CompanionReleaseRecord } from "./companionRelease";
 import type { CompanionCompletionInfo } from "./completion";
+import type { CouponFormKey } from "./coupon";
 import type { OrderComplaintSummary } from "./complaint";
 import type { ConversationStats } from "./message";
 import type { RefundSummary } from "./refund";
@@ -52,6 +53,38 @@ export type OrderCompanionSnapshot = {
 };
 
 /**
+ * 订单上的**券快照**（P1-4）。没使用优惠券时整项为 null。
+ *
+ * 冻结的字段是产品裁定 §9 要求的那一组（`claimId` 是本实现多加的一个，
+ * 用于回答「这张券被哪一单用掉了」）。冻结之后后台改券**不影响**这一单：
+ * 金额读 `couponDiscountAmount`（已经在金额域里），展示读这里，
+ * 两处都不会跟着券模板变。
+ *
+ * ⚠️ 金额字段是**整数分且可计算**，与 `valueLabel` 那种展示文案严格分开：
+ * 页面上要显示「满 100 减 10」就拼 `valueLabel`，要算钱就读 `discountAmount`。
+ *
+ * ⚠️ `discountAmount` 是**名义面额**，这一单实际抵掉的是金额域里的
+ * `couponDiscountAmount`（可能是被夹到原价后的更小值）。
+ * 两者刻意都留着：只留名义面额会算错钱，只留抵扣额则说不清「这张券本来值多少」。
+ */
+export type OrderCouponSnapshot = {
+  /** 被核销的那张领取记录 id */
+  claimId: string;
+  /** 券模板 id */
+  couponId: string;
+  name: string;
+  formKey: CouponFormKey;
+  /** 门槛（分）。满减券以外的形态为 null */
+  thresholdAmount: number | null;
+  /** 名义面额（分）。满减券以外的形态为 null */
+  discountAmount: number | null;
+  /** 券面值展示文案，如「满 100 减 10」 */
+  valueLabel: string;
+  /** 使用条件展示文案 */
+  conditionLabel: string;
+};
+
+/**
  * 订单（仓储内部类型）。
  *
  * 页面与接口**不直接返回本类型**：对外一律使用下面的两个 DTO，
@@ -71,6 +104,43 @@ export type Order = {
   servingAt: string | null;
   completedAt: string | null;
   refundedAt: string | null;
+
+  /**
+   * **这一单历史上第一次被承接的时刻**（P1-4 验收整改轮）。
+   *
+   * ⚠️ **它只写一次，而且任何路径都不清空**——这正是它与 `acceptedAt` 的区别：
+   *
+   * | 字段 | 回答的问题 | 回到 `paid` 时 |
+   * |---|---|---|
+   * | `acceptedAt` | 这一单**此刻**是哪次接单的 | **清成 `null`**（否则用户端时间轴会把 `paid` 单渲染成「已接单」） |
+   * | `everAcceptedAt` | 这一单**有没有人接过** | **原样保留** |
+   *
+   * ## 它为什么必须存在
+   *
+   * 优惠券返还的判据是产品裁定的一句话：**「订单历史上是否曾经被承接」**
+   * （`01-prompt.md` 验收整改轮 §一）。而这条信息在别处**一条都查不到**：
+   *
+   * | 候选 | 为什么不行 |
+   * |---|---|
+   * | `acceptedAt` | 回公共池 / 打手取消即被清空 |
+   * | `Dispatch.acceptedByCompanionId` / `acceptedVia` | 回公共池即被清空 |
+   * | `CompanionAcceptEvent` | 客服直接指定**不写**它（P1-5 §九-F 裁定），且裁定明令不得复用 |
+   * | `CompanionReleaseRecord` | 只在**退出履约**时写：当前处于 `accepted` / `serving` / `completed` 的单一条都没有 |
+   *
+   * 于是「曾经被承接」必须有它自己的落点。台账里那条 `accepted → 客服取消/回池 → paid →
+   * 用户退款` 的路径，只有本字段能回答「不返券」。
+   *
+   * ## 谁写它
+   *
+   * **只有 `applyOrderAccepted()`**——即「订单进入 `accepted`」的唯一写入器。
+   * 它同时服务两条来路（打手自己接单、客服直接指定 / 换人），而**两条都算被承接**：
+   * 客服指定之后订单已经产生真实服务承诺，券因此不返还
+   * （裁定 §一.3：**不得**复用接单榜的 `acceptedVia === "companion"` 来判断返券）。
+   *
+   * ⚠️ 写入用 `order.everAcceptedAt ?? at`：第二个打手接手同一单时**不刷新**它。
+   * 它回答的是「第一次」。
+   */
+  everAcceptedAt: string | null;
 
   // —— 下单内容快照 ——
   productId: string;
@@ -95,18 +165,21 @@ export type Order = {
   /** 增值服务合计（按单计费，不随数量变化） */
   addonsAmount: number;
   /**
-   * 商品金额 + 增值服务金额。**支付渠道实际收的钱**（退款也按它算）。
+   * 商品金额 + 增值服务金额 = **优惠前的应付总额**。
    *
-   * ⚠️ 与金额域的 `originalAmount` 当前是同一个数（无券时渠道实收就等于优惠前应付），
-   * 但两者的定义不同：这一个说的是「渠道收了多少钱」，那一个说的是「优惠前的应付总额」。
-   * 优惠券接入（P1-6）会让它们分开——那时渠道实收会小于原价。
+   * ⚠️ 它**不是**渠道实收。渠道实际收的钱是金额域的 `actualPaidAmount`：
+   * 用了满减券之后 `totalAmount > actualPaidAmount`（P1-4 起会真的发生）。
+   * 退款也按 `actualPaidAmount` 算，不按它。
+   *
+   * 两个字段的定义不同，不能互相替代：这一个说的是「这一单买了多少钱」，
+   * 那一个说的是「用户实际付了多少」。
    */
   totalAmount: number;
 
   // —— 金额域（P0-3，服务端计算，单位：分）——
   // 这一组回答「这一单的钱怎么分、退过多少」，与上面三个（卖了什么、收了多少）分开表达。
-  // 当前没有优惠券，因此 originalAmount === totalAmount、actualPaidAmount === originalAmount；
-  // 券接入（P1-6）之后两者才会分开。
+  // 用了满减券时 originalAmount === totalAmount 仍然成立（两者都是优惠前金额），
+  // 但 actualPaidAmount 会更小。
   /**
    * **用户这一单优惠前的原始应付总金额** = 商品金额 + 全部增值服务金额。
    *
@@ -119,7 +192,13 @@ export type Order = {
    * 商品改价不影响历史订单。
    */
   originalAmount: number;
-  /** 优惠券抵扣金额。P0 恒为 0，P1 接入优惠券后才有非 0 值 */
+  /**
+   * 这一单**实际**抵扣掉的券金额（P1-4 起可能非 0）。
+   *
+   * ⚠️ 它与 `coupon?.discountAmount`（券的名义面额）**可能不相等**：
+   * 满 10 减 100 的券在 50 元的单上，名义面额是 100 元，实际只抵掉 50 元。
+   * 算钱一律读这个字段，读券面看 `coupon`。
+   */
   couponDiscountAmount: number;
   /** 用户实付 = originalAmount − couponDiscountAmount。**分账的起点** */
   actualPaidAmount: number;
@@ -133,6 +212,24 @@ export type Order = {
   refundedAmount: number;
 
   /**
+   * 这一单用掉的券快照（P1-4）。没用券时为 null。
+   *
+   * ⚠️ **退款不改动它，一个字都不改**——`coupon` / `couponDiscountAmount` /
+   * `actualPaidAmount` 在退款之后**原样保留**。它们记录的是「这一单当初发生了什么」，
+   * 不是「现在还能不能用」。
+   *
+   * ⚠️ 但「**券的使用资格**会不会被退还」是**另一件事**（P1-4 验收整改轮 §一 / §二）：
+   * 从未被任何打手承接的订单退款后，`CouponClaim` 会 `used → unused`。
+   * 于是会出现「订单快照说用过这张券、而这张券现在又是 `unused`」——
+   * **这是正确的**，不是矛盾：订单历史仍然说明「当时用过」，
+   * 而使用资格因为「从未被承接 + 退款成功」被还回去了。
+   *
+   * `claimId` 同时也是返券的**唯一入口**：退款时靠它找回当初那张 Claim
+   * （`lib/data/couponRedemptionTransaction.ts` 的 `restoreCouponClaimForOrder`）。
+   */
+  coupon: OrderCouponSnapshot | null;
+
+  /**
    * **实际接到这单**的打手 id；还没有人接时为 null（P0-5 改名，原名 `companionId`）。
    *
    * ⚠️ 它回答的是「**谁在履约**」，不是「用户想要谁」。两件事现在是两个字段：
@@ -142,7 +239,7 @@ export type Order = {
    * | 用户**指定**过谁 | `Dispatch.exclusiveCompanionId` | 下单那一刻（结算页选的人） |
    * | 实际**接到**的是谁 | 本字段 | 接单那一刻 |
    *
-   * 一条真实路径：用户指定 A → A 十分钟内没接 → 自动进公共池 → B 接单。
+   * 一条真实路径：用户指定 A → A 在独占期内没接 → 自动进公共池 → B 接单。
    * 此时 `Dispatch.exclusiveCompanionId` 是 A、本字段是 B，两个事实都留得住。
    *
    * 旧名字同时表达这两件事，是 P0-5 之前「下单即绑定」那套模型的遗留：那时
@@ -203,7 +300,15 @@ export type OrderListItem = {
   productCoverUrl: string;
   specName: string;
   quantity: number;
-  totalAmount: number;
+  /**
+   * 单位：分。**用户实付** = 原价 − 券抵扣（P1-4 补）。
+   *
+   * ⚠️ 列表上**只有这一个金额**，而且它就是卡片上那句「实付」。（P1-4 之前这里叫
+   * `totalAmount`，含义是**优惠前**应付总额；接了满减券之后它比用户真正付掉的钱大，
+   * 再拿它渲染「实付」就是直接告诉用户他多花了钱。）优惠前的原价在详情页上叫
+   * `originalAmount`——全仓库对「原价」只有这一个名字，列表刻意不再带第二个金额。
+   */
+  actualPaidAmount: number;
   /** 未绑定时为 null，页面显示「等待接单」 */
   companion: OrderCompanionSnapshot | null;
 };
@@ -323,6 +428,13 @@ export type OrderDetail = OrderListItem & {
   /** 护航收益：这一单分给打手的钱（用户可见，用于「护航收益 ¥40」这一行） */
   companionBaseIncome: number;
   refundedAmount: number;
+  /**
+   * 用掉的券（P1-4）；没用券为 null。
+   *
+   * 详情页据此显示「优惠券 −¥10 满100减10」这一行。⚠️ 与 `couponDiscountAmount`
+   * 的分工：金额读那个，券名与券面文案读这里。
+   */
+  coupon: OrderCouponSnapshot | null;
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
 
@@ -366,6 +478,12 @@ export type OrderDetail = OrderListItem & {
  * 「平台净收入」属于平台自己的账——把它们带进打手端响应，只是让内部账目
  * 顺着接口流到浏览器。
  *
+ * ⚠️ **P0-15 起有唯一一个例外：`netIncomeAmount`**——它是**打手自己的钱**，
+ * 不是平台的账。加它的理由不是「顺便显示一下」，而是产品规则要求：
+ * 一单被退款之后打手**必须立刻看到「本单收益 ¥0」**，否则他会继续
+ * 按「这一单还能挣到钱」来安排时间。它不是平台金额域的第二份副本：
+ * 与「我的收益」页上的 `netAmount` 同源同义，只是换了个落点。
+ *
  * ⚠️ **也不含**：`userId`（下单人是另一个人，给 id 没有用途）、
  * 管理员备注（内部信息）、售后 / 投诉 / 退款摘要（那属于用户与客服的页面）、
  * `exclusiveCompanionId`（那是用户的选择，服务端据此收窄归属，
@@ -380,6 +498,45 @@ export type CompanionOrderListItem = {
   status: OrderStatus;
   /** 状态中文名（`ORDER_STATUS_LABELS`）。服务端给，页面不自己维护一份文案 */
   statusLabel: string;
+  /**
+   * 打手侧的**展示状态**（P0-15）——与 `status` 是两条线。
+   *
+   * 一单被部分退款（比如 10%）之后，订单的真实生命周期照走（`serving` / `completed`），
+   * 但打手这一单的钱已经全部取消，因此他看到的应当是「已退款」。
+   * 全额退款时两者恰好相同（都是 `refunded`）。
+   *
+   * ⚠️ **由服务端算好**（`resolveCompanionDisplayStatus`）：页面不得自己写
+   * `refundedAmount > 0 ? … : …`——那会把同一条口径复制到每一个渲染点上。
+   *
+   * ⚠️ **它不参与任何可写性判断**：聊天的可写性看的是真实订单状态
+   * （`isOrderChatClosed`），不是它。拿展示状态去锁沟通，会让部分退款的
+   * 售后沟通在最需要的时候断掉。
+   */
+  displayStatus: OrderStatus;
+  /** 展示状态的中文名。服务端给，与 `statusLabel` 同一个来源（`ORDER_STATUS_LABELS`） */
+  displayStatusLabel: string;
+  /**
+   * **本单收益**净额（分）——打手自己在这一单上最终拿到多少。
+   *
+   * | 情形 | 值 |
+   * |---|---|
+   * | 有收益记录（订单已结算） | `incomeAmount − reversedAmount` |
+   * | 没有收益记录，但订单已退款 | `0`（规则：退款把这一单收益取消） |
+   * | 没有收益记录，也未退款 | `null`（这笔账还没产生） |
+   *
+   * ⚠️ **`null` 与 `0` 是两件事**，页面必须分开渲染：`null` 是「还没结算」，
+   * `0` 是「结算过、但一分不剩」。合并成一句「¥0」会让尚未完成的订单
+   * 看起来像已经被退款了。
+   *
+   * ⚠️ **第二行那条 0 是规则给的，不是从收益记录读的**：订单在完成之前根本没有
+   * Earning（`settleOrderCompletion` 只在 `serving → completed` 时建它），
+   * 而「完成前被退款」恰恰是最常见的一类退款。若这里回 `null`，
+   * 打手就会看到一行「本单收益 —」，而事实是他这一单挣了 0 元。
+   *
+   * ⚠️ **服务端算好给**，页面不做减法——金额算术只有一处
+   * （与 `CompanionEarningItem.netAmount` 同一条约定）。
+   */
+  netIncomeAmount: number | null;
   /** 下单（支付成功）时间 */
   paidAt: string;
   /** 接单时间；本列表里都是他接过的单，因此正常有值，历史数据缺失时为 null */
@@ -733,8 +890,16 @@ export type AdminOrderListItem = {
   productTitle: string;
   specName: string;
   quantity: number;
-  /** 单位：分。订单实付金额快照 */
-  totalAmount: number;
+  /**
+   * 单位：分。**订单实付金额**快照 = `actualPaidAmount`。
+   *
+   * ⚠️ **P1-4 换掉了这里的字段**（原为 `order.totalAmount`）。那个数是
+   * **优惠前**的应付总额，而列表这一列的表头一直写着「实付金额」——用了券之后
+   * 两者不再相等，继续读 `totalAmount` 就是让后台把「原价」当成「用户付了多少」。
+   * 列表只保留一个金额，因此这里给的是**用户真的付掉的那个数**；
+   * 原价、券抵扣与分账明细在详情页里（`AdminOrderDetail`）。
+   */
+  actualPaidAmount: number;
   user: AdminUserSummary;
 };
 
@@ -759,6 +924,26 @@ export type AdminOrderDetail = AdminOrderListItem & {
   itemsAmount: number;
   addonsAmount: number;
   addons: OrderAddonSnapshot[];
+
+  /**
+   * 单位：分。**优惠前**应付 = `itemsAmount + addonsAmount`（P1-4 补）。
+   *
+   * ⚠️ 这里是**订单的金额域**，不是 `Order.totalAmount` 的同名搬用——虽然两者
+   * 当前恒等。既有 DTO 里「原价」一律叫 `originalAmount`（用户端 `OrderDetail`、
+   * `StaffOrderDetail`、`AdminRefundDetail` 都是），后台订单详情跟着叫这个名字，
+   * 三处展示才是同一套说法（`cmd_p1-4.md` 测试第 17 条）。
+   */
+  originalAmount: number;
+  /** 单位：分。优惠券实际抵扣（P1-4）。没用券时为 0 */
+  couponDiscountAmount: number;
+  /**
+   * 单位：分。这一单用的券快照（P1-4）。没用券时为 null。
+   *
+   * 与用户端 `OrderDetail.coupon` 是同一个形状、同一份数据：后台看到的券面
+   * 必须与用户看到的一致，因此不另做一份「后台版」。它冻结在订单上，
+   * 之后改券模板不影响这里（裁定 §9）。
+   */
+  coupon: OrderCouponSnapshot | null;
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
 
@@ -766,7 +951,7 @@ export type AdminOrderDetail = AdminOrderListItem & {
    * 用户**指定**的护航；没指定为 null（P0-5，原字段名 `companion`）。
    *
    * 来自派单的 `exclusiveCompanionId`，**不是**订单上的字段：订单只记得「谁在履约」。
-   * 它与实际接单的人可以**同时有值且不相同**——用户指定 A、A 十分钟没接、
+   * 它与实际接单的人可以**同时有值且不相同**——用户指定 A、A 在独占期内没接、
    * B 从公共池接走，这一单在后台就该显示成「指定：A / 实际：B」。
    * 只给一个字段的话，「用户要的人没接」这件事在后台完全不可见，
    * 客服也就回答不了「我明明指定了 A，怎么是 B 在打」。

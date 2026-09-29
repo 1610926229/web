@@ -806,7 +806,7 @@ test("编辑立刻反映到前台：后台、用户端列表、详情页、结�
   assert.equal(fromCheckout.displayName, "改过的名字（占位）");
 
   // 结算页真的能用这条记录下单（可接单时）：试算通过，且正式下单把它写进快照
-  await previewCheckout(checkoutSelection("cp-1"), undefined, "server");
+  await previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server");
   const { request } = await createPaymentRequest(
     { ...checkoutSelection("cp-1"), idempotencyKey: uniqueKey() },
     "u-1001",
@@ -947,7 +947,7 @@ test("暂停接单：仍在名单与详情里，但结算时不可选", async ()
 
   // 结算页拒绝：详情页能打开不等于可以下单
   await expectApiError(
-    previewCheckout(checkoutSelection("cp-1"), undefined, "server"),
+    previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server"),
     "BAD_REQUEST",
     "该陪玩当前不可选，请重新选择",
   );
@@ -978,7 +978,7 @@ test("停用：从用户端列表与结算页消失，直链详情是只读的�
   assert.equal(detail.selectable, false);
 
   await expectApiError(
-    previewCheckout(checkoutSelection("cp-1"), undefined, "server"),
+    previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server"),
     "BAD_REQUEST",
     "该陪玩当前不可选，请重新选择",
   );
@@ -1025,7 +1025,7 @@ test("移除是软删除：不物理删除、用户端不可见、后台仍可�
   const list = await publicCompanions();
   assert.equal(list.items.some((item) => item.id === "cp-1"), false);
   await expectApiError(
-    previewCheckout(checkoutSelection("cp-1"), undefined, "server"),
+    previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server"),
     "BAD_REQUEST",
     "该陪玩当前不可选，请重新选择",
   );

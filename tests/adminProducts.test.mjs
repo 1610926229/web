@@ -1510,8 +1510,7 @@ test("下架商品的直链继续显示「已下架」：重新上架再下架�
         remark: "",
         companionId: null,
       },
-      undefined,
-      "server",
+      "u-1001", undefined, "server",
     ),
     "BAD_REQUEST",
     "商品已下架，无法支付",
@@ -1594,9 +1593,9 @@ test("改价只影响之后的试算与支付，历史订单读的是下单那�
   });
 
   // ③ 之后的试算用新价
-  const preview = await previewCheckout(selection, undefined, "server");
+  const preview = await previewCheckout(selection, "u-1001", undefined, "server");
   assert.equal(preview.spec.price, 3990);
-  assert.equal(preview.totalAmount, 3990);
+  assert.equal(preview.originalAmount, 3990);
 
   // ④ 历史订单一点都没变：它读的是快照，不是商品当前值
   const persisted = await getOrderForUser(order.id, USER);
@@ -2328,7 +2327,11 @@ test("结算试算按分算、历史订单读的是下单快照：改价之后�
   const quoted = JSON.parse(preview.body).data;
   assert.equal(quoted.spec.price, 1000, "试算读到的单价是 1000 分");
   assert.equal(quoted.itemsAmount, 2000, "单价 × 数量按分计算");
-  assert.equal(quoted.totalAmount, 2000);
+  // 试算的字段名是 `originalAmount`（P1-4 改的名，原为 `totalAmount`）：
+  // 它给的是**优惠前**应付；实付是另一个字段。这一单没有券，因此两者相等
+  assert.equal(quoted.originalAmount, 2000);
+  assert.equal(quoted.couponDiscountAmount, 0, "没选券就没有抵扣");
+  assert.equal(quoted.actualPaidAmount, 2000, "无券时实付等于原价");
 
   // ⑩ 下单 → 改价 → 历史订单不变
   const pay = await sendWithCookie(

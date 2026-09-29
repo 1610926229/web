@@ -3,6 +3,7 @@ import { PLATFORM_CONFIG_ID } from "@/lib/constants/platformConfig";
 import type { PlatformConfig } from "@/lib/types/platformConfig";
 import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import {
+  normalizePlatformConfig,
   platformConfigStore,
   readPlatformConfig,
   writePlatformConfig,
@@ -77,11 +78,12 @@ export type AdminPlatformConfigWriteOutcome =
 /**
  * 本模块能改的字段（**白名单**）。没有 `updatedAt` / `updatedByAdminId`：那两个由事务写。
  *
- * ⚠️ 三个字段都**可选**（PATCH 只带要改的那一项），但**至少一个**——空 PATCH 不算
+ * ⚠️ 四个字段都**可选**（PATCH 只带要改的那一项），但**至少一个**——空 PATCH 不算
  * 改动，这个「至少一个」由服务层校验（`PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE`）。
  * 事务层按「没带的字段保持现状」合并，而不是清空。
  */
 export type PlatformConfigInput = {
+  exclusivePoolTimeoutMinutes?: number;
   publicPoolTimeoutMinutes?: number;
   completionAutoApprovalMinutes?: number;
   complaintWindowMinutes?: number;
@@ -90,7 +92,7 @@ export type PlatformConfigInput = {
 /**
  * 本模块能改的字段清单，**只用于「这次到底改没改」的判定**。
  *
- * ⚠️ 它存在的理由是让「加第四个参数时忘记更新判定」变成**编译错误**：
+ * ⚠️ 它存在的理由是让「加第五个参数时忘记更新判定」变成**编译错误**：
  * 类型是 `Record<keyof PlatformConfigInput, true>`，少写一个键就通不过 `tsc`。
  * 写成手写的 `next.x !== previous.x && next.y !== previous.y` 链则不会——
  * 那种写法漏掉一个字段时，改**只有那个字段**的请求会走进「值没变」分支，
@@ -100,6 +102,7 @@ export type PlatformConfigInput = {
  * 少写一个同样是编译错误。两边因此各有各的编译期保险，不依赖人的记性。
  */
 const PATCHABLE_FIELDS: Record<keyof PlatformConfigInput, true> = {
+  exclusivePoolTimeoutMinutes: true,
   publicPoolTimeoutMinutes: true,
   completionAutoApprovalMinutes: true,
   complaintWindowMinutes: true,
@@ -133,10 +136,13 @@ export async function updatePlatformConfig(
   const previous = { ...store.config };
 
   // PATCH 合并：没带的字段保持现状，带了的字段用新值。合并结果就是「这次若写、会写成什么」。
-  // 用展开 `...previous` 而不是逐字段列：三个字段的 `updatedAt` / `updatedByAdminId`
-  // 覆盖写在后面，其余值原样带过来——将来加第四个参数时这里**不需要**改一行。
+  // 用展开 `...previous` 而不是逐字段列：这四个时长字段**必须一个一个列出来**
+  // （展开不会替我们把「带了的字段用新值」做掉），而 `updatedAt` / `updatedByAdminId`
+  // 覆盖写在后面。⚠️ 漏列一个字段的后果由 `PATCHABLE_FIELDS` 兜住（它是编译期保险）。
   const next: PlatformConfig = {
     ...previous,
+    exclusivePoolTimeoutMinutes:
+      input.exclusivePoolTimeoutMinutes ?? previous.exclusivePoolTimeoutMinutes,
     publicPoolTimeoutMinutes: input.publicPoolTimeoutMinutes ?? previous.publicPoolTimeoutMinutes,
     completionAutoApprovalMinutes:
       input.completionAutoApprovalMinutes ?? previous.completionAutoApprovalMinutes,
@@ -151,10 +157,22 @@ export async function updatePlatformConfig(
     .every((field) => next[field] === previous[field]);
 
   if (replay?.kind === "replay" || nothingChanged) {
+    // ⚠️ 返回给调用方的两份必须过一遍**读边界归一化**，与 `readPlatformConfig()` 同一口径。
+    //
+    // 这条分支是唯一一条**不经过 `writePlatformConfig()`** 就返回配置的路径，而
+    // `previous` 是从 store 里直接展开出来的原始记录——代码升级后仍未重建的旧 store
+    // 可能缺 `exclusivePoolTimeoutMinutes`，于是返回对象里那个键是 `undefined`
+    // （JSON 序列化后**键直接消失**），管理端页面走 `setConfig(result.config)` 之后
+    // 会显示成「`undefined` 分钟」。读路径有兜底，写路径的这条分支绕过了它。
+    //
+    // ⚠️ **只归一化返回值，不动 `previous`**：`previous` 是上面 no-op 判据的合并基准，
+    // 把它也归一化会让「脏 store + 恰好提交默认值」落进 `nothingChanged` 而**永不写盘**
+    // ——那样旧 store 就再也修不好了。
+    const snapshot = normalizePlatformConfig(previous);
     return {
       kind: "ok",
       // 两份互不相关的副本，而不是同一个对象的两个别名
-      value: { previous: { ...previous }, updated: { ...previous } },
+      value: { previous: { ...snapshot }, updated: { ...snapshot } },
       changed: false,
       replayed: replay?.kind === "replay",
     };

@@ -806,6 +806,21 @@ test("唯一转换点：sourceLabel 只来自 COMPANION_RELEASE_SOURCE_LABELS，
     );
   }
 
+  // P0-14：回落规则本身（「查不到名字就用 id」）**全仓只有一处实现**。
+  // 会话分段（`toStaffConversationSegments`）与退出历史条目共用它，
+  // 因此这里数的是**表达式**而不是文件名：任何人再写一遍 `|| companionId` 都会现形，
+  // 而「共用一份实现」这件事无法靠改名绕过——多写一次就多一处，计数立刻变 2。
+  const conversionPoint = stripComments(readSource(path.join(ROOT, "lib", "constants", "staff.ts")));
+  assert.equal(
+    [...conversionPoint.matchAll(/\|\|\s*companionId/g)].length,
+    1,
+    "「查不到名字回落到 id」必须只有一处实现（resolveCompanionDisplayName）",
+  );
+  assert.ok(
+    conversionPoint.includes("export function resolveCompanionDisplayName"),
+    "回落规则应当由 resolveCompanionDisplayName 承载",
+  );
+
   // 转换点本身只有一个定义处
   const definitions = collectFiles(path.join(ROOT, "lib"))
     .filter((file) => file.endsWith(".ts"))
@@ -891,10 +906,27 @@ test("隐私边界未被放宽：三个 DTO 仍然没有游戏 ID、订单备注
     "companionRateSnapshot",
     "companionRateBp",
     "refundedAmount",
-    "actualPaidAmount",
     // 退出历史的内部字段（它只该以六个字段的形式出现在 releaseHistory 里）
     "actorId",
   ];
+
+  // ⚠️ `actualPaidAmount` 曾经在这张表里，**已经移出**（P1-4），理由要写清楚，
+  // 否则下一个人会以为它是被顺手放行的：
+  //
+  // 1. 它**不是**平台账目，而是**用户自己付掉的钱**。客服页上那一行本来就叫
+  //    「实付金额」，P1-4 之前读的是同一个数（当时叫 `totalAmount`）——
+  //    所以这里**没有放宽任何边界**，只是字段改了名。
+  // 2. 客服需要它：退款金额以实付为基数（裁定 §10），看不到实付就核对不了退款。
+  // 3. P0-15 冻结的是**退款决策参数**（`refundRateBp` / `companionReversalAmount`）——
+  //    那两项仍在客服与用户视野之外（见 `tests/refundMoneyChain.test.mjs`）。
+  //    「决策参数不可见」与「结果金额可见」是两件事，不能混成一句「金额都不给看」。
+  //
+  // 真正要守的是下面这一条：**分账口径**不得随实付一起漏出去。
+  assert.equal(
+    FORBIDDEN.includes("actualPaidAmount"),
+    false,
+    "实付金额不是平台账目：客服必须能看到它（退款以它为基数）",
+  );
 
   for (const [name, dto] of [
     ["会话详情", conversation],

@@ -12,12 +12,13 @@ import {
   readAdminRefundDecisionInput,
   readAdminRefundStatusFilter,
   refundMatchesAdminKeyword,
+  refundStatusesForFilter,
   toAdminRefundDetail,
   toAdminRefundListItem,
   type AdminRefundListQuery,
 } from "@/lib/constants/adminRefunds";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
-import { REFUND_STATUS_LABELS, sumApprovedCompanionReversal } from "@/lib/constants/refunds";
+import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
 import { IDEMPOTENCY_KEY_PATTERN, readIdempotencyKey, readTrimmedString } from "@/lib/constants/writes";
 import {
   approveRefund,
@@ -26,10 +27,8 @@ import {
   type AdminRefundWriteFailure,
   type AdminWriteContext,
 } from "@/lib/data/adminRefundTransaction";
-import { getEarningRepository } from "@/lib/data/earningRepository";
-import { ADMIN_ORDER_UNFILTERED_QUERY, getPaymentRepository } from "@/lib/data/paymentRepository";
+import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
-import { getUserRepository } from "@/lib/data/userRepository";
 import { mockEmptyApplies, withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { Order } from "@/lib/types/order";
 import type {
@@ -39,7 +38,7 @@ import type {
   RefundRequest,
   RefundStatus,
 } from "@/lib/types/refund";
-import type { AdminUserSummary } from "@/lib/types/user";
+import { adminOrderIndex, adminUserIndex, missingUser } from "./adminIndex";
 
 /**
  * 管理端「退款审核」服务 —— 列表、详情与三个审核动作的唯一入口。
@@ -48,9 +47,10 @@ import type { AdminUserSummary } from "@/lib/types/user";
  * 服务本身不再做一次角色判断：权限判断只有一处（`lib/api/adminRoute.ts`）。
  *
  * ⚠️ **本文件接收不到金额**（P0-13 起口径微调：接收的是**比例**，仍然不是金额）。
- * 通过动作的入参是幂等键、审核意见与资金决策三件套
- * （`refundRatePercent` / `responsibility` / `companionLiabilityRatePercent`），
- * 三个金额一律由数据层的 `computeRefundDecisionAmounts` 按订单冻结快照算出来
+ * 通过动作的资金决策入参**只有一个字段** `refundRatePercent`
+ * （P0-13 曾是「三件套」，另两件 `responsibility` / `companionLiabilityRatePercent`
+ * 随**责任模型整体废止**在 P0-15 删除，见 `02-decisions.md` D18 / 指令 ①§五），
+ * 两个金额一律由数据层的 `computeRefundDecisionAmounts` 按订单冻结快照算出来
  * （`业务流程表.md` §16.B：「管理员只输入退款比例，金额由系统计算」）。
  * 请求体里没有任何字段能传金额进来，写入侧也没有接收金额的位置。
  *
@@ -62,27 +62,8 @@ import type { AdminUserSummary } from "@/lib/types/user";
 
 // ——————————————————————————— 用户与订单摘要 ———————————————————————————
 
-/**
- * userId → 用户摘要。与订单列表同一做法：一次取回全部用户，避免逐条查询。
- */
-async function adminUserIndex(): Promise<Map<string, AdminUserSummary>> {
-  const users = await getUserRepository().listUsers();
-  return new Map(
-    users.map((user) => [user.id, { id: user.id, displayId: user.displayId, nickname: user.nickname }]),
-  );
-}
-
-/**
- * orderId → 订单。
- *
- * ⚠️ 关键词里含**订单号**，而订单号在订单上、不在退款申请上。因此匹配必须在分页**之前**
- * 完成，也就必须先把订单取回来——逐条 `findOrderById` 会让「先翻到第 2 页、再判断这一页
- * 命中没有」成为唯一可能的顺序，那样 `total` 与实际能翻到的条数必然分叉。
- */
-async function adminOrderIndex(): Promise<Map<string, Order>> {
-  const orders = await getPaymentRepository().queryOrdersForAdmin(ADMIN_ORDER_UNFILTERED_QUERY);
-  return new Map(orders.map((order) => [order.id, order]));
-}
+// `adminUserIndex` / `adminOrderIndex` / `missingUser` 见 `./adminIndex`
+// （P1-3 抽出：四个管理列表此前各有一份逐字节相同的副本）。本文件只是使用者。
 
 /**
  * 退款申请挂着的订单。
@@ -100,10 +81,8 @@ function orderOf(index: Map<string, Order>, refund: RefundRequest): Order | unde
   return index.get(refund.orderId);
 }
 
-/** 用户记录缺失时的占位摘要（同订单列表：缺一条用户记录不该让整页打不开）。 */
-function missingUser(userId: string): AdminUserSummary {
-  return { id: userId, nickname: "", displayId: "" };
-}
+// `missingUser` 见 `./adminIndex`。⚠️ 本文件对**订单**缺失的处理与其它列表相反
+// （当作这条退款不可读，见上面的 `orderOf`），共用的是那个函数，不是那条规则。
 
 // ——————————————————————————— 列表 ———————————————————————————
 
@@ -153,7 +132,7 @@ export async function queryAdminRefundList(
 
     const [rows, orders, users] = await Promise.all([
       getRefundRepository().queryRefundsForAdmin({
-        status: query.status === "all" ? null : query.status,
+        statuses: refundStatusesForFilter(query.status),
       }),
       adminOrderIndex(),
       adminUserIndex(),
@@ -200,16 +179,16 @@ export async function queryAdminRefundList(
  * 详情里补齐原因、说明、凭证、审核信息、进度时间轴与**服务端判定的** `allowedActions`：
  * 页面不拿状态自己写 `if`，终态三项都是 false。
  *
- * ## 订单金额快照（P0-13 验收整改 C）
+ * ## 订单金额快照（P0-13 验收整改 C · P0-15 收敛）
  *
- * 除了订单自己冻结的六个金额，还要查两样东西：
+ * ⚠️ **P0-15 起这里不再有一次「额外查询」**。原先要查两样收益域的东西：
+ * 既往已冲回额（`sumApprovedCompanionReversal`）与收益状态（D17 的 `withdrawn` 特例）。
+ * 两者都随责任模型与「累计冲回」一并删除，于是金额快照退化成
+ * **订单自身六个冻结字段的直接搬运**（`toAdminRefundOrderMoney`）。
  *
- * 1. **既往已冲回额**：该订单全部已批准退款的 `companionReversalAmount` 之和。
- *    它由 `sumApprovedCompanionReversal()` 算——与写入路径
- *    （`lib/data/adminRefundTransaction.ts`）是**同一个函数**，因此界面上算出来的
- *    「本次预计退款金额」与提交后真正写下去的数不可能不一致。
- * 2. **收益状态**：`withdrawn` 时 D17 规定本轮不冲回，界面必须据此改写预计金额与说明。
- *    收益可能不存在（`serving` 订单还没结算，D9），那种情况传 `null`。
+ * ⚠️ 因此这里**不再需要并发取两处**：`getEarningRepository()` 的调用一并去掉。
+ * 留着它只会是一次「查了但没人用」的读取，而那种读取最容易被后来的人
+ * 当成「这里依赖收益域」的证据，从而把已经删掉的逻辑又加回来。
  */
 export async function getAdminRefundDetail(
   id: string,
@@ -227,20 +206,10 @@ export async function getAdminRefundDetail(
 
     const users = await adminUserIndex();
 
-    // 两处额外查询并发：它们互不依赖，串行只是白等
-    const [refundsOfOrder, earning] = await Promise.all([
-      getRefundRepository().listRefundsByOrderId(order.id),
-      getEarningRepository().findEarningByOrderId(order.id),
-    ]);
-
     return toAdminRefundDetail(
       refund,
       order,
       users.get(refund.userId) ?? missingUser(refund.userId),
-      {
-        reversedSoFarAmount: sumApprovedCompanionReversal(refundsOfOrder),
-        companionEarningStatus: earning?.status ?? null,
-      },
     );
   });
 }
@@ -377,7 +346,8 @@ export async function startReviewAdminRefund(
 
 /**
  * 通过：`pending | reviewing → approved`，并**在同一次写入里**写入资金决策、
- * 累计订单退款额、打手收益冲回与（累计退满时）订单状态。
+ * 订单退款额（一单一退：这个字段只被写一次）、打手收益**整笔**冲销，
+ * 以及（**只有比例 100% 时**）订单状态与派单关闭。
  *
  * 那几件事（退款状态、审核人 / 意见 / 时间、资金决策、订单、收益、审计）由伪事务
  * 在同一段无 `await` 的同步区段里完成，因此不会出现「退款已通过但订单未退款」
@@ -385,9 +355,9 @@ export async function startReviewAdminRefund(
  *
  * 审核意见选填，见 `normalizeOptionalReviewNote`。
  *
- * ⚠️ **金额闸（单次 > 0、累计不超过实付）不在这一层判**：它要读订单当前的累计已退额，
+ * ⚠️ **金额闸（> 0、不超过实付）不在这一层判**：它要读订单当前的已退额，
  * 与后面的写入必须同段（见 `AdminRefundWriteFailure` 的 `decision-invalid`）。
- * 这一层判的是**请求体的形状**——比例与责任归属填得对不对，判完才进数据层。
+ * 这一层判的是**请求体的形状**——比例填得对不对，判完才进数据层。
  */
 export async function approveAdminRefund(
   id: string,
@@ -399,7 +369,7 @@ export async function approveAdminRefund(
 
   const reviewNote = normalizeOptionalReviewNote(readTrimmedString(body, "reviewNote"));
 
-  // 决策三件套：百分比字符串 → 基点整数。形状与范围在这里一次判完，
+  // 资金决策：百分比字符串 → 基点整数。形状与范围在这里一次判完，
   // 因此数据层永远只面对合法的 `RefundDecisionInput`
   const decision = readAdminRefundDecisionInput(body);
   if (!decision.ok) throw new ApiError("BAD_REQUEST", decision.message, 400);

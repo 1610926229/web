@@ -17,7 +17,7 @@ import { getMockStore } from "./mockStore";
  *
  * 并发安全的前提：Node 是单线程的，而下面「读—判断—写」的**原子区段内没有 await**。
  */
-type MockCouponStore = {
+export type MockCouponStore = {
   coupons: Map<string, Coupon>;
   claims: Map<string, CouponClaim>;
   /** `${userId}:${couponId}` → 领取记录 id（业务唯一键） */
@@ -39,6 +39,21 @@ function createStore(): MockCouponStore {
 
 function store(): MockCouponStore {
   return getMockStore("coupon", createStore);
+}
+
+/**
+ * 本存储的句柄（**同步**）。
+ *
+ * 导出它是为了让券的核销能与「订单 + 派单」写进**同一段无 `await` 的原子区段**
+ * （`lib/data/couponRedemptionTransaction.ts` ← `mockPaymentRepository.confirmPaymentRequest`）。
+ * 与本仓储的其它方法不同，它没有 `Promise` 包装：一旦改成 `await` 调用，
+ * 支付那一段原子区段就会被打断，「一张券被核销两次」就重新变成可能。
+ *
+ * ⚠️ 关于 `resetMockStore()`：它换掉的是 `globalThis` 上的整份存储，因此**每次都要现取**，
+ * 不能在模块顶层缓存一份。这一点与 `paymentStore()` / `dispatchStore()` 相同。
+ */
+export function couponStore(): MockCouponStore {
+  return store();
 }
 
 function couponKey(userId: string, couponId: string): string {
@@ -102,6 +117,12 @@ export const mockCouponRepository: CouponRepository = {
     return id ? (store().claims.get(id) ?? null) : null;
   },
 
+  async findClaimById(userId, claimId) {
+    const claim = store().claims.get(claimId);
+    // 「查不到」与「不是这个人的」返回同一个结果：上层不需要（也不该）自己再比一次
+    return claim && claim.userId === userId ? claim : null;
+  },
+
   async createClaim(claim, idempotencyKey) {
     const current = store();
     const businessKey = couponKey(claim.userId, claim.couponId);
@@ -125,6 +146,32 @@ export const mockCouponRepository: CouponRepository = {
 
     current.claims.set(claim.id, claim);
     current.claimIdByCoupon.set(businessKey, claim.id);
+    current.claimIdByKey.set(requestKey, claim.id);
+    // —— 原子区段结束 ——
+
+    return { claim, created: true };
+  },
+
+  /**
+   * 管理员发放（P1-4 验收整改轮 §五）。与 `createClaim` 的两处差别见接口上的说明：
+   * **不写** `claimIdByCoupon`（发放不受「一人一券」约束），
+   * 幂等键里带上 `adminId`（不同管理员各自的发放意图互不顶掉）。
+   */
+  async createGrant(claim, idempotencyKey) {
+    const current = store();
+    const requestKey = idempotencyKeyOf(
+      claim.userId,
+      `grant:${claim.grantedByAdminId ?? "unknown"}:${idempotencyKey}`,
+    );
+
+    // —— 原子区段开始（无 await）——
+    const byRequest = current.claimIdByKey.get(requestKey);
+    if (byRequest) {
+      const existing = current.claims.get(byRequest);
+      if (existing) return { claim: existing, created: false };
+    }
+
+    current.claims.set(claim.id, claim);
     current.claimIdByKey.set(requestKey, claim.id);
     // —— 原子区段结束 ——
 

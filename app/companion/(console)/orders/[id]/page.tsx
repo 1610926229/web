@@ -8,16 +8,21 @@ import CompanionOrderCancelPanel from "@/components/companion/CompanionOrderCanc
 import CompanionOrderStartPanel from "@/components/companion/CompanionOrderStartPanel";
 import PriceText from "@/components/common/PriceText";
 import { getSessionUser } from "@/lib/auth/session";
+import { COMPANION_CHAT_ENTRY_LABEL } from "@/lib/constants/conversations";
 import {
   COMPANION_ORDER_CANCEL_UNAVAILABLE_NOTICE,
   COMPANION_ORDER_DETAIL_PAGE_TITLE,
   COMPANION_ORDERS_BACK_LABEL,
 } from "@/lib/constants/dispatch";
-import { ORDER_STATUS_CLASS } from "@/lib/constants/orders";
+import {
+  COMPANION_ORDER_INCOME_LABEL,
+  COMPANION_ORDER_INCOME_REFUNDED_NOTE,
+  ORDER_STATUS_CLASS,
+} from "@/lib/constants/orders";
 import { resolveCompanionAccess } from "@/lib/services/companionAccess";
 import { getCompanionOrderDetail } from "@/lib/services/companionOrders";
 import type { CompanionOrderDetail } from "@/lib/types/order";
-import { formatDateTime } from "@/lib/utils/format";
+import { formatDateTime, formatYuan } from "@/lib/utils/format";
 
 /**
  * 订单详情（P0-6 / P0-7，`/companion/orders/[id]`）—— 履约所需的全部信息 +
@@ -77,7 +82,23 @@ export default async function CompanionOrderDetailPage({
     <>
       <h2 className="text-[14px] font-semibold text-ink">{COMPANION_ORDER_DETAIL_PAGE_TITLE}</h2>
 
+      {/*
+        订单聊天入口（P0-14）。聊天是订单的延伸，入口放在详情顶部让打手第一时间找到；
+        本页只给入口，不在这里做任何聊天取数。
+      */}
+      <section className="rounded-2xl border border-line px-4 py-4">
+        <Link
+          href={`/companion/chats/${detail.id}`}
+          className="flex h-11 items-center justify-center rounded-full border border-line text-[15px] text-ink-2"
+        >
+          {COMPANION_CHAT_ENTRY_LABEL}
+        </Link>
+      </section>
+
       <StatusSection detail={detail} />
+      {/* 收益紧跟在状态之后：退款改变的第一件事就是这一单的钱，而它是打手看这一页时
+          最先要确认的下一件事（未结算且未退款时这一段整段不出现） */}
+      <IncomeSection detail={detail} />
       <ProductSection detail={detail} />
       <OrderInfoSection detail={detail} />
       <CustomerSection detail={detail} />
@@ -127,16 +148,34 @@ export default async function CompanionOrderDetailPage({
   );
 }
 
-/** 状态区：状态名与状态色都取自同一套常量，页面不硬编码颜色。 */
+/**
+ * 状态区：状态名与状态色都取自同一套常量，页面不硬编码颜色。
+ *
+ * ⚠️ **大字显示的是 `displayStatus`**（P0-15），不是 `status`：一单被部分退款之后，
+ * 订单真实生命周期照走，而打手这一单的钱已经全部取消——他最先看到的那个词
+ * 必须是「已退款」。
+ *
+ * ⚠️ 但**真实状态没有被删掉**：它改成一行明细放在下面（`statusLabel`）。
+ * 「已退款」回答的是「这一单的钱怎么了」，答不出「我还需不需要继续打」——
+ * 而后者恰恰是这位打手此刻要决定的事。两个都显示，各回答一个问题。
+ * 只有真的不一样时才多出这一行：全额退款时两者相同，多一行重复的文字
+ * 只会让人去找那两个词之间的差别。
+ */
 function StatusSection({ detail }: { detail: CompanionOrderDetail }) {
   return (
     <section className="rounded-2xl border border-line px-4 py-4">
-      {/* 状态中文名由服务端给（`statusLabel`），页面不自己维护一份文案 */}
-      <p className={`text-[16px] font-semibold ${ORDER_STATUS_CLASS[detail.status]}`}>
-        {detail.statusLabel}
+      {/* 展示状态的中文名由服务端给（`displayStatusLabel`），页面不自己维护一份文案 */}
+      <p
+        className={`text-[16px] font-semibold ${ORDER_STATUS_CLASS[detail.displayStatus]}`}
+      >
+        {detail.displayStatusLabel}
       </p>
 
       <div className="mt-2">
+        {/* 展示状态与真实状态不同时（部分退款）才补这一行，见上面的说明 */}
+        {detail.displayStatus !== detail.status ? (
+          <DetailRow label="履约状态" value={detail.statusLabel} />
+        ) : null}
         <DetailRow label="订单号" value={detail.orderNo} />
         <DetailRow label="下单时间" value={formatDateTime(detail.paidAt)} />
         {/* 接单时间缺失（历史数据）时如实显示空值，不编一个时刻 */}
@@ -154,6 +193,44 @@ function StatusSection({ detail }: { detail: CompanionOrderDetail }) {
           <DetailRow label="开始服务时间" value={formatDateTime(detail.servingAt)} />
         ) : null}
       </div>
+    </section>
+  );
+}
+
+/**
+ * 本单收益（P0-15）。
+ *
+ * ⚠️ 它出现的条件与列表卡片完全一致：`netIncomeAmount !== null`。
+ * 未结算且未退款时**整段不渲染**——那一段没有内容可说，
+ * 而写上「本单收益 ¥0.00」会让一张正在护航的单看起来像已经被退款了。
+ *
+ * ⚠️ **文案在常量里**（`COMPANION_ORDER_INCOME_*`），与卡片引用的是同一份，
+ * 否则同一件事在两个页面上会有两种说法。
+ */
+function IncomeSection({ detail }: { detail: CompanionOrderDetail }) {
+  if (detail.netIncomeAmount === null) return null;
+
+  const refunded = detail.displayStatus === "refunded";
+
+  return (
+    <section className="rounded-2xl border border-line px-4 py-4">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[13px] text-ink-3">{COMPANION_ORDER_INCOME_LABEL}</span>
+        <span
+          className={`text-[20px] font-semibold tabular-nums ${
+            detail.netIncomeAmount > 0 ? "text-ink" : "text-ink-3"
+          }`}
+        >
+          ¥{formatYuan(detail.netIncomeAmount)}
+        </span>
+      </div>
+
+      {/* 只给数字的话，第一反应是「是不是算错了」——补一句为什么是 0，以及这与比例无关 */}
+      {refunded ? (
+        <p className="mt-2 text-[12px] leading-4 text-ink-3">
+          {COMPANION_ORDER_INCOME_REFUNDED_NOTE}
+        </p>
+      ) : null}
     </section>
   );
 }

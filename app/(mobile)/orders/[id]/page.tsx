@@ -13,9 +13,10 @@ import {
   ORDER_STATUS_LABELS,
 } from "@/lib/constants/orders";
 import { REFUND_STATUS_CLASS, REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
+import { CONVERSATION_ENTRY_HINT } from "@/lib/constants/service";
 import { getOrderDetailForUser } from "@/lib/services/orders";
 import type { OrderDetail } from "@/lib/types/order";
-import { formatDateTime } from "@/lib/utils/format";
+import { formatDateTime, formatYuan } from "@/lib/utils/format";
 
 /**
  * 订单详情页（需登录，只读 + 售后入口）。
@@ -111,21 +112,39 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
 
         {/*
           金额域（P0-3）：下单那一刻冻结在订单上的账。
-          「原价」是优惠前的应付总额，「实付」是实际付掉的钱（当前没有优惠券，两者相等），
-          「护航收益」是这一单按冻结比例分给打手的钱——增值服务由打手履约，
+          「原价」是优惠前的应付总额，「实付」是实际付掉的钱，两者在有满减券时会**不再相等**
+          （P1-4）；「护航收益」是这一单按冻结比例分给打手的钱——增值服务由打手履约，
           因此也参与分账（R3 已确认，见 lib/constants/orderAmount.ts）。
         */}
         <div className="mt-2 border-t border-line pt-1">
           <MoneyRow label="原价" cents={detail.originalAmount} />
+          {/* 优惠行只在**真的减了钱**时出现：券恒不减时渲染一行「−¥0.00」
+              既没有信息量，也会让人以为券生效了。
+              券面文案取自订单上的**券快照**，因此后台之后改券不影响这一行。
+
+              ⚠️ 减号写在 ¥ **前面**，因此不走 `MoneyRow` / `PriceText`：
+              那两个组件把负号交给 `formatYuan`，渲染出来是「¥-10.00」。
+              这一行是「抵扣」而不是一笔负的交易，读作「−¥10.00」才对 */}
+          {detail.coupon && detail.couponDiscountAmount > 0 ? (
+            <div className="flex gap-3 border-b border-line py-2 text-[13px]">
+              <span className="min-w-0 flex-1 break-words text-ink-3">
+                优惠券 · {detail.coupon.valueLabel}
+              </span>
+              <span className="shrink-0 font-semibold text-brand-red">
+                −¥{formatYuan(detail.couponDiscountAmount)}
+              </span>
+            </div>
+          ) : null}
           <MoneyRow label="实付" cents={detail.actualPaidAmount} />
           <MoneyRow label="护航收益" cents={detail.companionBaseIncome} />
         </div>
 
         <div className="mt-2 flex items-baseline justify-end gap-2 border-t border-line pt-2">
-          {/* 支付渠道实际收的钱。当前没有优惠券，它与上面的「实付」是同一个数；
-              优惠券接入之后才会分开，届时这里读的仍然是渠道实收，页面不必改 */}
-          <span className="text-[13px] text-ink-2">订单合计</span>
-          <PriceText cents={detail.totalAmount} className="text-[18px] text-brand-red" />
+          {/* 用户实际付掉的钱。有满减券时它**小于**上面的「原价」——这是正确的，
+              不是差异。读的是金额域的 `actualPaidAmount`，不是
+              `totalAmount`（后者是优惠前的应付总额，不是渠道实收） */}
+          <span className="text-[13px] text-ink-2">实付金额</span>
+          <PriceText cents={detail.actualPaidAmount} className="text-[18px] text-brand-red" />
         </div>
       </section>
 
@@ -258,7 +277,7 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
           <ActionRow
             href={`/service/chat/${detail.id}`}
             label="订单沟通"
-            hint={unread > 0 ? `未读 ${unread} 条` : "与客服 / 打手沟通"}
+            hint={unread > 0 ? `未读 ${unread} 条` : CONVERSATION_ENTRY_HINT}
             hintClass={unread > 0 ? "text-brand-red" : undefined}
           />
         ) : null}

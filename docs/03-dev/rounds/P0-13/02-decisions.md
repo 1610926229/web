@@ -281,6 +281,42 @@ P0-9 是**刻意**把这三个字段留成空壳的，它明确拒绝替后续�
 > 按 `development-workflow.md` §十二 的格式：`### User Answer` 照录裁定原文，`### Final Execution Rule` 写本轮的执行口径，
 > `Status: RESOLVED`。**§三 / §四 / §七 的原始提问一字未改**——裁定是追加，不是覆盖。
 
+---
+
+> # ⛔ 2026-09-28：本节 `D-Q1` / `D-Q2` / `D-Q3` 的资金口径**已被 P0-15 取代**
+>
+> **本节以下内容一个字都没有修改**（`development-workflow.md`：历史 Round 只可批注、不可改写）。
+> 保留它是为了让「为什么曾经这么定」可查。**它不是当前规则，不得据此开发。**
+>
+> **下列条款已失效**（P0-15 已从类型、常量、仓储、事务、DTO、界面**全部删除**）：
+>
+> | 原条款 | 位置 | 现状 |
+> |---|---|---|
+> | 三种责任归属 `platform` / `companion` / `shared` | `D-Q1` ① | ⛔ **已废止**。管理员不再认定责任 |
+> | `companionLiabilityRateBp`（共担时的打手责任比例） | `D-Q1` ① | ⛔ **已废止**，字段已删除 |
+> | `platformBorneAmount`（平台承担额） | `D-Q1` ③ | ⛔ **已废止**（它是 `refundAmount` 的第二份真值） |
+> | `shared` 的连乘公式 `floor(base × rate × liability)` | `D-Q1` ① | ⛔ **已废止** |
+> | 「同一 Earning 允许被**多次**退款产生的 adjustment 冲减」 | `D-Q2` ④ | ⛔ **已废止**。一单一退，`EarningAdjustment` 至多一条 |
+> | 部分冲回后 `status = available`、累计冲满才 `reversed` | `D-Q2` ② | ⛔ **已废止**。退款通过后**整笔冲销** → `reversed` |
+> | 冲回额 = `floor(base × refundRate)`（按比例） | `D-Q1` ① | ⛔ **已废止**。冲回额**恒等于** `incomeAmount`，**与比例无关** |
+> | `withdrawn` 不冲回（`D17` / `D-Q3`） | `D17` / `D-Q3` | ⚠️ 结论仍是「不冲回」，但**理由换了**：不是「DEFER 已提现追回」，而是**普通退款业务下 `withdrawn` 结构上不可达** |
+>
+> **哪些没有变**（这些**仍然有效**，新规则继续遵守）：
+>
+> - ✅ `Earning.incomeAmount` **不可变**，是历史快照（`D-Q2` ①）；
+> - ✅ 累计冲回字段复用**已有**的 `Earning.reversedAmount`，**不新增平行字段**（`D-Q2` ①）；
+> - ✅ 净收益 `incomeAmount − reversedAmount` 是**派生值，不落库**（`D-Q2` ①）；
+> - ✅ `EarningAdjustment` 实体与 `refundId` 幂等键（`D-Q2` ④ / `D8` / `D21`）；
+> - ✅ 管理员独占最终金额决策权、客服只有调查/记录/建议权（`D-Q1` ②）；
+> - ✅ `incomeAmount` 永不修改、金额只许有一份公式（`architecture-rules.md` §三）。
+>
+> **当前规则见**：`docs/01-requirements/超哥电竞_特殊情况与异常处理表.md`
+> （`EX-REFUND-03` / `EX-REFUND-05` / `EX-WITHDRAW-03` / `EX-EARN-01` 均已加 P0-15 批注）、
+> `docs/02-tech-design/architecture-rules.md` §三、
+> 以及本轮 `docs/03-dev/rounds/P0-15/`。
+
+---
+
 ### D-Q1（✅ 已裁定，2026-09-25）— 部分退款**区分责任**，责任由 Admin 认定
 
 #### User Answer（照录）
@@ -707,6 +743,15 @@ type RefundDecision = {
 `OrderStatus` / `DispatchState` / `EarningStatus` 三个枚举**一个都不扩**（Q2-c 已裁定用既有 `reversed`）。
 
 ### D17 `withdrawn` 不冲回：Q3 DEFER 的落点
+
+> ⚠️ **2026-09-28 批注（P0-15）**：本条**结论仍有效**（`withdrawn` 不冲回、不写分支），
+> 但**理由已换**。原理由是「Q3 DEFER 已提现追回」；P0-15 的理由是**结构性的**——
+> 只有 `completed` 的订单才有 `Earning`（由 `settleOrderCompletion` 以 `frozen` 创建），
+> 它通往 `available` 的**唯一出口**是 `sweepMaturedEarnings`，而那个谓词包含
+> `hasActiveRefund`；一张 `pending` / `reviewing` 的退款申请**本身就是** active refund，
+> 一旦批准，收益**直接**转 `reversed`。因此**普通退款业务下 `withdrawn` 不可达**，
+> 没有分支可写。详见 `EX-WITHDRAW-03` 的 4 步论证与 `adminRefundTransaction.ts` step ④。
+> 本条下面的原文**一字未改**。
 
 `Earning.status === "withdrawn"` 时**不做任何冲减**，冲回额按 0 记，
 多出来的部分由平台承担。理由是 Q3 明确 DEFER「已提现追回」——若照常冲减，

@@ -1,6 +1,7 @@
 import { ApiError } from "@/lib/api/ApiError";
 import {
   normalizeAdminReviewNote,
+  refundStatusesForFilter,
 } from "@/lib/constants/adminRefunds";
 import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
 import { toStaffCompanionReleaseEntry } from "@/lib/constants/staff";
@@ -187,7 +188,7 @@ export async function listStaffRefunds(
 
     const [rows, orders, users] = await Promise.all([
       getRefundRepository().queryRefundsForAdmin({
-        status: query.status === "all" ? null : query.status,
+        statuses: refundStatusesForFilter(query.status),
       }),
       staffOrderIndex(),
       staffUserIndex(),

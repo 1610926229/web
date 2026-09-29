@@ -297,7 +297,9 @@ test("会话列表 DTO 与订单摘要都不含游戏 ID、订单备注与用户
   // 传空数组是**有意义的**输入——「这一单没有人退出过」是正常情况，不是缺失取值。
   const summary = toStaffOrderSummary(order, "老板A", []);
   assert.equal(summary.orderNo, order.orderNo);
-  assert.equal(summary.totalAmount, order.totalAmount);
+  // 摘要上唯一的金额是**实付**（P1-4）：页面上那一行写的是「实付金额」，
+  // 而优惠前的原价只在订单详情里叫 `originalAmount`
+  assert.equal(summary.actualPaidAmount, order.actualPaidAmount);
   assert.equal(summary.userNickname, "老板A");
   assert.ok(summary.companionSummary.length > 0, "没有护航时要写成「等待接单」，不是空白");
   assert.deepEqual(summary.releaseHistory, [], "没有退出过就是空数组，不是 undefined");
@@ -801,6 +803,31 @@ test("概览三个数是真实聚合：按当前客服口径算，不是写死�
 
   assert.ok(metrics.generatedAt.length > 0);
   assert.ok(metrics.notice.length > 0, "口径说明必须跟着数字一起给出来");
+});
+
+test("客服工作台的待处理退款/投诉口径 = 该领域的未终结状态集合（不自己维护第二份）", async () => {
+  const metrics = await getStaffOverviewMetrics(STAFF_A, undefined, "server");
+
+  // ── 正例：**种子里有 1 条 `reviewing` 退款、2 条 `processing` 投诉**，所以
+  //    这个数不等于「pending 的条数」。写死 `=== "pending"` 的实现会得到 3 / 1，
+  //    这条断言就是冲它来的（P1-1 的 R6 裁定：待办口径要含「已接手未出结论」）。
+  assert.equal(metrics.pendingRefundCount, 4, "退款待处理数应含 reviewing（3 条 pending + 1 条 reviewing）");
+  assert.equal(metrics.pendingComplaintCount, 3, "投诉待处理数应含 processing（1 条 pending + 2 条 processing）");
+
+  // ── 源码探针：这两个状态字面量**不该再出现在服务层**。
+  //    它们曾经在这里被写成 `=== "pending" || === "reviewing"` 这样的第二份定义——
+  //    与后台首页待办卡、与 `?status=open` 列表各存一份「未处理」。
+  //    今天的取值恰好相同，因此重复**不会报错**；只有产品把某个新状态并入待处理时，
+  //    三处才会静默分叉（卡片 4 条、工作台 3 条，且没有任何测试失败）。
+  //    上面两条正例挡的是「退回到只数 pending」，这条源码探针挡的是「第二份定义回来」。
+  const source = stripComments(readSource(path.join(ROOT, "lib", "services", "staffConversations.ts")));
+  for (const status of ["reviewing", "processing"]) {
+    assert.ok(
+      !source.includes(`"${status}"`),
+      `staffConversations.ts 里又出现了状态字面量 "${status}"：待处理口径必须取自 ` +
+        "OPEN_REFUND_STATUSES / OPEN_COMPLAINT_STATUSES，不能在服务层另写一份",
+    );
+  }
 });
 
 test("会话列表：按最后消息时间倒序，没有消息的排最后", async () => {
@@ -1644,8 +1671,11 @@ test("伪造的客服身份请求会话详情：不存在的订单与没权限�
   const detail = await requestWithCookie("/api/staff/conversations/ord-seed-1001-04", staffCookie);
   assert.equal(detail.status, 200);
   assert.equal(detail.body.includes("orderNo"), true);
-  // 摘要有金额（客服要对得上账），但没有游戏 ID、订单备注与任何支付凭据
-  assert.equal(detail.body.includes("totalAmount"), true);
+  // 摘要有金额（客服要对得上账），但没有游戏 ID、订单备注与任何支付凭据。
+  // ⚠️ 摘要在 HTTP 上出现的是 `actualPaidAmount`（P1-4）：原先那个字段叫
+  // `totalAmount` 且含义被写成「渠道实收」，两个名字都错——已从摘要里摘掉，
+  // 现在只留一个金额，就是用户实付
+  assert.equal(detail.body.includes("actualPaidAmount"), true);
   for (const forbidden of ["gameAccountId", "remark", "openId", "unionId", "sessionId", "cookie"]) {
     assert.equal(detail.body.includes(forbidden), false, `详情的响应体不该出现 ${forbidden}`);
   }

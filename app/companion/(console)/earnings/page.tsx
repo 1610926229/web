@@ -30,7 +30,9 @@ import { listCompanionEarnings } from "@/lib/services/companionEarnings";
  *
  * 没有提现、没有冲正、没有罚款：P0-9 只做「看得见」，提现不在本阶段范围内。
  * 这里刻意**不放一个点了没反应的提现按钮**——`EarningStatus` 上写着 `withdrawn` /
- * `reversed` 两个取值，但它们在当前批次**没有写入路径**，页面也就不该承诺一个动作。
+ * `reversed` 两个取值，但它们在当前批次**都没有写入路径**，页面也就不该承诺一个动作。
+ * （P0-15 之前只有 `withdrawn` 无写入路径；产品裁定「退款批准后收益仍停在 `frozen`」
+ * 之后 `reversed` 也退出了写入侧，见 `lib/types/earning.ts` 的 `EarningStatus`。）
  *
  * ## 为什么这一页自己读资格
  *

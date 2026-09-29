@@ -63,7 +63,7 @@ function selection(overrides = {}) {
 }
 
 function preview(input = {}) {
-  return previewCheckout(selection(input), undefined, "server");
+  return previewCheckout(selection(input), "u-1001", undefined, "server");
 }
 
 function sleep(ms) {
@@ -100,7 +100,7 @@ test("游戏 ID 校验：首尾空格被裁掉，合法 ID 通过", () => {
 test("试算不要求填游戏 ID，正式下单要求", async () => {
   // 用户还没填完表单时就该看到金额，试算因此不校验游戏 ID
   const draft = await preview({ gameAccountId: "" });
-  assert.equal(draft.totalAmount, PRODUCT.specPrice);
+  assert.equal(draft.originalAmount, PRODUCT.specPrice);
 
   const user = uniqueUser();
   await assert.rejects(
@@ -136,9 +136,21 @@ test("金额以「分」为单位，全部是整数且等于单价 × 数量 + �
   assert.equal(result.spec.price, PRODUCT.specPrice);
   assert.equal(result.itemsAmount, PRODUCT.specPrice * 3);
   assert.equal(result.addonsAmount, ADDON_RUSH.price + ADDON_VOICE.price);
-  assert.equal(result.totalAmount, result.itemsAmount + result.addonsAmount);
+  // 「原价」是券前应付；P1-4 之后 `totalAmount` 这个名字不再存在——
+  // 它曾经表示「用户要付多少」，接券之后那个数是 `actualPaidAmount`
+  assert.equal(result.originalAmount, result.itemsAmount + result.addonsAmount);
+  // 没选券时三者必须自洽：不减钱、实付等于原价
+  assert.equal(result.couponDiscountAmount, 0);
+  assert.equal(result.actualPaidAmount, result.originalAmount);
 
-  for (const amount of [result.spec.price, result.itemsAmount, result.addonsAmount, result.totalAmount]) {
+  for (const amount of [
+    result.spec.price,
+    result.itemsAmount,
+    result.addonsAmount,
+    result.originalAmount,
+    result.couponDiscountAmount,
+    result.actualPaidAmount,
+  ]) {
     assert.ok(Number.isInteger(amount), "金额必须是整数分，不能出现浮点数");
   }
 });
@@ -348,7 +360,7 @@ test("指定暂停接单的陪玩：被挡（人还在名单里、详情页正�
   );
 });
 
-test("指定正常陪玩：试算与下单一律照旧（金额、快照、返回结构都不变）", async () => {
+test("指定正常陪玩：金额只受商品、数量与增值服务影响，与陪玩无关", async () => {
   const draft = await preview({
     companionId: COMPANION_OK,
     quantity: 2,
@@ -357,16 +369,25 @@ test("指定正常陪玩：试算与下单一律照旧（金额、快照、返�
 
   assert.equal(draft.itemsAmount, PRODUCT.specPrice * 2, "指定陪玩不影响商品金额");
   assert.equal(draft.addonsAmount, ADDON_RUSH.price);
-  assert.equal(draft.totalAmount, PRODUCT.specPrice * 2 + ADDON_RUSH.price);
-  // 返回结构是契约：换了判定方式，DTO 一个字段都不该多、不该少
+  assert.equal(draft.originalAmount, PRODUCT.specPrice * 2 + ADDON_RUSH.price);
+  // 指定陪玩**不改钱**：它只影响派单，不参与任何金额计算
+  assert.equal(draft.couponDiscountAmount, 0);
+  assert.equal(draft.actualPaidAmount, draft.originalAmount);
+  // 返回结构是契约：这里逐一钉住字段名，任何增删都会让这条断言失败，
+  // 从而逼着改动者回来改这个清单（P1-4 加券字段时正是如此）
   assert.deepEqual(Object.keys(draft).sort(), [
+    "actualPaidAmount",
     "addons",
     "addonsAmount",
+    "availableCoupons",
+    "coupon",
+    "couponDiscountAmount",
+    "couponReason",
     "itemsAmount",
+    "originalAmount",
     "product",
     "quantity",
     "spec",
-    "totalAmount",
   ]);
 
   const user = uniqueUser();

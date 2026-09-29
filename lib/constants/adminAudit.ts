@@ -298,23 +298,34 @@ export function toProductAuditSnapshot(record: CatalogProductRecord): AdminAudit
  * 不必再去比对时间戳猜「订单是不是被这次操作改的」。
  *
  * `amount` 也进快照：它是这次操作的标的，**申请时由服务端取快照**，后台改不了。
- * ⚠️ P0-13 起它不是「退了多少」——那是下面六项决策字段里的 `refundAmount`。
+ * ⚠️ P0-13 起它不是「退了多少」——那是下面决策字段里的 `refundAmount`。
  * 留着它是为了让「这一单当时申请的是什么金额」在审计里有据可查。
  *
- * ## P0-13 新增的六项决策字段
+ * ## 决策字段：从六项（P0-13）到七项（P0-14）再到三项（**P0-15 当前**）
  *
- * 产品裁定的原话是：平台承担的部分「必须留下明确、可审计的业务记录，
- * 不能仅通过『没有 reversal』间接推断」（Q1-c）。审计是这句话最主要的落点——
- * 光看「打手收益没动」永远分不清「平台承担」与「压根没决策」。
+ * 这个字段集**被改过两次**，读旧审计记录的人必须知道每一版记的是什么：
  *
- * 六项与 `RefundDecision` 一一对应，**一个不少、一个不多**：
- * `refundRateBp` / `refundAmount` / `responsibility` / `companionLiabilityRateBp` /
- * `companionReversalAmount` / `platformBorneAmount`。
+ * | 轮次 | 项数 | 内容 | 为什么 |
+ * |---|---|---|---|
+ * | P0-13 | 6 | `refundRateBp` / `refundAmount` / `responsibility` / `companionLiabilityRateBp` / `companionReversalAmount` / `platformBorneAmount` | 与当时的 `RefundDecision` 一一对应 |
+ * | P0-14 | 7 | 上面六项 + `refundFullRemaining` | 「退满剩余」与「按比例」可以算出同一个金额，光看金额分不出是哪一种 |
+ * | **P0-15** | **3** | `refundRateBp` / `refundAmount` / `companionReversalAmount` | 责任模型废止；「退满剩余」随多步退款一并消失（100% 就是 100%） |
+ *
+ * ⚠️ **P0-15 删掉四项，不是「漏记」**：`responsibility` /
+ * `companionLiabilityRateBp` / `platformBorneAmount` 属于**已废止的责任模型**，
+ * `refundFullRemaining` 属于**已废止的「多步退款补尾差」模型**。
+ * 继续记它们等于让审计去追问一件新业务里根本不存在的事。
+ * ⚠️ **`platformBorneAmount` 尤其不能留**：它的定义（退款额里不由打手承担的那部分）
+ * 在新规则下**恒等于 `refundAmount`**（打手全额归零、平台承担全部退款额），
+ * 记一个永远等于另一个字段的数只是多一份可能对不上的副本。
+ *
+ * ⚠️ 剩下三项仍然守着 P0-13 那句「一个不少、一个不多」：它们与
+ * `RefundDecision` 一一对应。新增决策字段时必须同步加到这里。
  *
  * ⚠️ 记的是**基点**（存储值）而不是界面的百分比，与上面
  * `companionRateBp` 的取舍同一条理由：审计要能回答「当时存的是哪个数」。
  *
- * ⚠️ 未决策时六项一律为 `null`（不是 0）：`null` 是「没有这件事」，
+ * ⚠️ 未决策时三项一律为 `null`（不是 0）：`null` 是「没有这件事」，
  * 0 是「决策了，金额/比例是 0」，两者在审计里必须分得开。
  */
 export function toRefundAuditSnapshot(
@@ -337,10 +348,7 @@ export function toRefundAuditSnapshot(
     reviewNote: truncateAuditText(refund.reviewNote, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
     refundRateBp: decision ? decision.refundRateBp : null,
     refundAmount: decision ? decision.refundAmount : null,
-    responsibility: decision ? decision.responsibility : null,
-    companionLiabilityRateBp: decision ? decision.companionLiabilityRateBp : null,
     companionReversalAmount: decision ? decision.companionReversalAmount : null,
-    platformBorneAmount: decision ? decision.platformBorneAmount : null,
     updatedAt: refund.updatedAt,
   };
 }
@@ -499,6 +507,7 @@ export function toAgreementAuditSnapshot(agreement: Agreement): AdminAuditSnapsh
  */
 export function toPlatformConfigAuditSnapshot(config: PlatformConfig): AdminAuditSnapshot {
   return {
+    exclusivePoolTimeoutMinutes: config.exclusivePoolTimeoutMinutes,
     publicPoolTimeoutMinutes: config.publicPoolTimeoutMinutes,
     completionAutoApprovalMinutes: config.completionAutoApprovalMinutes,
     complaintWindowMinutes: config.complaintWindowMinutes,

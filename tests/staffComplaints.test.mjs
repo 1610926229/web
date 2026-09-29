@@ -263,7 +263,7 @@ test("结果校验复用管理端：解决与关闭的空值文案不同，超�
 });
 
 test("列表项 DTO 只挑摘要：无正文、凭证、联系方式、结果与处理人", async () => {
-  const [complaint] = await getComplaintRepository().queryComplaintsForAdmin({ status: null, type: null });
+  const [complaint] = await getComplaintRepository().queryComplaintsForAdmin({ statuses: null, type: null });
   const user = { id: complaint.userId, nickname: "老板A（占位）", avatarUrl: "/mock/avatar-3.svg" };
 
   const item = toStaffComplaintListItem(complaint, user);

@@ -1,5 +1,18 @@
 # 订单生命周期需求对齐整改计划
 
+> ⚠️ **superseded by P1-2（2026-09-27，只标注、不改写原文）**：
+> 本计划里关于**专属池时长**的三处陈述已**过期**——它们是 2026-09-17 时点的实现口径，
+> 其中「固定 10 分钟」这一说法已被 2026-09-23 的产品裁定推翻：
+>
+> | 本文件位置 | 当时的说法 | 现在的口径 |
+> |---|---|---|
+> | 第 823 行 | 「指定打手走专属池（**固定 10 分钟**）」 | 时长由 `PlatformConfig.exclusivePoolTimeoutMinutes` 配置（默认 10） |
+> | 第 847 行 | `lib/constants/dispatch.ts` 里是 `EXCLUSIVE_WAIT_MINUTES = 10` | 该常量**已在 P1-2 删除**；派单进入专属池时读**当下配置**并冻结成 `Dispatch.exclusiveTimeoutMinutesSnapshot` |
+> | 第 986 行 | 验收步骤「或直接把 `EXCLUSIVE_WAIT_MINUTES` 临时改小」 | 改为「在 `/admin/platform-config` 把专属池超时改小」（见 `docs/03-dev/rounds/P1-2/04-acceptance.md` §D.4） |
+>
+> 除上述三处外，本文件其余内容**仍然有效**，因此**不重写**——历史计划照原样保留，
+> 只在开头标注它已被取代的那一小部分。现行口径以 `docs/03-dev/rounds/P1-2/02-decisions.md` 为准。
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把「订单只能停在 `paid`、打手不存在」的现状，改造成需求文档要求的完整生命周期：派单（专属池 → 公共池 → 超时自动退款）→ 接单 → 开始服务 → 提交完成材料 → 客服审核 → 完成 → 资金冻结 48 小时 → 可提现。

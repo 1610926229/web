@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CONVERSATION_SEGMENT_EMPTY_NOTICE } from "@/lib/constants/conversations";
 import {
   STAFF_MESSAGE_SEND_HINT,
   STAFF_NOT_REALTIME_NOTICE,
@@ -18,11 +19,24 @@ import {
   markStaffConversationRead,
   sendStaffMessage,
 } from "@/lib/services/staffHttp";
-import type { StaffConversationDetail, StaffConversationMessage } from "@/lib/types/staff";
+import type {
+  StaffConversationDetail,
+  StaffConversationMessage,
+  StaffConversationSegment,
+} from "@/lib/types/staff";
 import { formatDateTime } from "@/lib/utils/format";
 import { countCharacters } from "@/lib/utils/text";
 
 type RefreshStatus = "idle" | "loading";
+
+/**
+ * `segment.isCurrent` 为真的那一段的「当前」小标记，用中性样式，不用状态色。
+ *
+ * ⚠️ 这一段是**客服端专有**的展示决定（用户端与打手端只看得到自己那一段，
+ * 没有「哪一段是当前」这个问题），因此留在组件里；而空段落的占位句两端都要用，
+ * 已落在 `lib/constants/conversations.ts` 的 `CONVERSATION_SEGMENT_EMPTY_NOTICE`。
+ */
+const CURRENT_SEGMENT_LABEL = "当前";
 
 /**
  * 订单沟通（客服工作台）。
@@ -180,16 +194,38 @@ export default function StaffConversationConsole({
       ) : null}
 
       {/* 消息列表：桌面优先，靠 max-height + overflow 在自己的区域内滚动，
-          页面本身不出现第二个滚动条 */}
-      <ol className="flex max-h-[520px] flex-col gap-4 overflow-y-auto px-4 py-4">
-        {detail.messages.length === 0 ? (
+          页面本身不出现第二个滚动条。
+
+          P0-14 起按 `detail.segments` 分段渲染，而不是再铺 `detail.messages`：
+          一张订单现在可以有多段会话（客服沟通 + 每段履约各一段护航沟通），
+          换人之后旧段落照样在这里——调查时要能看到全部历史。 */}
+      <ol className="flex max-h-[520px] flex-col gap-5 overflow-y-auto px-4 py-4">
+        {detail.segments.length === 0 ? (
+          // 正常路径不会走到这里（有会话就至少有一段），这是防御性的兜底：
+          // 服务端真给回空数组时，不让页面只剩一个空白滚动区
           <li className="py-8 text-center text-[13px] leading-5 text-ink-3">
             这个会话还没有消息。用户还没有描述问题，你可以先等，也可以主动打个招呼。
           </li>
         ) : (
-          detail.messages.map((message) => (
-            <li key={message.id}>
-              <MessageBubble message={message} />
+          detail.segments.map((segment) => (
+            <li key={segment.index} className="flex flex-col gap-3">
+              <SegmentHeader segment={segment} />
+
+              {segment.messages.length === 0 ? (
+                // 空段落照样显示：一段会话存在但没有消息，本身就是一条信息
+                // （「这两方被撮合过但没聊」），藏掉它会让人以为那一段不存在
+                <p className="py-6 text-center text-[13px] leading-5 text-ink-3">
+                  {CONVERSATION_SEGMENT_EMPTY_NOTICE}
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-4">
+                  {segment.messages.map((message) => (
+                    <li key={message.id}>
+                      <MessageBubble message={message} />
+                    </li>
+                  ))}
+                </ul>
+              )}
             </li>
           ))
         )}
@@ -198,6 +234,12 @@ export default function StaffConversationConsole({
 
       {/* 发送区 */}
       <div className="border-t border-admin-line px-4 py-3">
+        {/* 发送目标说明（`STAFF_MESSAGE_TARGET_NOTICE` 的内容，随详情一起给）：
+            P0-14 之后一张订单可以有多段会话，客服看到「护航沟通」那一段时很容易以为
+            自己的回复会发给那位护航——不会，回复只进「客服沟通」那一段。不说清楚，
+            客服会在履约会话里追问一位已经不在这一单上的护航，而对方永远收不到。 */}
+        <p className="mb-2 text-[12px] leading-4 text-ink-3">{detail.messageTargetNotice}</p>
+
         {error ? (
           <p role="alert" className="mb-1.5 text-[12px] leading-4 text-brand-red">
             {error}
@@ -295,6 +337,36 @@ function MessageBubble({ message }: { message: StaffConversationMessage }) {
       </div>
 
       <span className="mt-1 text-[11px] text-ink-3">{formatDateTime(message.createdAt)}</span>
+    </div>
+  );
+}
+
+/**
+ * 分段标题（P0-14）：一段会话一行标题，**直接用服务端算好的 `segment.title`**。
+ *
+ * ⚠️ 不自己拼「第 N 段」：段号（`assignmentSeq`）是内部实现，标题已经是
+ * 「客服沟通 / 护航沟通 / 护航沟通（历史）」这三句话，由 `lib/constants/conversations.ts`
+ * 的 `segmentTitle` 按端生成。
+ *
+ * ⚠️ 护航名直接显示 `segment.companionName`（服务端已经按 `resolveCompanionDisplayName`
+ * 回落到 id），**不再拼「护航 · X」**：那会和服务端给的名字重复，而且在名字回落到 id 时
+ * 变成「护航 · 某 id」这种怪话。客服会话的 `companionName` 为 null，因此只有履约会话才显示。
+ *
+ * ⚠️ 「当前」小标记是**可选的中性提示**，用 `border-admin-line` / `text-ink-3`，
+ * 刻意不用任何订单状态色——「当前」说的是「这段履约还在进行中」，不是订单状态本身。
+ */
+function SegmentHeader({ segment }: { segment: StaffConversationSegment }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-admin-line pb-2">
+      <h3 className="text-[13px] font-medium text-ink">{segment.title}</h3>
+      {segment.kind === "assignment" && segment.companionName ? (
+        <span className="text-[12px] text-ink-3">{segment.companionName}</span>
+      ) : null}
+      {segment.isCurrent ? (
+        <span className="rounded border border-admin-line px-1.5 py-0.5 text-[11px] text-ink-3">
+          {CURRENT_SEGMENT_LABEL}
+        </span>
+      ) : null}
     </div>
   );
 }

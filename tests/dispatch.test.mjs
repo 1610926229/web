@@ -4,8 +4,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { EXCLUSIVE_WAIT_MINUTES, plusMinutes } from "../lib/constants/dispatch.ts";
-import { PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES } from "../lib/constants/platformConfig.ts";
+import { plusMinutes } from "../lib/constants/dispatch.ts";
+import {
+  EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+  PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
+} from "../lib/constants/platformConfig.ts";
 import { getComplaintRepository } from "../lib/data/complaintRepository.ts";
 import {
   acceptDispatch,
@@ -142,6 +145,27 @@ async function setPublicTimeoutMinutes(minutes) {
   assert.equal(result.config.publicPoolTimeoutMinutes, minutes);
 }
 
+/**
+ * 管理端改**专属池**超时（P1-2）。同上，走真实服务。
+ *
+ * ⚠️ 这里**不断言 `changed: true`**（与 `setPublicTimeoutMinutes` 不同）：
+ * 那一条要求「改动前与改动后不同」，于是调用它之前必须先知道配置当时是什么——
+ * 而配置是**单例且跨用例共享**的，上一个用例留下的值就是这一个用例的前置条件。
+ * 断言落在「改完之后配置确实是这个值」上，与前置状态无关，也不会因为
+ * 一次「本来就等于这个值」的保存而假红。
+ */
+async function setExclusiveTimeoutMinutes(minutes) {
+  const result = await updateAdminPlatformConfig(uniqueAdmin(), {
+    exclusivePoolTimeoutMinutes: minutes,
+    idempotencyKey: uniqueKey(),
+  });
+  assert.equal(
+    result.config.exclusivePoolTimeoutMinutes,
+    minutes,
+    "保存之后配置必须就是刚提交的那个值",
+  );
+}
+
 // ——————————————————————————— 一、专属池（1~7）———————————————————————————
 
 test("专属池 1：下单指定 A → 派单进专属池，exclusiveCompanionId 是 A", async () => {
@@ -155,8 +179,16 @@ test("专属池 1：下单指定 A → 派单进专属池，exclusiveCompanionId
   assert.equal(dispatch.exclusiveEnteredAt, order.paidAt);
   assert.equal(
     dispatch.exclusiveDeadlineAt,
-    plusMinutes(order.paidAt, EXCLUSIVE_WAIT_MINUTES),
-    "专属池的等待时长是固定的 10 分钟，不是平台参数",
+    plusMinutes(order.paidAt, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES),
+    "专属池的等待时长取进入专属池那一刻的平台配置（默认 10 分钟）",
+  );
+  // P1-2：时长**必须**被冻结在记录上。只断言 deadline 不够——
+  // 一个「每次读的时候按当前配置现算」的实现同样能算对这一次的 deadline，
+  // 而后台改过参数之后它就会给出另一个答案（专属池 1b 正是为那件事写的）。
+  assert.equal(
+    dispatch.exclusiveTimeoutMinutesSnapshot,
+    EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+    "进入专属池时必须把当时的配置值冻结成快照",
   );
 
   // 还没进过公共池：那三个字段此刻都必须是空的，否则「什么时候进的公共池」就说不清了
@@ -187,7 +219,7 @@ test("专属池 3：10 分钟以内只有 A 能接，接单后订单与派单同
   const user = uniqueUser();
   const { order } = await placeOrder(user, { companionId: COMPANION_A });
   const dispatchId = (await dispatchOf(order.id)).id;
-  const at = plusMinutes(order.paidAt, EXCLUSIVE_WAIT_MINUTES - 1);
+  const at = plusMinutes(order.paidAt, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES - 1);
 
   // 走服务层入口：接口拿到的就是它返回的 `kind`
   const outcome = await acceptDispatchForCompanion(COMPANION_A, dispatchId, at);
@@ -221,7 +253,7 @@ test("专属池 4：10 分钟整（deadline <= now）A 就不能再接了", asyn
   // 边界取「正好到点」：`deadline <= now` 即已过期，不是「严格超过」
   const result = await acceptDispatch(dispatch.id, {
     companionId: COMPANION_A,
-    at: plusMinutes(order.paidAt, EXCLUSIVE_WAIT_MINUTES),
+    at: plusMinutes(order.paidAt, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES),
   });
   assert.equal(result.kind, "expired");
 
@@ -380,6 +412,104 @@ test("专属池 4b：不是指定的人，在期限内也接不到", async () =>
   const byA = await acceptDispatchForCompanion(COMPANION_A, dispatch.id, at);
   assert.equal(byA.kind, "ok");
   assert.equal((await dispatchOf(order.id)).acceptedByCompanionId, COMPANION_A);
+});
+
+// ———————————— 一·b 专属池时长的可配置与快照（P1-2）————————————
+
+test("专属池 1b：管理员改专属池时长 → 旧单按旧快照到期，新单按新配置到期", async () => {
+  // 指令 §五 的那个例子，逐条落成断言：
+  //   12:00 配置=10 → A 在 12:01 进专属池 → 12:11 到期
+  //   12:05 管理员改成 20 → A 仍然 12:11；B 在 12:06 进 → 12:26
+  restoreDefaultTimeout();
+  await setExclusiveTimeoutMinutes(10);
+
+  const userA = uniqueUser();
+  const { order: orderA } = await placeOrder(userA, { companionId: COMPANION_A });
+  const dispatchA = await dispatchOf(orderA.id);
+
+  assert.equal(dispatchA.exclusiveTimeoutMinutesSnapshot, 10, "A 应当冻结当时的 10");
+  assert.equal(dispatchA.exclusiveDeadlineAt, plusMinutes(orderA.paidAt, 10));
+
+  // 管理员此刻把专属池时长改成 20。这是**让两次快照不等**的关键一步：
+  // 没有它，下面的断言在「实现按当前配置现算」时也会通过（两个数恰好相等）。
+  await setExclusiveTimeoutMinutes(20);
+
+  const afterA = await dispatchOf(orderA.id);
+  assert.equal(
+    afterA.exclusiveTimeoutMinutesSnapshot,
+    10,
+    "已进入专属池的派单，快照必须原样保留——不得按新配置重算",
+  );
+  assert.equal(
+    afterA.exclusiveDeadlineAt,
+    dispatchA.exclusiveDeadlineAt,
+    "已生成的专属池 deadline 不得被一次配置修改追着改掉",
+  );
+  // 这一条是**可分辨性**断言：若实现改成「读的时候按当前配置现算」，
+  // 上面那条 equal 仍会通过（它比的就是同一个被重算过的值），而这一条会红。
+  assert.notEqual(afterA.exclusiveDeadlineAt, plusMinutes(orderA.paidAt, 20));
+
+  // B 在配置改成 20 之后才进专属池 → 用 20
+  const userB = uniqueUser();
+  const { order: orderB } = await placeOrder(userB, { companionId: COMPANION_A });
+  const dispatchB = await dispatchOf(orderB.id);
+
+  assert.equal(dispatchB.exclusiveTimeoutMinutesSnapshot, 20, "B 应当冻结改动之后的 20");
+  assert.equal(dispatchB.exclusiveDeadlineAt, plusMinutes(orderB.paidAt, 20));
+
+  // 两种快照在同一时刻并存，而且指向同一位打手、同一个商品——
+  // 差异只可能来自「进池时配置不同」这一个原因
+  const both = [await dispatchOf(orderA.id), await dispatchOf(orderB.id)];
+  assert.deepEqual(
+    both.map((item) => item.exclusiveTimeoutMinutesSnapshot),
+    [10, 20],
+  );
+});
+
+test("专属池 1c：配置改大之后，旧单仍在**自己的** deadline 上转公共池", async () => {
+  // 与 1b 同一条不变量，换一条路径证：清扫只看记录上的 deadline，
+  // 不看「当下的配置」。若清扫里读了最新配置重算，A 会被留在专属池里更久。
+  restoreDefaultTimeout();
+  await setExclusiveTimeoutMinutes(10);
+
+  const user = uniqueUser();
+  const { order } = await placeOrder(user, { companionId: COMPANION_A });
+  const dispatch = await dispatchOf(order.id);
+
+  await setExclusiveTimeoutMinutes(20);
+
+  // 走到 A **自己**的截止时刻：这一单必须转池
+  const swept = sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
+  assert.ok(swept.movedToPublicDispatchIds.includes(dispatch.id), "旧单在自己的 deadline 上就该转池");
+
+  const moved = await dispatchOf(order.id);
+  assert.equal(moved.state, "public");
+  assert.equal(moved.exclusiveTimeoutMinutesSnapshot, 10, "转池不改写专属池快照——它是历史事实");
+  assert.equal(moved.publicPoolEnteredAt, dispatch.exclusiveDeadlineAt);
+
+  // 反方向：只走到 A 的 deadline 之前一点点，它必须还在专属池里
+  // （这一条防的是「按新配置 20 算，所以还早」与「立刻转池」两种都错的实现）
+  const user2 = uniqueUser();
+  const { order: order2 } = await placeOrder(user2, { companionId: COMPANION_A });
+  const dispatch2 = await dispatchOf(order2.id);
+  const before = plusMinutes(dispatch2.exclusiveDeadlineAt, -1);
+  const swept2 = sweepExpiredDispatches(before);
+  assert.equal(
+    swept2.movedToPublicDispatchIds.includes(dispatch2.id),
+    false,
+    "还没到自己的 deadline，不该转池",
+  );
+});
+
+test("专属池 1d：未指定打手的订单没有专属池快照（三个专属字段一起为 null）", async () => {
+  restoreDefaultTimeout();
+  const user = uniqueUser();
+  const { order } = await placeOrder(user);
+
+  const dispatch = await dispatchOf(order.id);
+  assert.equal(dispatch.exclusiveTimeoutMinutesSnapshot, null, "从未进过专属池就没有快照");
+  assert.equal(dispatch.exclusiveEnteredAt, null);
+  assert.equal(dispatch.exclusiveDeadlineAt, null);
 });
 
 // ——————————————————————————— 二、公共池（8~14）———————————————————————————
@@ -910,7 +1040,7 @@ test("池子 DTO：专属池只对指定的人可见，字段里没有游戏账�
   assert.equal(itemForA.poolLabel, "专属订单池");
   assert.equal(itemForA.orderNo, order.orderNo);
   assert.ok(itemForA.remainingSeconds > 0);
-  assert.ok(itemForA.remainingSeconds <= EXCLUSIVE_WAIT_MINUTES * 60);
+  assert.ok(itemForA.remainingSeconds <= EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES * 60);
 
   // 字段是显式挑出来的：私人与资金信息一个都不该在池子卡片里
   for (const leaked of ["gameAccountId", "remark", "userId", "actualPaidAmount", "companionBaseIncome"]) {

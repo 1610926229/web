@@ -36,7 +36,7 @@ web/
 app/
 ├── layout.tsx              仅文档骨架（<html> / <body> / metadata / viewport），无产品级布局、无 next/font
 ├── globals.css             Tailwind v4 @theme 设计令牌（233 行；含中文字体栈）
-├── (mobile)/               用户端（34 个页面目录）
+├── (mobile)/               用户端（36 个页面目录；实测于 P1-5）
 │   ├── layout.tsx          480px 移动壳层
 │   ├── (tabs)/             五个底部 tab 的容器
 │   │   ├── (protected)/    需登录的一级页：mine / orders / service
@@ -61,7 +61,10 @@ app/
 │                           / orders（全量订单查询，P0-10）/ refunds
 ├── companion/(console)/    打手工作台：orders（我的订单）/ orders/[id]（订单详情）
 │                           / earnings（我的收益，P0-9）/ exclusive（专属池）/ pool（公共池）
-└── api/                    131 个 route.ts（admin 62 · staff 25 · companion 8 · 其余为用户端）
+│                           / chats（订单会话，P0-14）
+└── api/                    138 个 route.ts（admin 64 · staff 25 · companion 12 · 其余为用户端）
+                            ⚠️ 数字实测于 P1-5，**不按增量推算**；这棵树是快照，
+                            分目录清单可能滞后于 `app/**` 的实际内容。
 ```
 
 ## 路由组（Route Group）说明 —— CURRENT，必读
@@ -86,11 +89,16 @@ app/api/
 ├── home/  catalog/  companions/  rankings/  agreements/  公开读取
 ├── me/  favorites/  coupons/  notifications/  tips/  suggestions/  reviews/
 ├── orders/  payments/  refunds/  complaints/  service/
-├── companion/                             打手接口（8 个）
+├── companion/                             打手接口（12 个）
 ├── companion-applications/                入驻申请
-├── staff/                                 客服接口（22 个）
-└── admin/                                 管理接口（62 个，含 admin/auth 3 个）
+├── staff/                                 客服接口（25 个）
+└── admin/                                 管理接口（64 个，含 admin/auth 3 个）
 ```
+
+> 📌 上面四个括号里的数字**实测于 P1-5**（`find app/api/<dir> -name route.ts | wc -l`），
+> 与第 65 行的总数 138 同一时点：12 + 25 + 64 = 101，其余 37 个是面向用户的接口。
+> ⚠️ 它们此前分别是 8 / 22 / 62（更早轮次的旧数），与同一份文档开头的 138 / 64 / 25 / 12
+> **自相矛盾**——本次只改数字，未改任何路由。
 
 ---
 
@@ -385,22 +393,25 @@ lib/data/mockCompanionReleaseRepository.ts
 
 继续复用现有 `PlatformConfig` / `/api/admin/platform-config`，不要新建第二套配置域。TARGET 增加 exclusive timeout、Completion 自动审核时长、投诉窗口；进入对应生命周期阶段时冻结 snapshot/deadline。
 
-**进度**：`completionAutoApprovalMinutes`（Completion 自动审核时长）**已于 P0-8 落地**——
-加在同一个 `PlatformConfig` 上（`lib/types/platformConfig.ts`）、走同一个
-`/api/admin/platform-config` 的 PATCH 与同一份审计，**没有**新建第二套配置域。
-`AdminPlatformConfigPatch` 的三个字段都是**可选**的，PATCH 只带改动的那一项。
+**进度（四项全部 CURRENT）**：`completionAutoApprovalMinutes`（Completion 自动审核时长）
+**已于 P0-8 落地**——加在同一个 `PlatformConfig` 上（`lib/types/platformConfig.ts`）、
+走同一个 `/api/admin/platform-config` 的 PATCH 与同一份审计，**没有**新建第二套配置域。
 `complaintWindowMinutes`（投诉窗口时长）**已于 P0-9 落地**，同样加在同一个实体上
 （默认 1440、取值 60~10080）。
-仍属 TARGET：`exclusivePoolTimeoutMinutes`。
+`exclusivePoolTimeoutMinutes`（专属池超时，默认 10、取值 1~1440）**已于 P1-2 落地**，
+同样加在同一个实体上；进入专属池时冻结到 `Dispatch.exclusiveTimeoutMinutesSnapshot`，
+**平台参数本身只是模板，已冻结的快照才是历史事实**。
+`AdminPlatformConfigPatch` 的**四个**字段都是**可选**的，PATCH 只带改动的那一项。
 
-⚠️ **新增第四个参数时要动的地方（P0-9 的实际改动面）**：
+⚠️ **新增第五个参数时要动的地方（P0-9 与 P1-2 的实际改动面）**：
 `lib/constants/platformConfig.ts`（默认值 / 上下界 / `isValidXxx` / 提示文案 / `PLATFORM_CONFIG_NOTICE`）、
 `lib/types/platformConfig.ts`、`lib/mocks/fixtures/platformConfigSeed.ts`、
 `lib/data/adminPlatformConfigTransaction.ts`（`PlatformConfigInput` + **`PATCHABLE_FIELDS`**——
 这个 `Record<keyof PlatformConfigInput, true>` 会让「忘了把字段加进 no-op 判定」变成 `tsc` 报错）、
 `lib/constants/adminAudit.ts`（审计快照）、`lib/services/adminPlatformConfig.ts`（输入解析）、
-`components/admin/AdminPlatformConfigConsole.tsx`（第三个独立保存的输入框）。
-**四处都要改，漏一处不会静默**——但漏掉审计快照不会有类型错误，那是唯一需要靠人记住的一处。
+`components/admin/AdminPlatformConfigConsole.tsx`（第四个独立保存的输入框）。
+**上面这七处都要改**（⚠️ 2026-09-27 更正：此前误写为「四处」，实际清单是七项）——
+漏一处不会静默；但漏掉审计快照不会有类型错误，那是唯一需要靠人记住的一处。
 
 ### E. Earning / 结算域（P0-9 落地）
 

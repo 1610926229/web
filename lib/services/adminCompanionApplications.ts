@@ -6,6 +6,7 @@ import {
   ADMIN_APPLICATION_OPERATION_CONFLICT_MESSAGE,
   ADMIN_APPLICATION_STATUS_INVALID_MESSAGE,
   adminApplicationTransitionMessage,
+  applicationStatusesForFilter,
   buildAdminApplicationListQuery,
   normalizeAdminReviewNote,
   readAdminApplicationGameId,
@@ -139,7 +140,7 @@ export async function queryAdminApplicationList(
     }
 
     const rows = await getCompanionApplicationRepository().queryApplicationsForAdmin({
-      status: query.status === "all" ? null : query.status,
+      statuses: applicationStatusesForFilter(query.status),
       keyword: query.keyword,
       gameId: query.gameId,
     });

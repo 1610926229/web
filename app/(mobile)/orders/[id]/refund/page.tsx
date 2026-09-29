@@ -119,10 +119,20 @@ async function RefundApplyBody({ orderId, userId }: { orderId: string; userId: s
         productCoverUrl={detail.productCoverUrl}
         specName={detail.specName}
         quantity={detail.quantity}
-        // 用户申请的是**整单**：金额直接取订单实付金额，页面与表单都没有编辑入口。
+        // 用户申请的是**整单**：金额直接取订单**实付**金额，页面与表单都没有编辑入口。
         // ⚠️ 「申请了多少」与「最后退多少」是两个数（P0-13 起可以由管理员按比例核定），
-        // 表单这里只能报申请金额，实际退款金额在退款详情页显示
-        amount={detail.totalAmount}
+        // 表单这里只能报申请金额，实际退款金额在退款详情页显示。
+        //
+        // ⚠️ **必须读 `actualPaidAmount`，不是 `totalAmount`（P1-4 修正）**：
+        // 这句注释原先就写着「实付金额」，但读的是 `totalAmount`——那是**优惠前**
+        // 应付总额。接券之前两者恒等所以看不出问题；满减券一生效，页面上报给用户
+        // 看的申请金额就会**大于他实际付出的钱**。
+        //
+        // ⚠️ 这**不是**一个金额安全性缺陷，而是一处**展示**缺陷，必须说清楚以免被高估：
+        // 落库的金额由服务端定（`lib/services/refunds.ts` 写的是 `order.actualPaidAmount`，
+        // 根本不读客户端传来的数），所以钱不会算错。但用户会看到「申请退款 ¥110」
+        // 而服务端记下的是 ¥100——两个数不一样，且他无从解释。
+        amount={detail.actualPaidAmount}
       />
     </div>
   );

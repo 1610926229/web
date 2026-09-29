@@ -18,7 +18,9 @@ import { toSearchParams } from "@/lib/utils/query";
  * 静默把非法值当成「全部」返回，会让它拿着不知道筛了什么的结果继续往下用。
  *
  * 首屏数据通过 `initialResult` 进入客户端组件，之后筛选与翻页由它在浏览器里发起请求，
- * 因此从首页点进筛选卡片的链接（`/admin/applications?status=pending`）能直接落在正确的筛选上。
+ * 因此从首页点进筛选卡片的链接（`/admin/applications?status=open`，P1-1 R6 起）能直接落在
+ * 正确的筛选上——`open` 是本模块的虚拟筛选值（`OPEN_APPLICATION_STATUSES`），
+ * 卡上的数就是这条链接下的 `total`，两者同源。
  *
  * ⚠️ 本页**只读**：审核动作用户必须进详情页，那里才能看到申请正文与申请人摘要。
  */

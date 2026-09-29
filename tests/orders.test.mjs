@@ -213,8 +213,9 @@ test("列表 DTO 不返回游戏 ID、备注与金额明细", async () => {
   for (const field of ["gameAccountId", "remark", "unitPrice", "itemsAmount", "addonsAmount", "addons"]) {
     assert.ok(!(field in item), `列表项不应包含 ${field}`);
   }
-  // 详情页要用的字段仍在
-  assert.equal(typeof item.totalAmount, "number");
+  // 详情页要用的字段仍在。⚠️ 列表上唯一的金额是**实付**（P1-4）：
+  // 优惠前的原价只在详情里叫 `originalAmount`，列表刻意不带第二个金额
+  assert.equal(typeof item.actualPaidAmount, "number");
   assert.equal(typeof item.orderNo, "string");
 });
 
@@ -235,7 +236,9 @@ test("详情 DTO 含游戏 ID 与备注，金额以「分」为单位且算术�
       detail.addonsAmount,
       detail.addons.reduce((sum, addon) => sum + addon.price, 0),
     );
-    assert.equal(detail.totalAmount, detail.itemsAmount + detail.addonsAmount);
+    // 「小计 + 增值」等于的是**原价**（优惠前应付），不是实付（P1-4）
+    assert.equal(detail.originalAmount, detail.itemsAmount + detail.addonsAmount);
+    assert.equal(detail.actualPaidAmount, detail.originalAmount - detail.couponDiscountAmount);
   }
 });
 
@@ -263,14 +266,25 @@ test("详情 DTO 带上金额域的三行展示值，但不带平台净收入", 
   for (const field of [
     "originalAmount",
     "couponDiscountAmount",
-    "actualPaidAmount",
     "companionRateSnapshot",
     "companionBaseIncome",
     "clubNetIncome",
     "refundedAmount",
+    "coupon",
   ]) {
     assert.equal(field in item, false, `列表项不应包含 ${field}`);
   }
+
+  // ⚠️ `actualPaidAmount` 是这条「列表不带金额域」规则**唯一的例外**（P1-4）：
+  // 订单卡片上那句「实付」就是它，不带这个数卡片就没得显示。但只此一个——
+  // 原价 `totalAmount` 虽然仍在列表上（详情页拿它当「原价」行），任何卡片都**不得**
+  // 拿它去渲染「实付」：用了券之后它比用户真正付掉的钱大。
+  assert.equal(typeof item.actualPaidAmount, "number", "列表项必须带上实付金额");
+  assert.ok(item.actualPaidAmount <= detail.originalAmount, "实付不可能大于优惠前应付");
+  // 列表与详情必须是**同一个**实付数字。列表刻意不带 `coupon`，所以这里无法从列表
+  // 自己推断「有没有用券」——只能拿详情对账。这也正是这条断言的价值：
+  // 两个入口各算一次金额时，对不上就会红。
+  assert.equal(item.actualPaidAmount, detail.actualPaidAmount, "列表与详情的实付金额对不上");
 });
 
 test("预置订单的金额域由公式算出，而不是手写的常量", async () => {
@@ -339,7 +353,9 @@ test("详情：已退款订单保留完整商品与金额快照", async () => {
   assert.ok(detail.productTitle.length > 0);
   assert.ok(detail.productCoverUrl.length > 0);
   assert.ok(detail.specName.length > 0);
-  assert.ok(detail.totalAmount > 0);
+  // 金额快照仍在：优惠前的原价与券抵扣不会被退款抹掉（退款改的是 `refundedAmount`）
+  assert.ok(detail.originalAmount > 0);
+  assert.ok(detail.actualPaidAmount >= 0);
   assert.equal(detail.timeline.at(-1).key, "refunded");
 });
 

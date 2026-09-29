@@ -3,11 +3,13 @@ import {
   PLATFORM_CONFIG_EMPTY_PATCH_MESSAGE,
   PLATFORM_CONFIG_INVALID_COMPLAINT_WINDOW_MESSAGE,
   PLATFORM_CONFIG_INVALID_COMPLETION_AUTO_APPROVAL_MESSAGE,
+  PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_INVALID_TIMEOUT_MESSAGE,
   PLATFORM_CONFIG_MISSING_IDEMPOTENCY_KEY_MESSAGE,
   PLATFORM_CONFIG_OPERATION_CONFLICT_MESSAGE,
   isValidComplaintWindowMinutes,
   isValidCompletionAutoApprovalMinutes,
+  isValidExclusivePoolTimeoutMinutes,
   isValidPublicPoolTimeoutMinutes,
 } from "@/lib/constants/platformConfig";
 import { readIdempotencyKey } from "@/lib/constants/writes";
@@ -27,8 +29,9 @@ import type { AdminPlatformConfigWriteResult, PlatformConfig } from "@/lib/types
  * （`lib/api/adminRoute.ts`，理由见那里的注释）。
  *
  * 这一层负责三件事，多一件都不做：
- * 1. 解析与校验入参（**白名单**：客户端能改的字段只有 `publicPoolTimeoutMinutes` /
- *    `completionAutoApprovalMinutes` / `complaintWindowMinutes`，其余字段没有进入路径）；
+ * 1. 解析与校验入参（**白名单**：客户端能改的字段只有 `exclusivePoolTimeoutMinutes` /
+ *    `publicPoolTimeoutMinutes` / `completionAutoApprovalMinutes` / `complaintWindowMinutes`，
+ *    其余字段没有进入路径）；
  * 2. 把伪事务的失败翻译成明确的接口错误；
  * 3. 决定 DTO —— 本模块的 DTO 就是配置记录本身（它没有需要裁剪的字段）。
  *
@@ -106,6 +109,24 @@ function readTimeoutMinutes(body: Record<string, unknown>): number | undefined {
 }
 
 /**
+ * 从请求体里读**专属池**超时时长（P1-2）。字段没出现表示不改这一项。
+ *
+ * ⚠️ 必须调用 `isValidExclusivePoolTimeoutMinutes` 而不是
+ * `isValidPublicPoolTimeoutMinutes`：两者今天的取值区间恰好相同（都是 1~1440，
+ * 常量是复用的），但它们是**两个字段的规则**。用错的那一天，只要有人给专属池
+ * 单独放宽或收紧范围，就会静默地校验错对象。
+ * 这与 `readComplaintWindowMinutes` 里那条警告是同一条理由的另一面。
+ */
+function readExclusivePoolTimeoutMinutes(body: Record<string, unknown>): number | undefined {
+  if (!("exclusivePoolTimeoutMinutes" in body)) return undefined;
+  const raw = body.exclusivePoolTimeoutMinutes;
+  if (!isValidExclusivePoolTimeoutMinutes(raw)) {
+    throw new ApiError("BAD_REQUEST", PLATFORM_CONFIG_INVALID_EXCLUSIVE_POOL_TIMEOUT_MESSAGE, 400);
+  }
+  return raw;
+}
+
+/**
  * 从请求体里读完成材料自动审核时长（P0-8）。字段没出现表示不改这一项。
  *
  * 与 `readTimeoutMinutes` 同一套「不做隐式转换、非法值一律拒绝」的规则。
@@ -167,6 +188,7 @@ export async function updateAdminPlatformConfig(
   body: Record<string, unknown>,
 ): Promise<AdminPlatformConfigWriteResult> {
   const operationId = requireIdempotencyKey(body);
+  const exclusivePoolTimeoutMinutes = readExclusivePoolTimeoutMinutes(body);
   const publicPoolTimeoutMinutes = readTimeoutMinutes(body);
   const completionAutoApprovalMinutes = readCompletionAutoApprovalMinutes(body);
   const complaintWindowMinutes = readComplaintWindowMinutes(body);
@@ -174,6 +196,7 @@ export async function updateAdminPlatformConfig(
   // 空 PATCH：一个字段都没带，不算一次改动，也谈不上「保持现状」——直接拒绝，
   // 免得调用方以为保存成功了
   if (
+    exclusivePoolTimeoutMinutes === undefined &&
     publicPoolTimeoutMinutes === undefined &&
     completionAutoApprovalMinutes === undefined &&
     complaintWindowMinutes === undefined
@@ -183,7 +206,12 @@ export async function updateAdminPlatformConfig(
 
   return toWriteResult(
     await updatePlatformConfig(
-      { publicPoolTimeoutMinutes, completionAutoApprovalMinutes, complaintWindowMinutes },
+      {
+        exclusivePoolTimeoutMinutes,
+        publicPoolTimeoutMinutes,
+        completionAutoApprovalMinutes,
+        complaintWindowMinutes,
+      },
       writeContext(adminId, operationId),
     ),
   );

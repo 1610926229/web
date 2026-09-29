@@ -2,7 +2,7 @@ import type { CompanionReleaseSource } from "./companionRelease";
 import type { StaffCompletionListItem } from "./completion";
 import type { StaffComplaintListItem } from "./complaint";
 import type { DispatchState } from "./dispatch";
-import type { MessageSenderRole } from "./message";
+import type { ConversationKind, MessageSenderRole } from "./message";
 import type { OrderAddonSnapshot, OrderStatus, OrderTimelineEntry } from "./order";
 import type { StaffRefundListItem } from "./refund";
 
@@ -338,8 +338,14 @@ export type StaffOrderSummary = {
   productTitle: string;
   specName: string;
   quantity: number;
-  /** 单位：分。只读展示，客服不能改 */
-  totalAmount: number;
+  /**
+   * 单位：分。**用户实付**（P1-4）。只读展示，客服不能改。
+   *
+   * ⚠️ 摘要上**只有这一个金额**，且它就是页面上那一行「实付金额」。P1-4 之前
+   * 这里叫 `totalAmount`（优惠前应付）；摘要行当时写的是「金额」，读原价还糊弄得过去，
+   * 一旦改口叫「实付」就必须换字段——两个数在有券时不是一回事。
+   */
+  actualPaidAmount: number;
   userNickname: string;
   /** 护航摘要：未接单时是一句「等待接单」，接了单就是陪玩名 */
   companionSummary: string;
@@ -362,10 +368,50 @@ export type StaffOrderSummary = {
  * ⚠️ **消息实体不直接作为响应**：这里每一条都经过 `senderRoleLabel` / `isSelf`
  * 这类展示层加工，仓储里那条带 `userId` 的记录不会原样下发。
  */
+/**
+ * 客服视角的一段会话（P0-14）。
+ *
+ * ⚠️ **与用户端的 `OrderConversationSegment` 是两个类型**，不是同一个：
+ * 用户端那一个绝不许带 `companionId`（`cmd_p0-14.md` §七：不展示内部 id），
+ * 而客服端必须带——「这段是谁在服务」正是售后调查要回答的问题。
+ * 合成一个类型就只能靠调用方自觉不把它交给用户端，而那是迟早会失守的约定。
+ *
+ * ⚠️ 这里**没有** `isReadOnly`：客服端不存在「能不能在这段里发消息」这个问题——
+ * 客服的发送框只有一处，写入的是客服会话（见 `STAFF_MESSAGE_TARGET_NOTICE`）。
+ * 照搬用户端的那个标志位会让人以为客服能在履约会话里发言。
+ */
+export type StaffConversationSegment = {
+  index: number;
+  kind: ConversationKind;
+  /** 段标题；已失效的履约段带「（历史）」后缀 */
+  title: string;
+  /** 这一段是否仍是订单当前的履约段。客服会话恒为 false */
+  isCurrent: boolean;
+  /** 这一段对应的护航；客服会话为 null */
+  companionId: string | null;
+  /** 护航展示名；查不到资料时回落到 `companionId`（同履约退出历史的口径） */
+  companionName: string | null;
+  messages: StaffConversationMessage[];
+};
+
 export type StaffConversationDetail = {
   order: StaffOrderSummary;
   user: { id: string; nickname: string; avatarUrl: string };
+  /**
+   * **全部段落**按时间线的扁平消息，与 P0-14 之前同形。
+   *
+   * ⚠️ 保留它是为了不打断既有调用方与既有测试：它一直是「这一单聊过什么」的答案。
+   * 新增的 `segments` 是同一个答案的**分段视图**，两者由同一批消息算出，
+   * 不存在一份新、一份旧。
+   */
   messages: StaffConversationMessage[];
+  /**
+   * 分段视图（P0-14）：客服会话在前，其后按履约序号升序，含已失效的历史段。
+   * 换人之后**旧段落照样在这里**——`cmd_p0-14.md` §八：不因换人丢失旧聊天。
+   */
+  segments: StaffConversationSegment[];
+  /** 发送框旁的说明：告诉客服这条消息会落到哪一段（避免他以为发给了当前打手） */
+  messageTargetNotice: string;
   /** 当前客服读到的时间；null 表示这位客服从未读过这个会话 */
   staffLastReadAt: string | null;
 };
@@ -445,8 +491,15 @@ export type StaffOrderListItem = {
   productTitle: string;
   specName: string;
   quantity: number;
-  /** 单位：分。渠道实收（商品 + 增值服务）的订单快照。只读展示，客服不能改 */
-  totalAmount: number;
+  /**
+   * 单位：分。**用户实付**（P1-4）。客服列表「实收金额」列读的是它。
+   *
+   * ⚠️ **这里原先叫 `totalAmount`，含义被写成「渠道实收」**——两处都错：它是
+   * **优惠前**应付总额，而渠道真正收到的钱是实付；满减券一生效两者就不相等。
+   * 列表只带这一个金额。优惠前的原价叫 `originalAmount`，只在详情里出现
+   * （`StaffOrderDetail` 自己声明了它，不从这个列表项继承）。
+   */
+  actualPaidAmount: number;
   /**
    * 下单用户摘要（`StaffOrderUserSummary`：id / 昵称 / 头像 / `displayId`）。
    *

@@ -301,7 +301,17 @@ export function toStaffRefundDetail(
     orderNo: string;
     status: OrderStatus;
     productTitle: string;
-    totalAmount: number;
+    /**
+     * 单位：分。用户实付（P1-4）。
+     *
+     * 详情页那行「原订单实付金额」读的是**这个**（下方 `orderTotalAmount`），
+     * 列表那行「申请金额」读的是申请时冻结的 `refund.amount`。
+     *
+     * ⚠️ 入参里**刻意不要** `totalAmount`（优惠前应付总额）：本层不读它，
+     * 而一个没人读的原价字段正是「拿原价充实付」的入口——同一处错误已经在
+     * 用户端与客服端各出现过一次（见下方 `orderTotalAmount`）。
+     */
+    actualPaidAmount: number;
   },
   user: StaffUserSummary,
   conversationOrderId: string | null,
@@ -313,7 +323,10 @@ export function toStaffRefundDetail(
     reasonLabel: refund.reasonLabel || (REFUND_REASON_LABELS[refund.reasonKey] ?? refund.reasonKey),
     description: refund.description,
     evidence: refund.evidence,
-    orderTotalAmount: order.totalAmount,
+    // ⚠️ **读实付，不读 `totalAmount`（P1-4 修正）**：详情页那一行标着「原订单实付金额」，
+    // 而值原先取自**优惠前**应付总额。有券时客服会拿着一个比用户实付更大的数去对账
+    // （同一处错误在用户端由 `lib/services/refunds.ts` 的同一个字段名一起改掉）
+    orderTotalAmount: order.actualPaidAmount,
     reviewingAt: refund.reviewingAt,
     reviewedAt: refund.reviewedAt,
     reviewedBy: refund.reviewedBy,

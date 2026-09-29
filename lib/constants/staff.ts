@@ -1,3 +1,9 @@
+import {
+  CONVERSATION_SEGMENT_ASSIGNMENT_TITLE_STAFF,
+  compareConversationsWithinOrder,
+  isCurrentAssignmentConversation,
+  segmentTitle,
+} from "@/lib/constants/conversations";
 import { COMPANION_RELEASE_SOURCE_LABELS, DISPATCH_STATE_LABELS } from "@/lib/constants/dispatch";
 import { ORDER_STATUSES, ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import { PLATFORM_NAME } from "@/lib/constants/site";
@@ -7,12 +13,13 @@ import type { CompanionReleaseRecord } from "@/lib/types/companionRelease";
 import type { Companion } from "@/lib/types/companion";
 import type { Order } from "@/lib/types/order";
 import type { DispatchRecord } from "@/lib/types/dispatch";
-import type { MessageSenderRole, OrderMessage } from "@/lib/types/message";
+import type { MessageSenderRole, OrderConversationRecord, OrderMessage } from "@/lib/types/message";
 import type { OrderStatus } from "@/lib/types/order";
 import type {
   StaffCompanionReleaseEntry,
   StaffConversationListItem,
   StaffConversationMessage,
+  StaffConversationSegment,
   StaffOrderAllowedActions,
   StaffOrderDispatchSummary,
   StaffOrderListItem,
@@ -399,6 +406,22 @@ export function toStaffConversationListItem(input: {
   };
 }
 
+/**
+ * 护航展示名的**唯一**回落规则：查不到名字时回落到 `companionId`。
+ *
+ * 直接调用它的是退出历史条目（`toStaffCompanionReleaseEntry`）与会话分段
+ * （`toStaffConversationSegments`）两处，但它们**共用这一份实现**——
+ * 也就是「查不到名字怎么办」在代码里只有一句。两处各写一次 `|| companionId`
+ * 的话，将来有一处被改成空串或「未知护航」，那处就会开始显示一个
+ * **看起来像另一位护航**的占位符，而另一处不会——这种分叉不会有人发现。
+ *
+ * ⚠️ 参数顺序是 `(id, name)`：名字是**可能缺失的那一个**，id 是**一定有的那一个**。
+ * 反过来的签名会让调用方以为名字才是主、id 是备选。
+ */
+export function resolveCompanionDisplayName(companionId: string, companionName: string): string {
+  return companionName || companionId;
+}
+
 // ——————————————————————————— 工作台详情 ———————————————————————————
 
 /**
@@ -425,7 +448,9 @@ export function toStaffOrderSummary(
     productTitle: order.productTitle,
     specName: order.specName,
     quantity: order.quantity,
-    totalAmount: order.totalAmount,
+    // 摘要只给实付（P1-4）：页面上那一行写的是「实付金额」。
+    // 优惠前的原价不进摘要——它只在订单详情里以 `originalAmount` 出现
+    actualPaidAmount: order.actualPaidAmount,
     userNickname,
     // 护航摘要：未绑定陪玩时是一句明确的「等待接单」，不是空白
     companionSummary: order.companion ? order.companion.name : "等待接单",
@@ -462,7 +487,7 @@ export function toStaffCompanionReleaseEntry(
 ): StaffCompanionReleaseEntry {
   return {
     companionId: record.companionId,
-    companionName: companionName || record.companionId,
+    companionName: resolveCompanionDisplayName(record.companionId, companionName),
     source: record.source,
     // 标签表复用派单域那一份（`COMPANION_RELEASE_SOURCE_LABELS`），不另写一套叫法
     sourceLabel: COMPANION_RELEASE_SOURCE_LABELS[record.source],
@@ -493,6 +518,79 @@ export function toStaffConversationMessage(
     createdAt: message.createdAt,
     isSelf,
   };
+}
+
+// ——————————————————————————— 会话分段（P0-14） ———————————————————————————
+
+/**
+ * 发送框旁的说明。
+ *
+ * ⚠️ 这句话在 P0-14 **从「提示」变成了「必须说清的事」**：一张订单现在可以有两段
+ * 以上的会话，客服看到「护航沟通」那一段时很容易以为自己的回复会发给那位护航。
+ * 不会——客服的回复只进入客服会话。不说清楚，客服会在履约会话里追问一位
+ * **已经不在这一单上**的护航，而对方永远收不到。
+ *
+ * 说明里刻意点了「用户能同时看到客服沟通与各段护航沟通」：客服据此才敢判断
+ * 「这句话写在客服沟通里，用户照样看得到」。
+ */
+export const STAFF_MESSAGE_TARGET_NOTICE =
+  "你的回复只会进入「客服沟通」那一段；用户能看到客服沟通与各段护航沟通，但护航看不到客服沟通。";
+
+/**
+ * 订单的全部会话 → 客服视角的分段视图（P0-14）。
+ *
+ * 四条约定：
+ *
+ * 1. **含已失效的历史段**，而且照样带护航名字——`cmd_p0-14.md` §八要求
+ *    「不因换人丢失旧聊天」，被换下的那位护航做过什么正是调查的对象；
+ * 2. **排序与用户端同一套**（`compareConversationsWithinOrder`）：客服与会话页
+ *    讨论的必须是同一个「第几段」，两边各排一次迟早会错位；
+ * 3. **`isCurrent` 由订单当前的履约段现算**（`isCurrentAssignmentConversation`），
+ *    不是读会话上的历史标记——「哪一段是当前」是订单此刻的事实，会变；
+ * 4. **空段落照样出现**：一段会话存在但没有消息，本身就是一条信息
+ *    （「这两方被撮合过但没聊」），藏掉它会让人以为那一段不存在。
+ *
+ * ⚠️ `companionNames` 由调用方解析后传入（仓储读不了「展示名」这件事）。
+ * 查不到名字时**回落到 `companionId`**：与履约退出历史
+ * （`toStaffCompanionReleaseEntry`）同一个口径——客服宁可看到一个 id，
+ * 也不能看到一段占位符而以为那是一位真正的护航。
+ */
+export function toStaffConversationSegments(
+  conversations: readonly OrderConversationRecord[],
+  messages: readonly OrderMessage[],
+  currentStaffId: string,
+  currentAssignmentKey: string | null,
+  companionNames: ReadonlyMap<string, string>,
+): StaffConversationSegment[] {
+  // 消息按会话分组：分段只需要「这一段的消息」，跨段合并是另一件事（那就是 `messages`）
+  const byConversation = new Map<string, OrderMessage[]>();
+  for (const message of messages) {
+    const list = byConversation.get(message.conversationId);
+    if (list) list.push(message);
+    else byConversation.set(message.conversationId, [message]);
+  }
+
+  return [...conversations]
+    .sort(compareConversationsWithinOrder)
+    .map((conversation, index) => {
+      const isCurrent = isCurrentAssignmentConversation(conversation, currentAssignmentKey);
+      return {
+        index,
+        kind: conversation.kind,
+        // 客服端的角色称呼是「护航」（见 `..._TITLE_STAFF` 的说明）
+        title: segmentTitle(conversation, isCurrent, CONVERSATION_SEGMENT_ASSIGNMENT_TITLE_STAFF),
+        isCurrent,
+        companionId: conversation.companionId,
+        // 客服会话没有护航；履约会话即使查不到资料也要显示得出是哪一位（回落规则见
+        // `resolveCompanionDisplayName`，与退出历史条目同一份实现）
+        companionName: conversation.companionId
+          ? resolveCompanionDisplayName(conversation.companionId, companionNames.get(conversation.companionId) ?? "")
+          : null,
+        messages: (byConversation.get(conversation.id) ?? []).map((message) =>
+          toStaffConversationMessage(message, currentStaffId),
+        ),
+      };
+    });
 }
 
 // ——————————————————————————— 全量订单查询（P0-10） ———————————————————————————
@@ -654,7 +752,10 @@ export function toStaffOrderListItem(
     productTitle: order.productTitle,
     specName: order.specName,
     quantity: order.quantity,
-    totalAmount: order.totalAmount,
+    // 列表那一列的表头是「实收金额」，所以给**实付**（P1-4）：
+    // 优惠前应付有券时比渠道真正收到的钱大。列表只带这一个金额，
+    // 优惠前的原价只在详情里叫 `originalAmount`
+    actualPaidAmount: order.actualPaidAmount,
     user,
   };
 }

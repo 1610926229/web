@@ -4,11 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  COMPANION_POOL_PAUSED_NOTICE,
-  EXCLUSIVE_WAIT_MINUTES,
-  plusMinutes,
-} from "../lib/constants/dispatch.ts";
+import { COMPANION_POOL_PAUSED_NOTICE, plusMinutes } from "../lib/constants/dispatch.ts";
+import { EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES } from "../lib/constants/platformConfig.ts";
 import { getCompanionRepository } from "../lib/data/companionRepository.ts";
 import { getDispatchRepository } from "../lib/data/dispatchRepository.ts";
 import { getNotificationRepository } from "../lib/data/notificationRepository.ts";
@@ -340,7 +337,7 @@ test("可用性 6：期限内重新恢复接单，仍然可以正常接下这一
   );
 
   await resume(companionId);
-  const at = plusMinutes(order.paidAt, EXCLUSIVE_WAIT_MINUTES - 1);
+  const at = plusMinutes(order.paidAt, EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES - 1);
   const outcome = await acceptDispatchForCompanion(companionId, dispatch.id, at);
   assert.equal(outcome.kind, "ok", "deadline 还没到，恢复接单后应当能接");
 

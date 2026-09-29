@@ -1,3 +1,9 @@
+import {
+  COMPLAINT_WINDOW_DEFAULT_MINUTES,
+  COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES,
+  EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+  PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
+} from "@/lib/constants/platformConfig";
 import { platformConfigSeed } from "@/lib/mocks/fixtures/platformConfigSeed";
 import type { PlatformConfig } from "@/lib/types/platformConfig";
 import { getMockStore } from "./mockStore";
@@ -46,8 +52,62 @@ export function clonePlatformConfig(config: PlatformConfig): PlatformConfig {
   return { ...config };
 }
 
+/**
+ * 一个「时长」字段的兜底：合法（有限、整数、> 0）就原样保留，否则回退到默认值。
+ *
+ * ⚠️ 判据是 **> 0** 而不是「非空」：所有时长字段的合法下界都 ≥ 1 分钟，因此
+ * `0` / 负数 / `NaN` / `undefined` 都属于**不可能由正常写入产生**的值。
+ * 让它们漏过去，deadline 会算成 `new Date(NaN).toISOString()` 并**抛异常**
+ * （不是得到一个「很早的截止时间」）——一条这样的记录会让整次清扫炸掉。
+ */
+function withTimeoutFallback(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * 把一份配置补齐成**完整的当前配置**（P1-2）——旧数据升级的唯一入口。
+ *
+ * ## 为什么必须有它
+ *
+ * store 挂在 `globalThis` 上（`lib/data/mockStore.ts`），而 `createStore` 只在
+ * **第一次**取这个 store 时执行。于是存在这样一条真实路径：开发服务器上先跑的是
+ * **旧版本**的代码，它建的 store 里没有 `exclusivePoolTimeoutMinutes` 这个键；
+ * 换上新代码后（进程没重启、或热更新保留了那份 store），读到的就是 `undefined`。
+ * 而上层任何一处把 `undefined` 当分钟数用，都会算出 `Invalid Date` 的截止时间。
+ *
+ * ⚠️ 兜底放在**读边界**（而不是每个调用点）：这样「配置对象的四个时长字段恒为
+ * 合法整数」成为仓储的一条保证，服务层 / 事务层 / 页面都不需要写空值分支。
+ * 在每个调用点判 `?? 10` 的写法，迟早会有一个漏判点，而漏判的那一处
+ * 不会报错，只会安静地生成一条**永远不会过期**的派单。
+ *
+ * ⚠️ 它**不是**校验：校验是服务层的事，非法值必须在写入前被拒。
+ * 这里只处理「这份记录是在本字段存在之前建的」这一种历史情况。
+ */
+export function normalizePlatformConfig(config: PlatformConfig): PlatformConfig {
+  const cloned = clonePlatformConfig(config);
+  return {
+    ...cloned,
+    exclusivePoolTimeoutMinutes: withTimeoutFallback(
+      cloned.exclusivePoolTimeoutMinutes,
+      EXCLUSIVE_POOL_TIMEOUT_DEFAULT_MINUTES,
+    ),
+    publicPoolTimeoutMinutes: withTimeoutFallback(
+      cloned.publicPoolTimeoutMinutes,
+      PUBLIC_POOL_TIMEOUT_DEFAULT_MINUTES,
+    ),
+    completionAutoApprovalMinutes: withTimeoutFallback(
+      cloned.completionAutoApprovalMinutes,
+      COMPLETION_AUTO_APPROVAL_DEFAULT_MINUTES,
+    ),
+    complaintWindowMinutes: withTimeoutFallback(
+      cloned.complaintWindowMinutes,
+      COMPLAINT_WINDOW_DEFAULT_MINUTES,
+    ),
+  };
+}
+
 function createStore(): MockPlatformConfigStore {
-  return { config: clonePlatformConfig(platformConfigSeed) };
+  return { config: normalizePlatformConfig(platformConfigSeed) };
 }
 
 export function platformConfigStore(): MockPlatformConfigStore {
@@ -67,7 +127,7 @@ function store(): MockPlatformConfigStore {
  * 原子区段内出现 `await` 就是 bug）。
  */
 export function readPlatformConfig(): PlatformConfig {
-  return clonePlatformConfig(store().config);
+  return normalizePlatformConfig(store().config);
 }
 
 /**
@@ -78,11 +138,14 @@ export function readPlatformConfig(): PlatformConfig {
  *
  * ⚠️ 本函数**不校验**取值是否合法：校验是服务层与伪事务的事
  * （非法值必须被拒，而不是被写进去）。仓储只负责存取。
+ * 它做的是另一件事：**补齐缺失的字段**（见 `normalizePlatformConfig`），
+ * 因此 store 里的那一份永远是四个时长齐全的完整配置——写进来的对象缺字段时，
+ * 缺的那个按默认值补，而不是留一个洞给后面所有读的人。
  */
 export function writePlatformConfig(next: PlatformConfig): PlatformConfigWriteResult {
-  const previous = clonePlatformConfig(store().config);
-  store().config = clonePlatformConfig(next);
-  return { previous, updated: clonePlatformConfig(next) };
+  const previous = normalizePlatformConfig(store().config);
+  store().config = normalizePlatformConfig(next);
+  return { previous, updated: normalizePlatformConfig(next) };
 }
 
 export const mockPlatformConfigRepository: PlatformConfigRepository = {
