@@ -1,4 +1,5 @@
 import type { Companion, CompanionDetail, CompanionListItem } from "@/lib/types/companion";
+import type { OrderCompanionSnapshot } from "@/lib/types/order";
 import { clampPage, clampPageSize } from "./pagination";
 
 /**
@@ -186,6 +187,38 @@ export function isCompanionListed(
 }
 
 /**
+ * 这位护航**此刻能不能接新的单**（P0-5 手工验收时冻结的语义）。
+ *
+ * ## 为什么它与 `isCompanionListed()` 是两件事
+ *
+ * | 字段 | 回答的问题 | 关掉之后 |
+ * |---|---|---|
+ * | `enabled` | 这个 User 还有没有**打手工作资格** | 进不去工作台（`disabled`） |
+ * | `available` | 现在**允不允许接新的订单** | 进得去，但接不了单 |
+ *
+ * ⚠️ **禁止把 `available` 并进 `isCompanionListed()`**，也**禁止**并进
+ * `resolveCompanionAccess()`（`lib/services/companionAccess.ts`）。
+ * 并进去等于说「暂停接单 = 被取消打手资格」：一位想歇两天的护航会连自己的工作台
+ * 都进不去、看不到自己的资料，以为资格没了，转头去重新提交入驻申请——
+ * 而他要的只是暂时不接单。**资格与接单能力必须分开。**
+ *
+ * ## 谁该用它
+ *
+ * 一切「这个人现在能不能接新单」的判断：
+ * - 结算页指定护航（`lib/services/checkout.ts` 里同一条规则的既有写法）；
+ * - 公共池列表是否给他返回可接订单（`lib/services/companionDispatch.ts`）；
+ * - 原子接单区段的最后一道检查（`lib/data/companionDispatchTransaction.ts`）。
+ *
+ * ⚠️ 历史事实**不因它改变**：已经被他接下的单、用户指定给他的专属派单，
+ * 都不会因为 `available` 变成 false 而被改写或隐藏。它只回答「**新的**单能不能接」。
+ */
+export function isCompanionAcceptingOrders(
+  companion: Pick<Companion, "enabled" | "available" | "removedAt">,
+): boolean {
+  return isCompanionListed(companion) && companion.available;
+}
+
+/**
  * 默认排序：`sortOrder` 升序，相等时按 id 兜底。
  *
  * 兜底那一层不是可有可无的：顺序不确定时，同一条陪玩可能在第一页出现过、
@@ -222,6 +255,25 @@ export function toCompanionIntroBrief(intro: string): string {
   const characters = Array.from(trimmed);
   if (characters.length <= COMPANION_INTRO_BRIEF_LENGTH) return trimmed;
   return `${characters.slice(0, COMPANION_INTRO_BRIEF_LENGTH).join("")}…`;
+}
+
+/**
+ * 护航资料 → **订单上的护航公开信息快照**（P0-5）。
+ *
+ * 两个写入点共用这一处转换：**接单那一刻**写进订单
+ * （`companionDispatchTransaction.acceptDispatch`），以及管理端回看
+ * 「用户当初指定的是谁」（`lib/services/adminOrders.ts`）。
+ * 各写一遍的话，两边迟早会对「哪些字段算公开信息」给出不同答案——
+ * 而其中一边一旦多带一个 `userId`，那位护航的账号就会出现在后台订单详情里。
+ *
+ * ⚠️ 只有 id / 昵称 / 头像：`enabled` / `removedAt` / `rankLabel` 与任何身份字段都不进快照。
+ */
+export function toOrderCompanionSnapshot(companion: Companion): OrderCompanionSnapshot {
+  return {
+    id: companion.id,
+    name: companion.displayName,
+    avatarUrl: companion.avatarUrl,
+  };
 }
 
 /**

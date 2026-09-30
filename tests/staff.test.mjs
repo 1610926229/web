@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 import { fileURLToPath } from "node:url";
 import { findAppFile } from "./app-path.mjs";
 
@@ -109,6 +111,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STAFF_API_DIR = path.join(ROOT, "app", "api", "staff");
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP_HTTP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过客服端 HTTP 用例";
 
 /** 去掉注释后再做「源码里不该出现某标识」的断言：文档注释里说明「本页没有 X」不算出现 X。 */
@@ -293,11 +298,16 @@ test("会话列表 DTO 与订单摘要都不含游戏 ID、订单备注与用户
   const order = orderSeed.find((item) => item.id === "ord-seed-1001-04");
   assert.ok(order, "预置订单缺失：ord-seed-1001-04");
 
-  const summary = toStaffOrderSummary(order, "老板A");
+  // 第三个入参是履约退出历史（P0-6）：本层不做仓储读取，由服务层查好传进来。
+  // 传空数组是**有意义的**输入——「这一单没有人退出过」是正常情况，不是缺失取值。
+  const summary = toStaffOrderSummary(order, "老板A", []);
   assert.equal(summary.orderNo, order.orderNo);
-  assert.equal(summary.totalAmount, order.totalAmount);
+  // 摘要上唯一的金额是**实付**（P1-4）：页面上那一行写的是「实付金额」，
+  // 而优惠前的原价只在订单详情里叫 `originalAmount`
+  assert.equal(summary.actualPaidAmount, order.actualPaidAmount);
   assert.equal(summary.userNickname, "老板A");
   assert.ok(summary.companionSummary.length > 0, "没有护航时要写成「等待接单」，不是空白");
+  assert.deepEqual(summary.releaseHistory, [], "没有退出过就是空数组，不是 undefined");
 
   // 字段表就是边界：少一个字段就少一条泄漏路径
   for (const forbidden of ["gameAccountId", "remark", "userId", "payCredential"]) {
@@ -800,6 +810,31 @@ test("概览三个数是真实聚合：按当前客服口径算，不是写死�
   assert.ok(metrics.notice.length > 0, "口径说明必须跟着数字一起给出来");
 });
 
+test("客服工作台的待处理退款/投诉口径 = 该领域的未终结状态集合（不自己维护第二份）", async () => {
+  const metrics = await getStaffOverviewMetrics(STAFF_A, undefined, "server");
+
+  // ── 正例：**种子里有 1 条 `reviewing` 退款、2 条 `processing` 投诉**，所以
+  //    这个数不等于「pending 的条数」。写死 `=== "pending"` 的实现会得到 3 / 1，
+  //    这条断言就是冲它来的（P1-1 的 R6 裁定：待办口径要含「已接手未出结论」）。
+  assert.equal(metrics.pendingRefundCount, 4, "退款待处理数应含 reviewing（3 条 pending + 1 条 reviewing）");
+  assert.equal(metrics.pendingComplaintCount, 3, "投诉待处理数应含 processing（1 条 pending + 2 条 processing）");
+
+  // ── 源码探针：这两个状态字面量**不该再出现在服务层**。
+  //    它们曾经在这里被写成 `=== "pending" || === "reviewing"` 这样的第二份定义——
+  //    与后台首页待办卡、与 `?status=open` 列表各存一份「未处理」。
+  //    今天的取值恰好相同，因此重复**不会报错**；只有产品把某个新状态并入待处理时，
+  //    三处才会静默分叉（卡片 4 条、工作台 3 条，且没有任何测试失败）。
+  //    上面两条正例挡的是「退回到只数 pending」，这条源码探针挡的是「第二份定义回来」。
+  const source = stripComments(readSource(path.join(ROOT, "lib", "services", "staffConversations.ts")));
+  for (const status of ["reviewing", "processing"]) {
+    assert.ok(
+      !source.includes(`"${status}"`),
+      `staffConversations.ts 里又出现了状态字面量 "${status}"：待处理口径必须取自 ` +
+        "OPEN_REFUND_STATUSES / OPEN_COMPLAINT_STATUSES，不能在服务层另写一份",
+    );
+  }
+});
+
 test("会话列表：按最后消息时间倒序，没有消息的排最后", async () => {
   const result = await listConversationsForStaff(STAFF_A, listQuery(), undefined, "server");
   assert.equal(result.items.length, 5);
@@ -1225,7 +1260,8 @@ test("客服发消息不改订单：状态、金额、商品与消费等级、�
 test("客服账号不进用户名单，也不参与消费：它是独立的第三类身份", async () => {
   const accounts = await getStaffRepository().listStaff();
   const userIds = new Set(userSeed.map((user) => user.id));
-  const companionIds = new Set(orderSeed.map((order) => order.companionId).filter(Boolean));
+  // P0-5 起订单上只剩「实际接单的人」这一个护航字段（用户指定的人记在派单上）
+  const companionIds = new Set(orderSeed.map((order) => order.actualCompanionId).filter(Boolean));
 
   for (const account of accounts) {
     assert.equal(userIds.has(account.id), false, "客服账号不能混成普通用户");
@@ -1243,19 +1279,32 @@ test("客服账号不进用户名单，也不参与消费：它是独立的第�
 
 // ——————————————————————————— 六、源码门禁 ———————————————————————————
 
-test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + 投诉五件", () => {
+test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + 退款四件 + 投诉五件 + 完成材料四件", () => {
   const routeFiles = collectFiles(STAFF_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
   // ⚠️ 这里没有「管理客服账号」的地址：那在 `/api/admin/staff/**`，
   // 两者的鉴权是两套（`requireAdmin()` 与 `requireStaff()`），不能合成一个地址段。
   // ⚠️ **仍然没有**「改订单」的地址：客服不能改订单状态、金额、商品（P8D-2 也没有放开）。
+  //    P0-10 加的是**两个只读地址**：列表与详情。全量订单查询因此不等于「客服能改订单」——
+  //    两个地址都是 GET，且服务层没有任何写订单的路径。
+  // ⚠️ P0-11 在订单段下加了**三个地址**：两个写（`release` 回池 / `replace` 直接换人）、
+  //    一个只读（`replace-candidates` 候选名单）。它们**不是**「改订单」——
+  //    改的是**当前履约人**：`release` 把订单退回 `paid` 并重进公共池，`replace` 换成另一位护航，
+  //    两者都不改金额、不改商品、不退款。金额与商品仍然没有写地址。
+  // ⚠️ 订单因此是**五个**地址：列表、详情、回池、换人、候选名单。
+  //    **没有**「退款」「售后」「改金额」的地址——它们属于后续 Round 或别的动作，边界到这里为止。
+  // ⚠️ 候选名单是 GET 而不是塞进详情 DTO：详情每次翻页都会取，而候选名单只在客服按下
+  //    「更换护航」时才需要（要读全部护航再筛一遍）。塞进去等于给每次详情读取都加一次全表扫描。
   // ⚠️ 退款**只有四个**地址：列表、详情、开始审核、驳回。
   //    **没有 `approve`**：通过会在同一次写入里把订单改成「已退款」，属于资金最终划拨，
   //    留在管理员侧。这个「少一个地址」就是那条边界在代码里的样子——
   //    接口不存在，因此谁也无法从客服端把它调出来。
   // ⚠️ 投诉五个：列表、详情，加三个处理动作（开始处理 / 解决 / 关闭）——
   //    投诉不写订单、不写退款、不动金额，因此三个动作都归客服。
+  // ⚠️ 完成材料四个：列表、详情，加两个审核动作（通过 / 驳回）。
+  //    通过会同时把订单推进到 completed——那是「完成材料审核」的业务结果，不是「改订单」的入口；
+  //    驳回只改完成材料、订单保持 serving。因此两个审核动作都归客服。
   assert.deepEqual(
     routeFiles.map((file) => path.relative(STAFF_API_DIR, file).replace(/\\/g, "/")).sort(),
     [
@@ -1267,11 +1316,22 @@ test("客服接口清单固定：认证三件 + 会话四件 + 退款四件 + �
       "complaints/[id]/route.ts",
       "complaints/[id]/start-processing/route.ts",
       "complaints/route.ts",
+      "completions/[id]/approve/route.ts",
+      "completions/[id]/reject/route.ts",
+      "completions/[id]/route.ts",
+      "completions/route.ts",
       // 详情与发送共用一个地址段（GET 读、POST 发），因此只有这一个 route.ts
       "conversations/[orderId]/messages/route.ts",
       "conversations/[orderId]/read/route.ts",
       "conversations/[orderId]/route.ts",
       "conversations/route.ts",
+      // 全量订单查询（P0-10）：列表与详情两个只读地址
+      // 订单处置（P0-11）：退回公共池 + 直接换人 + 换人候选名单
+      "orders/[id]/release/route.ts",
+      "orders/[id]/replace-candidates/route.ts",
+      "orders/[id]/replace/route.ts",
+      "orders/[id]/route.ts",
+      "orders/route.ts",
       "refunds/[id]/reject/route.ts",
       "refunds/[id]/route.ts",
       "refunds/[id]/start-review/route.ts",
@@ -1331,7 +1391,12 @@ test("客服工作台不复用用户端壳层，也不进管理员侧栏", () =>
   }
 
   // 工作台页面按地址找得到，且登录页在壳层之外（否则会转成一个死循环）
-  for (const route of ["staff/page.tsx", "staff/login/page.tsx", "staff/conversations/page.tsx"]) {
+  for (const route of [
+    "staff/page.tsx",
+    "staff/login/page.tsx",
+    "staff/conversations/page.tsx",
+    "staff/orders/page.tsx",
+  ]) {
     assert.ok(findAppFile(route).length > 0, `缺少 ${route}`);
   }
   assert.equal(
@@ -1340,12 +1405,35 @@ test("客服工作台不复用用户端壳层，也不进管理员侧栏", () =>
     "登录页不该待在需要登录的壳层里",
   );
 
-  // 详情页不能有加载边界：外壳先以 200 发出之后，迟到的 notFound() 只能改内容、改不了状态码
-  const detailDir = path.dirname(findAppFile("staff/conversations/[orderId]/page.tsx"));
-  assert.equal(
-    readdirSync(detailDir).some((name) => /^loading\.(tsx|js)$/.test(name)),
-    false,
-    "订单沟通页不该有 loading.tsx：加载边界会把真 404 变成 200",
+  // 详情页不能有加载边界：外壳先以 200 发出之后，迟到的 notFound() 只能改内容、改不了状态码。
+  // ⚠️ 逐条列出而不是只查一个：这条约束是**每一条客服详情路由**都要满足的，
+  // 漏登记一条就等于那条路由的 404 悄悄退化成 200。
+  // ⚠️ 而且要**逐级上溯到 `app/`**，不能只看详情页自己那一层：把 `loading.tsx` 放到
+  // `orders/` 或 `(console)/` 一层，它同样会成为详情页的加载边界，
+  // 而那时「所在目录里没有 loading.tsx」这条断言仍然成立——红不了，等于没守。
+  const APP_ROOT = path.join(ROOT, "app");
+  for (const detailRoute of [
+    "staff/conversations/[orderId]/page.tsx",
+    "staff/orders/[id]/page.tsx",
+  ]) {
+    for (let dir = path.dirname(findAppFile(detailRoute)); ; dir = path.dirname(dir)) {
+      assert.equal(
+        readdirSync(dir).some((name) => /^loading\.(tsx|js)$/.test(name)),
+        false,
+        `${path.relative(ROOT, dir).replace(/\\/g, "/")} 里有 loading.tsx，它会把 ${detailRoute} 罩进加载边界：外壳先以 200 发出，迟到的 notFound() 改不了状态码`,
+      );
+      if (dir === APP_ROOT) break;
+    }
+  }
+
+  // ⚠️ 列表页的 loading.tsx **必须收在 `(list)` 段内**：放到 `orders/` 或 `(console)/`
+  // 一层，它就会成为详情页的加载边界，上面那条约束会被从旁边绕过去。
+  // 按路由找而不是按目录名找：`findAppFile` 会剥掉全部路由组段，
+  // 所以 `(list)` 不出现在入参里，返回值才落在真正的那个目录上。
+  const listDir = path.dirname(findAppFile("staff/orders/page.tsx"));
+  assert.ok(
+    readdirSync(listDir).some((name) => /^loading\.(tsx|js)$/.test(name)),
+    "全量订单列表页缺少 loading.tsx（列表本身仍需要骨架屏）",
   );
 });
 
@@ -1588,8 +1676,11 @@ test("伪造的客服身份请求会话详情：不存在的订单与没权限�
   const detail = await requestWithCookie("/api/staff/conversations/ord-seed-1001-04", staffCookie);
   assert.equal(detail.status, 200);
   assert.equal(detail.body.includes("orderNo"), true);
-  // 摘要有金额（客服要对得上账），但没有游戏 ID、订单备注与任何支付凭据
-  assert.equal(detail.body.includes("totalAmount"), true);
+  // 摘要有金额（客服要对得上账），但没有游戏 ID、订单备注与任何支付凭据。
+  // ⚠️ 摘要在 HTTP 上出现的是 `actualPaidAmount`（P1-4）：原先那个字段叫
+  // `totalAmount` 且含义被写成「渠道实收」，两个名字都错——已从摘要里摘掉，
+  // 现在只留一个金额，就是用户实付
+  assert.equal(detail.body.includes("actualPaidAmount"), true);
   for (const forbidden of ["gameAccountId", "remark", "openId", "unionId", "sessionId", "cookie"]) {
     assert.equal(detail.body.includes(forbidden), false, `详情的响应体不该出现 ${forbidden}`);
   }
@@ -1605,4 +1696,51 @@ test("伪造的客服身份请求会话详情：不存在的订单与没权限�
   assert.equal(noConversation.status, 404);
   assert.equal(missing.status, 404);
   assert.equal(noConversation.body, missing.body, "两种情形必须完全无法区分，否则订单号可以被逐个试探");
+});
+
+/**
+ * 退出历史（P0-6）必须在**接口层**也下得来。
+ *
+ * 内容口径（六个字段、名字回落、顺序、空数组语义）由 `tests/staffReleaseHistory.test.mjs`
+ * 逐条守住；这里只回答接口这一层的问题：三个既有详情接口的 JSON 里到底有没有这个字段、
+ * 它是不是数组、以及它有没有把匿名请求放进来。
+ *
+ * ⚠️ 这里断言的是**空数组**：「字段在、类型对、没有被序列化吃掉」；非空的内容在
+ * 服务层用例里覆盖。为空的原因**不再是「没人能成为打手」**——DEV-1 起预置数据里
+ * 有 `u-1022` / `u-1023` 两位有效打手，接口层是可以产生退出历史的；为空是因为
+ * 本用例读的这几张**预置订单**从来没有被打手取消过，而且本仓库的 HTTP 用例
+ * 不写共享内存（见 `adminCompanionManagement.test.mjs` 的约定），不会去造一条。
+ */
+test("会话详情接口：releaseHistory 是数组，匿名一律 401", { skip: SKIP_HTTP }, async () => {
+  const pathname = "/api/staff/conversations/ord-seed-1001-04";
+
+  // 匿名：401。这一条不依赖任何开关，先跑——退出历史不得成为一条不用登录的读法
+  assert.equal((await requestWithCookie(pathname, null)).status, 401);
+
+  const login = await staffLogin("staff-1");
+  if (login.status !== 200) {
+    assert.equal(login.status, 404, "客服端开关关闭时登录接口按「不存在」返回");
+    return;
+  }
+  const staffCookie = login.setCookie[0].split(";")[0];
+
+  const detail = await requestWithCookie(pathname, staffCookie);
+  assert.equal(detail.status, 200);
+  const payload = JSON.parse(detail.body);
+
+  assert.equal(
+    Object.hasOwn(payload.data.order, "releaseHistory"),
+    true,
+    "字段必须始终在：时有时无会让页面在两种状态下渲染出不同的结构",
+  );
+  assert.deepEqual(
+    payload.data.order.releaseHistory,
+    [],
+    "没有退出过就是空数组（正常情况），不是 null / undefined（查不到）",
+  );
+
+  // 退出历史的**内部字段**一个都不许顺着接口流出去
+  for (const hidden of ["actorId", "releaseRecordId"]) {
+    assert.equal(new RegExp(`"${hidden}"`).test(detail.body), false, `会话详情不该出现 ${hidden}`);
+  }
 });

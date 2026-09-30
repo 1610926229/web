@@ -22,6 +22,7 @@ import {
   type CompanionProfileInput,
 } from "@/lib/constants/adminCompanions";
 import { readCompanionGameId } from "@/lib/constants/companions";
+import { ORDER_DATA_INCONSISTENT_MESSAGE } from "@/lib/constants/dispatch";
 import { countCompanionStates } from "@/lib/constants/admin";
 import {
   IDEMPOTENCY_KEY_PATTERN,
@@ -257,6 +258,10 @@ function toWriteResult(result: TransactionWriteResult, companionId: string): Adm
       throw new ApiError("BAD_REQUEST", ADMIN_COMPANION_DISABLED_MESSAGE, 400);
     case "operation-conflict":
       throw new ApiError("BAD_REQUEST", ADMIN_COMPANION_OPERATION_CONFLICT_MESSAGE, 400);
+    // P0-11：停用要连带解除他手上的订单，而那份数据不自洽。**停用本身也一笔没写**，
+    // 因此不能报成任何一种 400——那会让管理员以为是自己操作的问题而反复重试同一件事
+    case "inconsistent":
+      throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
     default: {
       const { enabled, available, unavailableReason, removedAt } = result.value.updated;
       return {

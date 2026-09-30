@@ -1,8 +1,10 @@
 import { compareOrdersForAdmin, orderInDateRange } from "@/lib/constants/adminOrders";
+import { plusMinutes } from "@/lib/constants/dispatch";
 import { compareOrdersNewestFirst, matchesOrderKeyword } from "@/lib/constants/orders";
+import { isRefundExecutionClosed } from "@/lib/constants/refunds";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
-import type { Order } from "@/lib/types/order";
+import type { Order, OrderCompanionSnapshot } from "@/lib/types/order";
 import type {
   MockPaymentResult,
   Payment,
@@ -133,7 +135,11 @@ export const mockPaymentRepository: PaymentRepository = {
         paymentRequestId: request.id,
         orderId: order.id,
         userId: request.userId,
-        amount: request.totalAmount,
+        // ⚠️ 实付，不是 `totalAmount`（P1-4 修正）。`totalAmount` 是**优惠前**的应付总额，
+        // 拿它当支付金额就等于「按原价扣款却给优惠」——用户被多收了钱，而且
+        // 支付记录与订单的 `actualPaidAmount` 从此对不上。
+        // 无券时两者相等，因此这一改动对既有链路零影响。
+        amount: request.actualPaidAmount,
         status: "success",
         paidAt,
       };
@@ -184,6 +190,15 @@ export const mockPaymentRepository: PaymentRepository = {
     return [...store().orders.values()].filter((order) => order.userId === userId);
   },
 
+  async queryOrdersByCompanion(companionId) {
+    // `actualCompanionId` 是**查询条件**而不是「查出来再比对」：本方法只可能返回
+    // 这一位打手实际接过的单。与 queryOrders 同一个 Map，因此刚接的单立刻可见、
+    // 取消之后（`actualCompanionId` 被清空）也立刻不可见
+    return [...store().orders.values()]
+      .filter((order) => order.actualCompanionId === companionId)
+      .sort(compareOrdersNewestFirst);
+  },
+
   async listAllOrders() {
     // 订单在 Map 里按 id 键控，因此每条订单只会出现一次——「同一订单只累计一次」的**数据侧**保证
     return [...store().orders.values()];
@@ -200,20 +215,154 @@ export const mockPaymentRepository: PaymentRepository = {
 };
 
 /**
- * 把订单标记为「已退款」（**同步写入器**，无 `await`）。
+ * 打手接单 → 订单进入「已接单」（**同步写入器**，无 `await`）。
  *
- * ⚠️ 与 `applyApplicationReview` 同一套路：它**只负责写**，不判断这次迁移合不合法
- * ——合法性由伪事务在调用它之前用状态机判定（`lib/constants/adminRefunds.ts`）。
- * 拆成两处是因为「谁能改订单」只有伪事务一处，而写入本身需要一个不让人拿到 `Map` 的入口。
+ * ⚠️ 与下面的 `applyOrderRefund` 同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （能不能接、有没有超时、是不是指定给这位打手）。合法性由伪事务在调用它之前判定
+ * （`lib/data/companionDispatchTransaction.ts` 的 `acceptDispatch`），
+ * 而订单那一侧**必须与派单那一侧在同一段无 `await` 的代码里写完**。
  *
- * ⚠️ 又是**同步**的：它被 `adminRefundTransaction` 的原子区段调用，里面出现 `await`
- * 就会让出执行权，原子性立刻消失。
- *
- * `refundedAt` 只在**第一次**进入 `refunded` 时写入：重复调用不会刷新时间戳
- * （「这一单是什么时候退的」不该被第二次点击改掉）。
- * 已经是 `refunded` 的订单再写一次返回 `changed: false`，由调用方决定这算不算异常。
+ * `input.companion` 是**接单那一刻**的打手公开信息快照（昵称 / 头像），
+ * 与其它快照字段一样：之后改昵称换头像，这一单的展示不受影响。
  */
-export function applyOrderRefund(
+export function applyOrderAccepted(
+  id: string,
+  input: { companionId: string; companion: OrderCompanionSnapshot; at: string },
+): { previous: Order; updated: Order } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  const updated: Order = {
+    ...order,
+    status: "accepted",
+    acceptedAt: input.at,
+    // ⚠️ 这里写的是**实际接单的人**，与用户当初指定的人（`Dispatch.exclusiveCompanionId`）
+    // 是两个字段。它也**只**由这里写：与派单的 `acceptedByCompanionId` 同段写下去，
+    // 因此「派单说被 A 接了、订单说没人接」这种状态在结构上产生不出来
+    actualCompanionId: input.companionId,
+    companion: input.companion,
+    // ⚠️ 「这一单**曾经**被承接」的历史事实（P1-4 验收整改轮）。`??` 就是它的全部规则：
+    // **只写第一次**，后来的第二个打手接手同一单不会刷新它。
+    //
+    // 它与上面的 `acceptedAt` 是**两个概念**，而这里正是它们唯一分道扬镳的地方：
+    // 下面的 `applyOrderAcceptanceReleased()` 会把 `acceptedAt` 清回 null
+    // （否则一张回到 `paid` 的单会在用户端时间轴上显示「已接单」），
+    // 而**本字段永不清空**——「有没有人接过」不因为人又走了就变成「没接过」。
+    //
+    // 两条来路都写它：打手自己接单、客服直接指定 / 换人。**两条都算被承接**，
+    // 因此优惠券一律不返还（裁定 §一.3 明令不得按接单榜的 `acceptedVia` 区分）。
+    everAcceptedAt: order.everAcceptedAt ?? input.at,
+  };
+  current.orders.set(id, updated);
+  return { previous, updated };
+}
+
+/**
+ * 打手主动取消接单 → 订单退出当前履约（**同步写入器**，无 `await`），P0-6。
+ *
+ * 与上面的 `applyOrderAccepted` **严格对称**：那边一次写四个字段
+ * （`status` / `acceptedAt` / `actualCompanionId` / `companion`），
+ * 这里就把这四个字段**一起**退回去。四个必须同进同退，理由有三条：
+ *
+ * 1. **对称性**：接单是一次四字段的原子赋值，取消只回退其中一部分，
+ *    就会留下一条永远对不齐的不变量（「什么时候接的」被清空而「谁接的」还在）；
+ * 2. **技术设计把前两者定义为一个整体**：`database-schema.md` 把
+ *    `actualCompanionId` 与 `companion` 归在「履约人」同一组；
+ *    `01-prompt.md` §2.3 说的是「当前**履约绑定**必须解除」——绑定指的就是这一组；
+ * 3. **不清空会直接渲染出自相矛盾的界面**：`lib/services/orders.ts` 的 `TIMELINE_SOURCE`
+ *    把 `acceptedAt` 直接变成用户可见的时间轴节点（只判「时间戳非 null」），
+ *    残留的 `acceptedAt` 会让一张已回到 `paid` 的订单在用户端显示「已接单」；
+ *    而 `toOrderListItem()` 输出 `order.companion`，残留快照会让订单列表里
+ *    挂着一个并不在履约的打手。
+ *
+ * 「谁曾经接过这一单」不在这里保存：它由 `CompanionReleaseRecord` 记一位，
+ * 由伪事务在同一段代码里写下去（`lib/data/companionOrderTransaction.ts`）。
+ *
+ * ⚠️ 与同文件另外两个写入器同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （是不是本人、状态是不是还停在 `accepted`）。合法性由伪事务在调用它之前判定。
+ *
+ * ⚠️ `Order` 上**没有** `updatedAt` 字段，因此这里没有「一并刷新时间戳」这一步——
+ * `applyOrderAccepted` 也没有。订单的时间事实是它自己的那五个节点，
+ * 「最后一次改动发生在何时」不属于订单模型。
+ */
+export function applyOrderAcceptanceReleased(
+  id: string,
+): { previous: Order; updated: Order } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  const updated: Order = {
+    ...order,
+    status: "paid",
+    acceptedAt: null,
+    // 与派单的 `acceptedByCompanionId` 同段写下去，因此「派单说没人接、订单说有人接」
+    // 这种状态在结构上产生不出来（见 applyOrderAccepted 的同一句注释）
+    actualCompanionId: null,
+    companion: null,
+    // ⚠️ P0-11 起这里**多写一个字段**：`servingAt` 一并清空。
+    //
+    // 这条写入器现在服务两条边：`accepted → paid` 与 `serving → paid`
+    // （后者由 P0-11 首次接上入口：封禁回池 / 客服换人）。
+    // 而 `applyOrderServing` 写的是 `servingAt: order.servingAt ?? at`——
+    // 释放后若不清空，**新打手点「开始服务」会沿用上一任的开始时间**：
+    // 用户端时间轴、打手端「护航中」的开始时间都会显示错，
+    // 而它还是将来按实际服务时长做任何统计 / 结算的基准。
+    //
+    // 口径由产品在 P0-11 裁定：「`servingAt` 表达**当前这位**打手从何时开始服务」
+    // （见 `docs/03-dev/rounds/P0-11/02-decisions.md` §九 D-Q1）。
+    // ⚠️ `?? at` 那一边**刻意不动**：释放时清空之后，下一次开始服务必然写本次的 `at`，
+    // 而 `??` 仍然防着「状态还是 accepted 但 servingAt 已有值」的历史脏数据，
+    // 也让 P0-7 的「重复点击不刷新服务开始时间」那条保证原样成立。
+    //
+    // 对 `accepted → paid`（主动取消 / 换人）这条路径它是**恒等操作**——
+    // 还没开始服务时 `servingAt` 本来就该是 null。
+    servingAt: null,
+    // ⚠️ **`everAcceptedAt` 刻意不在这里**（P1-4 验收整改轮）。
+    //
+    // 上面那四个字段是「当前履约绑定」，绑定解除时当然一起退回去；
+    // 而 `everAcceptedAt` 不是绑定，是**历史事实**——「这一单有没有被承接」。
+    // 它一旦写上就不再变，回池、换人、退款都不清。
+    //
+    // 少写这一句会怎样，值得写下来：`accepted → 客服取消/回池 → paid → 用户退款`
+    // 这条路径上，订单会被判成「从未被承接」，于是**优惠券被错误地还给用户**。
+    // 裁定 §一.2 把这条路径**点名列出**，就是因为它正是那种「只在多步之后才显形」的错。
+  };
+  current.orders.set(id, updated);
+  return { previous, updated };
+}
+
+/**
+ * 打手开始服务 → 订单进入「护航中」（**同步写入器**，无 `await`），P0-7。
+ *
+ * ⚠️ 与同文件另外三个写入器同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （是不是本人实际履约、状态是不是还停在 `accepted`）。合法性由伪事务在调用它之前
+ * 判定（`lib/data/companionOrderTransaction.ts` 的 `startCompanionOrder`）。
+ *
+ * ## 只写两个字段，一个都不多
+ *
+ * | 字段 | 动不动 | 为什么 |
+ * |---|---|---|
+ * | `status` | 写成 `"serving"` | 这就是这次迁移本身 |
+ * | `servingAt` | 第一次进入时写入 | 需求要的「记录开始服务时间」 |
+ * | `acceptedAt` | **不动** | 历史事实。进入 `serving` 不抹掉「什么时候接的」（`01-prompt.md` §二） |
+ * | `actualCompanionId` / `companion` | **不动** | 履约绑定。进入 `serving` 恰恰是它成立的证明；这里清掉就等于「人还在干活、订单说没人」 |
+ * | 金额域四个字段 | **不动** | 开始服务不是一个资金事件（P0-7 不做任何资金联动） |
+ *
+ * ⚠️ **不能复用 `applyOrderAccepted`**：那个函数会写 `acceptedAt` 与 `actualCompanionId`，
+ * 用它「顺手推进状态」等于把接单时刻改写成开始服务的时刻，并且让「谁接的」有第二个出处。
+ *
+ * ⚠️ **同步**是必须的：它被伪事务的原子区段调用，里面出现 `await` 就会让出执行权，
+ * 「订单已开始服务、别的字段还没写完」的那一瞬会被别的请求读到。
+ *
+ * ⚠️ `servingAt` 只在**第一次**进入 `serving` 时写入：已经是 `serving` 的订单再写一次
+ * 返回 `changed: false` 且**不刷新时间戳**（照 `applyOrderRefund` 的既有先例）。
+ * 「这一单是几点开始的」不该被第二次点击改掉；事务层据此把重复点击判成重放。
+ */
+export function applyOrderServing(
   id: string,
   at: string,
 ): { previous: Order; updated: Order; changed: boolean } | null {
@@ -222,11 +371,207 @@ export function applyOrderRefund(
   if (!order) return null;
 
   const previous = { ...order };
-  if (order.status === "refunded") {
+  if (order.status === "serving") {
     return { previous, updated: previous, changed: false };
   }
 
-  const updated: Order = { ...order, status: "refunded", refundedAt: order.refundedAt ?? at };
+  const updated: Order = {
+    ...order,
+    status: "serving",
+    // 已经写过的时刻原样保留（`??` 而不是直接赋值）：这一条是对「历史数据里
+    // 状态还是 accepted 但 servingAt 已有值」的防御，与 refundedAt 同一写法
+    servingAt: order.servingAt ?? at,
+  };
+  current.orders.set(id, updated);
+  return { previous, updated, changed: true };
+}
+
+/**
+ * 把订单标记为「已完成」（**同步写入器**，无 `await`），P0-8。
+ *
+ * ⚠️ 与 `applyOrderServing` 同一套路：它**只负责写**，不判断这次迁移合不合法
+ * （完成材料有没有提交并审核通过、订单是不是还停在 `serving`）。合法性由伪事务在
+ * 调用它之前判定（`lib/data/completionTransaction.ts` 的 `approveCompletion` 与
+ * `sweepCompletionAutoApprovals`）。
+ *
+ * ## 只写四个字段，一个都不多
+ *
+ * | 字段 | 动不动 | 为什么 |
+ * |---|---|---|
+ * | `status` | 写成 `"completed"` | 这就是这次迁移本身 |
+ * | `completedAt` | 第一次进入时写入 | 需求要的「记录完成时间」 |
+ * | `complaintWindowMinutesSnapshot` | 第一次进入时写入（P0-9） | 本单的投诉窗口，冻结后不随后续改配置变化 |
+ * | `complaintDeadlineAt` | 第一次进入时写入（P0-9） | 就是 `completedAt + 上面那个快照` |
+ * | `servingAt` | **不动** | 历史事实。进入 `completed` 不抹掉「什么时候开始的」 |
+ * | `actualCompanionId` / `companion` | **不动** | 履约绑定。完成恰恰是它成立的证明 |
+ * | 金额域五个字段 | **不动** | 完成不是资金事件，收益金额在 `Earning` 那一侧直接搬快照 |
+ *
+ * ⚠️ **不能复用 `applyOrderServing` / `applyOrderRefund`**：那两个写的是别的状态与
+ * 别的时间字段，用它「顺手推进状态」等于把完成时刻写成开始 / 退款时刻。
+ *
+ * ⚠️ `completedAt` 只在**第一次**进入 `completed` 时写入：已经是 `completed` 的订单
+ * 再写一次返回 `changed: false` 且**不刷新时间戳**。重复清扫据此做到
+ * 「不重复完成、不刷新 completedAt」。
+ *
+ * ## 为什么投诉窗口快照在这里算（P0-9）
+ *
+ * `completedAt` 与 `complaintDeadlineAt` 之间有一条**必须恒成立**的等式：
+ * `complaintDeadlineAt === completedAt + complaintWindowMinutesSnapshot`。
+ * 两个值若由两个地方分别算出来，这条等式就只靠调用方自觉；而它一旦不成立
+ * （例如完成时刻来自历史数据、而 deadline 是按本次的 `at` 算的），
+ * 用户端会显示一个与打手收益解冻时刻**不一致**的投诉截止时间——
+ * 同一个业务事实在两张页面上给出两个答案。
+ *
+ * 因此两个字段在**这里**一起写：`completedAt` 先定下来（`?? at` 保留历史值），
+ * 快照与 deadline 随后从它算出来。调用方只提供**分钟数**，提供不了时刻。
+ *
+ * ⚠️ `Earning.availableAt` 也**必须**等于这个 deadline（`lib/data/earningTransaction.ts`
+ * 里直接读订单算好的值，不自己再加一次），否则「可投诉到几点」与「钱几点解冻」
+ * 会分叉。
+ *
+ * ⚠️ `plusMinutes` 是仓库里唯一的「分钟加法」实现（它住在 `lib/constants/dispatch.ts`
+ * 是历史原因，与派单无关）。这里复用它而不是自己写一段 `Date` 运算：
+ * 同一件事有两份实现，迟早出现一处四舍五入、另一处不。
+ */
+export function applyOrderCompletion(
+  id: string,
+  at: string,
+  /**
+   * 本次完成应当采用的投诉窗口（分钟）。由伪事务从平台参数读出后传入——
+   * 仓储不读平台配置（那是 `lib/data/adminPlatformConfigTransaction.ts` 的职责），
+   * 也不做「取值是否合法」的判断（校验在服务层）。
+   */
+  complaintWindowMinutes: number,
+): { previous: Order; updated: Order; changed: boolean } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  if (order.status === "completed") {
+    return { previous, updated: previous, changed: false };
+  }
+
+  // 已经写过的时刻原样保留（`??` 而不是直接赋值）：对「历史数据里状态还是
+  // serving 但 completedAt 已有值」的防御，与 servingAt / refundedAt 同一写法
+  const completedAt = order.completedAt ?? at;
+  // 同理：已经有快照的记录沿用旧快照（正常路径上它与状态一起为 null，
+  // 这只在重复完成被上面那一步挡住之后才谈得上）
+  const snapshot = order.complaintWindowMinutesSnapshot ?? complaintWindowMinutes;
+
+  const updated: Order = {
+    ...order,
+    status: "completed",
+    completedAt,
+    complaintWindowMinutesSnapshot: snapshot,
+    complaintDeadlineAt: order.complaintDeadlineAt ?? plusMinutes(completedAt, snapshot),
+  };
+  current.orders.set(id, updated);
+  return { previous, updated, changed: true };
+}
+
+/**
+ * 把订单标记为「已退款」（**同步写入器**，无 `await`）。
+ *
+ * ⚠️ 与 `applyApplicationReview` 同一套路：它**只负责写**，不判断这次迁移合不合法
+ * ——合法性由伪事务在调用它之前用状态机判定（`lib/constants/adminRefunds.ts`）。
+ * 拆成两处是因为「谁能改订单」只有伪事务一处，而写入本身需要一个不让人拿到 `Map` 的入口。
+ *
+ * ⚠️ 又是**同步**的：它被 `adminRefundTransaction` 的原子区段调用，里面出现 `await`
+ * 就会让出执行权，原子性立刻消失。P0-5 的超时自动退款同样在原子区段里调用它。
+ *
+ * `refundedAt` 只在**第一次**进入 `refunded` 时写入：重复调用不会刷新时间戳
+ * （「这一单是什么时候退的」不该被第二次点击改掉）。
+ * 已经是 `refunded` 的订单再写一次返回 `changed: false`，由调用方决定这算不算异常——
+ * P0-5 的超时清扫据此做到「重复执行不重复退款」。
+ */
+export function applyOrderRefund(
+  id: string,
+  at: string,
+  /**
+   * 这一次退掉的钱（分）。**不传表示「不改动累计已退」**——这是一个技术上的默认值，
+   * 只有极少数调用方依赖它（见下）。
+   *
+   * ## 第三个参数的语义：「这一次退多少」（增量）
+   *
+   * P0-13 把它从「覆盖成多少」改成「这一次退多少（增量）」——覆盖式写入会让
+   * 「累计已退」变成「最后一次退了多少钱」。写入形式至今是
+   * `refundedAmount = 原值 + 传入值`（再钳一次，见下）。
+   *
+   * ⚠️ **但 P0-15 之后「增量」这个概念实际上只剩一个可能的取值**：一单一退，
+   * 所以调用本函数时 `refundedAmount` 必然是 `0`，「原值 + 传入值」永远是
+   * 「0 + 本次」，**累计**这件事已经不存在了。保留加法形式是因为它正确且无成本，
+   * 不是因为有第二次。
+   *
+   * ## 一单一退在这里是**结构性**的（P0-15，指令 ①§一 / §八）
+   *
+   * 本函数是 `refundedAmount` 的**唯一写入点**，因此「第二次实际退款执行不可能发生」
+   * 这件事，靠的就是下面短路条件里的 `isRefundExecutionClosed(order)`——
+   * 不是靠界面藏按钮，也不是靠每个调用方自觉。
+   *
+   * ⚠️ **它挡掉的是一条真实可达的路径，不是假想**：
+   * 部分退款不改订单状态，因此一张 `serving` 单可以带着 `refundedAmount > 0`
+   * 被 P0-11 的「退回公共池」打回 `paid`，随后**直接退款**与
+   * **公共池超时自动退款**都想再作用在它身上。2026-09-28 的交付前审查
+   * 逐步核实过这条路径，它当时是可达的（见 `hasRefundBeenExecuted` 的注释）。
+   *
+   * ⚠️ **调用方仍要在计划阶段自己判一次**（`directRefundTransaction` /
+   * `companionDispatchTransaction`）：这里静默返回 `changed: false` 时，
+   * 调用方的返回清单（如 `refundedOrderIds`）仍会把它算成「退过款」。
+   *
+   * ## 另两条规则（都还在）
+   *
+   * 1. **`status` 只在退满时才改成 `refunded`**（`architecture-rules.md`
+   *    与 `database-schema.md` T3 两条都是明写的硬规矩）。
+   *    部分退款**不改订单状态**——订单按原进度继续履约，
+   *    打手的收益也照常走它自己的生命周期。
+   * 2. **本次传入的金额封顶在「还剩多少」**：
+   *    `EX-REFUND-02` 与 `cmd_p0-12.md:40` 把「累计已退不得超过实付」冻结为硬约束，
+   *    而写入点就是这里——于是这条不变式在这一行成为**结构性**的。
+   *    在一单一退下这次钳制已不可能改变结果（`剩余额 === 实付`），
+   *    但它是「调用方算错了也不会退超过实付」的那道保险，**留着**。
+   */
+  refundedAmount?: number,
+): { previous: Order; updated: Order; changed: boolean } | null {
+  const current = store();
+  const order = current.orders.get(id);
+  if (!order) return null;
+
+  const previous = { ...order };
+  // 「已经退过款」的判据要一起看（P0-15）：
+  //
+  // - `hasRefundBeenExecuted(order)` —— **一单一退**（指令 ①§一 / §八）：
+  //   只要出过一次款，退款流程即告终结，**任何**后续路径都不得再出款。
+  //   这是本函数最重要的一条闸，因为**本函数是 `refundedAmount` 的唯一写入点**，
+  //   所以「第二次退款不可能」这件事在这里是**结构性**的，而不是靠每个调用方自觉。
+  //   ⚠️ 它**替代不了**调用方各自的判据：调用方在计划阶段就要按它决定「要不要
+  //   通知 / 要不要报进 `refundedOrderIds`」——静默被这里拒掉的 id 仍会出现在
+  //   调用方的返回清单里，那正是「计划层放行、存储层静默拒绝」这种不一致。
+  // - `isRefundExecutionClosed(order)` —— 状态判据 ∨ 出过款判据，**并集的单点定义**
+  //   （P0-15 决策 D20）。不要再在别处手写这个 `||`。
+  // - `refundedAmount >= actualPaidAmount` —— 只有 `actualPaidAmount === 0` 时它才
+  //   与上面两条不同（`0 >= 0` 成立），而那种坏单子**不得**被写成「凭空退满」。
+  if (
+    isRefundExecutionClosed(order) ||
+    order.refundedAmount >= order.actualPaidAmount
+  ) {
+    return { previous, updated: previous, changed: false };
+  }
+
+  // 唯一一次钳制：见上面第 3 条。上面的短路已经保证 `remainingAmount > 0`
+  const remainingAmount = order.actualPaidAmount - order.refundedAmount;
+  const nextRefundedAmount =
+    order.refundedAmount + Math.max(0, Math.min(refundedAmount ?? 0, remainingAmount));
+  const fullyRefunded = nextRefundedAmount >= order.actualPaidAmount;
+
+  const updated: Order = {
+    ...order,
+    status: fullyRefunded ? "refunded" : order.status,
+    // `refundedAt` 在**第一次退满**时写下，之后不再刷新（`??` 就是这条规则的落点）；
+    // 部分退款不写它——「什么时候退完的」那一刻还没到
+    refundedAt: fullyRefunded ? (order.refundedAt ?? at) : order.refundedAt,
+    refundedAmount: nextRefundedAmount,
+  };
   current.orders.set(id, updated);
   return { previous, updated, changed: true };
 }

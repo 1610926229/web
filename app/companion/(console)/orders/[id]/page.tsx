@@ -1,0 +1,341 @@
+/* eslint-disable @next/next/no-img-element -- Mock 阶段使用 public/mock 下的本地 SVG 占位图，
+   不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
+
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import CompanionCompletionPanel from "@/components/companion/CompanionCompletionPanel";
+import CompanionOrderCancelPanel from "@/components/companion/CompanionOrderCancelPanel";
+import CompanionOrderStartPanel from "@/components/companion/CompanionOrderStartPanel";
+import PriceText from "@/components/common/PriceText";
+import { getSessionUser } from "@/lib/auth/session";
+import { COMPANION_CHAT_ENTRY_LABEL } from "@/lib/constants/conversations";
+import {
+  COMPANION_ORDER_CANCEL_UNAVAILABLE_NOTICE,
+  COMPANION_ORDER_DETAIL_PAGE_TITLE,
+  COMPANION_ORDERS_BACK_LABEL,
+} from "@/lib/constants/dispatch";
+import {
+  COMPANION_ORDER_INCOME_LABEL,
+  COMPANION_ORDER_INCOME_REFUNDED_NOTE,
+  ORDER_STATUS_CLASS,
+} from "@/lib/constants/orders";
+import { resolveCompanionAccess } from "@/lib/services/companionAccess";
+import { getCompanionOrderDetail } from "@/lib/services/companionOrders";
+import type { CompanionOrderDetail } from "@/lib/types/order";
+import { formatDateTime, formatYuan } from "@/lib/utils/format";
+
+/**
+ * 订单详情（P0-6 / P0-7，`/companion/orders/[id]`）—— 履约所需的全部信息 +
+ * 「开始服务」与「取消接单」两个动作入口。
+ *
+ * ⚠️ 两个入口长在**同一个**详情页上：`api-contract.md` 明确要求不得为后续阶段
+ * 复制第二套订单详情。今天是「`accepted` 显示两个按钮、`serving` 一个都不显示」，
+ * 后续阶段（提交完成材料）继续加在这一页上。
+ *
+ * ## 取不到就是 404，而不是「查不到」
+ *
+ * 服务层**重新校验归属**（`Order.actualCompanionId === 当前 companionId`），
+ * 订单不存在、或存在但不是他接的单，对外表现完全一致 → `notFound()`。列表入口隐藏
+ * 不是保护：接口可以被直接请求，因此不能只靠「列表里没有这一单」。
+ *
+ * ⚠️ 本路由上下**没有 `loading.tsx`**，这与 `app/admin/(console)/orders/[id]/` 是
+ * 同一条理由：加载边界一旦罩住它，外壳会先以 200 发出，迟到的 `notFound()` 只能改内容、
+ * 改不了状态码，「不是你的订单」就变成一屏 200 的 404 文案。
+ * 兄弟目录用 `(list)` 分组隔开（admin 的做法）会改变本轮已冻结的落点，因此这里
+ * 让整棵 `orders/` 都不挂 loading 边界。
+ *
+ * ## 只渲染服务端给的字段
+ *
+ * `gameAccountId` 与 `remark` **只在这个接口上出现**（公共池的 DTO 刻意没有它们）：
+ * 接单之前打手没有理由看到别人的游戏账号，接单之后没有账号与备注就打不了这一单。
+ * 金额只显示商品与增值服务（`unitPrice` / `itemsAmount` / `addonsAmount` / `totalAmount`）
+ * ——打手端 DTO 上**没有**平台净收入、分账比例、护航收益与已退金额，这一页也就无从显示。
+ *
+ * ⚠️ 能不能开始 / 能不能取消**都不在这里判断**：`detail.canStart` 与
+ * `detail.canCancel` 都由服务端算好（今天都是 `status === "accepted"`），
+ * 页面只按它们显示或隐藏入口。前端拿状态自己推一遍，就是在页面这一层再写一份规则，
+ * 而真正的保护在两个伪事务的原子区段里（`startCompanionOrder` / `cancelAcceptedOrder`）。
+ *
+ * ## 为什么这一页自己读资格
+ *
+ * 取详情需要**当前打手的 id**，而布局无法给 `children` 传 props；
+ * `getSessionUser` 与 `resolveCompanionAccess` 都被 `React.cache` 包着，
+ * 因此这一次读取与布局那一次是**同一个结果**（与 `pool` / `exclusive` 两页同一条理由）。
+ */
+export default async function CompanionOrderDetailPage({
+  params,
+}: PageProps<"/companion/orders/[id]">) {
+  const { id } = await params;
+
+  const user = await getSessionUser();
+  // 未登录时布局已经在渲染用户端的登录控件；这里什么都不做
+  if (!user) return null;
+
+  const access = await resolveCompanionAccess(user.id);
+  // 不是护航 / 资格已下架：布局已经渲染了对应的提示页
+  if (access.kind !== "granted") return null;
+
+  const detail = await getCompanionOrderDetail(access.companion.companionId, id);
+  if (!detail) notFound();
+
+  return (
+    <>
+      <h2 className="text-[14px] font-semibold text-ink">{COMPANION_ORDER_DETAIL_PAGE_TITLE}</h2>
+
+      {/*
+        订单聊天入口（P0-14）。聊天是订单的延伸，入口放在详情顶部让打手第一时间找到；
+        本页只给入口，不在这里做任何聊天取数。
+      */}
+      <section className="rounded-2xl border border-line px-4 py-4">
+        <Link
+          href={`/companion/chats/${detail.id}`}
+          className="flex h-11 items-center justify-center rounded-full border border-line text-[15px] text-ink-2"
+        >
+          {COMPANION_CHAT_ENTRY_LABEL}
+        </Link>
+      </section>
+
+      <StatusSection detail={detail} />
+      {/* 收益紧跟在状态之后：退款改变的第一件事就是这一单的钱，而它是打手看这一页时
+          最先要确认的下一件事（未结算且未退款时这一段整段不出现） */}
+      <IncomeSection detail={detail} />
+      <ProductSection detail={detail} />
+      <OrderInfoSection detail={detail} />
+      <CustomerSection detail={detail} />
+
+      {/*
+        开始服务入口（P0-7）。**只有 `canStart` 为真时才有那个按钮**（`accepted` 之外
+        一律不显示）；`serving` 时它与下面的取消入口一起消失，这正是「开始服务之后
+        两个按钮都不在」那条验收要求。
+
+        ⚠️ 不显示的三种状态（`serving` / `completed` / `refunded`）**不需要**再补一句
+        「当前状态不能开始服务」：那些状态下本节由下面的取消说明承担解释，而状态名本身
+        （「护航中」）已经说明服务已经开始了。多一段提示只会把同一件事说两遍。
+      */}
+      {detail.canStart ? <CompanionOrderStartPanel orderId={detail.id} /> : null}
+
+      {/*
+        取消接单入口（P0-6）。**只有 `canCancel` 为真时才有那个按钮**（`serving` 不显示
+        普通取消按钮）；不能取消时留一句解释，而不是让那一块凭空消失——按钮不见了而
+        没有任何说明，打手只会以为页面坏了。
+      */}
+      {detail.canCancel ? (
+        <CompanionOrderCancelPanel orderId={detail.id} />
+      ) : (
+        <section className="rounded-2xl border border-line px-4 py-4">
+          <p className="text-[12px] leading-5 text-ink-3">
+            {COMPANION_ORDER_CANCEL_UNAVAILABLE_NOTICE}
+          </p>
+        </section>
+      )}
+
+      {/*
+        完成材料入口（P0-8）。**入口显隐只看服务端给的 `completion` 摘要**（`canSubmit` /
+        `status`），页面不拿订单状态自己推断——「serving 但已有 pending」时 `canSubmit`
+        是 false，前端推断会算错。不能提交时面板自己给一句人话原因，不静默消失。
+      */}
+      <CompanionCompletionPanel orderId={detail.id} completion={detail.completion} />
+
+      <div className="flex justify-center pb-2">
+        <Link
+          href="/companion/orders"
+          className="flex h-11 items-center justify-center rounded-full border border-line px-8 text-[15px] text-ink-2"
+        >
+          {COMPANION_ORDERS_BACK_LABEL}
+        </Link>
+      </div>
+    </>
+  );
+}
+
+/**
+ * 状态区：状态名与状态色都取自同一套常量，页面不硬编码颜色。
+ *
+ * ⚠️ **大字显示的是 `displayStatus`**（P0-15），不是 `status`：一单被部分退款之后，
+ * 订单真实生命周期照走，而打手这一单的钱已经全部取消——他最先看到的那个词
+ * 必须是「已退款」。
+ *
+ * ⚠️ 但**真实状态没有被删掉**：它改成一行明细放在下面（`statusLabel`）。
+ * 「已退款」回答的是「这一单的钱怎么了」，答不出「我还需不需要继续打」——
+ * 而后者恰恰是这位打手此刻要决定的事。两个都显示，各回答一个问题。
+ * 只有真的不一样时才多出这一行：全额退款时两者相同，多一行重复的文字
+ * 只会让人去找那两个词之间的差别。
+ */
+function StatusSection({ detail }: { detail: CompanionOrderDetail }) {
+  return (
+    <section className="rounded-2xl border border-line px-4 py-4">
+      {/* 展示状态的中文名由服务端给（`displayStatusLabel`），页面不自己维护一份文案 */}
+      <p
+        className={`text-[16px] font-semibold ${ORDER_STATUS_CLASS[detail.displayStatus]}`}
+      >
+        {detail.displayStatusLabel}
+      </p>
+
+      <div className="mt-2">
+        {/* 展示状态与真实状态不同时（部分退款）才补这一行，见上面的说明 */}
+        {detail.displayStatus !== detail.status ? (
+          <DetailRow label="履约状态" value={detail.statusLabel} />
+        ) : null}
+        <DetailRow label="订单号" value={detail.orderNo} />
+        <DetailRow label="下单时间" value={formatDateTime(detail.paidAt)} />
+        {/* 接单时间缺失（历史数据）时如实显示空值，不编一个时刻 */}
+        <DetailRow
+          label="接单时间"
+          value={detail.acceptedAt ? formatDateTime(detail.acceptedAt) : ""}
+        />
+        {/*
+          开始服务时间（P0-7）。**只在已经发生过时才有这一行**——与上面两行不同，
+          `servingAt` 为 null 在打手端是**常态**（`accepted` 的单就是还没开始），
+          显示成一行「—」会让人以为缺了数据。订单模型对这几个节点的约定正是
+          「未发生时为 null，详情页只展示已存在的节点」（`Order.servingAt`）。
+        */}
+        {detail.servingAt ? (
+          <DetailRow label="开始服务时间" value={formatDateTime(detail.servingAt)} />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 本单收益（P0-15）。
+ *
+ * ⚠️ 它出现的条件与列表卡片完全一致：`netIncomeAmount !== null`。
+ * 未结算且未退款时**整段不渲染**——那一段没有内容可说，
+ * 而写上「本单收益 ¥0.00」会让一张正在护航的单看起来像已经被退款了。
+ *
+ * ⚠️ **文案在常量里**（`COMPANION_ORDER_INCOME_*`），与卡片引用的是同一份，
+ * 否则同一件事在两个页面上会有两种说法。
+ */
+function IncomeSection({ detail }: { detail: CompanionOrderDetail }) {
+  if (detail.netIncomeAmount === null) return null;
+
+  const refunded = detail.displayStatus === "refunded";
+
+  return (
+    <section className="rounded-2xl border border-line px-4 py-4">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[13px] text-ink-3">{COMPANION_ORDER_INCOME_LABEL}</span>
+        <span
+          className={`text-[20px] font-semibold tabular-nums ${
+            detail.netIncomeAmount > 0 ? "text-ink" : "text-ink-3"
+          }`}
+        >
+          ¥{formatYuan(detail.netIncomeAmount)}
+        </span>
+      </div>
+
+      {/* 只给数字的话，第一反应是「是不是算错了」——补一句为什么是 0，以及这与比例无关 */}
+      {refunded ? (
+        <p className="mt-2 text-[12px] leading-4 text-ink-3">
+          {COMPANION_ORDER_INCOME_REFUNDED_NOTE}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * 商品与金额。
+ *
+ * 展示的全是**下单那一刻的快照**：之后改价、换图、下架、改名都不影响这一页
+ * ——打手要照这一单当时买的东西服务。
+ *
+ * 金额只到「商品 + 增值服务」为止：平台净收入、分账比例与护航收益都不在打手端 DTO 上，
+ * 因此这里没有、也不该有任何分账口径。
+ */
+function ProductSection({ detail }: { detail: CompanionOrderDetail }) {
+  return (
+    <section className="rounded-2xl border border-line px-4 py-4">
+      <h2 className="text-[14px] font-semibold text-ink">商品信息</h2>
+
+      <div className="mt-2 flex gap-3">
+        <img
+          src={detail.productCoverUrl}
+          alt={detail.productTitle}
+          className="h-16 w-16 shrink-0 rounded-[8px] border border-line object-cover"
+        />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <p className="line-clamp-2 text-[14px] font-medium leading-5 text-ink">
+            {detail.productTitle}
+          </p>
+          <p className="mt-1 break-words text-[12px] leading-4 text-ink-3">{detail.specName}</p>
+        </div>
+      </div>
+
+      <div className="mt-2">
+        <MoneyRow label="单价" cents={detail.unitPrice} />
+        <DetailRow label="数量" value={`×${detail.quantity}`} />
+        <MoneyRow label="商品金额" cents={detail.itemsAmount} />
+
+        {detail.addons.map((addon) => (
+          <MoneyRow key={addon.id} label={`增值服务 · ${addon.name}`} cents={addon.price} />
+        ))}
+        {detail.addons.length > 0 ? (
+          <MoneyRow label="增值服务合计" cents={detail.addonsAmount} />
+        ) : (
+          <DetailRow label="增值服务" value="无" />
+        )}
+        <MoneyRow label="订单合计" cents={detail.totalAmount} />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 订单信息：游戏 / 大区 / 游戏账号 / 用户备注。
+ *
+ * ⚠️ 前三项与备注**是这一页存在的理由之一**：没有游戏账号与备注就打不了这一单。
+ * 它们出现在**接单之后**的详情里（公共池的 DTO 刻意不带），而不是「打手能看的都给」。
+ */
+function OrderInfoSection({ detail }: { detail: CompanionOrderDetail }) {
+  return (
+    <section className="rounded-2xl border border-line px-4 py-4">
+      <h2 className="text-[14px] font-semibold text-ink">服务信息</h2>
+      <div className="mt-1">
+        <DetailRow label="游戏" value={detail.gameName} />
+        <DetailRow label="大区" value={detail.region} />
+        <DetailRow label="游戏账号" value={detail.gameAccountId} />
+        <DetailRow label="用户备注" value={detail.remark || "无"} />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 下单用户的称呼。
+ *
+ * DTO 里**只有昵称**：没有联系方式、没有平台展示 ID、没有头像——打手与用户的联系
+ * 发生在聊天里（后续批次），订单详情不需要带出更多身份信息。
+ * 查不到用户记录时是空串，这时显示空值而不是让整页报错：订单本身是有效的。
+ */
+function CustomerSection({ detail }: { detail: CompanionOrderDetail }) {
+  return (
+    <section className="rounded-2xl border border-line px-4 py-4">
+      <h2 className="text-[14px] font-semibold text-ink">下单用户</h2>
+      <div className="mt-1">
+        <DetailRow label="昵称" value={detail.customerNickname} />
+      </div>
+    </section>
+  );
+}
+
+/** 明细行：左标签右内容，长内容换行而不是把卡片撑宽。空值显示「—」。 */
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-3 border-b border-line py-2 text-[13px] last:border-b-0">
+      <span className="shrink-0 text-ink-3">{label}</span>
+      <span className="min-w-0 flex-1 break-words text-right text-ink">{value || "—"}</span>
+    </div>
+  );
+}
+
+/** 金额行：一律经 `PriceText`，两位小数的口径只有 `lib/utils/format.ts` 一处实现。 */
+function MoneyRow({ label, cents }: { label: string; cents: number }) {
+  return (
+    <div className="flex gap-3 border-b border-line py-2 text-[13px] last:border-b-0">
+      <span className="min-w-0 flex-1 break-words text-ink-3">{label}</span>
+      <PriceText cents={cents} className="shrink-0 text-[13px] text-ink" />
+    </div>
+  );
+}

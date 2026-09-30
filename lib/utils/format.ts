@@ -72,3 +72,67 @@ export function formatDateTime(iso: string): string {
     ` ${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}`
   );
 }
+
+/** `<input type="datetime-local">` 的取值形状（**精确到秒**，因此输入框必须带 `step="1"`）。 */
+const DATE_TIME_LOCAL_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/;
+
+/**
+ * ISO 字符串 → `datetime-local` 输入框的取值（P1-6，`formatDateTime` 的**逆运算**）。
+ *
+ * `"2026-12-31T15:59:59.000Z"` → `"2026-12-31T23:59:59"`。
+ *
+ * ⚠️ **与 `formatDateTime` 用同一个 `BEIJING_OFFSET_MINUTES`，且同样不用 `Intl`**：
+ * 后台的编辑表单既被服务端渲染、也被浏览器渲染，两边必须算出**逐字相同**的字符串，
+ * 否则 React 会报水合不一致；而让输入框跟随访问者时区，还会出现
+ * 「北京时间的运营看到的时间与列表页显示的不是同一个」这种没法解释的现象。
+ *
+ * ⚠️ **精确到秒，不截断到分**：种子券的 `validTo` 是 `15:59:59.000Z`
+ * （即北京时间 `23:59:59`）。截断到分会让「打开编辑表单、一个字没改、直接保存」
+ * 变成一次真实的改动，而且改动的是**用户手里那张券的截止秒数**。
+ *
+ * 解析不出来返回空串（输入框显示为空，由调用方的校验给出文案）。
+ */
+export function toDateTimeLocalValue(iso: string): string {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return "";
+
+  const shifted = new Date(time + BEIJING_OFFSET_MINUTES * 60_000);
+  return (
+    `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}` +
+    `T${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}:${pad2(shifted.getUTCSeconds())}`
+  );
+}
+
+/**
+ * `datetime-local` 输入框的取值 → ISO 字符串（P1-6，与 `toDateTimeLocalValue` 互为逆运算）。
+ *
+ * 输入框里的墙钟时间按**北京时间**解释：`"2026-12-31T23:59:59"` → `"2026-12-31T15:59:59.000Z"`。
+ *
+ * ⚠️ **不用 `new Date(local)`**：那一句按**运行环境的本地时区**解释裸日期时间，
+ * 服务端与浏览器时区不同就会存进两个不同的时刻——而这是一句写到界面上的时间。
+ * 这里显式按固定偏移换算，任何环境下结果都相同。
+ *
+ * 形状不对、或日期在日历上不存在（`2026-02-30`，`Date` 会把它悄悄归一到 3 月 2 日）
+ * 一律返回空串：**宁可让调用方报「请选择有效期」，也不替操作者改一个日期**。
+ */
+export function fromDateTimeLocalValue(local: string): string {
+  const match = DATE_TIME_LOCAL_PATTERN.exec(local.trim());
+  if (!match) return "";
+
+  const [, year, month, day, hour, minute, second] = match;
+  const shifted = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+  if (!Number.isFinite(shifted)) return "";
+
+  const iso = new Date(shifted - BEIJING_OFFSET_MINUTES * 60_000).toISOString();
+  // 回读校验：日历上不存在的日期会被 `Date.UTC` 归一化，只有往返一致才收下
+  return toDateTimeLocalValue(iso) === `${year}-${month}-${day}T${hour}:${minute}:${second}`
+    ? iso
+    : "";
+}

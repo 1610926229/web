@@ -1,10 +1,18 @@
 import type { ActorRole } from "@/lib/types/actor";
 import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
+import type { Agreement } from "@/lib/types/agreement";
 import type { CategoryRecord } from "@/lib/types/catalog";
+import type {
+  ContentAnnouncementRecord,
+  ContentBannerRecord,
+  QuickEntryRecord,
+} from "@/lib/types/content";
 import type { Companion } from "@/lib/types/companion";
 import type { CompanionApplication } from "@/lib/types/companionApplication";
 import type { Complaint } from "@/lib/types/complaint";
+import type { Coupon } from "@/lib/types/coupon";
 import type { OrderStatus } from "@/lib/types/order";
+import type { PlatformConfig } from "@/lib/types/platformConfig";
 import type { CatalogProductRecord } from "@/lib/types/product";
 import type { RefundRequest } from "@/lib/types/refund";
 import type { StaffAccount } from "@/lib/types/staff";
@@ -76,6 +84,31 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
   "staff.enable": "启用客服账号",
   "staff.disable": "停用客服账号",
   "staff.remove": "移除客服账号",
+  // ————— 运营内容与协议（P8E-1）—————
+  "announcement.create": "新增图片公告",
+  "announcement.update": "编辑图片公告",
+  "announcement.enable": "启用图片公告",
+  "announcement.disable": "停用图片公告",
+  "announcement.remove": "移除图片公告",
+  "banner.create": "新增活动 Banner",
+  "banner.update": "编辑活动 Banner",
+  "banner.enable": "启用活动 Banner",
+  "banner.disable": "停用活动 Banner",
+  "banner.remove": "移除活动 Banner",
+  "quickEntry.create": "新增快捷入口",
+  "quickEntry.update": "编辑快捷入口",
+  "quickEntry.enable": "启用快捷入口",
+  "quickEntry.disable": "停用快捷入口",
+  "quickEntry.remove": "移除快捷入口",
+  "agreement.update": "编辑协议正文",
+  "agreement.enable": "启用协议",
+  "agreement.disable": "停用协议",
+  "platformConfig.update": "修改平台参数",
+  // ————— 优惠券模板（P1-6）—————
+  "coupon.create": "新建优惠券模板",
+  "coupon.update": "编辑优惠券模板",
+  "coupon.enable": "启用优惠券模板",
+  "coupon.disable": "停用优惠券模板",
 };
 
 export function adminAuditActionLabel(action: AdminAuditAction): string {
@@ -225,6 +258,9 @@ export function toCategoryAuditSnapshot(record: CategoryRecord): AdminAuditSnaps
  * 因此永远不会出现在 before/after 的差异里。把一份统计数字抄进审计，只会得到
  * 一个当时正确、之后必然过期的副本——而且看的人无从知道它已经过期了。
  *
+ * `companionRateBp`（分账比例，P0-3）**进快照**：它与销量相反——后台改得动，
+ * 而且改它等于改一条资金规则，正是审计最该留下的那类改动。
+ *
  * 规格不进完整的 before/after 明细，只留三个标量：`specCount`（全部）、
  * `effectiveSpecCount`（有效）与 `specNames`（截断后的名字串）。审计要回答的是
  * 「这次改价动了哪几条规格」，不是把整份规格表留档——真需要精确明细时，
@@ -245,6 +281,11 @@ export function toProductAuditSnapshot(record: CatalogProductRecord): AdminAudit
     effectiveSpecCount: listEffectiveSpecs(record).length,
     specNames: truncateAuditText(record.specs.map((spec) => spec.name).join("、")),
     priceFrom: productDisplayPrice(record),
+    // 分账比例（P0-3）：它是**可被后台改动**的资金规则（§十：商品分账比例修改要进审计），
+    // 而且「只改了比例」的一次保存必须留下一条看得见差异的记录——
+    // 少了这个字段，改比例这件事在审计里会变成一条「什么都没变」的空记录。
+    // 记的是基点（存储值）：审计要能回答「当时存的是哪个数」，与界面的百分比是两回事
+    companionRateBp: record.companionRateBp,
     removedAt: record.removedAt,
     updatedAt: record.updatedAt,
   };
@@ -262,13 +303,42 @@ export function toProductAuditSnapshot(record: CatalogProductRecord): AdminAudit
  * 于是「这一条审计同时对应两次写入」这件事在记录里是看得见的，
  * 不必再去比对时间戳猜「订单是不是被这次操作改的」。
  *
- * `amount` 也进快照：它是这次操作的标的，而且**后台改不了**（见 `lib/constants/adminRefunds.ts`）。
- * 留一份在这里，是为了让「当时退的是多少钱」在审计里有个可核对的数。
+ * `amount` 也进快照：它是这次操作的标的，**申请时由服务端取快照**，后台改不了。
+ * ⚠️ P0-13 起它不是「退了多少」——那是下面决策字段里的 `refundAmount`。
+ * 留着它是为了让「这一单当时申请的是什么金额」在审计里有据可查。
+ *
+ * ## 决策字段：从六项（P0-13）到七项（P0-14）再到三项（**P0-15 当前**）
+ *
+ * 这个字段集**被改过两次**，读旧审计记录的人必须知道每一版记的是什么：
+ *
+ * | 轮次 | 项数 | 内容 | 为什么 |
+ * |---|---|---|---|
+ * | P0-13 | 6 | `refundRateBp` / `refundAmount` / `responsibility` / `companionLiabilityRateBp` / `companionReversalAmount` / `platformBorneAmount` | 与当时的 `RefundDecision` 一一对应 |
+ * | P0-14 | 7 | 上面六项 + `refundFullRemaining` | 「退满剩余」与「按比例」可以算出同一个金额，光看金额分不出是哪一种 |
+ * | **P0-15** | **3** | `refundRateBp` / `refundAmount` / `companionReversalAmount` | 责任模型废止；「退满剩余」随多步退款一并消失（100% 就是 100%） |
+ *
+ * ⚠️ **P0-15 删掉四项，不是「漏记」**：`responsibility` /
+ * `companionLiabilityRateBp` / `platformBorneAmount` 属于**已废止的责任模型**，
+ * `refundFullRemaining` 属于**已废止的「多步退款补尾差」模型**。
+ * 继续记它们等于让审计去追问一件新业务里根本不存在的事。
+ * ⚠️ **`platformBorneAmount` 尤其不能留**：它的定义（退款额里不由打手承担的那部分）
+ * 在新规则下**恒等于 `refundAmount`**（打手全额归零、平台承担全部退款额），
+ * 记一个永远等于另一个字段的数只是多一份可能对不上的副本。
+ *
+ * ⚠️ 剩下三项仍然守着 P0-13 那句「一个不少、一个不多」：它们与
+ * `RefundDecision` 一一对应。新增决策字段时必须同步加到这里。
+ *
+ * ⚠️ 记的是**基点**（存储值）而不是界面的百分比，与上面
+ * `companionRateBp` 的取舍同一条理由：审计要能回答「当时存的是哪个数」。
+ *
+ * ⚠️ 未决策时三项一律为 `null`（不是 0）：`null` 是「没有这件事」，
+ * 0 是「决策了，金额/比例是 0」，两者在审计里必须分得开。
  */
 export function toRefundAuditSnapshot(
   refund: RefundRequest,
   orderStatus: OrderStatus,
 ): AdminAuditSnapshot {
+  const decision = refund.decision;
   return {
     status: refund.status,
     refundNo: refund.refundNo,
@@ -282,6 +352,9 @@ export function toRefundAuditSnapshot(
     reviewedByRole: refund.reviewedByRole,
     reviewedAt: refund.reviewedAt,
     reviewNote: truncateAuditText(refund.reviewNote, ADMIN_AUDIT_REVIEW_NOTE_MAX_LENGTH),
+    refundRateBp: decision ? decision.refundRateBp : null,
+    refundAmount: decision ? decision.refundAmount : null,
+    companionReversalAmount: decision ? decision.companionReversalAmount : null,
     updatedAt: refund.updatedAt,
   };
 }
@@ -342,5 +415,144 @@ export function toStaffAuditSnapshot(account: StaffAccount): AdminAuditSnapshot 
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
     removedAt: account.removedAt,
+  };
+}
+
+/**
+ * 图片公告的精简快照。
+ *
+ * 六个可改字段就是这条记录**全部能被后台改动的东西**，因此 before/after 的差异
+ * 恰好说明了这次操作改了什么。`imageUrl` 进快照：它是一条站内路径
+ * （写入前过 `validateSafePath()`），不是外域地址，留档不会泄露任何东西，
+ * 而且「当时首页上挂的是哪张图」正是审计要回答的问题。
+ *
+ * `title` 截断后进：它是后台辨认素材用的说明，属于「这次操作改了什么」的一部分。
+ */
+export function toAnnouncementAuditSnapshot(
+  record: ContentAnnouncementRecord,
+): AdminAuditSnapshot {
+  return {
+    title: truncateAuditText(record.title),
+    imageUrl: record.imageUrl,
+    alt: truncateAuditText(record.alt),
+    enabled: record.enabled,
+    sortOrder: record.sortOrder,
+    removedAt: record.removedAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** 活动 Banner 的精简快照。字段与公告完全相同（两者都是「一张图 + 一个后台标题」）。 */
+export function toBannerAuditSnapshot(record: ContentBannerRecord): AdminAuditSnapshot {
+  return {
+    title: truncateAuditText(record.title),
+    imageUrl: record.imageUrl,
+    alt: truncateAuditText(record.alt),
+    enabled: record.enabled,
+    sortOrder: record.sortOrder,
+    removedAt: record.removedAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * 快捷入口的精简快照。
+ *
+ * `path` 进快照：它写入前过了 `validateSafePath()`，因此里面不可能有 `javascript:`
+ * 之类的串——**这一点由快照本身证明**（审计里留的是一条站内路径）。
+ *
+ * `label` 与 `icon` 一起进：用户端一个入口长什么样就是这两样加路径，
+ * 缺一个都说不清「当时首页第二个格子点下去是哪儿」。
+ */
+export function toQuickEntryAuditSnapshot(record: QuickEntryRecord): AdminAuditSnapshot {
+  return {
+    label: truncateAuditText(record.label),
+    icon: record.icon,
+    path: record.path,
+    enabled: record.enabled,
+    sortOrder: record.sortOrder,
+    removedAt: record.removedAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/**
+ * 协议的精简快照。
+ *
+ * ⚠️ **协议正文一个字符都不进快照**，这是四条硬边界里最要紧的一条在这里的落点。
+ * `Agreement.sections` 是几十段法律文本，把它整个抄进 before/after，等于每编辑一次
+ * 就往审计表里存一份全文副本——审计表会以「正文的长度」而不是「操作的次数」增长。
+ * 需要正文时去协议记录本身取；审计回答的是「哪一份协议、什么时候、被谁改了」。
+ *
+ * 因此正文的**规模**用两个标量表达：`sectionCount`（几节）与`paragraphCount`（几段）。
+ * 它们足以回答「这次是改了个错别字还是重写了一份」——而这正是审计要回答的粒度。
+ *
+ * `version` 进快照：它由服务端在正文变化时递增，是「正文变过没有」的**权威证据**。
+ */
+export function toAgreementAuditSnapshot(agreement: Agreement): AdminAuditSnapshot {
+  return {
+    type: agreement.type,
+    title: truncateAuditText(agreement.title),
+    version: agreement.version,
+    enabled: agreement.enabled,
+    sectionCount: agreement.sections.length,
+    paragraphCount: agreement.sections.reduce(
+      (total, section) => total + section.paragraphs.length,
+      0,
+    ),
+    updatedAt: agreement.updatedAt,
+  };
+}
+
+/**
+ * 平台参数的精简快照。
+ *
+ * 配置只有几个标量字段，整条进快照即可——这里没有需要裁剪的正文或个人信息。
+ * `updatedByAdminId` 也进快照：审计的 `actorId` 回答「这一次是谁改的」，
+ * 而这个字段回答「改动前那份值是谁留下的」，两者不是一回事。
+ */
+export function toPlatformConfigAuditSnapshot(config: PlatformConfig): AdminAuditSnapshot {
+  return {
+    exclusivePoolTimeoutMinutes: config.exclusivePoolTimeoutMinutes,
+    publicPoolTimeoutMinutes: config.publicPoolTimeoutMinutes,
+    completionAutoApprovalMinutes: config.completionAutoApprovalMinutes,
+    complaintWindowMinutes: config.complaintWindowMinutes,
+    updatedAt: config.updatedAt,
+    updatedByAdminId: config.updatedByAdminId,
+  };
+}
+
+/**
+ * 优惠券模板的精简快照（P1-6）。
+ *
+ * ⚠️ **刻意没有 `valueLabel` / `conditionLabel`**，这与商品快照里
+ * `platformBorneAmount` 被删掉是同一条理由：它们由 `thresholdAmount` /
+ * `discountAmount` **派生**（`buildThresholdCouponLabels()`），在 before/after 里
+ * 与金额**永远同步变化**。把「同一件事的两种呈现」都记进去，只会让一次改价
+ * 在审计里看起来改动了三处。看审计的人要的是「改了什么数」，文案随时可以按当时的
+ * 金额重新算出来。
+ *
+ * ⚠️ **也没有 `createdAt`**：它永远不变，放进每一条审计里只是把一个常量抄了很多遍。
+ *
+ * `formKey` 进快照：它是「这张券参不参与结算」的分类依据（`isComputableCouponForm()`），
+ * 而本阶段只有 `threshold` 可编辑——审计里留着它，才能解释为什么某条记录从没被编辑过。
+ *
+ * ⚠️ 两个金额字段**保留 `null` 的原样**：`null` 是「这张券没有可计算金额」，
+ * 不是 0。把它记成 0，事后读审计的人会以为平台上曾经有一张「满 0 减 0」的券。
+ *
+ * ⚠️ **本快照记的是模板，不是任何一张已发出的券**：模板改动不追溯
+ * `CouponClaim.snapshot`（P1-4 裁定 §9），因此这里出现的字段与用户手里那张券的
+ * 内容可以不同——那不是不一致，那正是本轮要保证的事。
+ */
+export function toCouponAuditSnapshot(coupon: Coupon): AdminAuditSnapshot {
+  return {
+    name: truncateAuditText(coupon.name),
+    formKey: coupon.formKey,
+    thresholdAmount: coupon.thresholdAmount,
+    discountAmount: coupon.discountAmount,
+    validFrom: coupon.validFrom,
+    validTo: coupon.validTo,
+    enabled: coupon.enabled,
+    updatedAt: coupon.updatedAt,
   };
 }

@@ -8,10 +8,18 @@ import {
   canTransitionRefund,
   refundMatchesAdminKeyword,
 } from "../lib/constants/adminRefunds.ts";
+import {
+  REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+  assertRefundApprovalOrderStatus,
+} from "../lib/constants/refunds.ts";
 import { CONSUMPTION_ORDER_STATUS, sumEffectiveSpend } from "../lib/constants/levels.ts";
 import { beijingDayStart } from "../lib/constants/rankingPeriods.ts";
 import { adminAuditStore } from "../lib/data/mockAdminAuditRepository.ts";
+import { earningStore } from "../lib/data/mockEarningRepository.ts";
+import { notificationStore } from "../lib/data/mockNotificationRepository.ts";
+import { refundStore } from "../lib/data/mockRefundRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
+import { approveRefund } from "../lib/data/adminRefundTransaction.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
 import { getRefundRepository } from "../lib/data/refundRepository.ts";
 import { getUserRepository } from "../lib/data/userRepository.ts";
@@ -48,8 +56,18 @@ import { createRefundForOrder } from "../lib/services/refunds.ts";
 const ADMIN = "admin-1";
 const SURFACE = "server";
 
-/** 待审核、且订单处于「已接单」的预置退款 */
-const PENDING_REFUND = "rf-seed-1001-01";
+/**
+ * 待审核、且订单处于「已完成」的预置退款 —— **本文件所有「通过」用例的对象**。
+ *
+ * ⚠️ 2026-09-27 产品裁定之后不能再用 `rf-seed-1001-01`：那条挂在 `accepted` 单上，
+ * 属于 P0-12 之前的存量，**审核必须被拒绝**（见本文件「状态闸」那一节）。
+ * 想要一条能正常批准的申请，订单必须是 `serving` / `completed`。
+ */
+const PENDING_REFUND = "rf-seed-1003-01";
+/** 待审核、但订单处于「已接单」——**负向**预置：批准必须被拒绝（存量语义） */
+const LEGACY_ACCEPTED_REFUND = "rf-seed-1001-01";
+/** 待审核、但订单处于「已付款」——**负向**预置：批准必须被拒绝（存量语义） */
+const LEGACY_PAID_REFUND = "rf-seed-1002-01";
 /** 审核中、订单处于「护航中」的预置退款 */
 const REVIEWING_REFUND = "rf-seed-1001-02";
 /** 已通过（终态） */
@@ -61,6 +79,51 @@ const CANCELLED_REFUND = "rf-seed-1001-05";
 
 function key() {
   return crypto.randomUUID();
+}
+
+/**
+ * 通过时必填的资金决策 —— **P0-15 之后只剩一个比例字段**。
+ *
+ * ⚠️ 2026-09-28 产品裁定推翻了 P0-13 / P0-14 的责任划分模型，本条注释依据的是新规则：
+ * 请求体只该携带 `refundRatePercent`（管理端百分比），三个金额一律由服务端按冻结公式算：
+ *   - `refundAmount = floor(actualPaidAmount × rateBp / 10000)`
+ *   - `companionReversalAmount = companionBaseIncome`（**恒为全额**，10% / 30% / 50% / 100% 都一样）
+ *   - `responsibility` / `companionLiabilityRatePercent` / `platformBorneAmount` 已从
+ *     `lib/**` 整条删除，服务端不再读、也不再写。
+ *
+ * 因此旧版本里那句「默认是全额、平台承担：正好复现 P0-13 之前的语义（不碰打手收益）」
+ * **不再成立**：现在只要通过，打手这一单的净收益就一定被全额冲回，与比例无关；
+ * 平台最终收入 = `actualPaidAmount − refundAmount`。
+ *
+ * 这里取「100%」是为了让本文件既有的「通过之后订单变已退款」断言继续成立：
+ * 只有**全额**退款才会把 `Order.status` 改成 `refunded`（部分退款保留真实生命周期）。
+ * 金额公式与打手冲回链由 `tests/refundMoneyChain.test.mjs` 专门覆盖——
+ * 那些规则要一条完整的资金链（订单 → 收益 → 冲回），混在这里会让两件事都说不清。
+ */
+function decision(overrides = {}) {
+  return { refundRatePercent: "100", ...overrides };
+}
+
+/**
+ * 同一件事的**数据层形状**：比例一律是基点。
+ *
+ * ⚠️ 这两个形状必须分开写，正是为了让「比例在哪一层换算」有断言可依：
+ * 接口层收百分比字符串（`refundRatePercent`，经 `readAdminRefundDecisionInput` 换算），
+ * 数据层收基点（`refundRateBp`），换算只有 `lib/constants/shareRatio.ts` 一处。
+ *
+ * 把接口形状直接传进数据层时，`refundRateBp` 是 `undefined`，算出来的
+ * `refundAmount` 是 `NaN`。这件事**危险在它不报错**：金额闸用的是
+ * `累计 + 本次 <= 实付`，而 `NaN <= x` 恒为 false 看起来像「没超」，
+ * 于是「累计已退」被写成 NaN 还一路绿灯。下面那条重放用例
+ * （`同幂等键重放`）就是靠钉住这个数抓出它的。
+ */
+function decisionInput(overrides = {}) {
+  // ⚠️ P0-15 之后 `RefundDecisionInput` 只剩 `refundRateBp` 一个字段。
+  // 旧版本里的 `refundFullRemaining` / `responsibility` / `companionLiabilityRateBp`
+  // 是已被删除的规则，写进来只会让「数据层形状」看起来还带着责任划分，
+  // 因此这里如实只给新形状；要伪造它们由调用方通过 `overrides` 显式传入
+  // （服务端会忽略，见「退款金额不可篡改」那条）。
+  return { refundRateBp: 10000, ...overrides };
 }
 
 async function refundOf(id) {
@@ -117,22 +180,44 @@ test("状态机：终态没有出边，撤销没有入边（管理端不能替�
 });
 
 test("可执行动作由状态推导：终态三项全 false，页面因此没有灰按钮", () => {
-  assert.deepEqual(adminRefundAllowedActions("pending"), {
+  // 「订单状态」这一维在下面单独覆盖，这里先钉住状态机这一维
+  const APPROVABLE_ORDER = "serving";
+
+  assert.deepEqual(adminRefundAllowedActions("pending", APPROVABLE_ORDER), {
     canStartReview: true,
     canApprove: true,
     canReject: true,
   });
-  assert.deepEqual(adminRefundAllowedActions("reviewing"), {
+  assert.deepEqual(adminRefundAllowedActions("reviewing", APPROVABLE_ORDER), {
     canStartReview: false,
     canApprove: true,
     canReject: true,
   });
   for (const terminal of ["approved", "rejected", "cancelled"]) {
     assert.deepEqual(
-      adminRefundAllowedActions(terminal),
+      adminRefundAllowedActions(terminal, APPROVABLE_ORDER),
       { canStartReview: false, canApprove: false, canReject: false },
       `${terminal} 不该有可执行动作`,
     );
+  }
+});
+
+test("可执行动作的第二维：订单不在审批范围时只有「通过」变灰，另外两个动作照旧", () => {
+  // 四档业务状态逐一验证：serving / completed 放行，paid / accepted 挡下
+  for (const orderStatus of ["serving", "completed"]) {
+    assert.equal(
+      adminRefundAllowedActions("pending", orderStatus).canApprove,
+      true,
+      `${orderStatus} 属于审批范围，应当可以批`,
+    );
+  }
+  for (const orderStatus of ["paid", "accepted"]) {
+    const actions = adminRefundAllowedActions("pending", orderStatus);
+    assert.equal(actions.canApprove, false, `${orderStatus} 不在审批范围，不能批`);
+    // ⚠️ 关键：另外两个动作**必须仍然可用**——这类申请是存量，
+    // 驳回（以及开始审核）正是它们的应有处置。一起灰掉等于让它们永远挂着
+    assert.equal(actions.canStartReview, true, `${orderStatus} 仍应能开始审核`);
+    assert.equal(actions.canReject, true, `${orderStatus} 仍应能驳回`);
   }
 });
 
@@ -145,7 +230,7 @@ test("非法迁移一律 400 且带上当前状态：重复通过、拒绝之后
   ]) {
     for (const call of [
       () => startReviewAdminRefund(id, ADMIN, { idempotencyKey: key() }),
-      () => approveAdminRefund(id, ADMIN, { idempotencyKey: key() }),
+      () => approveAdminRefund(id, ADMIN, { idempotencyKey: key(), ...decision() }),
       () => rejectAdminRefund(id, ADMIN, { idempotencyKey: key(), reviewNote: "不行" }),
     ]) {
       await assert.rejects(call(), (error) => {
@@ -161,12 +246,15 @@ test("非法迁移一律 400 且带上当前状态：重复通过、拒绝之后
     startReviewAdminRefund(REVIEWING_REFUND, ADMIN, { idempotencyKey: key() }),
     "BAD_REQUEST",
   );
-  const approved = await approveAdminRefund(REVIEWING_REFUND, ADMIN, { idempotencyKey: key() });
+  const approved = await approveAdminRefund(REVIEWING_REFUND, ADMIN, {
+    idempotencyKey: key(),
+    ...decision(),
+  });
   assert.equal(approved.status, "approved");
 
   // 不存在的退款：404，且与「状态不对」区分开
   await expectApiError(
-    approveAdminRefund("rf-nope", ADMIN, { idempotencyKey: key() }),
+    approveAdminRefund("rf-nope", ADMIN, { idempotencyKey: key(), ...decision() }),
     "NOT_FOUND",
   );
   await expectApiError(
@@ -260,6 +348,7 @@ test("通过：退款与订单在同一次写入里改到位，审核人 / 意�
   const result = await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: key(),
     reviewNote: "已核实服务未按约定开始。",
+    ...decision(),
   });
 
   assert.equal(result.status, "approved");
@@ -286,6 +375,7 @@ test("通过的意见选填：不填也能通过，且不会把空字符串当�
   const result = await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: key(),
     reviewNote: "",
+    ...decision(),
   });
   assert.equal(result.status, "approved");
 
@@ -301,7 +391,22 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
 
   await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: key(),
-    // 客户端伪造：金额、状态、审核人、审核时间、订单状态、退款单号
+    // 服务端只认 refundRatePercent 这一个字段算钱；下面全部是伪造的同名/派生字段
+    ...decision(),
+    /*
+      客户端伪造：金额、状态、审核人、审核时间、订单状态、退款单号。
+
+      ⚠️ P0-15 之后伪造面只剩**一个**真正动钱的比例字段 + 一批派生金额。
+      请求体只该携带 `refundRatePercent`；其余三个金额由服务端按 §17 冻结公式算
+      （`companionReversalAmount` 恒等于订单上的打手收益，与比例无关）。
+      如果写入侧是「有值就用请求体的值」，下面这几个伪造字段就能直接决定退多少钱、
+      打手被冲回多少，因此必须在这里被钉死：伪造的金额一个都不许落地。
+
+      另外，**已删除的责任划分字段**（`responsibility` /
+      `companionLiabilityRatePercent` / `platformBorneAmount`）也一并伪造进来：
+      它们现在不在契约里，服务端既不该读、也不该把客户端传的值写回决策对象——
+      下面用 `Object.hasOwn` 从**写入结果**这一侧验证它们没有复活。
+    */
     amount: 1,
     status: "rejected",
     reviewedBy: "admin-999",
@@ -309,6 +414,15 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
     orderStatus: "completed",
     refundNo: "FAKE",
     orderId: "ord-nope",
+    decidedAmount: 1,
+    refundAmount: 1,
+    refundRateBp: 1,
+    companionReversalAmount: 99999999,
+    platformBorneAmount: -99999999,
+    responsibility: "companion",
+    companionLiabilityRatePercent: "100",
+    decidedBy: "admin-999",
+    decidedAt: "2000-01-01T00:00:00.000Z",
   });
 
   const after = await refundOf(PENDING_REFUND);
@@ -320,8 +434,195 @@ test("退款金额不可篡改：请求体里的 amount / status 等字段一律
   assert.equal(after.refundNo, before.refundNo);
   assert.equal(after.orderId, before.orderId);
 
+  // 服务端按「100%」自己算出来的那几个数，才是唯一能落地的值
+  const written = after.decision;
+  assert.notEqual(written, null);
+  assert.equal(written.refundRateBp, 10000, "比例只认 refundRatePercent，不看请求体里的 refundRateBp");
+  assert.equal(written.refundAmount, order.totalAmount, "退款额由服务端按实付×比例算");
+  assert.notEqual(written.refundAmount, 1, "伪造的 refundAmount / decidedAmount / amount 无效");
+  // P0-15：冲回额恒为全额，等于订单上的打手收益（与比例、与责任方都无关）
+  assert.ok(order.companionBaseIncome > 0, "预置订单的打手收益非 0，否则下面那条断言什么也没证明");
+  assert.equal(
+    written.companionReversalAmount,
+    order.companionBaseIncome,
+    "打手冲回额恒为全额（= 订单上的 companionBaseIncome），与比例 / responsibility 无关",
+  );
+  assert.notEqual(written.companionReversalAmount, 99999999, "伪造的冲回额无效");
+  // 责任划分模型已被 P0-15 整条删除：这些字段不得再出现在写出的决策对象上
+  assert.equal(Object.hasOwn(written, "platformBorneAmount"), false, "平台承担额已删除，不得被伪造字段复活");
+  assert.equal(Object.hasOwn(written, "responsibility"), false, "责任方已删除，不得被伪造字段复活");
+  assert.equal(
+    Object.hasOwn(written, "companionLiabilityRatePercent"),
+    false,
+    "打手责任比例已删除，不得被伪造字段复活",
+  );
+  assert.equal(written.decidedBy, ADMIN, "决策人来自服务端会话，不由请求体决定");
+  assert.notEqual(written.decidedAt, "2000-01-01T00:00:00.000Z");
+
   const orderAfter = await getPaymentRepository().findOrderById(before.orderId);
   assert.equal(orderAfter.status, "refunded", "订单状态由通过决定，不由请求体决定");
+});
+
+// ——————————————— 全额退款的金额口径：refundedAmount（P0-5.5 R2 / R3）———————————————
+//
+// `Order.status === "refunded"` 表示**已全额退款**，因此这一单必须同时满足
+// `refundedAmount === actualPaidAmount`。少了这一步，用户会看到「已退款」但「累计已退 0 元」——
+// 状态与金额各说各话，而这正是本批要修的那个缺陷。
+//
+// 金额的**真值源是被修改的那张订单**（`order.actualPaidAmount`），不是退款申请上的
+// 快照字段。下面第 10 条用一份「两个数被改成不一样」的数据把这件事钉住：只有它分得出
+// 「取自订单」与「取自申请」。
+
+/** 一次写操作的上下文。直接调伪事务时需要自己凑（服务层会从会话与请求体里组装）。 */
+function writeContext(operationId) {
+  return {
+    actorId: ADMIN,
+    actorRole: "admin",
+    actorName: null,
+    operationId,
+    at: new Date().toISOString(),
+  };
+}
+
+test("通过全额退款：同一个订单对象上 status 与 refundedAmount 必须同时到位", async () => {
+  const before = await orderOf(PENDING_REFUND);
+  // 非 0 的起点是这条用例的前提：两个数都等于 0 时，上面那个等号什么也没证明
+  assert.ok(before.actualPaidAmount > 0, "预置订单的实付金额必须非 0");
+  assert.equal(before.refundedAmount, 0, "退款前累计已退是 0");
+
+  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "", ...decision() });
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.status, "refunded", "退款申请通过就要把订单改成已退款");
+  assert.equal(
+    after.refundedAmount,
+    after.actualPaidAmount,
+    "全额退款后累计已退必须等于实付——不得出现「已退款但累计已退 0 元」",
+  );
+  assert.equal(after.refundedAmount, before.actualPaidAmount, "退的就是这一单当初实付的钱");
+  assert.notEqual(after.refundedAmount, 0);
+});
+
+test("金额真值源是订单不是退款申请：两个数被人为改开后，写进订单的是订单自己的实付", async () => {
+  const orderBefore = await orderOf(PENDING_REFUND);
+  const refundBefore = await refundOf(PENDING_REFUND);
+  // 起点自检：预置数据里两者本来就相等，所以下面的分歧只能来自这一行改动
+  assert.equal(refundBefore.amount, orderBefore.actualPaidAmount);
+
+  // 人为制造分歧：把退款申请上的金额快照改成一个一眼能认出来的错数。
+  // 这正是「有人误把 refund.amount 当成真值源」之后数据会长的样子。
+  // 直接改 store（不去动 lib/mocks 里的夹具）：这是一次性构造，没有第二个用例需要它。
+  //
+  // ⚠️ **换掉 Map 里的那一条，而不是就地改它**：预置数据的 `createStore` 是把
+  //    `refundSeed` 里的对象**原样**放进 Map 的，就地改会连模块级的种子一起改掉——
+  //    而 `resetMockStore()` 之后种子会被重新放进 Map，污染就漏到后面的用例了。
+  const wrong = orderBefore.actualPaidAmount + 12345;
+  const refunds = refundStore().refunds;
+  const stored = refunds.get(PENDING_REFUND);
+  assert.ok(stored, "预置退款记录必须存在");
+  refunds.set(PENDING_REFUND, { ...stored, amount: wrong });
+
+  try {
+    await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "", ...decision() });
+
+    const after = await orderOf(PENDING_REFUND);
+    assert.equal(
+      after.refundedAmount,
+      orderBefore.actualPaidAmount,
+      "写进订单的必须是**订单自己的**实付（同一事实只有一个真值源）",
+    );
+    assert.notEqual(after.refundedAmount, wrong, "不得取退款申请上的金额快照");
+
+    // 审批只写「被修改的那张记录」：退款申请上的金额快照不该被顺手改写
+    assert.equal((await refundOf(PENDING_REFUND)).amount, wrong, "审批不改退款申请的金额快照");
+    // 订单的实付本身也不因退款而变（退的是历史事实，不是重算一遍）
+    assert.equal(after.actualPaidAmount, orderBefore.actualPaidAmount);
+  } finally {
+    refunds.set(PENDING_REFUND, stored);
+  }
+});
+
+test("重复批准（换一个幂等键）不重复累计：状态机挡住，refundedAmount 与 refundedAt 都不变", async () => {
+  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "", ...decision() });
+  const first = await orderOf(PENDING_REFUND);
+  assert.equal(first.status, "refunded");
+  assert.ok(first.refundedAt, "第一次通过要记下退款时间");
+
+  // 「已通过」是终态：换一个键也不能再批一次（§退款审核：已出结果的记录不能二次裁决）
+  await assert.rejects(
+    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "", ...decision() }),
+    (error) => {
+      assert.equal(error.code, "BAD_REQUEST");
+      assert.ok(error.message.includes("已通过"), `提示要说清当前状态：${error.message}`);
+      return true;
+    },
+  );
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.refundedAmount, first.refundedAmount, "被拒的第二次不该改动金额");
+  assert.equal(after.refundedAt, first.refundedAt, "被拒的第二次不该刷新退款时间");
+  assert.equal(await auditCount(), 1, "失败的请求不写审计");
+});
+
+test("同幂等键重放：replayed=true、changed/orderChanged=false，金额不变、审计仍只有一条", async () => {
+  const before = await orderOf(PENDING_REFUND);
+  const operationId = key();
+
+  // 直接调伪事务：第三个参数是资金决策，**基点形状**（服务层从百分比换算后给它）
+  const first = await approveRefund(PENDING_REFUND, "", decisionInput(), writeContext(operationId));
+  assert.equal(first.kind, "ok");
+  assert.equal(first.replayed, false, "第一次不是重放");
+  assert.equal(first.changed, true);
+  assert.equal(first.value.orderChanged, true);
+  assert.deepEqual(
+    (await auditsFor(PENDING_REFUND)).map((entry) => entry.action),
+    ["refund.approve"],
+  );
+
+  const settled = await orderOf(PENDING_REFUND);
+  assert.equal(settled.refundedAmount, before.actualPaidAmount);
+
+  // 同一个键第二次到达：原样返回当时的结果，一个字节都不再写
+  const replay = await approveRefund(PENDING_REFUND, "", decisionInput(), writeContext(operationId));
+  assert.equal(replay.kind, "ok");
+  assert.equal(replay.replayed, true, "同一个键第二次到达必须被判为重放");
+  assert.equal(replay.changed, false, "重放不算改动");
+  assert.equal(replay.value.orderChanged, false, "重放不该再动一次订单");
+  assert.equal(replay.value.order.refundedAt, settled.refundedAt, "重放返回的订单就是当时那一张");
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.refundedAmount, settled.refundedAmount, "重放不改金额");
+  assert.equal(after.refundedAt, settled.refundedAt, "重放不刷新退款时间");
+  assert.equal(await auditCount(), 1, "重放不写第二条审计");
+});
+
+test("金额不重复累计：批准 + 重放 + 换键重批之后，这一单仍然只退了一次", async () => {
+  const before = await orderOf(PENDING_REFUND);
+  const operationId = key();
+
+  await approveAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: operationId,
+    reviewNote: "",
+    ...decision(),
+  });
+  // 同键重放：服务层成功返回，但不写任何东西
+  const replay = await approveAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: operationId,
+    reviewNote: "第二次提交（不该生效）",
+    ...decision(),
+  });
+  assert.equal(replay.changed, false);
+  // 换键重批：被状态机挡住
+  await assert.rejects(
+    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "", ...decision() }),
+  );
+
+  const after = await orderOf(PENDING_REFUND);
+  assert.equal(after.status, "refunded");
+  assert.equal(after.refundedAmount, after.actualPaidAmount, "终态仍必须是「全额退款」");
+  assert.equal(after.refundedAmount, before.actualPaidAmount, "金额等于实付，不多不少");
+  assert.notEqual(after.refundedAmount, before.actualPaidAmount * 2, "不得累计成两倍");
+  assert.equal(await auditCount(), 1, "三次请求里只有一次真的落了审计");
 });
 
 test("纯口径：已退款订单在任何计入口径里都是零", async () => {
@@ -332,7 +633,11 @@ test("纯口径：已退款订单在任何计入口径里都是零", async () =>
     (order) => order.status === "completed",
   );
   assert.ok(completed, "这位用户应当有已完成订单，否则这条对照做不了");
-  assert.equal(sumEffectiveSpend([completed]), completed.totalAmount);
+  // ⚠️ 期望值取 `actualPaidAmount`（P1-4）：口径读的是**实付**。种子订单没有券，
+  // 两个数当前相等，所以这一条也拦不住字段读错——它只是把「口径 = 实付」这句话
+  // 显式写进断言；真正的守门符在 `tests/levels.test.mjs` 的「接券后按实付计入」，
+  // 那条的两个数**故意不相等**。
+  assert.equal(sumEffectiveSpend([completed]), completed.actualPaidAmount);
   assert.equal(sumEffectiveSpend([{ ...completed, status: "refunded" }]), 0);
 
   // 预置的已退款订单一分都不进累计——它的金额不为零，才说明它确实是被排除的
@@ -503,11 +808,28 @@ test("拒绝已完成的退款：订单仍是已完成，累计消费与六个�
     assert.deepEqual(board.rows, snapshot.boards.get(period).rows, `${period} 榜必须原样`);
   }
 
-  // 用户端：订单仍是已完成，但入口不会回来——本阶段一笔订单只有一条退款记录
+  /*
+    用户端：订单仍是已完成，但**申请入口已经关闭**。
+
+    ⚠️ 这里在 P0-15（2026-09-28 产品裁定）之前断言的是 `true`。
+    P0-13 期间的理由是「只有**进行中**的记录才挡申请，已拒绝 / 已撤销 / 已通过的记录
+    都不再挡——部分退款要求同一单能退第二次」。这条理由已随 P0-15 被推翻：
+    **一个订单最多一次退款申请，一旦提交就永久关闭**（拒绝 / 撤销 / 通过都一样）。
+    因此被驳回之后，用户看到的是「入口消失」而不是「可以重新申请」；
+    `canRequestRefund` 由 `canRequestRefund(status, hasRefundRecord)` 给出——
+    只要这一单**存在过**任何一条退款记录（含已驳回）就为 false。
+
+    在 DTO 这一层钉住它，是因为若只改服务端判定而让这里的断言留在旧口径，
+    页面按钮与接口判定会各说各话，而且不会有任何报错。
+  */
   const detail = await getOrderDetailForUser(OTHER_COUNTED_ORDER, COUNTED_USER, undefined, SURFACE);
   assert.equal(detail.status, "completed");
-  assert.equal(detail.allowedActions.canRequestRefund, false, "已结束的退款记录仍然挡着重复申请");
-  assert.equal(detail.refundSummary.status, "rejected");
+  assert.equal(
+    detail.allowedActions.canRequestRefund,
+    false,
+    "一单只能申请一次：被驳回也算用掉了这一次机会，入口必须关闭",
+  );
+  assert.equal(detail.refundSummary.status, "rejected", "那一条记录本身仍然是「未通过」");
 });
 
 test("通过已完成的退款：订单变已退款，累计消费正好扣掉这一单，周期榜按完成时间归属扣减", async () => {
@@ -518,6 +840,7 @@ test("通过已完成的退款：订单变已退款，累计消费正好扣掉�
   const result = await approveAdminRefund(refundId, ADMIN, {
     idempotencyKey: key(),
     reviewNote: "已核实本次服务未按约定完成，同意整单退款。",
+    ...decision(),
   });
 
   // ① 只有「通过」这一刻，退款与订单两边才同时变
@@ -581,6 +904,7 @@ test("幂等重放「通过」不会重复扣减：同一个键提交两次，�
   const first = await approveAdminRefund(refundId, ADMIN, {
     idempotencyKey: operationId,
     reviewNote: "同意整单退款。",
+    ...decision(),
   });
   const spendAfterFirst = await spendOf(COUNTED_USER);
   assert.equal(spendAfterFirst, spendBefore - before.totalAmount);
@@ -588,6 +912,7 @@ test("幂等重放「通过」不会重复扣减：同一个键提交两次，�
   const replay = await approveAdminRefund(refundId, ADMIN, {
     idempotencyKey: operationId,
     reviewNote: "第二次提交（不该生效）",
+    ...decision(),
   });
   assert.equal(replay.status, "approved");
   assert.equal(replay.changed, false);
@@ -605,8 +930,8 @@ test("并发通过只执行一次：两笔同时到达，消费只扣一次、�
   const refundId = await submitRefund(COUNTED_ORDER);
 
   const results = await Promise.allSettled([
-    approveAdminRefund(refundId, ADMIN, { idempotencyKey: key() }),
-    approveAdminRefund(refundId, ADMIN, { idempotencyKey: key() }),
+    approveAdminRefund(refundId, ADMIN, { idempotencyKey: key(), ...decision() }),
+    approveAdminRefund(refundId, ADMIN, { idempotencyKey: key(), ...decision() }),
   ]);
 
   assert.equal(
@@ -632,12 +957,21 @@ test("通过之后历史快照与退款金额仍原样：商品、实付、完�
   await approveAdminRefund(refundId, ADMIN, {
     idempotencyKey: key(),
     reviewNote: "已核实，同意整单退款。",
+    ...decision(),
     // 客户端伪造：金额、订单快照、退款单号、完成时间——一律被白名单忽略
     amount: 1,
     totalAmount: 1,
     refundNo: "FAKE",
     completedAt: "2000-01-01T00:00:00.000Z",
     status: "rejected",
+    // 同一类伪造的第二个面：决策里的**派生金额**与已删除的责任划分字段
+    // （见上一条测试的说明；P0-15 之后 responsibility 一侧的字段已不在契约里）
+    decidedAmount: 1,
+    refundAmount: 1,
+    companionReversalAmount: 99999999,
+    platformBorneAmount: -99999999,
+    responsibility: "companion",
+    companionLiabilityRatePercent: "50",
   });
 
   const after = await orderById(COUNTED_ORDER);
@@ -648,11 +982,27 @@ test("通过之后历史快照与退款金额仍原样：商品、实付、完�
   assert.equal(after.completedAt, before.completedAt, "完成时间必须保留：周期榜靠它归属");
   assert.equal(after.userId, before.userId);
   assert.equal(after.status, "refunded", "状态由服务端的状态机决定，不由请求体决定");
+  assert.equal(after.refundedAmount, before.totalAmount, "累计已退额由服务端算，不用请求体的 1");
 
   const refundAfter = await refundOf(refundId);
   assert.equal(refundAfter.amount, before.totalAmount, "退款金额仍是申请时的快照");
   assert.notEqual(refundAfter.amount, 1);
   assert.equal(refundAfter.refundNo, refundBefore.refundNo);
+  assert.equal(refundAfter.decision.refundAmount, before.totalAmount, "退款额由服务端算，不用伪造的 1");
+  // P0-15：冲回额恒为全额（= 订单上的打手收益），与比例 / 责任方都无关。
+  // 这与「历史快照不被改写」是同一条不变量的两面：服务端算出来的金额才是唯一真值。
+  assert.ok(before.companionBaseIncome > 0, "预置订单的打手收益非 0，否则下面那条断言什么也没证明");
+  assert.equal(
+    refundAfter.decision.companionReversalAmount,
+    before.companionBaseIncome,
+    "打手冲回额恒为全额，且不被伪造的 99999999 改写",
+  );
+  assert.notEqual(refundAfter.decision.companionReversalAmount, 99999999);
+  assert.equal(
+    Object.hasOwn(refundAfter.decision, "platformBorneAmount"),
+    false,
+    "平台承担额已随责任模型删除，伪造的 -99999999 不得落地",
+  );
 });
 
 // ——————————————————————————— 幂等与审计 ———————————————————————————
@@ -663,6 +1013,7 @@ test("幂等：同一个键重复提交返回同一次结果，不迁移两次�
   const first = await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: operationId,
     reviewNote: "第一次提交",
+    ...decision(),
   });
   assert.equal(first.changed, true);
   assert.equal(first.orderChanged, true);
@@ -671,6 +1022,7 @@ test("幂等：同一个键重复提交返回同一次结果，不迁移两次�
   const replay = await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: operationId,
     reviewNote: "第二次提交（不该生效）",
+    ...decision(),
   });
   assert.equal(replay.status, "approved");
   assert.equal(replay.changed, false, "重放不算改动");
@@ -684,8 +1036,8 @@ test("幂等：同一个键重复提交返回同一次结果，不迁移两次�
 
 test("并发：两个同时到达的「通过」只有一个成功，另一个被判为非法迁移", async () => {
   const results = await Promise.allSettled([
-    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key() }),
-    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key() }),
+    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), ...decision() }),
+    approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), ...decision() }),
   ]);
 
   const ok = results.filter((item) => item.status === "fulfilled");
@@ -704,7 +1056,7 @@ test("幂等键被别的对象用过时报 400，而不是安静地返回别人�
   await startReviewAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: operationId });
 
   await expectApiError(
-    approveAdminRefund(REVIEWING_REFUND, ADMIN, { idempotencyKey: operationId }),
+    approveAdminRefund(REVIEWING_REFUND, ADMIN, { idempotencyKey: operationId, ...decision() }),
     "BAD_REQUEST",
   );
 
@@ -732,6 +1084,7 @@ test("审计恰好一次，且不保存退款说明、凭证地址与联系方�
   await approveAdminRefund(PENDING_REFUND, ADMIN, {
     idempotencyKey: key(),
     reviewNote: "已核实，同意退款。",
+    ...decision(),
   });
 
   const entries = await auditsFor(PENDING_REFUND);
@@ -763,7 +1116,8 @@ test("审计恰好一次，且不保存退款说明、凭证地址与联系方�
   assert.ok(entries[1].after.reviewNote.startsWith("已核实"));
   // 业务状态与订单状态同时留档，这是「通过会动订单」唯一的痕迹
   assert.equal(entries[1].after.orderStatus, "refunded");
-  assert.equal(entries[0].after.orderStatus, "accepted");
+  // 开始审核**不动**订单：第一条快照里它还是原样（`PENDING_REFUND` 的订单是「已完成」）
+  assert.equal(entries[0].after.orderStatus, "completed");
 });
 
 test("三个动作失败时都不留审计，业务数据也一个字不改", async () => {
@@ -774,6 +1128,122 @@ test("三个动作失败时都不留审计，业务数据也一个字不改", as
   );
   assert.equal(await auditCount(), 0);
   assert.deepEqual(await refundOf(APPROVED_REFUND), before);
+});
+
+// ————————————— 状态闸：paid / accepted 不允许批准售后退款（2026-09-27 裁定） —————————————
+//
+// 产品裁定：退款路径保持唯一——`paid` / `accepted` → 用户 direct full refund；
+// `serving` → 售后；`completed` → 投诉 / 售后。
+// 因此审核入口必须由**服务端**挡下 `paid` / `accepted`，不能靠前端藏按钮。
+//
+// 为什么要挡的是**存量**申请：P0-12 之后那两档已经开不出新申请
+// （`canRequestRefund` 只放行 `serving` / `completed`），但历史遗留的记录还在
+// （`rf-seed-1001-01` 挂 `accepted`、`rf-seed-1002-01` 挂 `paid`）。
+// 没有这道闸时，那两条存量申请会被批准成「绕过直接退款路径的人工退款」——
+// 同一档订单出现两条互斥的退款结果。
+
+test("状态闸（纯函数）：只有 serving / completed 通过，paid / accepted / refunded 一律拒绝", () => {
+  for (const status of ["serving", "completed"]) {
+    assert.equal(assertRefundApprovalOrderStatus(status), null, `${status} 应当放行`);
+  }
+  for (const status of ["paid", "accepted", "refunded"]) {
+    assert.equal(
+      assertRefundApprovalOrderStatus(status),
+      REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+      `${status} 必须被拒绝`,
+    );
+  }
+});
+
+test("存量 accepted 单上的售后申请：批准被服务端拒绝，四类数据一个字都不改", async () => {
+  const refundBefore = await refundOf(LEGACY_ACCEPTED_REFUND);
+  const orderBefore = await orderOf(LEGACY_ACCEPTED_REFUND);
+  assert.equal(orderBefore.status, "accepted", "前置：这条存量的订单确实是「已接单」");
+
+  // 四类可能在审批里被写到的数据，全部先记下**当前规模**
+  const auditBefore = await auditCount();
+  const notificationsBefore = notificationStore().notifications.size;
+  const adjustmentsBefore = earningStore().adjustments.size;
+  const earningsBefore = earningStore().earnings.size;
+
+  await expectApiError(
+    approveAdminRefund(LEGACY_ACCEPTED_REFUND, ADMIN, {
+      idempotencyKey: key(),
+      reviewNote: "已核实服务未按约定开始。",
+      ...decision(),
+    }),
+    "BAD_REQUEST",
+    REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+  );
+
+  // 退款申请、订单：一字未改
+  assert.deepEqual(await refundOf(LEGACY_ACCEPTED_REFUND), refundBefore, "退款记录不得被改动");
+  assert.deepEqual(await orderOf(LEGACY_ACCEPTED_REFUND), orderBefore, "订单不得被改动");
+  assert.notEqual((await refundOf(LEGACY_ACCEPTED_REFUND)).status, "approved");
+  // 审计 / 通知 / 收益与冲回明细：一条都没写
+  assert.equal(await auditCount(), auditBefore, "被拒绝的批准不得留下审计");
+  assert.equal(notificationStore().notifications.size, notificationsBefore, "不得发出任何通知");
+  assert.equal(earningStore().adjustments.size, adjustmentsBefore, "不得写 EarningAdjustment");
+  assert.equal(earningStore().earnings.size, earningsBefore, "不得改动收益");
+});
+
+test("存量 paid 单上的售后申请：同样被拒绝，且金额闸根本轮不到（顺序在它之前）", async () => {
+  const refundBefore = await refundOf(LEGACY_PAID_REFUND);
+  const orderBefore = await orderOf(LEGACY_PAID_REFUND);
+  assert.equal(orderBefore.status, "paid", "前置：这条存量的订单确实是「已付款」");
+
+  const auditBefore = await auditCount();
+
+  await expectApiError(
+    approveAdminRefund(LEGACY_PAID_REFUND, ADMIN, {
+      idempotencyKey: key(),
+      reviewNote: "已核实重复支付。",
+      ...decision(),
+    }),
+    "BAD_REQUEST",
+    REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+  );
+
+  assert.deepEqual(await refundOf(LEGACY_PAID_REFUND), refundBefore);
+  assert.deepEqual(await orderOf(LEGACY_PAID_REFUND), orderBefore);
+  assert.equal(await auditCount(), auditBefore);
+});
+
+test("状态闸只管「通过」：存量的 paid / accepted 申请仍然可以正常驳回（不然它们永远悬着）", async () => {
+  for (const legacy of [LEGACY_ACCEPTED_REFUND, LEGACY_PAID_REFUND]) {
+    const result = await rejectAdminRefund(legacy, ADMIN, {
+      idempotencyKey: key(),
+      reviewNote: "该订单走用户直接退款路径，本申请驳回。",
+    });
+    assert.equal(result.status, "rejected", `${legacy} 必须能被驳回`);
+    assert.equal(result.orderChanged, false, "驳回不动订单");
+  }
+  // 驳回之后订单仍是原样——「服务从未开始」这件事不会因为驳回而改变
+  assert.equal((await orderOf(LEGACY_ACCEPTED_REFUND)).status, "accepted");
+  assert.equal((await orderOf(LEGACY_PAID_REFUND)).status, "paid");
+});
+
+test("状态闸放行的是「护航中 / 已完成」两档：本用例走已完成单，合法档位上批准成功", async () => {
+  /*
+    两档各要有**具名**用例，否则将来某一条被删掉时，「serving 放行」会无人看护而没人发现。
+    本用例走的是 `completed`（`PENDING_REFUND` = `rf-seed-1003-01`，挂 `ord-seed-1003-01`）；
+    `serving` 一档由同文件下方「详情 DTO 的读侧与写侧同口径」覆盖——
+    它在护航中的 `rf-seed-1001-02` 上真的把批准走了下去。
+
+    ⚠️ 标题曾经写着「放行的正是 serving」而夹具是 `completed`（复核 MINOR）。
+    下面那句前置断言就是防止标题与事实再次脱节。
+  */
+  const before = await getAdminRefundDetail(PENDING_REFUND, undefined, SURFACE);
+  assert.equal(before.orderStatus, "completed", "前置：本用例走的是「已完成」档");
+  assert.equal(before.approveBlockedReason, null, "前置：合法档位不该被状态闸挡下");
+
+  const result = await approveAdminRefund(PENDING_REFUND, ADMIN, {
+    idempotencyKey: key(),
+    reviewNote: "已核实服务未按约定完成。",
+    ...decision(),
+  });
+  assert.equal(result.status, "approved");
+  assert.equal(result.orderStatus, "refunded", "退满之后订单转已退款");
 });
 
 // ——————————————————————————— 列表与详情 ———————————————————————————
@@ -838,6 +1308,8 @@ test("列表 DTO 只有摘要：没有原因、说明、凭证、审核意见与
     "status",
     "statusLabel",
     "amount",
+    // P0-13：列表要能一眼分出「部分退款」，因此决策后的实退额也跟着列表走
+    "decidedAmount",
     "createdAt",
     "updatedAt",
     "user",
@@ -854,7 +1326,43 @@ test("列表 DTO 只有摘要：没有原因、说明、凭证、审核意见与
       new Set(Object.keys(item.user)),
       new Set(["id", "displayId", "nickname"]),
     );
+
+    /*
+      `decidedAmount` 的语义必须与决策状态一致：没决策就是 `null`（**不是 0**），
+      决策过就是一个正数。这两件事被混起来时页面分不出「还没人批」与「批了但退 0 元」，
+      而列表这一列正是管理员用来分辨部分退款的。
+    */
+    if (item.status === "approved") {
+      assert.notEqual(item.decidedAmount, null, `已通过的 ${item.refundNo} 必须有实退额`);
+      assert.ok(item.decidedAmount > 0);
+    } else {
+      assert.equal(item.decidedAmount, null, `未决策的 ${item.refundNo} 的实退额必须是 null`);
+    }
   }
+
+  /*
+    列表这一列与退款记录里的决策**同源**：不能一个取决策、一个另算一遍。
+
+    ⚠️ 用**种子里那条已通过**的退款（`APPROVED_REFUND`），而不是靠本文件前面的用例
+    先批一条——`beforeEach` 每个用例都重建三个仓储，跨用例的写入在这里根本不存在。
+    用单号搜出来，也不依赖它落在第几页。
+  */
+  const approvedSeed = await refundOf(APPROVED_REFUND);
+  assert.equal(approvedSeed.status, "approved");
+  const listed = (
+    await queryAdminRefundList(
+      await resolveAdminRefundListQuery(
+        new URLSearchParams({ status: "all", keyword: approvedSeed.refundNo }),
+        false,
+      ),
+      undefined,
+      SURFACE,
+    )
+  ).items.find((item) => item.id === APPROVED_REFUND);
+  assert.notEqual(listed, undefined, "按退款单号应该能搜到这一条");
+  assert.equal(listed.decidedAmount, approvedSeed.decision.refundAmount);
+  // 且它与申请金额是两个字段，不是同一个数顶两问
+  assert.equal(listed.amount, approvedSeed.amount);
 
   const serialized = JSON.stringify(data);
   const seed = await refundOf(PENDING_REFUND);
@@ -953,7 +1461,7 @@ test("详情带上原因、说明、凭证、审核信息与服务端判定的 a
 });
 
 test("审核之后详情与列表读到的是新状态：通过的那一单订单状态也变成已退款", async () => {
-  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "" });
+  await approveAdminRefund(PENDING_REFUND, ADMIN, { idempotencyKey: key(), reviewNote: "", ...decision() });
 
   const detail = await getAdminRefundDetail(PENDING_REFUND, undefined, SURFACE);
   assert.equal(detail.status, "approved");
@@ -975,6 +1483,58 @@ test("审核之后详情与列表读到的是新状态：通过的那一单订�
   const row = data.items.find((item) => item.id === PENDING_REFUND);
   assert.ok(row, "通过之后应当能在「已通过」里筛到");
   assert.equal(row.orderStatus, "refunded", "列表里的订单状态列也要是已退款");
+});
+
+test("详情 DTO 的读侧与写侧同口径：订单不在审批范围时「通过」变灰并给出同一句原因", async () => {
+  // 负向：两张存量单（已接单 / 已付款）——写侧必然 400，读侧就不能说「可以批」
+  for (const [id, label] of [
+    [LEGACY_ACCEPTED_REFUND, "已接单"],
+    [LEGACY_PAID_REFUND, "已付款"],
+  ]) {
+    const detail = await getAdminRefundDetail(id, undefined, SURFACE);
+    assert.equal(
+      detail.allowedActions.canApprove,
+      false,
+      `${label} 的存量申请：详情页不能显示可点的「通过」`,
+    );
+    assert.equal(
+      detail.approveBlockedReason,
+      REFUND_APPROVAL_ORDER_STATUS_MESSAGE,
+      `${label} 的存量申请：原因必须与接口 400 的 message 是同一句话`,
+    );
+    assert.equal(detail.allowedActions.canReject, true, `${label} 的存量申请仍可驳回`);
+  }
+
+  // 正向：护航中的申请——读侧放行，且明确「没有被挡」
+  const serving = await getAdminRefundDetail(REVIEWING_REFUND, undefined, SURFACE);
+  assert.equal(serving.orderStatus, "serving", "前置：这一单确实在护航中");
+  assert.equal(serving.allowedActions.canApprove, true);
+  assert.equal(serving.approveBlockedReason, null, "没被挡时必须是 null，不是空字符串");
+
+  /*
+    终态的申请：`canApprove === false` 的**原因不是订单档位**，而是「这笔申请早结束了」。
+    此时不能再下发订单档位的理由，否则页面上会同时出现「这笔退款申请已结束」与
+    「订单不在审批范围内」两句话，把管理员引到错误的原因上去查（复核 MINOR）。
+
+    `rf-seed-1001-03` 是已通过、订单已 `refunded` 的那一条——它的订单档位这一问
+    当然也答「不行」，正是最容易把两个原因混起来的样本。
+  */
+  const terminal = await getAdminRefundDetail(APPROVED_REFUND, undefined, SURFACE);
+  assert.equal(terminal.orderStatus, "refunded", "前置：已通过的申请，订单必然是已退款");
+  assert.equal(terminal.allowedActions.canApprove, false, "终态不能批");
+  assert.equal(
+    terminal.approveBlockedReason,
+    null,
+    "终态的原因是「申请已结束」，不是订单档位——不能下发订单档位那句话",
+  );
+
+  // 两档口径必须一致：同一张单，读侧说能批，写侧就必须真的批得下去
+  const outcome = await approveAdminRefund(REVIEWING_REFUND, ADMIN, {
+    idempotencyKey: key(),
+    reviewNote: "",
+    ...decision(),
+  });
+  assert.equal(outcome.status, "approved");
 });
 
 // ——————————————————————————— 九、幂等键的意图绑定（P8D-2） ———————————————————————————

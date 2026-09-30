@@ -117,6 +117,21 @@ export type PaymentRepository = {
   listOrdersByUser(userId: string): Promise<Order[]>;
 
   /**
+   * 某个打手**实际履约**的订单（打手端「我的订单」的唯一入口，P0-6）。
+   *
+   * ⚠️ 条件是 `Order.actualCompanionId`，**不是**派单的 `exclusiveCompanionId`：
+   * 后者是「用户当初指定了谁」的历史事实，订单回公共池、被别人接走之后都不清，
+   * 拿它当归属就会把「用户想要的人」当成「现在在履约的人」。
+   * 与 `queryOrders` 一样，`companionId` 是**查询条件**而不是可选的过滤项——
+   * 本方法只可能返回这一位打手实际接过的单，调用方不需要（也不应该）拿到结果后再过滤。
+   *
+   * 不分页、也不筛状态：打手端「我的订单」本轮是一份平铺列表（进行中的与历史都在），
+   * 页面结构由后续 UI 批次决定。返回值**只在服务端转成打手端 DTO**
+   * （`CompanionOrderListItem`），任何情况下都不会原样作为响应体返回。
+   */
+  queryOrdersByCompanion(companionId: string): Promise<Order[]>;
+
+  /**
    * 全部用户的**全部订单**（不分页、不筛状态），消费排行榜聚合用。
    *
    * ⚠️ 返回值**只在服务端参与聚合**，任何情况下都不会作为响应体返回：

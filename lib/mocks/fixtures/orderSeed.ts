@@ -1,9 +1,11 @@
+import { resolveOrderMoneyDomain } from "@/lib/constants/orderAmount";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import {
   beijingDayStart,
   beijingMonthStart,
   beijingWeekStart,
 } from "@/lib/constants/rankingPeriods";
+import { DEFAULT_COMPANION_RATE_BP } from "@/lib/constants/shareRatio";
 import type { Order, OrderStatus } from "@/lib/types/order";
 import { addonSeed } from "./catalogSeed";
 import { companionSeed } from "./seed";
@@ -48,8 +50,20 @@ type PresetOrderInput = {
   gameAccountId: string;
   remark?: string;
   addonIds?: string[];
-  /** 不填表示未绑定打手 */
-  companionId?: string;
+  /**
+   * **实际接到这单**的打手；已接单 / 护航中 / 已完成 / 已退款 的订单填它。
+   *
+   * ⚠️ 等待接单（`paid`）的订单**不能**填这个——还没人接，订单上就不该有打手。
+   * 那种订单要表达的是「用户想要谁」，填 `exclusiveCompanionId`。
+   */
+  actualCompanionId?: string;
+  /**
+   * 用户在下单时**指定**的打手；只有等待接单的订单填它。
+   *
+   * 它落进 `Dispatch.exclusiveCompanionId`（见 `lib/mocks/fixtures/dispatchSeed.ts`），
+   * **不落进订单**：用户想要谁与实际谁接单是两个事实，P0-5 起由两个字段分别表达。
+   */
+  exclusiveCompanionId?: string;
 };
 
 /**
@@ -106,7 +120,7 @@ function timeline(input: { status: OrderStatus; paidAt: string; hasCompanion: bo
 }
 
 function build(input: PresetOrderInput): Order {
-  const companion = input.companionId ? requireCompanion(input.companionId) : null;
+  const companion = input.actualCompanionId ? requireCompanion(input.actualCompanionId) : null;
 
   // 不变量：已接单 / 护航中 / 已完成必须有打手。少了这句话，页面上就会出现
   // 「护航中 · 等待接单」这种自相矛盾的展示，且很难看出是哪条数据写错了。
@@ -114,7 +128,16 @@ function build(input: PresetOrderInput): Order {
     input.status === "accepted" || input.status === "serving" || input.status === "completed";
   if (needsCompanion && !companion) {
     throw new Error(
-      `预置订单 ${input.id} 的状态是「${ORDER_STATUS_LABELS[input.status]}」，必须绑定打手`,
+      `预置订单 ${input.id} 的状态是「${ORDER_STATUS_LABELS[input.status]}」，必须有一位实际接单的打手`,
+    );
+  }
+
+  // 反向的不变量：还没人接单的订单不许带打手。带上就成了
+  // 「等待接单 · 张三」——一个既没人接、又已经写着人的状态。
+  // 用户指定了谁由派单记录表达（`dispatchSeed`），不写在订单上
+  if (input.status === "paid" && companion) {
+    throw new Error(
+      `预置订单 ${input.id} 还在等待接单，不能用 actualCompanionId 指定打手（请用 exclusiveCompanionId）`,
     );
   }
 
@@ -127,6 +150,17 @@ function build(input: PresetOrderInput): Order {
   // 金额全程「分」为单位的整数运算
   const itemsAmount = input.unitPrice * input.quantity;
   const addonsAmount = addons.reduce((sum, addon) => sum + addon.price, 0);
+  // 金额域（P0-3）：预置订单与真实订单走**同一套公式**，不在这里手写数字——
+  // 手写的常量一旦与公式不一致，验收时看到的「护航收益」就只是种子里的一个巧合，
+  // 而那种不一致只能靠人偶然比对才能发现。
+  // 预置订单的分账比例统一取默认 80%（`DEFAULT_COMPANION_RATE_BP`）
+  const money = resolveOrderMoneyDomain({
+    itemsAmount,
+    addonsAmount,
+    companionRateBp: DEFAULT_COMPANION_RATE_BP,
+    // 预置订单没有用过券
+    couponDiscountAmount: 0,
+  });
   const times = timeline({
     status: input.status,
     paidAt: input.paidAt,
@@ -141,6 +175,14 @@ function build(input: PresetOrderInput): Order {
     createdAt: times.paidAt,
     paidAt: times.paidAt,
     acceptedAt: times.acceptedAt,
+    // 「曾经被承接」的历史事实（P1-4 验收整改轮）。预置数据里它**恒等于** `acceptedAt`：
+    // 这批种子描述的都是一条直路（下单 → 接单 → 履约 / 退款），
+    // **没有任何一条走过「接单后又回到 paid」**（那才会让两个字段分叉）。
+    //
+    // ⚠️ 因此这一行**不是**一条可以直接抄进生产代码的公式。真实订单里
+    // `everAcceptedAt` 一旦写上就不再变，而 `acceptedAt` 会随回池清空——
+    // 生产侧的唯一写入点是 `applyOrderAccepted()`，不是这里。
+    everAcceptedAt: times.acceptedAt,
     servingAt: times.servingAt,
     completedAt: times.completedAt,
     refundedAt: times.refundedAt,
@@ -163,11 +205,34 @@ function build(input: PresetOrderInput): Order {
     addonsAmount,
     totalAmount: itemsAmount + addonsAmount,
 
-    companionId: companion ? companion.id : null,
+    // —— 金额域（P0-3）——
+    ...money,
+    // 预置的已退款订单是**全额退款**，因此累计已退等于这一单的实付；
+    // 其余状态一笔没退。这一条与「全额退款后 refundedAmount === actualPaidAmount」
+    // 的规则一致（见 lib/types/order.ts）。
+    refundedAmount: input.status === "refunded" ? money.actualPaidAmount : 0,
+
+    // 预置订单没有用过券（与上面 `couponDiscountAmount: 0` 是同一件事的两面）。
+    // 想验证有券的展示与金额，走真实下单链路，不在这里造数据——
+    // 种子里的券快照一旦与 `couponDiscountAmount` 对不上，验收看到的就只是巧合。
+    coupon: null,
+
+    actualCompanionId: companion ? companion.id : null,
     companion: companion
       // 订单快照的字段名保持 `name`（订单与评价的历史展示都按它读），值取陪玩唯一的昵称字段
       ? { id: companion.id, name: companion.displayName, avatarUrl: companion.avatarUrl }
       : null,
+
+    // —— 投诉窗口快照（P0-9）——
+    // ⚠️ 预置订单**一律为 null**，包括状态已经是 `completed` 的那几条。
+    // 它们是 P0-9 之前就存在的历史数据，从没有「在投诉窗口规则下完成」过：
+    // 补一个窗口等于拿今天的配置去套一张旧订单（EX-CONFIG-06 明令禁止的追溯），
+    // 而按它们各自早已过去的 `completedAt` 补出一个结论，还会连带产生
+    // 「这条收益现在就该解冻」的资金后果——那是**凭空造钱**，不属于本轮的授权范围。
+    // 因此旧订单留在模型之外，由人工处理；新完成的订单走
+    // `lib/data/mockPaymentRepository.ts` 的 `applyOrderCompletion` 正常冻结。
+    complaintWindowMinutesSnapshot: null,
+    complaintDeadlineAt: null,
   };
 }
 
@@ -207,8 +272,10 @@ export const orderSeed: Order[] = [
     unitPrice: 3990,
     quantity: 1,
     gameAccountId: "moyu_1001",
-    // 已付款但已绑定打手：支付时用户主动选了陪玩，还没进入「已接单」
-    companionId: "cp-1",
+    // 已付款、**还没人接单**：用户在结算页指定了 cp-1，于是他进的是专属池。
+    // ⚠️ 订单上因此**不带**打手——「用户想要谁」记在派单记录上，
+    // 「谁在履约」此刻还是空的
+    exclusiveCompanionId: "cp-1",
     ...DELTA,
   }),
   build({
@@ -225,7 +292,7 @@ export const orderSeed: Order[] = [
     unitPrice: 4590,
     quantity: 1,
     gameAccountId: "moyu_1001",
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
     ...DELTA,
   }),
   build({
@@ -243,7 +310,7 @@ export const orderSeed: Order[] = [
     quantity: 2,
     gameAccountId: "moyu_1001",
     addonIds: ["ad-voice"],
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
   build({
@@ -263,7 +330,7 @@ export const orderSeed: Order[] = [
     region: "端游",
     gameAccountId: "moyu_1001_8899",
     remark: "已经打完了，很稳",
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
   }),
   build({
     id: "ord-seed-1001-06",
@@ -282,7 +349,7 @@ export const orderSeed: Order[] = [
     region: "端游",
     gameAccountId: "moyu_1001_8899",
     // 接单的打手后来被停用：快照照样完整展示，不受今天的人员状态影响
-    companionId: "cp-4",
+    actualCompanionId: "cp-4",
   }),
   build({
     id: "ord-seed-1001-07",
@@ -315,7 +382,7 @@ export const orderSeed: Order[] = [
     unitPrice: 3590,
     quantity: 1,
     gameAccountId: "moyu_1001",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
   build({
@@ -351,7 +418,7 @@ export const orderSeed: Order[] = [
     quantity: 1,
     gameAccountId: "moyu_1001",
     addonIds: ["ad-rush", "ad-insure"],
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
     ...DELTA,
   }),
   build({
@@ -368,7 +435,7 @@ export const orderSeed: Order[] = [
     unitPrice: 6990,
     quantity: 1,
     gameAccountId: "moyu_1001",
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
     ...DELTA,
   }),
   build({
@@ -385,7 +452,7 @@ export const orderSeed: Order[] = [
     unitPrice: 5990,
     quantity: 1,
     gameAccountId: "moyu_1001",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
   build({
@@ -443,7 +510,7 @@ export const orderSeed: Order[] = [
     gameName: "无畏契约",
     region: "端游",
     gameAccountId: "moyu_1001_8899",
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
   }),
 
   // ——————————————————— 老板B（u-1002）：3 条，用于验证两个人互相看不到对方订单 ———————————————————
@@ -477,7 +544,7 @@ export const orderSeed: Order[] = [
     unitPrice: 3990,
     quantity: 1,
     gameAccountId: "moyu_1002",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
   build({
@@ -528,7 +595,7 @@ export const orderSeed: Order[] = [
     unitPrice: 39900,
     quantity: 1,
     gameAccountId: "moyu_1003",
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
     ...DELTA,
   }),
   build({
@@ -545,7 +612,7 @@ export const orderSeed: Order[] = [
     unitPrice: 19980,
     quantity: 1,
     gameAccountId: "moyu_1003",
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
     ...DELTA,
   }),
 
@@ -563,7 +630,7 @@ export const orderSeed: Order[] = [
     unitPrice: 89900,
     quantity: 1,
     gameAccountId: "moyu_1004",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
   build({
@@ -582,7 +649,7 @@ export const orderSeed: Order[] = [
     gameName: "无畏契约",
     region: "端游",
     gameAccountId: "moyu_1004_7788",
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
   }),
   build({
     id: "ord-seed-1004-03",
@@ -599,7 +666,7 @@ export const orderSeed: Order[] = [
     quantity: 1,
     gameAccountId: "moyu_1004",
     addonIds: ["ad-voice"],
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
     ...DELTA,
   }),
 
@@ -617,7 +684,7 @@ export const orderSeed: Order[] = [
     unitPrice: 39900,
     quantity: 1,
     gameAccountId: "moyu_1005",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
   build({
@@ -634,7 +701,7 @@ export const orderSeed: Order[] = [
     unitPrice: 9900,
     quantity: 1,
     gameAccountId: "moyu_1005",
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
     ...DELTA,
   }),
   build({
@@ -653,7 +720,7 @@ export const orderSeed: Order[] = [
     gameName: "无畏契约",
     region: "端游",
     gameAccountId: "moyu_1005_6612",
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
   }),
 
   build({
@@ -671,7 +738,7 @@ export const orderSeed: Order[] = [
     unitPrice: 30000,
     quantity: 1,
     gameAccountId: "moyu_1006",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
 
@@ -689,7 +756,7 @@ export const orderSeed: Order[] = [
     unitPrice: 15000,
     quantity: 1,
     gameAccountId: "moyu_1007",
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
     ...DELTA,
   }),
   build({
@@ -707,7 +774,7 @@ export const orderSeed: Order[] = [
     unitPrice: 15000,
     quantity: 1,
     gameAccountId: "moyu_1007",
-    companionId: "cp-2",
+    actualCompanionId: "cp-2",
     ...DELTA,
   }),
 
@@ -725,7 +792,7 @@ export const orderSeed: Order[] = [
     unitPrice: 8880,
     quantity: 1,
     gameAccountId: "moyu_1008",
-    companionId: "cp-3",
+    actualCompanionId: "cp-3",
     ...DELTA,
   }),
 
@@ -747,7 +814,7 @@ export const orderSeed: Order[] = [
     gameName: "无畏契约",
     region: "端游",
     gameAccountId: "moyu_1009_5501",
-    companionId: "cp-1",
+    actualCompanionId: "cp-1",
   }),
   build({
     id: "ord-seed-1009-02",
@@ -950,7 +1017,7 @@ export function buildRankingPeriodOrders(now: Date): Order[] {
       unitPrice: preset.unitPrice,
       quantity: 1,
       gameAccountId: `moyu_${preset.userId.slice(2)}`,
-      companionId: "cp-1",
+      actualCompanionId: "cp-1",
       ...DELTA,
     }),
   );

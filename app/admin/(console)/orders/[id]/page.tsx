@@ -13,8 +13,9 @@ import {
 } from "@/lib/constants/adminOrders";
 import { REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
 import { COMPLAINT_STATUS_LABELS } from "@/lib/constants/complaints";
+import { COMPANION_RELEASE_SOURCE_LABELS } from "@/lib/constants/dispatch";
 import { getAdminOrderDetail } from "@/lib/services/adminOrders";
-import type { AdminOrderDetail } from "@/lib/types/order";
+import type { AdminOrderDetail, OrderCompanionSnapshot } from "@/lib/types/order";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
 import { toSearchParams } from "@/lib/utils/query";
 
@@ -57,6 +58,7 @@ export default async function AdminOrderDetailPage({
       <UserSection order={order} />
       <AmountSection order={order} />
       <CompanionSection order={order} />
+      <ReleaseHistorySection order={order} />
       <TimelineSection order={order} />
       <AfterSaleSection order={order} />
     </div>
@@ -116,8 +118,14 @@ function UserSection({ order }: { order: AdminOrderDetail }) {
  * 不是当前商品目录：之后改价、改图、下架都不影响这里，而客服要判断的正是
  * 「这一单当时买的是什么」。
  *
- * 三行金额的关系是自洽的：`单价 × 数量 = 商品小计`，`商品小计 + 增值服务 = 实付合计`。
+ * 金额的关系是自洽的：`单价 × 数量 = 商品小计`，
+ * `商品小计 + 增值服务 = 原价`，`原价 − 优惠券抵扣 = 实付金额`。
  * 把它们一起列出来，是让「金额对不对」可以被当场核对，而不是去查代码。
+ *
+ * ⚠️ **P1-4 改正了两处**：原先底部那一行写着「实付合计」却读 `order.totalAmount`
+ * （**优惠前**应付总额），并断言「商品小计 + 增值服务 = 实付合计」。
+ * 满减券生效后这两条都不再成立——那一行会把用户没付的券面额也算进「实付」里。
+ * 现在三行分开列，读的是订单金额域的三个字段，与客服工作台、用户端同一套说法。
  */
 function AmountSection({ order }: { order: AdminOrderDetail }) {
   return (
@@ -162,41 +170,137 @@ function AmountSection({ order }: { order: AdminOrderDetail }) {
           </div>
         </div>
 
-        <div className="flex items-baseline justify-between border-t border-admin-line pt-3">
-          <span className="text-[13px] text-ink-3">实付合计</span>
-          <span className="text-[18px] font-semibold tabular-nums text-ink">
-            ¥{formatYuan(order.totalAmount)}
-          </span>
+        {/* 原价 / 券抵扣 / 实付（P1-4）：三行一起列，后台才能核对
+            「原价 − 券 = 实付」。券抵扣行**恒显示**（不用券时为 ¥0.00）——
+            这一栏是**对账**用的，不是促销展示：让某一行时有时无，
+            核账的人就分不清「没有券」和「漏了一行」 */}
+        <div className="flex flex-col gap-1 border-t border-admin-line pt-3">
+          <DetailRow label="原价（优惠前）" value={`¥${formatYuan(order.originalAmount)}`} />
+          <DetailRow
+            label="优惠券抵扣"
+            value={`−¥${formatYuan(order.couponDiscountAmount)}`}
+          />
+          <div className="mt-1 flex items-baseline justify-between border-t border-admin-line pt-3">
+            <span className="text-[13px] text-ink-3">实付金额</span>
+            <span className="text-[18px] font-semibold tabular-nums text-ink">
+              ¥{formatYuan(order.actualPaidAmount)}
+            </span>
+          </div>
         </div>
       </div>
     </Section>
   );
 }
 
-/** 陪玩快照。未绑定时说明「尚未接单」——`paid` 之外的订单一定有陪玩。 */
+/**
+ * 护航：**指定**的人与**实际接单**的人分两行写（P0-5）。
+ *
+ * 这两件事可以是两个人：用户指定 A、A 在独占期内没接、订单自动进公共池、B 接走。
+ * 合成一行的话，「我明明指定了 A，怎么是 B 在打」在后台就查不出来——
+ * 而那正是客服最需要回答的问题。
+ *
+ * 「实际接单」为空只可能出现在还在等人接的订单上（`paid`）：
+ * 已接单及之后的状态一定有护航，这是订单自身的约束。
+ */
 function CompanionSection({ order }: { order: AdminOrderDetail }) {
   return (
     <Section title="护航">
-      {order.companion ? (
-        <div className="flex items-center gap-3">
+      <CompanionRow label="用户指定" companion={order.exclusiveCompanion} emptyHint="用户未指定护航" />
+      <CompanionRow
+        label="实际接单"
+        companion={order.actualCompanion}
+        emptyHint="还没有人接单"
+      />
+    </Section>
+  );
+}
+
+/** 一行护航快照：头像 + 昵称 + 资料入口。没有这个人时如实说明，不补占位。 */
+function CompanionRow({
+  label,
+  companion,
+  emptyHint,
+}: {
+  label: string;
+  companion: OrderCompanionSnapshot | null;
+  emptyHint: string;
+}) {
+  return (
+    <div className="flex items-center gap-3 py-1.5">
+      <span className="w-16 shrink-0 text-[12px] text-ink-3">{label}</span>
+      {companion ? (
+        <>
           <img
-            src={order.companion.avatarUrl}
+            src={companion.avatarUrl}
             alt=""
             className="h-10 w-10 shrink-0 rounded-full border border-admin-line object-cover"
           />
           <div className="min-w-0">
-            <p className="text-[13px] text-ink">{order.companion.name}</p>
+            <p className="text-[13px] text-ink">{companion.name}</p>
             <Link
-              href={`/admin/companions/${order.companion.id}`}
+              href={`/admin/companions/${companion.id}`}
               className="text-[12px] text-admin-accent underline-offset-2 hover:underline"
             >
               查看护航资料
             </Link>
           </div>
-        </div>
+        </>
       ) : (
-        <p className="text-[13px] text-ink-3">尚未绑定护航（已接单及之后的订单一定会有）。</p>
+        <p className="text-[13px] text-ink-3">{emptyHint}</p>
       )}
+    </div>
+  );
+}
+
+/**
+ * 履约退出历史（P0-6）：谁曾经接过这一单、为什么退出、什么时候退出。
+ *
+ * ⚠️ 打手主动取消接单之后，订单上的 `actualCompanionId` 与 `companion` 已经清空
+ * （订单要能重新进公共池等人接）。上面那块「护航」因此会显示「还没有人接单」——
+ * 这两块**不是自相矛盾**，一个说的是**现在是谁**，一个说的是**之前是谁**。
+ *
+ * ⚠️ 只显示，没有任何按钮：本页是只读的（见文件头）。
+ *
+ * ⚠️ 客服侧**另有三个入口**能看到同一份历史（会话 / 投诉 / 退款详情，
+ * 见 `components/staff/StaffReleaseHistory.tsx`），因此这里**不是**唯一入口。
+ * 客服进不了本页（`canEnterAdminConsole` 只放行 `admin`），那两个面是分开的。
+ *
+ * ⚠️ 这里只渲染**标识**（`companionId`）而不是昵称。这**不是数据限制**：
+ * `getCompanionRepository().findCompanionById()` 按 id 查得到展示名
+ * （连已下架的护航也查得到），客服侧就是这么解析的。管理端不解析**是一个取舍**——
+ * 本轮管理端不在改动范围内，保持原样以免扩大批次。
+ * ⚠️ 因此本页显示的是形如 `cp_xxxx` 的内部标识，与客服侧同一段历史显示的名字
+ * **观感不一致**。这是已知的不对称，已记入 `03-delivery.md` §15.6，等后续裁定。
+ * 不要据此以为「名字拿不到」而在客服侧也退回显示 id。
+ */
+function ReleaseHistorySection({ order }: { order: AdminOrderDetail }) {
+  return (
+    <Section title="履约退出历史">
+      {order.releaseHistory.length > 0 ? (
+        <ul className="flex flex-col">
+          {order.releaseHistory.map((record, index) => (
+            <li
+              key={record.id}
+              className={`border-admin-line ${index > 0 ? "border-t pt-3" : ""}`}
+            >
+              <DetailRow label="护航标识" value={record.companionId} />
+              <DetailRow label="动作" value={COMPANION_RELEASE_SOURCE_LABELS[record.source]} />
+              <DetailRow label="时间" value={formatDateTime(record.createdAt)} />
+              <div className="mt-2">
+                {/* 原因是打手自己写的一句话，原样展示、保留换行、不做任何截断 */}
+                <FieldBlock title="原因" content={record.reason ?? ""} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-[13px] text-ink-3">无退出记录</p>
+      )}
+
+      <p className="mt-2 text-[12px] leading-4 text-ink-3">
+        打手在开始服务前取消接单会在这里留一条记录；订单回到公共池之后就不再挂着那位打手，
+        这段记录是唯一能看出「原来是谁接的、为什么走」的地方。
+      </p>
     </Section>
   );
 }

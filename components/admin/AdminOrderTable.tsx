@@ -291,7 +291,7 @@ export default function AdminOrderTable({
                     </td>
                     <td className="px-4 py-3 text-ink-2">{item.gameName}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-ink">
-                      ¥{formatYuan(item.totalAmount)}
+                      ¥{formatYuan(item.actualPaidAmount)}
                     </td>
                     <td className="px-4 py-3">
                       <AdminStatusBadge

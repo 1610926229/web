@@ -68,7 +68,9 @@ export default function OrderCard({ order }: { order: OrderListItem }) {
 
         <div className="shrink-0 text-right">
           <p className="text-[12px] text-ink-3">
-            实付 <PriceText cents={order.totalAmount} className="text-[15px] text-ink" />
+            {/* 写「实付」就要读**实付**（P1-4）：`totalAmount` 是优惠前应付总额，
+                用券之后它比用户真正付掉的钱大 */}
+            实付 <PriceText cents={order.actualPaidAmount} className="text-[15px] text-ink" />
           </p>
           <p className="mt-0.5 text-[12px] text-brand-red">查看详情 ›</p>
         </div>

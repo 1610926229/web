@@ -51,8 +51,9 @@ function createStore(): MockCompanionStore {
 
   const companionIdByUser = new Map<string, string>();
   for (const companion of companions.values()) {
-    // 预置数据里这两项都是 null（见 companionSeed 的说明），因此这条循环当前不会登记任何东西；
-    // 保留它，是为了「将来种子补一条带 userId 的记录」时索引自动跟上，而不是静默漏掉。
+    // 预置数据里大部分记录的 `userId` 是 null（平台早期的护航资料没有关联用户），
+    // 但 `cp-10` / `cp-11` 有值——DEV-1 的验收身份正是靠这条循环被登记进来的，
+    // 因此这里**必须**与 `createCompanionRecord()` 用同一个判据（见下方注释）。
     if (companion.userId && companion.removedAt === null) {
       companionIdByUser.set(companion.userId, companion.id);
     }
@@ -68,6 +69,23 @@ export function companionStore(): MockCompanionStore {
 /** 本文件内部取 store 的短名字。 */
 function store(): MockCompanionStore {
   return companionStore();
+}
+
+/**
+ * 按 id **同步**读取一条护航资料（只读，返回副本）。
+ *
+ * ⚠️ 存在的理由只有一个：**伪事务的原子区段里不能有 `await`**，走不了本仓储的
+ * 异步方法。接单事务要在「写下去之前」的最后一步确认这位打手的资料还在架
+ * （`lib/data/companionDispatchTransaction.ts`）——少了这一步，一位刚好被管理员
+ * 下架的打手仍能把单接走，而他随后既看不到订单也提交不了材料。
+ *
+ * ⚠️ 因此本函数**不对外提供 store 本身**：调用方只能取走一条记录的副本，
+ * 拿不到 `Map` 就没有「顺手改一下」的位置。写入仍然只有审核通过与后台管理
+ * 那两处伪事务。
+ */
+export function readCompanionRecord(id: string): Companion | null {
+  const record = store().companions.get(id);
+  return record ? { ...record, reviews: [...record.reviews] } : null;
 }
 
 export const mockCompanionRepository: CompanionRepository = {

@@ -27,6 +27,7 @@ export default function AdminConfirmDialog({
   tone = "danger",
   pending = false,
   error = null,
+  size = "md",
   children,
   initialFocusRef,
   onConfirm,
@@ -41,6 +42,14 @@ export default function AdminConfirmDialog({
   tone?: "danger" | "primary";
   pending?: boolean;
   error?: string | null;
+  /**
+   * 面板宽度。默认 `md`（`max-w-md`）。
+   *
+   * `lg` 是给**内容本身就是一张表**的确认框用的（退款资金决策：金额表 + 实时预览 +
+   * 口径说明）。不给这个选项的话，调用方只能自己撑破布局，或者把金额挤成一列读不清。
+   * 默认值不变，因此既有调用方的排版一个字都不动。
+   */
+  size?: "md" | "lg";
   /** 确认框里的补充内容（如「暂停接单」需要填的原因）。 */
   children?: ReactNode;
   /**
@@ -80,14 +89,21 @@ export default function AdminConfirmDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="admin-confirm-title"
-        className="w-full max-w-md rounded-xl bg-surface p-5 shadow-xl"
+        /* `flex-col + max-h-full`：标题与底部两个按钮**钉住**，只有中间的说明与
+           补充内容滚动。不加这一条时，内容一长（退款资金决策那张表），
+           确认按钮会被推到视口外面——而它正是这个框存在的理由 */
+        className={`flex max-h-full w-full flex-col rounded-xl bg-surface p-5 shadow-xl ${
+          size === "lg" ? "max-w-lg" : "max-w-md"
+        }`}
       >
         <h2 id="admin-confirm-title" className="text-[16px] font-semibold text-ink">
           {title}
         </h2>
-        <p className="mt-2 text-[13px] leading-5 text-ink-2">{description}</p>
 
-        {children ? <div className="mt-3">{children}</div> : null}
+        <div className="mt-2 min-h-0 overflow-y-auto">
+          <p className="text-[13px] leading-5 text-ink-2">{description}</p>
+          {children ? <div className="mt-3">{children}</div> : null}
+        </div>
 
         {error ? (
           <p role="alert" className="mt-3 text-[13px] leading-5 text-brand-red">

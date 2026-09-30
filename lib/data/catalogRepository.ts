@@ -74,7 +74,19 @@ export type AdminProductFilter = {
  * （见 `lib/data/adminCatalogTransaction.ts`），而服务层在此之前还要做 `await`
  * 取游戏与类目目录。让服务层直接产出最终记录，事务里就只剩「写」这一件事。
  */
-export type CatalogProductPatch = Omit<ProductProfilePatch, "specs"> & {
+export type CatalogProductPatch = Omit<
+  ProductProfilePatch,
+  "specs" | "companionRatePercent"
+> & {
+  /**
+   * 分账比例，**整数基点**。
+   *
+   * 线上入参里没有这个键（那一份是 `companionRatePercent` 百分比文本），
+   * 因此这里不能直接从 `ProductProfilePatch` 继承：到了仓储这一层，
+   * 「界面单位」已经全部换成了存储单位（金额是分、比例是基点），
+   * 记录里绝不允许出现百分比字符串。
+   */
+  companionRateBp: number;
   specs: ProductSpecRecord[];
 };
 

@@ -10,6 +10,8 @@ import {
   ADMIN_APPLICATION_PAGE_SIZE,
   ADMIN_APPLICATION_STATUS_FILTERS,
   ADMIN_APPLICATION_STATUS_FILTER_LABELS,
+  applicationCountForFilter,
+  isOpenApplicationStatus,
   type AdminApplicationStatusFilter,
 } from "@/lib/constants/adminApplications";
 import { formatDateTime } from "@/lib/utils/format";
@@ -131,12 +133,18 @@ export default function AdminApplicationTable({
             }
             className="h-9 rounded-lg border border-admin-line bg-surface px-2 text-[13px] text-ink outline-none focus:border-admin-accent"
           >
-            {ADMIN_APPLICATION_STATUS_FILTERS.map((item) => (
-              <option key={item} value={item}>
-                {ADMIN_APPLICATION_STATUS_FILTER_LABELS[item]}
-                {item === "all" ? "" : `（${result.counts[item]}）`}
-              </option>
-            ))}
+            {ADMIN_APPLICATION_STATUS_FILTERS.map((item) => {
+              // ⚠️ 角标走 `applicationCountForFilter()`：`open` 不是领域状态，
+              // 直接 `counts[item]` 会读出 undefined（显示成「待处理（）」），
+              // 而它该显示的是「待审核 + 审核中」的和——与经营首页卡片同一个数。
+              const badge = applicationCountForFilter(result.counts, item);
+              return (
+                <option key={item} value={item}>
+                  {ADMIN_APPLICATION_STATUS_FILTER_LABELS[item]}
+                  {badge === null ? "" : `（${badge}）`}
+                </option>
+              );
+            })}
           </select>
         </label>
 
@@ -275,9 +283,10 @@ export default function AdminApplicationTable({
                         href={`/admin/applications/${item.id}`}
                         className="text-[13px] text-admin-accent underline-offset-2 hover:underline"
                       >
-                        {item.status === "pending" || item.status === "reviewing"
-                          ? "去审核"
-                          : "查看详情"}
+                        {/* ⚠️ 判据走 `isOpenApplicationStatus()`，不在这里再写一遍
+                            「pending || reviewing」：这行决定操作员要不要点进去，
+                            与待办卡 / `?status=open` 必须是同一组状态。 */}
+                        {isOpenApplicationStatus(item.status) ? "去审核" : "查看详情"}
                       </Link>
                     </td>
                   </tr>

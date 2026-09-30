@@ -44,8 +44,18 @@ export const CONSUMPTION_CALCULATION_NOTICE =
  * 1. **只累计 `completed`**：其余状态一律跳过，函数本身不信任调用方已经筛过；
  * 2. **同一订单只算一次**：按订单 id 去重。仓储返回的就是一个按 id 键控的 Map，
  *    正常不会有重复；这里仍显式去重，使「不重复累计」成为可单独测试的保证；
- * 3. **金额取订单的服务端快照 `totalAmount`**，不读任何客户端字段，
+ * 3. **金额取订单的服务端快照 `actualPaidAmount`（用户实付）**，不读任何客户端字段，
  *    也不做四舍五入之外的处理（分是整数，本函数保持整数运算）。
+ *
+ * ⚠️ 第 3 条读的是**实付**，不是 `totalAmount`（P1-4 修正）。
+ * `totalAmount` 是**优惠前**应付总额；接满减券之前两者恒等，所以这个错一直看不出来。
+ * 两者不等之后继续读它，就会让**用券用户的累计消费虚高**——而 `CONSUMPTION_CALCULATION_NOTICE`
+ * （用户可见文案）与 `docs/02-tech-design/database-schema.md` 的 ConsumptionLevel 一节
+ * 都写的是「按 `actualPaidAmount` 计入」，代码与它自己的口径说明当场自相矛盾。
+ *
+ * ⚠️ 这与 `database-schema.md` 里那条**部分退款** TBD（`Σ max(0, actualPaidAmount − refundedAmount)`）
+ * 是两件事，不要混：本条只解决「有券时读哪个字段」，部分退款要不要按实退扣减仍未裁定，
+ * 因此这里**不做**任何 `refundedAmount` 扣减，保持现状。
  */
 export function sumEffectiveSpend(orders: readonly Order[]): number {
   const counted = new Set<string>();
@@ -54,10 +64,10 @@ export function sumEffectiveSpend(orders: readonly Order[]): number {
   for (const order of orders) {
     if (order.status !== CONSUMPTION_ORDER_STATUS) continue;
     if (counted.has(order.id)) continue;
-    if (!Number.isFinite(order.totalAmount)) continue;
+    if (!Number.isFinite(order.actualPaidAmount)) continue;
 
     counted.add(order.id);
-    total += Math.trunc(order.totalAmount);
+    total += Math.trunc(order.actualPaidAmount);
   }
 
   return total;

@@ -34,8 +34,16 @@ export type CompanionApplicationCreateOutcome =
  * 排序不是条件——后台列表的排序只有一种，见 `compareApplicationsForAdmin()`。
  */
 export type AdminApplicationFilter = {
-  /** null 表示不限状态 */
-  status: CompanionApplicationStatus | null;
+  /**
+   * 命中的**真实领域状态集合**；`null` 表示不限状态。
+   *
+   * ⚠️ 这里只接受 `CompanionApplicationStatus`：地址栏上的虚拟筛选值
+   * `all` / `open` **不得**出现在数据层，服务层在调用前就用
+   * `applicationStatusesForFilter()` 把它们解析成了真实状态。
+   * 空数组表示「一个状态都不命中」（与 `null` 的「不限」是两件事），
+   * 因此调用方不该传空数组。
+   */
+  statuses: readonly CompanionApplicationStatus[] | null;
   /** 空串表示不搜索 */
   keyword: string;
   /** 空串表示全部游戏 */

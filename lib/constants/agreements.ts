@@ -41,17 +41,25 @@ export const AGREEMENT_MISSING_MESSAGE = "内容暂未配置";
 export const AGREEMENT_MISSING_DESCRIPTION =
   "该类型的协议内容尚未配置，其他类型不受影响。正式内容将在平台配置后展示。";
 
-/** 四类内容的名称。**唯一一份**，页签与详情标题都用它，避免两边文案漂移。 */
+/** 五类内容的名称。**唯一一份**，页签与详情标题都用它，避免两边文案漂移。 */
 export const AGREEMENT_TYPE_LABELS: Record<AgreementType, string> = {
   user: "用户协议",
+  privacy: "隐私协议",
   companion: "陪玩协议",
   platform: "平台协议",
   version: "版本介绍",
 };
 
-/** 页签顺序：与原型一致（用户协议 / 陪玩协议 / 平台协议 / 版本介绍）。 */
+/**
+ * 页签顺序：用户协议 / 隐私协议 / 陪玩协议 / 平台协议 / 版本介绍。
+ *
+ * ⚠️ 原型里只有四项，隐私协议是 P8E-1 按运营要求新增的第五类，插在用户协议之后
+ * （两者是同一组「你与平台之间」的文件）。前四项的**相对顺序一字未改**，
+ * 因此这既不是重排也不是替换。
+ */
 export const AGREEMENT_TYPES: readonly AgreementType[] = [
   "user",
+  "privacy",
   "companion",
   "platform",
   "version",
@@ -90,6 +98,38 @@ export function compareAgreementVersion(a: string, b: string): number {
   }
 
   return 0;
+}
+
+/**
+ * 正文改动后生成新版本号：**递增最后一段数字**。
+ *
+ * `1.2.0` → `1.2.1`，`1.2` → `1.3`，`3` → `4`。
+ *
+ * ⚠️ 为什么是「最后一段」而不是「次一段」：本阶段的改动全部是**内容修订**
+ * （改措辞、补一段、修错别字），没有接口意义上的「新增功能」或「破坏性变更」。
+ * 递增末段是修订号的语义，也是唯一一个不需要人做判断的规则——
+ * 「这次算不算大改动」一旦交给填表的人，版本号就会变成随手填的东西。
+ * 真出现需要提升主次版本号的场景时，那是运营的明确决定，届时由管理员直接改版本号字段。
+ *
+ * ⚠️ 最后一段**不是数字**时（例如 `v1.beta`），退化为在末尾追加 `.1` 而不是猜。
+ * 猜错的版本号会让 `compareAgreementVersion()` 给出错误的新旧关系，
+ * 而那个函数正是「当前版本」选择的依据。
+ */
+export function bumpAgreementVersion(current: string): string {
+  const value = current.trim();
+  if (!value) return "1";
+
+  const segments = value.split(".");
+  const last = segments[segments.length - 1] ?? "";
+
+  // 末段必须是**非负整数**才递增：`1.2.0` 的 `0` 递增成 `1`，
+  // 而 `1.2.x` 的 `x` 不是数字，走下面的兜底分支
+  if (/^\d+$/.test(last)) {
+    segments[segments.length - 1] = String(Number(last) + 1);
+    return segments.join(".");
+  }
+
+  return `${value}.1`;
 }
 
 /**

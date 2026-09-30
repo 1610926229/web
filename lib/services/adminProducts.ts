@@ -359,6 +359,10 @@ function readProductInput(body: Record<string, unknown>): ProductProfileInput {
     detailText: readTrimmedString(body, "detailText"),
     detailImages: readStringArray(body, "detailImages"),
     sortOrder: readInteger(body, "sortOrder", Number.NaN),
+    // 分账比例与规格单价一样按**原始字符串**读（界面单位是百分比）：
+    // 换算成基点是服务端 `toProductDraft()` 的事，读入阶段不做数字转换。
+    // 缺省给空串 → 校验报「分账比例请填 0 到 100 之间的百分比」，而不是静默取默认比例
+    companionRatePercent: readTrimmedString(body, "companionRatePercent"),
     recommended: readBoolean(body, "recommended", false),
     // 只有明确的 `"on"` 才当作上架；其余（含缺省、写错）一律按**下架**处理。
     // 这个方向的默认值是刻意的：把一次误传当成「下架」最多让人再点一次上架，
