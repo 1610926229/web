@@ -120,7 +120,23 @@ export type AdminAuditAction =
   // ⚠️ 动作名带模块前缀（`platformConfig.`）而不是笼统的 `platform.update`：
   // 将来若出现「平台级开关」这类**另一类**配置，它会是一张不同的表、
   // 有不同的校验规则，共用一个前缀会让审计里两种东西长得一样。
-  | "platformConfig.update";
+  | "platformConfig.update"
+  // ————— 优惠券模板（P1-6）—————
+  // 四个动作，**没有第五个**：没有 `coupon.remove`。
+  // §6 明文「本轮不提供 hard delete，停用使用 `enabled=false`」，因此券模板的
+  // 生命周期止于停用——「这张券不存在了」这件事在本阶段写不出来，也就不该有一个
+  // 永远不会被写下的动作名（留着它，读审计的人会去找根本没发生过的删除）。
+  //
+  // ⚠️ 「启用」与「停用」分开记，与客服账号 / 运营内容同一个理由：这两件事的后果不同
+  // （停用会让**已经领到券的用户**也无法再核销，见 §5），审计里必须一眼看得出是哪一种。
+  //
+  // ⚠️ 与 P1-4 的**发放**（`grantCouponToUser`）不是一回事，因此**没有动作名重叠**：
+  // 那一次产生的是 `CouponClaim`（用户的资产，没有对应的审计动作——它是业务记录，
+  // 不是后台对配置的改动）；本组四个改的是 `Coupon` 模板本身。
+  | "coupon.create"
+  | "coupon.update"
+  | "coupon.enable"
+  | "coupon.disable";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
 export type AdminAuditTargetType =
@@ -150,7 +166,17 @@ export type AdminAuditTargetType =
    * 审计查询按 `(targetType, targetId)` 取，空串会让「查平台参数的历史」
    * 与「查一条 id 为空的记录」变成同一件事。
    */
-  | "platformConfig";
+  | "platformConfig"
+  // ————— 优惠券模板（P1-6）—————
+  /**
+   * 券模板（`Coupon`）。`targetId` 是 `Coupon.id`。
+   *
+   * ⚠️ **不是 `CouponClaim`**：领到手的券是用户的资产，后台改不了它（P1-4 §六
+   * 明文「不要建立复杂营销 Ledger」）。审计这一侧只盯**模板**的改动，
+   * 而模板的改动对已发出去的券**不追溯**——这在 before/after 里看得见：
+   * 两次快照记的都是模板字段，与任何一张 Claim 无关。
+   */
+  | "coupon";
 
 /**
  * 精简快照。

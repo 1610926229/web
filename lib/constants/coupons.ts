@@ -180,6 +180,65 @@ export function couponThresholdNotMetReason(
   return `满 ¥${formatYuan(thresholdAmount)} 可用，还差 ¥${formatYuan(gap)}`;
 }
 
+/* ───────────────── 券面文案的派生（P1-6） ───────────────── */
+
+/**
+ * 券面上的金额写法：**整数元不带小数，否则两位小数**。
+ *
+ * - `10_000` → `100`；`1_000` → `10`；`1_050` → `10.50`；`1_005` → `10.05`。
+ *
+ * ⚠️ **它只用于券面文案，不是全站金额展示口径**。全站金额一律走
+ * `formatYuan()`（恒两位小数，见 `lib/utils/format.ts`），那是「¥70.10」这种
+ * 金额本身的写法。券面上的「满 100 减 10」是一句**读起来像话的券名**，
+ * 带上 `.00` 会变成「满 100.00 减 10.00」——那不像券，像一张对账单。
+ *
+ * ⚠️ 与那个被删掉的 `formatCouponYuan` 的区别：那一个对**所有**金额做去零，
+ * 于是 `10.05` 会被 `toFixed(1)` 抹成 `10.1`——**改钱**。这里只在**分位为 0**
+ * 时省略小数，其余一律交给 `formatYuan`，因此没有任何一位数字被丢掉。
+ */
+export function formatCouponYuan(cents: number): string {
+  if (!Number.isFinite(cents)) return "0";
+  if (cents % 100 === 0) return String(Math.trunc(cents) / 100);
+  return formatYuan(cents);
+}
+
+/**
+ * 满减券的券面文案 —— **由金额派生的唯一一份**（P1-6 §3）。
+ *
+ * ```
+ * 满 100 减 10 / 全场通用，满 100 元可用
+ * ```
+ *
+ * ## 为什么必须派生，而不能让调用方传文案
+ *
+ * P1-6 §3 明文：`valueLabel` / `conditionLabel` **不作为业务真值**。
+ * 后台新建 / 编辑一张券时，客户端只提交 `thresholdAmount` 与 `discountAmount`，
+ * 文案由这里生成。这样一来：
+ *
+ * - 「满 100 减 10」与 `thresholdAmount: 10_000` **不可能对不上**——
+ *   它们不是两份可以各自编辑的数据，而是同一份数据的两种呈现；
+ * - 客户端也就没有伪造文案的位置（与 §九「客户端伪造字段必须被忽略」同一方向）。
+ *
+ * ⚠️ **它只服务于后台写路径**。「文案与金额分开」这条 P1-4 的老规矩并没有被推翻：
+ * 已经存在的历史模板（种子券）保留它们手写的文案，已发放的 Claim 更是保留**快照**里的
+ * 那一份——本函数**不追溯**它们。理由很直接：快照是历史事实，
+ * 用今天的派生规则去重写用户手里的券，等于篡改历史。
+ *
+ * ⚠️ 派生的输出与种子券的写法**逐字一致**（`满 100 减 10`），这不是巧合：
+ * 格式一旦分叉，后台新建的券与预置的券在用户端会长得不一样。
+ */
+export function buildThresholdCouponLabels(
+  thresholdAmount: number,
+  discountAmount: number,
+): { valueLabel: string; conditionLabel: string } {
+  const threshold = formatCouponYuan(thresholdAmount);
+  return {
+    valueLabel: `满 ${threshold} 减 ${formatCouponYuan(discountAmount)}`,
+    // 适用范围一律是**全场券**（P1-4 裁定 §3），因此这句话里没有「限某类商品」的位置
+    conditionLabel: `全场通用，满 ${threshold} 元可用`,
+  };
+}
+
 /**
  * 券面数据的性质说明。
  *

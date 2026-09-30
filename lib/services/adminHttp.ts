@@ -15,6 +15,7 @@ import {
   type AdminStatusFilter,
 } from "@/lib/constants/adminCatalog";
 import { ADMIN_CATEGORY_PAGE_SIZE } from "@/lib/constants/adminCategories";
+import { ADMIN_COUPON_PAGE_SIZE } from "@/lib/constants/adminCoupons";
 import {
   ADMIN_COMPLAINT_PAGE_SIZE,
   type AdminComplaintStatusFilter,
@@ -97,6 +98,10 @@ import type {
 import type {
   AdminCouponGrantOption,
   AdminCouponGrantResult,
+  AdminCouponTemplateItem,
+  AdminCouponTemplateListData,
+  AdminCouponTemplateProfilePatch,
+  AdminCouponTemplateWriteResult,
   AdminGrantTargetUser,
 } from "@/lib/types/coupon";
 
@@ -1343,4 +1348,104 @@ export function grantAdminCoupon(input: {
     userId: input.userId,
     couponId: input.couponId,
   });
+}
+
+// ————————————————————— 优惠券模板管理（P1-6） —————————————————————
+
+/** 列表请求。三个筛选字段都可省，省略即「不筛」。 */
+export type AdminCouponTemplateListRequest = {
+  keyword?: string;
+  enabled?: AdminEnabledFilter;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 券模板列表（管理员视角）。
+ *
+ * ⚠️ 与 `fetchAdminCouponGrantOptions()` **不是一回事**，两者也不能合并：
+ * 那一个回答「有哪些券现在可以发」，服务端只返回启用中的满减券；
+ * 这一个回答「平台上有哪些券、它们现在是什么状态」，**含已停用的全部模板**。
+ * 合并成一个「取券列表」会让发放页突然看得到停用的券。
+ *
+ * ⚠️ `enabled` 的两个取值与类目列表共用同一套（`""` / `enabled` / `disabled`），
+ * 因此这里不另写一份筛选语义。
+ */
+export function fetchAdminCouponTemplates(
+  input: AdminCouponTemplateListRequest = {},
+): Promise<AdminCouponTemplateListData> {
+  const params = new URLSearchParams();
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.enabled) params.set("enabled", input.enabled);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_COUPON_PAGE_SIZE));
+
+  return apiGet<AdminCouponTemplateListData>(`/api/admin/coupon-templates?${params.toString()}`);
+}
+
+/** 取一条券模板详情。**已停用的模板照样返回**：后台要能查看并重新启用它。 */
+export function fetchAdminCouponTemplate(id: string): Promise<AdminCouponTemplateItem> {
+  return apiGet<AdminCouponTemplateItem>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}`,
+  );
+}
+
+/**
+ * 新建 / 编辑券模板。
+ *
+ * 请求体是**整份白名单**：名称、门槛、优惠金额、有效期、启用状态。
+ * `formKey`、`formLabel`、`valueLabel`、`conditionLabel`、`createdAt`、`updatedAt`、`id`
+ * **没有可传的位置**——形态由服务端钉死为满减券，文案由服务端按金额派生（§1 / §3）。
+ */
+export function saveCouponTemplateProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminCouponTemplateProfilePatch,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPatch<AdminCouponTemplateWriteResult>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}`,
+    { idempotencyKey, ...patch },
+  );
+}
+
+export function createCouponTemplate(
+  idempotencyKey: string,
+  patch: AdminCouponTemplateProfilePatch,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPost<AdminCouponTemplateWriteResult>("/api/admin/coupon-templates", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+/**
+ * 启用 / 停用，两个**窄写入**接口。
+ *
+ * ⚠️ 与 `saveCouponTemplateProfile()` 分开：详情页上的开关只应当改启用状态，
+ * 而不是「读出整条记录、拼一个完整 patch 再写回去」——后者会在两位管理员
+ * 同时操作时，用后写的那次把另一位刚改好的金额覆盖回旧值。
+ *
+ * ⚠️ 这个开关在**详情页**，不在列表行上（列表是只读的）：停用会让已经领到券的
+ * 用户当下不能核销，所以不把它做成列表上「顺手一点」的开关。
+ *
+ * ⚠️ 两者都是 `POST` + 幂等键：重复点击不会产生第二条审计，也不会刷新 `updatedAt`。
+ */
+export function enableCouponTemplate(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPost<AdminCouponTemplateWriteResult>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}/enable`,
+    { idempotencyKey },
+  );
+}
+
+export function disableCouponTemplate(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPost<AdminCouponTemplateWriteResult>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}/disable`,
+    { idempotencyKey },
+  );
 }

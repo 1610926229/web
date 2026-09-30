@@ -457,7 +457,7 @@ P0-11 开处置三个）：
 
 ---
 
-## 12. 管理后台（admin）—— 64 条
+## 12. 管理后台（admin）—— 71 条
 
 > ⚠️ **本节的数字 = `find app/api/admin -name route.ts | wc -l` 的实测值**。
 > 下面的小节只逐条列出**成组**的路由；订单 / 退款 / 投诉 / 申请等分散在 §5 / §6 / §7 / §9。
@@ -581,6 +581,38 @@ P0-11 开处置三个）：
 
 ---
 
+### 12.9 优惠券（7 条，P1-4 发券 + P1-6 模板）
+
+| Method | URL | Guard | Service | 作用 |
+|---|---|---|---|---|
+| GET | `/api/admin/coupon-templates` | `requireAdmin` | `adminCouponTemplates` | 模板列表（关键词 / 启用状态筛选 + 分页）。**含已停用券与历史券** |
+| POST | `/api/admin/coupon-templates` | `requireAdmin` | `adminCouponTemplates` | 新建满减券模板 |
+| GET | `/api/admin/coupon-templates/[id]` | `requireAdmin` | `adminCouponTemplates` | 模板详情（含只在后台可见的时间戳与领取数） |
+| PATCH | `/api/admin/coupon-templates/[id]` | `requireAdmin` | `adminCouponTemplates` | 编辑（名称 / 门槛 / 面额 / 有效期 / 启用状态，一次保存） |
+| POST | `/api/admin/coupon-templates/[id]/enable` | `requireAdmin` | `adminCouponTemplates` | **窄写入**：只改 `enabled` |
+| POST | `/api/admin/coupon-templates/[id]/disable` | `requireAdmin` | `adminCouponTemplates` | **窄写入**：只改 `enabled` |
+| GET | `/api/admin/coupons` | `requireAdmin` | `adminCoupons` | 可发放的模板（**已启用 ∧ 参与结算**） |
+| GET | `/api/admin/coupons/grant-targets` | `requireAdmin` | `adminCoupons` | 按关键词找用户；空关键词返回空列表 |
+| POST | `/api/admin/coupons/grant` | `requireAdmin` | `adminCoupons` | 向指定用户发放一张券 |
+
+> 📌 **后三条（`/api/admin/coupons` 系列）是 P1-4 交付的，但一直没有出现在本文档里**——
+> `tests/admin.test.mjs` 的清单数组收着它们，本文档的 §12 却没有对应小节，
+> 于是 §12 的标题数长期比实测少 3。**P1-6 没有改这三条路由的任何代码**，
+> 只是把文档补到与源码一致（同 §12.8 对 P1-3 的处理）。
+
+**⚠️ 六个模板接口的读与写都是 Admin only。** 与用户端接口不同，模板里有
+**已停用券、已过期券与历史折扣 / 无门槛券**——视野比用户端只看得见「现在能领的券」宽得多，
+因此**读也必须有管理权限**（匿名 401、有会话无权限 403）。
+
+**⚠️ 没有第三个窄写入地址，更没有删除地址。** 启停只有 `enable` / `disable` 两个，
+且**列表页是只读的**：这两条窄写入的调用方是**详情页**（见 `P1-6/02-decisions.md` D2）。
+模板的生命周期终点是 `enabled=false`，**不存在硬删除**（`P1-6` §6 明文；
+`tests/adminCouponTemplates.test.mjs` 直接枚举该目录断言恰好四个文件）。
+
+**⚠️ 路径为什么不是 `/api/admin/coupons`（复数）**：那个地址已经被 **P1-4 的发券**
+占用了，而它管的是 `CouponClaim`（发到某个人手里的券），与模板的增删改是两件事。
+模板用 `coupon-templates` 这个**独立主键**，两者在 URL 上就不共用命名空间。
+
 # 第二部分：API Conventions
 
 **以下约定在当前仓库中已经稳定，新增接口必须遵守。**
@@ -611,7 +643,7 @@ P0-11 开处置三个）：
 **两个刻意使用 404 的场景**：
 
 1. **不泄露资源存在性**——如「其他打手访问不属于他的订单」返回 404 而不是 403。
-2. **Mock 开关关闭**——`mock-login` / `mock-confirm` 在开关关闭时返回 **404 而不是 403**：功能不存在，而不是「你没权限」。
+2. **Mock 开关关闭**——`mock-login` / `mock-confirm` / `debug/reset` 在开关关闭时返回 **404 而不是 403**：功能不存在，而不是「你没权限」。
 
 **⚠️ 两种拒绝的文案策略**：管理端与客服端给**同一套、不含具体原因的提示**——区分「你不是管理员」与「你的账号被停用了」，等于给出一个可以探测账号状态的接口。
 **打手端是例外**：「不是护航」与「资格已下架」分开表达，因为这两件事对使用者的下一步动作完全不同（去入驻 vs 找管理员），且不构成账号探测（这位用户自己本来就知道）。
@@ -716,13 +748,32 @@ Route Handler 侧统一用 `ok()` / `fail()` / `toApiError()`。
 
 **调试参数**（`ENABLE_MOCK_DEBUG` 控制）：`mockError` / `mockEmpty` / `mockDelay`，由 `lib/api/client.ts` 的 `withMockParams` 透传，`lib/mocks/debug.ts` 读取。**Mock 层移除时一并删除**。
 
+### 2.10.1 调试接口（`POST /api/debug/reset`，DEV-2 新增）
+
+| Method | URL | Guard | Service | 作用 |
+|---|---|---|---|---|
+| POST | `/api/debug/reset` | `ENABLE_MOCK_DEBUG`（关闭时 404） | `lib/services/mockStores` → `lib/data/mockStore` | **把当前进程的全部 Mock 存储丢回预置**，返回 `{"data":{"reset":[...被丢弃的 store 名]}}`。**测试专用，不是业务接口** |
+
+⚠️ **`ENABLE_MOCK_DEBUG` 的语义在 DEV-2 之后不再只是「读侧调试参数」**：它还控制一个
+**会写（清空）内存存储**的接口。三条边界必须一起读：
+
+1. **未开启时 404**，与其余 Mock 开关同一取舍；正式部署不设置该变量。
+2. **在开启的环境里它是破坏性的**——任何能访问该服务的人都能清空 Mock 数据。
+   数据本身是一次性内存数据、无真实用户数据，但**这个开关不能开在任何有真实数据的部署上**。
+3. **接真实后端时必须删除这条路由**（连同 `lib/services/mockStores.ts`），
+   真实测试该用独立测试库，而不是给线上服务开一个清库接口。
+
+它没有 `requireAdmin()`：调用方是 24 个 HTTP 测试文件的模块加载期（各自身份不同），
+而其唯一实际边界是 `ENABLE_MOCK_DEBUG` 开关本身。完整论证见
+`app/api/debug/reset/route.ts` 的头部注释与 `docs/03-dev/rounds/DEV-2/02-decisions.md` §四。
+
 ## 2.11 接口清单门禁
 
 **新增后台 / 客服 / 打手接口时，必须同批扩充清单数组**：
 
 | 门禁 | 位置 | 当前条数 |
 |---|---|---|
-| 管理端 | `tests/admin.test.mjs` | 64（P1-1 扩充：+1 经营首页 `GET /api/admin/dashboard`；P1-3 扩充：+1 售后工作台 `GET /api/admin/aftersales`，本条此前未同步到本文档） |
+| 管理端 | `tests/admin.test.mjs` | 71（P1-1 扩充：+1 经营首页 `GET /api/admin/dashboard`；P1-3 扩充：+1 售后工作台 `GET /api/admin/aftersales`；**P1-6 扩充：+4 券模板**。⚠️ P1-4 的 **3 条发券路由此前一直没有同步到本文档、也没进本行的累计数**，P1-6 一并补记，因此本行从 64 直接跳到 71 而不是 68） |
 | 客服端 | `tests/staff.test.mjs` | 25（P0-10 扩充：+2 全量订单查询；P0-11 扩充：+3 订单处置） |
 | 打手端 | `tests/`（P0-5.5 建立，扫描 `app/api/companion/**`；P0-6 / P0-7 / P0-8 / P0-9 / P0-14 扩充） | 12 |
 
@@ -967,3 +1018,4 @@ P0-12 落地时**新增了一个路由** `POST /api/orders/[id]/direct-refund`�
 | **打手侧统一「操作史」查询 API** | **TBD — DO NOT INVENT**（计划 R7） |
 | **「服务异常」触发与售后区** | **TBD — DO NOT INVENT**（计划 R4） |
 | **「非普通投诉通道」** | **TBD — DO NOT INVENT**（计划 R5） |
+| ~~**管理端优惠券模板管理 API**~~ | ✅ **已实现（`P1-6`，2026-09-30）——本行已作废，不再是缺口。** 六个模板路由见 §12.9（列表 / 新建 / 详情 / 编辑 / 启用 / 停用），三条发券路由一并补录在同处。<br>📌 **本行原文写的「NOT IMPLEMENTED / DO NOT INVENT / `ADMIN_NAV_ITEMS` 无对应条目」在 `P1-6` 交付后已与源码相反**，保留删除线只为让此前读过它的人找得到出处。<br>⚠️ **该行当初列出的四项「未冻结的规则」已由 `P1-6/01-prompt.md` §1–§7 全部冻结并实现**：字段清单（§2 六字段）、权限粒度（Admin only，读也是）、审计（复用既有 `AdminAudit`，四个动作）、追溯口径（§4 不追溯 + §5 两层语义）。<br>⚠️ **当初那条「已经定死的边界」依然有效，且 `P1-6` 没有推翻它**：**`Coupon.enabled` 只决定「当前」能否核销，不追溯已经发出去的 `CouponClaim.snapshot`**——判定仍由 `resolveCouponClaimGate()` 这**一个**前置函数实现，账户页与结算页**共用**；`P1-6` 的编辑事务只写 `Coupon`，一个字节都不碰 `CouponClaim`（`tests/adminCouponTemplates.test.mjs` 的 §4 三组端到端用例钉住）。<br>📌 登记来源：`docs/03-dev/rounds/P1-4/04-acceptance.md` §八 8.3；交付记录见 `docs/03-dev/rounds/P1-6/`。**本轮状态 `AWAITING_ACCEPTANCE`，尚未 `DONE`。** |

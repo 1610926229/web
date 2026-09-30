@@ -17,7 +17,13 @@ export function isMockAuthEnabled(): boolean {
   return readFlag("ENABLE_MOCK_AUTH");
 }
 
-/** 调试查询参数（`mockError` / `mockEmpty` / `mockDelay`）是否启用。 */
+/**
+ * 调试查询参数（`mockError` / `mockEmpty` / `mockDelay`）是否启用。
+ *
+ * ⚠️ **它同时是 `POST /api/debug/reset` 的唯一守卫**（DEV-2 起）：那个接口会把
+ * 当前进程的全部 Mock 存储清回预置，是**破坏性**的。因此这个开关的语义不只是
+ * 「读侧调试参数」——**不得开在任何有真实数据的部署上**。详见 `api-contract.md` §2.10.1。
+ */
 export function isMockDebugEnabled(): boolean {
   return readFlag("ENABLE_MOCK_DEBUG");
 }

@@ -10,6 +10,7 @@ import type {
 import type { Companion } from "@/lib/types/companion";
 import type { CompanionApplication } from "@/lib/types/companionApplication";
 import type { Complaint } from "@/lib/types/complaint";
+import type { Coupon } from "@/lib/types/coupon";
 import type { OrderStatus } from "@/lib/types/order";
 import type { PlatformConfig } from "@/lib/types/platformConfig";
 import type { CatalogProductRecord } from "@/lib/types/product";
@@ -103,6 +104,11 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
   "agreement.enable": "启用协议",
   "agreement.disable": "停用协议",
   "platformConfig.update": "修改平台参数",
+  // ————— 优惠券模板（P1-6）—————
+  "coupon.create": "新建优惠券模板",
+  "coupon.update": "编辑优惠券模板",
+  "coupon.enable": "启用优惠券模板",
+  "coupon.disable": "停用优惠券模板",
 };
 
 export function adminAuditActionLabel(action: AdminAuditAction): string {
@@ -513,5 +519,40 @@ export function toPlatformConfigAuditSnapshot(config: PlatformConfig): AdminAudi
     complaintWindowMinutes: config.complaintWindowMinutes,
     updatedAt: config.updatedAt,
     updatedByAdminId: config.updatedByAdminId,
+  };
+}
+
+/**
+ * 优惠券模板的精简快照（P1-6）。
+ *
+ * ⚠️ **刻意没有 `valueLabel` / `conditionLabel`**，这与商品快照里
+ * `platformBorneAmount` 被删掉是同一条理由：它们由 `thresholdAmount` /
+ * `discountAmount` **派生**（`buildThresholdCouponLabels()`），在 before/after 里
+ * 与金额**永远同步变化**。把「同一件事的两种呈现」都记进去，只会让一次改价
+ * 在审计里看起来改动了三处。看审计的人要的是「改了什么数」，文案随时可以按当时的
+ * 金额重新算出来。
+ *
+ * ⚠️ **也没有 `createdAt`**：它永远不变，放进每一条审计里只是把一个常量抄了很多遍。
+ *
+ * `formKey` 进快照：它是「这张券参不参与结算」的分类依据（`isComputableCouponForm()`），
+ * 而本阶段只有 `threshold` 可编辑——审计里留着它，才能解释为什么某条记录从没被编辑过。
+ *
+ * ⚠️ 两个金额字段**保留 `null` 的原样**：`null` 是「这张券没有可计算金额」，
+ * 不是 0。把它记成 0，事后读审计的人会以为平台上曾经有一张「满 0 减 0」的券。
+ *
+ * ⚠️ **本快照记的是模板，不是任何一张已发出的券**：模板改动不追溯
+ * `CouponClaim.snapshot`（P1-4 裁定 §9），因此这里出现的字段与用户手里那张券的
+ * 内容可以不同——那不是不一致，那正是本轮要保证的事。
+ */
+export function toCouponAuditSnapshot(coupon: Coupon): AdminAuditSnapshot {
+  return {
+    name: truncateAuditText(coupon.name),
+    formKey: coupon.formKey,
+    thresholdAmount: coupon.thresholdAmount,
+    discountAmount: coupon.discountAmount,
+    validFrom: coupon.validFrom,
+    validTo: coupon.validTo,
+    enabled: coupon.enabled,
+    updatedAt: coupon.updatedAt,
   };
 }

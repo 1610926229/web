@@ -92,8 +92,13 @@ app/api/
 ├── companion/                             打手接口（12 个）
 ├── companion-applications/                入驻申请
 ├── staff/                                 客服接口（25 个）
-└── admin/                                 管理接口（64 个，含 admin/auth 3 个）
+├── admin/                                 管理接口（64 个，含 admin/auth 3 个）
+└── debug/                                 Mock 存储重置（1 个，**测试专用**，DEV-2）
 ```
+
+> ⚠️ `debug/reset` 不是业务接口：它只在 `ENABLE_MOCK_DEBUG` 开启时存在，
+> **接真实后端时连同它一起删除**（见 `api-contract.md` §2.10.1）。
+> 也正因为它，下面各目录的条数合计会比 `app/api/` 的总数少 1。
 
 > 📌 上面四个括号里的数字**实测于 P1-5**（`find app/api/<dir> -name route.ts | wc -l`），
 > 与第 65 行的总数 138 同一时点：12 + 25 + 64 = 101，其余 37 个是面向用户的接口。
@@ -238,13 +243,22 @@ lib/mocks/
 
 ```
 tests/
-├── *.test.mjs                 66 个测试文件
+├── *.test.mjs                 82 个测试文件
 ├── alias-hook.mjs             node --import 入口，注册下面的 hook
 ├── alias-loader.mjs           ~20 行，教会 node「@/ 别名」与「无扩展名相对导入」
 ├── app-path.mjs               按**路由**（忽略路由组）查找 app/ 下源文件
+├── httpReset.mjs              把**服务端** Mock 存储丢回预置（DEV-2，见下）
+├── httpIsolation.test.mjs     上面那套隔离机制的**门禁**（DEV-2，6 条）
 └── manual/
     └── browserChain.mjs       手工浏览器链路脚本（不在自动测试内）
 ```
+
+**⚠️ HTTP 用例的隔离基线（DEV-2）**：`node --test` 让每个测试文件跑在自己的子进程里，
+所以进程内的用例之间天然隔离；但带 `APP_BASE_URL` 的 **24** 个用例文件打的是 `next start`
+那**一个**服务进程，进程内的 `resetMockStore()` 够不着它。因此每个 HTTP 文件在发起
+任何请求之前都调一次 `tests/httpReset.mjs` 的 `resetServerStores()`，把服务端存储
+丢回预置；配套的 `--test-concurrency=1` 保证重置之间不会插进第二个 HTTP 文件。
+两半缺一不可，`tests/httpIsolation.test.mjs` 各有一条门禁盯着。
 
 **命名惯例**：`<域>.test.mjs`（`orders`、`refunds`）、`admin<域>.test.mjs`、`staff<域>.test.mjs`、`<域>Http.test.mjs`、跨角色用 `<A>CrossRole.test.mjs`。
 

@@ -75,6 +75,21 @@ export type Coupon = CouponSnapshot & {
   id: string;
   /** 平台是否启用；停用后不可再领取 */
   enabled: boolean;
+  /**
+   * 券模板的建档时刻（P1-6）。
+   *
+   * ⚠️ **它不进 `CouponSnapshot`**：快照冻结的是「用户手里那张券长什么样」，
+   * 而模板什么时候被建出来与券面无关。两条时间线必须分开——
+   * 混进去的话，用户端「我的优惠券」会凭空多出一个与用户无关的时间。
+   */
+  createdAt: string;
+  /**
+   * 券模板最后一次被后台改动的时刻（P1-6）。
+   *
+   * ⚠️ 同样不进快照。顺带说清一件容易误会的事：**它变了不代表用户手里的券变了**——
+   * `CouponClaim.snapshot` 在领取那一刻就冻结了（P1-4 裁定 §9），后台改模板不追溯。
+   */
+  updatedAt: string;
 };
 
 /**
@@ -327,3 +342,115 @@ export type AdminCouponGrantResult = {
   userId: string;
   created: boolean;
 };
+
+/* ───────────────── 管理端：券模板管理（P1-6） ───────────────── */
+
+/**
+ * 管理端券模板列表项。
+ *
+ * ⚠️ 它是**管理端**的 DTO，与 `ClaimableCouponItem` 不是一回事：后者回答
+ * 「当前用户能不能领」，这一份回答「平台上有哪些券、它们现在是什么状态」。
+ * 合成一个类型的话，「已领取」这种只有用户视角才成立的概念会漏进后台。
+ *
+ * `thresholdAmount` / `discountAmount` 在**这里永远是数字**（不是 `number | null`）：
+ * 管理端列表要显示满减门槛与优惠金额，而 `null` 表示「这张券没有可计算金额」，
+ * 界面需要把这件事**显示出来**（非满减券），所以原样保留 `null` 反而更准确。
+ * 见 `AdminCouponTemplateItem.thresholdAmount` 上的说明。
+ */
+export type AdminCouponTemplateItem = {
+  id: string;
+  name: string;
+  formKey: CouponFormKey;
+  /** 优惠形式的展示文案，如「满减券」 */
+  formLabel: string;
+  /** 券面值展示文案（后台新建/编辑时由服务端按金额派生） */
+  valueLabel: string;
+  /** 使用条件的展示文案（同上） */
+  conditionLabel: string;
+  validFrom: string;
+  validTo: string;
+  enabled: boolean;
+  /**
+   * 满减门槛（**整数分**）。非满减券为 `null`。
+   *
+   * ⚠️ 后台**必须看得见这个 `null`**：它是「这张券不参与结算」的唯一标记
+   * （P1-4 裁定 §1 只有满减券参与抵扣，`isComputableCouponForm()` 是那个判据）。
+   * 把 `null` 显示成 0 会让管理员以为它是一张「满 0 减 0」的券。
+   */
+  thresholdAmount: number | null;
+  /** 抵扣金额（**整数分**）。非满减券为 `null`。理由同上。 */
+  discountAmount: number | null;
+  /**
+   * 这张模板**能不能被编辑**。
+   *
+   * ⚠️ 由**服务端**算好（`isComputableCouponForm(formKey)`），页面不自己推导：
+   * 界面自己判一次、服务端再判一次，两侧迟早给出不同答案——
+   * 而这次分叉的后果是「按钮能点、点下去 400」。
+   *
+   * 非满减券（`discount` / `gift`）为 `false`：它们是历史模板，可以展示、
+   * 可以启停，但**不能改**（P1-6 §1「只允许新建/编辑 `threshold`」）。
+   */
+  editable: boolean;
+  /**
+   * 这个模板已经被领走 / 发出多少张（含自己领的与管理员发的）。
+   *
+   * ⚠️ **它是「停用会影响谁」的展示，不是判断依据**：真正的停用没有前置条件
+   * （§5 明文 disable 不删除 Claim）。页面拿它提醒管理员后果，仅此而已。
+   */
+  claimCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** 一页券模板 + 各状态角标。页面首屏与接口返回的是同一个形状。 */
+export type AdminCouponTemplateListData = {
+  items: AdminCouponTemplateItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  counts: { all: number; enabled: number; disabled: number };
+  notice: string;
+};
+
+/** 写操作的返回：界面据此就地更新那一行，不必为了刷新一个开关重拉整页。 */
+export type AdminCouponTemplateWriteResult = {
+  couponId: string;
+  enabled: boolean;
+  updatedAt: string;
+  changed: boolean;
+};
+
+/**
+ * 券模板的编辑白名单 —— 后台能改的字段就是这些，多一个都没有。
+ *
+ * ⚠️ **不在这个类型里**的字段：`id`、`createdAt`、`updatedAt`、
+ * `formKey`、`formLabel`、`valueLabel`、`conditionLabel`。
+ *
+ * | 字段 | 为什么不可改 |
+ * |---|---|
+ * | `formKey` | 改它等于把一张满减券变成折扣券，而两者的结算语义完全不同（§1） |
+ * | `valueLabel` / `conditionLabel` | **它们不是业务真值**，由服务端按金额派生（§3）。让客户端传等于把「用户看到的那句话」交给调用方决定 |
+ * | `createdAt` / `updatedAt` | 服务端时间戳（§九：客户端伪造时间必须被忽略） |
+ *
+ * 注意 `enabled` 在这里：编辑表单可以一次把字段与启用状态一起提交；
+ * 而详情页上的启停开关走的是两个**窄写入**接口，不经过这个 patch。
+ */
+export type AdminCouponTemplateProfilePatch = {
+  name: string;
+  thresholdAmount: number;
+  discountAmount: number;
+  validFrom: string;
+  validTo: string;
+  enabled: boolean;
+};
+
+/**
+ * 新建券模板的入参。
+ *
+ * ⚠️ 与 `AdminCouponTemplateProfilePatch` **是同一个形状**，但刻意分开命名：
+ * 新建时服务端会额外写入 `formKey: "threshold"`（客户端**没有**声明形态的位置，
+ * §1 只允许新建满减券），而编辑时形态是**读出来的**、不是补上去的。
+ * 两个动作对同一个请求体的解释不同，就不该共用一个名字。
+ */
+export type AdminCouponTemplateInput = AdminCouponTemplateProfilePatch;

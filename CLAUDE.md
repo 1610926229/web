@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Pages | 80 `page.tsx`, 8 `layout.tsx` |
 | API routes | 131 `route.ts` (`admin` 62 · `staff` 25 · `companion` 8 · rest user-facing) |
 | Repositories | 26 (interface + mock impl + `globalThis` store) |
-| Tests | 69 files, 1385 cases — `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm build` all green |
+| Tests | 82 files, 1794 cases — `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm build` all green. 24 of those files carry HTTP cases and need `APP_BASE_URL` + a running server; they reset the server's mock store before running and require `--test-concurrency=1` (DEV-2) |
 | Product name | **超哥电竞** — `lib/constants/site.ts:11` `PLATFORM_NAME`. The name "有目电竞" is **wrong** |
 
 The product is a mobile-first H5 storefront for esports companion/boosting services (陪玩 / 护航 / 打手), opened inside WeChat. Five-tab bottom nav — 首页 / 分类 / 订单 / 客服 / 我的. Design mobile-first; do not build desktop-first layouts and shrink them.

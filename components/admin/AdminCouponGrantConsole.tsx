@@ -11,7 +11,11 @@ import type { AdminCouponGrantOption, AdminGrantTargetUser } from "@/lib/types/c
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
- * 优惠券发放（`/admin/coupons`）：管理员挑一张券模板，发给指定用户。
+ * 优惠券发放（`/admin/coupons/grant`）：管理员挑一张券模板，发给指定用户。
+ *
+ * ⚠️ 路径在 P1-6 从 `/admin/coupons` 挪到了这里——`/admin/coupons` 现在是**券模板管理**
+ * （列表 → 详情 → 编辑，写 `Coupon`）。这个组件与它的接口一个字节都没改：
+ * 它写的是 `CouponClaim`，与模板的增删改是两件事。
  *
  * ## 这一页只有一件事：产生一张券
  *

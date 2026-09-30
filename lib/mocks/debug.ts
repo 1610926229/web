@@ -56,6 +56,12 @@ export type MockEmptyScope =
   // 管理后台：类目与商品两组列表分别清空（P8B）
   | "categories"
   | "products"
+  // 管理后台：券模板列表清空（P1-6）。
+  // ⚠️ 它是**模板**列表，与上面几组不是一回事：`coupons` 清的是「平台上有哪些券」，
+  // 而领券中心的券面来自同一份数据，因此清空后**用户端也会一起空**——
+  // 这正是它与别的范围分开的理由：验收券模板空态时要能一眼看出「是空态生效了」，
+  // 而不是与其它后台列表混在一起
+  | "coupons"
   // 管理后台：订单、退款、投诉三张列表分别清空（P8C）。
   // 三者分开而不是合成一个 `admin`：验收时要看的是「这一张列表的空态」，
   // 一次清空三张只会让人分不清是空态生效了还是页面坏了
@@ -94,6 +100,7 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "applications",
   "categories",
   "products",
+  "coupons",
   "orders",
   "refunds",
   "complaints",

@@ -525,6 +525,44 @@ closed     → []
 **⚠️ 优惠券成本规则（已冻结）**：成本**全部由俱乐部承担**，**不得**减少打手按商品原价算出的理论收入。
 因此大额券会让 `clubNetIncome` 为负——**这是允许的业务事实**。
 
+**✅ `Coupon`（模板）这一侧现在有写入了（`P1-6`，2026-09-30）。**
+管理端的**创建 / 编辑 / 启用 / 停用**入口齐备：页面在 `app/admin/(console)/coupons/`
+（列表 / `new` / `[id]`），接口见 `api-contract.md` §12.9，写入路径是
+`lib/data/couponTemplateTransaction.ts` 的三个伪事务。
+
+> ⚠️ **本节此前写着「`Coupon`（模板）这一侧只有读……没有任何写入入口」，
+> 那句话在 `P1-6` 交付后与源码相反**，故就地改写（历史 Round 文档只加批注、不重写；
+> 本文是技术设计文档，描述的是**当前**源码，因此直接更正）。
+> `P1-6` 的状态是 **`AWAITING_ACCEPTANCE`**，尚未 `DONE`。
+
+**⚠️ `Coupon` 实体新增两个时间戳**（`P1-6`）：`createdAt` / `updatedAt`。
+列表要按建档时间排、详情页要显示「最近更新」，没有它们排不了也显示不了。
+**两者都不进任何用户端 DTO**——券面快照、结算可选券项、订单里的券快照三者的
+精确键集合断言继续把它们排除在外（`tests/couponCheckoutChain.test.mjs`）。
+`updatedAt` 是一个会被当作证据的字段：空保存与重放**都不刷新它**。
+
+**⚠️ 模板只管理满减券**（`formKey === "threshold"`）。`discount` / `gift` 两类
+历史模板**可以展示、可以启停，但不能编辑**，也不进结算页的可选列表——
+它们的 `thresholdAmount` / `discountAmount` 在 DTO 里是 **`null` 而不是 `0`**
+（「满 0 减 0」会伪造出一张处处可用的券的外观）。
+
+**⚠️ 没有硬删除**：模板的生命周期终点是 `enabled = false`，`Coupon` 表上**不存在**
+`DELETE`，也不存在 `Coupon.remove` 这一类审计动作。
+
+⚠️ **不要把它与 `CouponClaim` 那一侧混为一谈**：`CouponClaim` **有**真实的写入路径
+（用户自助领取 `claimCouponForUser` ＋ 管理员发放 `POST /api/admin/coupons/grant`；
+发放页现在的地址是 `/admin/coupons/grant`——`/admin/coupons` 这个**页面**在 `P1-6`
+变成了模板列表，见 `api-contract.md` §12.9），并且
+**`Coupon.enabled` 只决定「当前」能否核销，不追溯已发出的 `CouponClaim.snapshot`**
+（`P1-4` 已实现，由 `resolveCouponClaimGate()` 单一判定 + 测试钉住）。
+「模板能不能改」与「券能不能核销」是**两件事**，改动前先分清是哪一侧。
+
+**⚠️ 将来做真 DB 时必须守住的一条**：`Coupon` 与 `CouponClaim` 是**两张表**，
+`CouponClaim.snapshot` 是**值拷贝**，不是外键到 `Coupon` 的引用。
+因此模板的 `UPDATE` **不得**带上会打到 `CouponClaim` 的级联
+（不写 `ON UPDATE CASCADE`、不建「改模板顺带更新所有 Claim」的触发器）——
+§4 的「不追溯」在数据层就是这条约束，级联会静默推翻它。
+
 ---
 
 ## 13. OrderReview（评价）

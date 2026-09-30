@@ -60,6 +60,88 @@ function couponKey(userId: string, couponId: string): string {
   return `${userId}:${couponId}`;
 }
 
+/* ────────────── 券模板的同步写入原语（P1-6） ──────────────
+ *
+ * ⚠️ 它们**只给** `lib/data/couponTemplateTransaction.ts` 的原子区段用。
+ * 与 `createClaim` / `createGrant` 不同，这里没有幂等判断、也没有审计——
+ * 那两件事属于伪事务，写在下面这些函数里就会与业务写入分开成两步，
+ * 而「业务写成功、审计没写进去」是事后无法补救的。
+ *
+ * ⚠️ 每一个都**只覆盖它该覆盖的字段**：`applyCouponEnabled` 尤其不能退化成
+ * `applyCouponPatch(id, { enabled }, at)` 的调用方——详情页上的开关只应当改这一个字段，
+ * 走「先读出来、拼一个完整 patch 再写回去」的话，两位管理员同时操作时，
+ * 后写的那次会把另一位刚改好的金额覆盖回旧值。
+ */
+
+/** 新建一条券模板记录。`id` 由调用方在原子区段内用 `nextRecordId()` 生成。 */
+export function createCouponRecord(record: Coupon): Coupon {
+  const current = store();
+
+  // —— 原子区段开始（无 await）——
+  current.coupons.set(record.id, { ...record });
+  // —— 原子区段结束 ——
+
+  return { ...record };
+}
+
+/**
+ * 编辑券模板。
+ *
+ * ⚠️ 只覆盖 `patch` 里那些字段：`id`、`formKey`、`formLabel`、`createdAt` 一律原样保留。
+ * 「顺手把一张折扣券改成满减券」在 `patch` 类型里没有位置可写——
+ * 形态决定了这张券能不能参与结算（§1），要换形态只能新建一张。
+ */
+export function applyCouponPatch(
+  id: string,
+  patch: Pick<
+    Coupon,
+    | "name"
+    | "valueLabel"
+    | "conditionLabel"
+    | "validFrom"
+    | "validTo"
+    | "enabled"
+    | "thresholdAmount"
+    | "discountAmount"
+  > & { at: string },
+): { previous: Coupon; updated: Coupon } | null {
+  const current = store();
+
+  // —— 原子区段开始（无 await）——
+  const existing = current.coupons.get(id);
+  if (!existing) return null;
+
+  const { at, ...fields } = patch;
+  const updated: Coupon = { ...existing, ...fields, updatedAt: at };
+  current.coupons.set(id, updated);
+  // —— 原子区段结束 ——
+
+  return { previous: { ...existing }, updated: { ...updated } };
+}
+
+/**
+ * 只改券模板的启用状态。
+ *
+ * 窄写入器，理由见上面那一段说明：停用只应当改这一个字段。
+ */
+export function applyCouponEnabled(
+  id: string,
+  enabled: boolean,
+  at: string,
+): { previous: Coupon; updated: Coupon } | null {
+  const current = store();
+
+  // —— 原子区段开始（无 await）——
+  const existing = current.coupons.get(id);
+  if (!existing) return null;
+
+  const updated: Coupon = { ...existing, enabled, updatedAt: at };
+  current.coupons.set(id, updated);
+  // —— 原子区段结束 ——
+
+  return { previous: { ...existing }, updated: { ...updated } };
+}
+
 function idempotencyKeyOf(userId: string, idempotencyKey: string): string {
   return `${userId}:${idempotencyKey}`;
 }
@@ -176,5 +258,25 @@ export const mockCouponRepository: CouponRepository = {
     // —— 原子区段结束 ——
 
     return { claim, created: true };
+  },
+
+  /**
+   * 全部券模板（P1-6）。**含已停用**，且不排序、不分页——
+   * 排序与筛选是展示规则，在 `lib/constants/adminCoupons.ts` 里，
+   * 而那两件事都需要看到**全部**记录才能算对（角标按全量算）。
+   */
+  async listCouponTemplates() {
+    return [...store().coupons.values()].map((coupon) => ({ ...coupon }));
+  },
+
+  /**
+   * 一个模板被领走 / 发出多少张（P1-6）。
+   *
+   * ⚠️ 数的是 **Claim 条数**，与「这个模板一共服务过几个人」不是一回事：
+   * 管理员可以对同一个人重复发放（§五），因此 N 张券可能只属于 1 个人。
+   * 后台那个数字的用途是「停用会影响多少张券」，张数才是对的量纲。
+   */
+  async countClaimsByCoupon(couponId) {
+    return [...store().claims.values()].filter((claim) => claim.couponId === couponId).length;
   },
 };

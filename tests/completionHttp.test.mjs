@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 
 import {
   COMPLETION_ORDER_NOT_FOUND_MESSAGE,
@@ -18,6 +20,9 @@ import {
  */
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过 P0-8 完成材料 HTTP 契约";
 
 async function loginAs(userId) {

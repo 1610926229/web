@@ -1,12 +1,17 @@
 import AdminCouponGrantConsole from "@/components/admin/AdminCouponGrantConsole";
 import AdminPageHeading from "@/components/admin/AdminPageHeading";
-import { ADMIN_COUPONS_NOTICE, ADMIN_COUPONS_PAGE_TITLE } from "@/lib/constants/admin";
+import { ADMIN_COUPON_GRANT_PAGE_TITLE, ADMIN_COUPONS_NOTICE } from "@/lib/constants/admin";
 import { listCouponGrantOptions } from "@/lib/services/adminCoupons";
 import type { AdminCouponGrantOption } from "@/lib/types/coupon";
 import { toSearchParams } from "@/lib/utils/query";
 
 /**
- * 优惠券发放（`/admin/coupons`）。
+ * 优惠券发放（`/admin/coupons/grant`）。
+ *
+ * ⚠️ **路径在 P1-6 变了，入口没变**：`/admin/coupons` 现在是**券模板管理**
+ * （列表 → 详情 → 编辑，写 `Coupon`），发放是它的一个子页面（写 `CouponClaim`）。
+ * 侧栏的「优惠券管理」仍然指向 `/admin/coupons`，因此从导航看过去与之前一样，
+ * 只是多了一层「先看券、再进发放」。
  *
  * 阅读顺序与其余管理页一致：**首屏由服务端取数 → 客户端接管**。
  * 券模板由这一层取好交给 `AdminCouponGrantConsole`，因此直接打开这一页看到的是
@@ -35,7 +40,7 @@ import { toSearchParams } from "@/lib/utils/query";
  */
 export default async function AdminCouponsPage({
   searchParams,
-}: PageProps<"/admin/coupons">) {
+}: PageProps<"/admin/coupons/grant">) {
   const params = toSearchParams(await searchParams);
 
   let options: AdminCouponGrantOption[] = [];
@@ -49,7 +54,7 @@ export default async function AdminCouponsPage({
 
   return (
     <div className="flex flex-col gap-5">
-      <AdminPageHeading title={ADMIN_COUPONS_PAGE_TITLE} description={ADMIN_COUPONS_NOTICE} />
+      <AdminPageHeading title={ADMIN_COUPON_GRANT_PAGE_TITLE} description={ADMIN_COUPONS_NOTICE} />
 
       <AdminCouponGrantConsole initialOptions={options} initialError={error} />
     </div>

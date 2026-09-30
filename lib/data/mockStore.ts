@@ -139,7 +139,41 @@ export function getMockStore<T>(name: MockStoreName, create: () => T): T {
  *
  * **只给自动化测试用**：测试需要从一份干净的数据出发（例如「这一单还没有退款申请」），
  * 而各仓储的预置数据恰好就是这个起点。业务代码不要调用它——那等于清空用户数据。
+ *
+ * ⚠️ 它作用在**调用进程自己的** `globalThis` 上。HTTP 用例跑的是**另一个进程**
+ * （`next start` 起的服务），因此在测试进程里调它**够不着服务端的存储**——
+ * 那种场合要用 `resetAllMockStores()` + `POST /api/debug/reset`，见下。
  */
 export function resetMockStore(name: MockStoreName): void {
   delete holder()[storeKey(name)];
+}
+
+/**
+ * 丢弃**全部**仓储的 store，下次取用时逐个按预置数据重新建仓。
+ *
+ * **只给自动化测试用**，与 `resetMockStore` 同一条纪律：业务代码不要调用它。
+ *
+ * 与 `resetMockStore(name)` 的差别有两处：
+ *
+ * 1. **范围**：这个把整族 store 一起丢掉，用来把「一个跑久了的进程」恢复成刚启动的样子；
+ * 2. **列举方式**：它按**前缀**扫 `globalThis`，而不是遍历 `MockStoreName` 联合类型。
+ *    这是刻意的——联合类型是一个需要**人工维护**的清单，新增一个仓储时如果忘了往里加，
+ *    `resetMockStore` 侧不会有任何提示，测试只会**静默地**少重置一份存储，
+ *    表现为「偶发」而不是「报错」。按前缀扫则天然覆盖将来新增的每一个仓储。
+ *
+ * ⚠️ 前缀是 `__youmuMockStore__`，与 `storeKey()` 同源；前缀之外挂在 `globalThis`
+ * 上的东西一律不动（这是刻意划的界：本函数只该动 Mock 存储）。
+ *
+ * 返回被丢弃的 store 名，供调用方回显（例如调试接口的响应体）。
+ */
+export function resetAllMockStores(): string[] {
+  const target = holder();
+  const dropped: string[] = [];
+  for (const key of Object.keys(target)) {
+    if (key.startsWith(PREFIX)) {
+      delete target[key];
+      dropped.push(key.slice(PREFIX.length));
+    }
+  }
+  return dropped;
 }

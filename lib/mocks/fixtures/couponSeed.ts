@@ -20,6 +20,20 @@ import type { Coupon, CouponClaim, CouponFormKey } from "@/lib/types/coupon";
  * ⚠️ 仅服务端使用：本文件不会被任何客户端组件引用，接入真实后端后随 lib/mocks 一并移除。
  */
 
+/**
+ * 种子券模板的建档与最后改动时刻（P1-6 起 `Coupon` 上多了这两个字段）。
+ *
+ * ⚠️ **写死一个常量**，不用 `new Date()`：种子数据每次建仓都要**完全一样**，
+ * 否则「同一条记录」在不同次运行里的 `createdAt` 不同，任何按它的断言都会变成
+ * 一条偶尔为真、偶尔为假的用例。除 `cpn-mock-disabled` 外全部相同——
+ * 那一张是「被停用过」的样本，它的 `updatedAt` 应当晚于建档时刻，
+ * 否则后台列表上会出现一条「停用了但从未被改过」的记录。
+ */
+const SEED_CREATED_AT = "2025-12-20T00:00:00.000Z";
+const SEED_UPDATED_AT = "2025-12-20T00:00:00.000Z";
+/** 已停用那张券的最后改动时刻（晚于建档），见上。 */
+const SEED_DISABLED_UPDATED_AT = "2026-01-05T00:00:00.000Z";
+
 type PresetCouponInput = {
   id: string;
   name: string;
@@ -30,6 +44,8 @@ type PresetCouponInput = {
   validTo: string;
   /** 不填表示启用 */
   enabled?: boolean;
+  /** 不填用种子统一的建档时刻 */
+  updatedAt?: string;
 };
 
 function build(input: PresetCouponInput): Coupon {
@@ -54,6 +70,10 @@ function build(input: PresetCouponInput): Coupon {
     enabled: input.enabled ?? true,
     thresholdAmount: amounts ? amounts.threshold : null,
     discountAmount: amounts ? amounts.discount : null,
+    // 后台用的两条时间戳（P1-6）。**不进 `CouponSnapshot`**：
+    // 它们描述的是模板而不是用户手里那张券，领取记录里不该出现。
+    createdAt: SEED_CREATED_AT,
+    updatedAt: input.updatedAt ?? SEED_UPDATED_AT,
   };
 }
 
@@ -118,6 +138,7 @@ export const couponSeed: Coupon[] = [
     validFrom: "2026-01-01T00:00:00.000Z",
     validTo: "2026-12-31T15:59:59.000Z",
     enabled: false,
+    updatedAt: SEED_DISABLED_UPDATED_AT,
   }),
   build({
     id: "cpn-mock-upcoming",

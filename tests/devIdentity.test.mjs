@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 import { fileURLToPath } from "node:url";
 
 import { MOCK_LOGIN_ACCESS_LABELS, MOCK_LOGIN_USERS } from "../lib/constants/mockUsers.ts";
@@ -577,6 +579,9 @@ test("§十三.7/8 打手接口守卫只从用户会话取身份，不读第二�
  * 恰好不需要造数据就能验——这正是 DEV-1 本轮补上那两条预置护航的意义。
  */
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3213），跳过 DEV-1 的真实会话用例";
 
 function mockLoginBody(userId) {

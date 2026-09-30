@@ -66,9 +66,10 @@ docs/02-tech-design/api-contract.md                   ← §2.11 接口清单门
 |---|---|
 | 运行器 | **Node 内置 `node --test`**。没有 Jest / Vitest，**不要引入** |
 | 命令 | `pnpm test` |
-| 完整命令 | `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/alias-hook.mjs --test "tests/*.test.mjs"` |
-| 测试文件 | `tests/*.test.mjs`，当前 51 个文件 / 1011 条用例 |
+| 完整命令 | `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/alias-hook.mjs --test-concurrency=1 --test "tests/*.test.mjs"` |
+| 测试文件 | `tests/*.test.mjs`，当前 82 个文件 / 1794 条用例 |
 | 别名 | `tests/alias-hook.mjs` → `tests/alias-loader.mjs`（~20 行 ESM resolve hook，教会 Node「`@/*` 别名」与「无扩展名相对导入」） |
+| HTTP 隔离 | `tests/httpReset.mjs` 的 `resetServerStores()`：每个带 HTTP 用例的文件在发起请求前把**服务端**存储丢回预置。`--test-concurrency=1` 与它是一套的，**不要删**（DEV-2） |
 | 路径解析 | `tests/app-path.mjs` 的 `findAppFile()` / `hasAppFile()` / `resolveSource()` |
 
 ## 两条必须记住的后果

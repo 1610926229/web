@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 
 /**
  * HTTP 冒烟测试：需要已经跑起来的服务，未提供地址时自动跳过。
@@ -15,13 +17,17 @@ import test from "node:test";
  *
  * 不设 `APP_BASE_URL` 时整组跳过，因此 `pnpm test` 在没有任何服务时依然全绿。
  *
- * ⚠️ **这组用例假定服务端的预置数据没被外部改过**。用例自身可以重复跑，但如果你先在
- * 后台通过 / 驳回了某条**预置**的入驻申请（手工验收时很容易发生），入驻那一组会因为
- * 找不到「待查看 / 审核中」的申请而失败——那是数据被改过，不是回归。
- * 要跑门禁请**重启服务**（Mock 存储在内存里，重启即回到预置状态）。
+ * ⚠️ **这组用例假定服务端的预置数据没被手工改过**。用例自身可以重复跑：文件头的
+ * `await resetServerStores()` 会先把**服务端**存储丢回预置（DEV-2）——「跑门禁要重启服务」
+ * 那条旧约定已经**被这个机制取代**，不再需要人工重启。但如果你通过**浏览器**在后台
+ * 通过 / 驳回了某条**预置**的入驻申请，那一步不经过本文件的代码，重置的时点之后仍会被改，
+ * 入驻那一组就会因为找不到「待查看 / 审核中」的申请而失败——那是数据被改过，不是回归。
  */
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过 HTTP 冒烟测试";
 
 /** 登录拦截页的固定文案，用来判断「打开了受保护页面」而不是「404」。 */

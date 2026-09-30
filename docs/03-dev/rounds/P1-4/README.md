@@ -1,6 +1,6 @@
 Round ID: P1-4
 Title: 优惠券交易链路与结算口径校准
-Status: AWAITING_ACCEPTANCE   # 2026-09-29 首次交付完成；同日人工验收**未通过**（「账户里可用的券，结算页说没有」）+ 新增 16 条正式产品规则，转入**验收整改轮**（裁定原文见 01-prompt.md §二；交付记录见 03-delivery.md §十一；**复验步骤见 04-acceptance.md §七**——⚠️ §二 里 A4/A5 与 E 全组已被 §七 取代，只作批注未删旧文）。整改已交付，等人工**复验**，**Claude 不得自行 DONE**
+Status: DONE   # ✅ 2026-09-30 **由产品负责人正式裁定收口为 DONE**：`86c28c1` 作为用户本人功能收口提交有效（用户本人提交 · 含完整业务代码 · 提交后完成人工验收并 PASSED · 独立缺口不阻塞 · 提交后新增的验收文档属收口记录）。`Accepted At` 2026-09-30。⚠️ 验收项 5（模板改动不追溯 / disabled 后不可核销）**无法 UI 复验**——本项目没有 Admin Coupon Template 编辑 / 停用入口，规则本身由自动化测试保护，缺的是**入口**不是**能力**（§八 8.2）；该缺口保持**独立登记** `UNASSIGNED` · ⏳ `PLANNED`，**未并入本轮、未标 DONE**（§八 8.3）。历史：2026-09-29 首次交付完成；同日人工验收**未通过**（「账户里可用的券，结算页说没有」）+ 新增 16 条正式产品规则，转入**验收整改轮**（裁定原文见 01-prompt.md §二；交付记录见 03-delivery.md §十一；验收步骤见 04-acceptance.md §七——⚠️ §二 里 A4/A5 与 E 全组已被 §七 取代，只作批注未删旧文）
 Depends On:
 - checkout / 订单快照（P0-6 系列）
 - P0-15（退款与收益归零）
@@ -10,5 +10,5 @@ Primary Domain: 优惠券交易链路与结算口径校准
 Primary State Transition: 无
 Started At: 2026-09-29
 Development Completed At: 2026-09-29
-Accepted At:
-Git Commit:            # 用户提交前留空
+Accepted At: 2026-09-30
+Git Commit: 86c28c1   # 用户本人功能收口提交（「P0-14 → P1-5」批次，含 P1-4 完整业务代码）。⚠️ 本提交之后新增的是**验收 / 收口文档**（04-acceptance.md §八、03-delivery.md §十二、README 等），按裁定属收口记录，**不影响功能提交成立**；这些文档改动**保持未提交**，等用户之后自行 commit

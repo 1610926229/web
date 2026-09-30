@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 
 import {
   COMPANION_CHAT_HISTORY_NOTICE,
@@ -38,6 +40,9 @@ import {
  */
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP = BASE ? false : "未设置 APP_BASE_URL（例如 http://127.0.0.1:3214），跳过 P0-14 聊天 HTTP 契约";
 
 /** `u-1022` 名下是 `cp-10`、`u-1023` 名下是 `cp-11`：两位**有效**打手，互不相干。 */

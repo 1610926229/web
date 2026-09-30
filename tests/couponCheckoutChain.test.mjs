@@ -1052,10 +1052,18 @@ test("券相关 DTO 的键集合精确固定：多一个少一个都要红", asy
     "valueLabel",
   ]);
 
-  // 券模板 = 券面快照 + id + enabled
+  // 券模板 = 券面快照 + id + enabled + 两个时间戳
+  //
+  // ⚠️ P1-6 加了**两个**字段，这里同步扩：`createdAt` / `updatedAt`。
+  //   后台的券模板列表要按建档时间倒序、要显示「最近更新」，没有这两个字段就排不了也显示不了；
+  //   它们也进 `AdminCouponTemplateItem`（后台 DTO），但**不进任何用户端 DTO**——
+  //   券面快照、结算页可选券项与订单里的券快照都仍然只字不提时间戳（下面几条断言即是）。
+  //   与 P1-4 §六 给 `CouponClaim` 加 `source` 是同一套做法：键集合变了就同步扩这条门禁，
+  //   而不是把断言放宽成「包含」。
   const template = await getCouponRepository().findCouponById(THRESHOLD_COUPON);
   assert.deepEqual(Object.keys(template).sort(), [
     "conditionLabel",
+    "createdAt",
     "discountAmount",
     "enabled",
     "formKey",
@@ -1063,6 +1071,7 @@ test("券相关 DTO 的键集合精确固定：多一个少一个都要红", asy
     "id",
     "name",
     "thresholdAmount",
+    "updatedAt",
     "validFrom",
     "validTo",
     "valueLabel",

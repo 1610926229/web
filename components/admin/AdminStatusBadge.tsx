@@ -1,4 +1,5 @@
 import type { AdminCategoryStatusKey } from "@/lib/constants/adminCategories";
+import type { AdminCouponTemplateStatusKey } from "@/lib/constants/adminCoupons";
 import type { AdminContentStatusKey } from "@/lib/constants/adminContent";
 import type { AdminCompanionStatusKey } from "@/lib/constants/adminCompanions";
 import type { AdminProductStatusKey } from "@/lib/constants/adminProducts";
@@ -48,6 +49,20 @@ export const CATEGORY_STATUS_TONE: Record<AdminCategoryStatusKey, AdminStatusTon
   removed: "muted",
   disabled: "danger",
   enabled: "success",
+};
+
+/**
+ * 券模板：已停用用 `pending`（橙）而不是 `danger`（红）。
+ *
+ * 与商品「已下架」同一个理由：停用一张券是**正常的运营动作**（活动结束、
+ * 面额要重算、先把券关掉再改），而且一条命令就能启用回来。
+ * 标成红色会让列表上出现「一屏待处理的事故」，真正需要抬头看的东西反而被淹没。
+ *
+ * ⚠️ 券模板**没有终态**：§6 不提供硬删除，因此这里不存在 `muted` 那一档。
+ */
+export const COUPON_TEMPLATE_STATUS_TONE: Record<AdminCouponTemplateStatusKey, AdminStatusTone> = {
+  enabled: "success",
+  disabled: "pending",
 };
 
 /**

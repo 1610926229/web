@@ -43,7 +43,7 @@ Mock 能力由五个开关控制，取值必须**显式等于字符串 `true`** 
 | 变量 | 作用 |
 |---|---|
 | `ENABLE_MOCK_AUTH` | 用户端模拟登录：`/api/auth/mock-login`、`/api/auth/logout`、`mock_user_id` 会话 Cookie、拦截页上的「模拟微信登录」按钮 |
-| `ENABLE_MOCK_DEBUG` | 调试查询参数：`mockError` / `mockEmpty` / `mockDelay` |
+| `ENABLE_MOCK_DEBUG` | 调试查询参数 `mockError` / `mockEmpty` / `mockDelay`；**并开放 `POST /api/debug/reset`**（清空本进程 Mock 存储，测试专用、**破坏性**，不得开在有真实数据的部署上；**接真实后端时连同该接口一起删除**） |
 | `ENABLE_MOCK_PAYMENT` | 模拟支付：`/api/payments/mock-confirm` 与支付结果页上的「模拟支付成功 / 失败 / 取消」三个按钮 |
 | `ENABLE_MOCK_ADMIN` | **管理端**模拟登录：`/api/admin/auth/*`、`mock_admin_id` 会话 Cookie、`/admin/login` 上的「模拟管理员登录」按钮 |
 | `ENABLE_MOCK_STAFF` | **客服端**模拟登录：`/api/staff/auth/*`、`mock_staff_id` 会话 Cookie、`/staff/login` 上的客服测试账号列表 |
@@ -55,7 +55,7 @@ cp .env.example .env.local   # .env.local 已被 .gitignore 忽略
 **正式部署不要设置这五个变量**。关闭时无需改动任何代码：
 
 - 未开启 `ENABLE_MOCK_AUTH`：两个认证接口返回 404；`mock_user_id` Cookie 不再产生登录身份（伪造该 Cookie 只会看到登录拦截页）；拦截页上不出现任何模拟登录控件。
-- 未开启 `ENABLE_MOCK_DEBUG`：三个调试查询参数被完全忽略，数据与延迟都不受影响，首页照常渲染。
+- 未开启 `ENABLE_MOCK_DEBUG`：三个调试查询参数被完全忽略，数据与延迟都不受影响，首页照常渲染；`POST /api/debug/reset` 返回 **404**（接口不存在）。**注意：开启时该接口会把本进程的全部 Mock 存储清空**，所以这个开关不能开在任何有真实数据的部署上。
 - 未开启 `ENABLE_MOCK_PAYMENT`：模拟支付确认接口返回 404，页面上不出现任何模拟支付控件；此时**创建支付请求仍然可用**（那是真实业务逻辑，不属于模拟渠道），只是待支付的请求无法在本地走到「已支付」。
 - 未开启 `ENABLE_MOCK_ADMIN`：管理端登录与退出接口返回 **404**；`/admin/login` 不出现「模拟管理员登录」按钮，只显示一行说明；伪造 `mock_admin_id` Cookie 拿不到任何权限（管理页面照常跳登录、管理接口 401）。**用户端的 `ENABLE_MOCK_AUTH` 不受影响**，两个开关各自独立。
 - 未开启 `ENABLE_MOCK_STAFF`：客服端登录与退出接口返回 **404**；`/staff/login` 不列出任何测试账号，只显示一行说明；伪造 `mock_staff_id` Cookie 拿不到任何权限（`/staff` 照常跳登录页、客服接口 401）。**另外两个开关都不受影响**，三个开关各自独立。

@@ -80,9 +80,17 @@ allowBuilds:
 |---|---|
 | **测试框架** | **无。使用 Node 内置 `node --test`** |
 | **命令** | `pnpm test` |
-| **完整命令** | `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/alias-hook.mjs --test "tests/*.test.mjs"` |
-| **测试文件数** | 65 |
-| **测试用例数** | 1255（其中 132 条是 `APP_BASE_URL` 门控的 HTTP 套件，未起服务时跳过；生产模式跑满 1255/1255） |
+| **完整命令** | `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/alias-hook.mjs --test-concurrency=1 --test "tests/*.test.mjs"` |
+| **测试文件数** | 82 |
+| **测试用例数** | 1794（其中 177 条是 `APP_BASE_URL` 门控的 HTTP 套件，未起服务时跳过；生产模式跑满 1794/1794） |
+
+**⚠️ `--test-concurrency=1` 不是性能选项，是正确性选项（DEV-2）。**
+带 `APP_BASE_URL` 的 HTTP 用例打的是 `next start` 那**一个**服务进程，它们读写同一份
+内存存储。每个 HTTP 文件开跑前会 `POST /api/debug/reset` 把这份存储丢回预置
+（`tests/httpReset.mjs`）——重置是**全局**的，因此两个 HTTP 文件同时跑会互相清掉
+对方的中间状态。**删掉它，门禁 `tests/httpIsolation.test.mjs` 的第 2 条会立刻变红**；
+但除此之外不会有任何一条**业务**断言当场失败——它只会在某次全量里大面积、看似随机的失败。
+正是这种「删掉也看不出问题」的约束才需要一条专门的门禁盯着。
 
 **`tests/alias-hook.mjs`** 是一个约 20 行的 ESM resolve hook，教会 Node 两条它原生不支持的规则：
 
@@ -137,7 +145,7 @@ allowBuilds:
 | `ENABLE_MOCK_ADMIN` | 管理员模拟登录（**独立**） | `/api/admin/auth/mock-login` → 404 |
 | `ENABLE_MOCK_STAFF` | 客服模拟登录（**独立**） | `/api/staff/auth/mock-login` → 404 |
 | `ENABLE_MOCK_PAYMENT` | 模拟支付 | `/api/payments/mock-confirm` → 404 |
-| `ENABLE_MOCK_DEBUG` | 调试参数 `mockError` / `mockEmpty` / `mockDelay` | 参数失效 |
+| `ENABLE_MOCK_DEBUG` | 调试参数 `mockError` / `mockEmpty` / `mockDelay`；**并开放 `POST /api/debug/reset`**（把本进程全部 Mock 存储清回预置，**测试专用、破坏性**，DEV-2）⚠️ | 参数失效 **+ `/api/debug/reset` → 404** |
 
 **⚠️ 实现要点**：这五个开关全部通过**动态 key** 读 env（`process.env[name] === "true"`），而不是 `process.env.ENABLE_MOCK_AUTH`。
 理由（源码注释原文）：打包器会把静态写法在构建期内联成常量，导致「构建时开、运行时关」这类差异被抹掉。

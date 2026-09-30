@@ -18,6 +18,12 @@ import { mockCouponRepository } from "./mockCouponRepository";
  *
  * ⚠️ 本层**不判断**「这张券能不能领」：那是业务规则，在 `lib/services/coupons.ts` 里做。
  * 将来换成数据库时，两道约束分别对应 `(user_id, coupon_id)` 唯一索引与幂等键唯一索引。
+ *
+ * ⚠️ **券模板的写操作不在这份接口上**（P1-6）。`listCouponTemplates()` 是只读的，
+ * 「新建 / 编辑 / 启停一张券模板」走 `lib/data/couponTemplateTransaction.ts` 的伪事务，
+ * 它直接使用 `mockCouponRepository` 导出的**同步**写入原语。
+ * 这条不对称是刻意的，与平台参数同一个理由：接口上开一个 `updateCoupon()`，
+ * 就等于开出了第二条**绕过幂等与审计**的写路径，而它没有任何地方会提醒后来的人别用。
  */
 
 export type CouponListQuery = {
@@ -86,6 +92,28 @@ export type CouponRepository = {
     claim: CouponClaim,
     idempotencyKey: string,
   ): Promise<{ claim: CouponClaim; created: boolean }>;
+
+  /**
+   * **全部**券模板（含已停用）（P1-6）。
+   *
+   * ⚠️ 它是**管理端读路径**，与 `queryCoupons()` 刻意分开：
+   * 那一个是领券中心用的，只该看到「平台愿意让人领的券」；
+   * 后台要看到全部，否则「这张券为什么不见了」只能靠猜。
+   *
+   * ⚠️ **不分页、也不在仓储里筛**：券模板总数很小（种子 6 张），
+   * 而后台的角标要按**全部**记录算（「已启用 3 / 已停用 2」）。
+   * 分成「一页数据 + 一次全量计数」两次查询，只会让两个数字来自不同的时刻。
+   * 关键词与启用状态的筛选在服务层做（它是展示层的筛选，不是数据层的约束）。
+   */
+  listCouponTemplates(): Promise<Coupon[]>;
+
+  /**
+   * 一个模板已经被领走 / 发出多少张（P1-6）。
+   *
+   * ⚠️ 它**只是展示**（「停用会影响多少人」），不是任何判断的依据：
+   * §5 明文停用不删除 Claim，因此这里返回多少都不影响停用能不能做。
+   */
+  countClaimsByCoupon(couponId: string): Promise<number>;
 };
 
 export function getCouponRepository(): CouponRepository {

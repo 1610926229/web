@@ -1,5 +1,5 @@
 import { ApiError } from "@/lib/api/ApiError";
-import { toCouponSnapshot } from "@/lib/constants/coupons";
+import { isComputableCouponForm, toCouponSnapshot } from "@/lib/constants/coupons";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
 import { getCouponRepository } from "@/lib/data/couponRepository";
 import { getUserRepository } from "@/lib/data/userRepository";
@@ -45,6 +45,16 @@ const COUPON_NOT_FOUND_MESSAGE = "优惠券不存在";
 /** 发放时选了未启用的模板。 */
 const GRANT_DISABLED_TEMPLATE_MESSAGE = "该优惠券已停用，不能发放";
 
+/**
+ * 发放时选了非满减券（P1-6 §7）。
+ *
+ * ⚠️ 这句话与「已停用」**必须分开**：两者的补救动作完全不同——
+ * 停用可以去后台重新启用，而折扣券与无门槛券**永远**不会参与结算
+ * （P1-4 裁定 §1），发出去也核销不了，只能换一张券发。
+ * 合成一句「不能发放」会让管理员去后台找一个并不存在的开关。
+ */
+const GRANT_UNSUPPORTED_TEMPLATE_MESSAGE = "该优惠券类型不参与结算，不能发放";
+
 /** 发放目标用户不存在。 */
 const GRANT_USER_NOT_FOUND_MESSAGE = "用户不存在";
 
@@ -56,12 +66,17 @@ const TARGET_KEYWORD_MIN_LENGTH = 1;
 const TARGET_RESULT_LIMIT = 20;
 
 /**
- * 可发放的券模板：**只要当前 `enabled` 的**（裁定 §四.2）。
+ * 可发放的券模板：**当前 `enabled` 且参与结算**的（裁定 §四.2 + P1-6 §7）。
  *
- * ⚠️ 这里**不**顺手把过期的也筛掉：裁定那一句只写了 `enabled`。
- * 有效期由 `withinValidity` **显示**给管理员看（发出去一张过期的券是废的，
- * 但他有权知道自己正在这么做），而不是替他挡掉——多一条他没要求的硬规则，
- * 将来想发一张「明天开始」的券时会变成拦路石。
+ * ⚠️ P1-6 §7 收窄了这里的口径：原文只说「选择 enabled Coupon 模板」，
+ * 而 P1-6 起后台能新建券了，于是「enabled 的折扣券」成了一个真实存在的选项——
+ * 它 claim 得了、却永远核销不了（`isComputableCouponForm` 是那个判据）。
+ * 让管理员发出去一张废纸不是「多给一个选择」，因此在**服务端**筛掉，
+ * 而不是靠页面上的下拉框少显示一项。
+ *
+ * ⚠️ 这里**仍然不**顺手把过期的也筛掉：有效期由 `withinValidity` **显示**给管理员看
+ * （发出去一张过期的券是废的，但他有权知道自己正在这么做），而不是替他挡掉——
+ * 多一条他没要求的硬规则，将来想发一张「明天开始」的券时会变成拦路石。
  */
 export async function listCouponGrantOptions(
   params: URLSearchParams | undefined,
@@ -76,7 +91,7 @@ export async function listCouponGrantOptions(
   );
 
   return page.items
-    .filter((coupon) => coupon.enabled)
+    .filter((coupon) => coupon.enabled && isComputableCouponForm(coupon.formKey))
     .map((coupon) => toGrantOption(coupon, now));
 }
 
@@ -138,8 +153,8 @@ export async function searchGrantTargetUsers(
  * ## 顺序
  *
  * 1. **幂等键**：没有就是 400。与其他写接口同一套（`lib/constants/writes.ts`）；
- * 2. 券模板必须存在且**当前启用**（裁定 §四.2）。停用的一律拒绝——
- *    发出去也核销不了，那是给用户一张废纸；
+ * 2. 券模板必须存在、**当前启用**且**参与结算**（裁定 §四.2 + P1-6 §7）。
+ *    停用的一律拒绝——发出去也核销不了，那是给用户一张废纸；
  * 3. 目标用户必须存在；
  * 4. 写入 Claim：`source: "admin_grant"`、`grantedByAdminId` 记下发放人、
  *    `snapshot` 取**当前模板**（§七：模板后改不追溯这张券）。
@@ -178,6 +193,10 @@ export async function grantCouponToUser(
   const coupon = await withMockDebug(params, surface, () => couponRepository.findCouponById(couponId));
   if (!coupon) throw new ApiError("NOT_FOUND", COUPON_NOT_FOUND_MESSAGE);
   if (!coupon.enabled) throw new ApiError("BAD_REQUEST", GRANT_DISABLED_TEMPLATE_MESSAGE);
+  // 形态的判定与启用的判定分开（P1-6 §7）：两者的补救动作不同，见上面那句注释
+  if (!isComputableCouponForm(coupon.formKey)) {
+    throw new ApiError("BAD_REQUEST", GRANT_UNSUPPORTED_TEMPLATE_MESSAGE);
+  }
 
   const user = await withMockDebug(params, surface, () => userRepository.findUserById(userId));
   if (!user) throw new ApiError("NOT_FOUND", GRANT_USER_NOT_FOUND_MESSAGE);

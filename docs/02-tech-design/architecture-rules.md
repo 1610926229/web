@@ -68,7 +68,11 @@ Component (components/**.tsx, "use client")
 **禁止**：
 
 - ❌ **`app/` 与 `components/` 不得直接 import `lib/data`。**
-  （CURRENT 的唯一实际破例见 §六 Observed Current。）
+  （CURRENT 的**唯一**实际破例是 `/api/auth/mock-login` 的 Route Handler 直接调
+  `lib/data/userRepository`，登记在 `api-contract.md` §1 的 ⚠️ 注，**不在 §六**——
+  §六 只收「不遵守会产生业务错误」的那一类现状。**新代码不得照做**：
+  需要碰 `lib/data` 就在 `lib/services/` 里放一个薄转发，如
+  `lib/services/mockStores.ts`（DEV-2 新增，就是为此而存在）。）
 - ❌ 不得直接 `fetch`。
 - ❌ 不得 import `lib/mocks/*`（种子数据不得进浏览器产物）。
 - ❌ 不得做金额计算。
@@ -83,13 +87,19 @@ Route Handler **只做四件事**：
 4. **response** —— 成功 `ok(data)`，失败 `fail(toApiError(e))`。
 
 **禁止**：Route **不得承载主要业务规则**。
-（CURRENT 唯一例外见 §六 Observed Current。）
+（与上一条同一处破例：`/api/auth/mock-login`，登记在 `api-contract.md` §1。§六 不含此项。）
 
 ## 2.3 Service（`lib/services/*.ts`）—— 业务编排层
 
 **负责**：业务编排、DTO 裁剪、把仓储结果转成对外结构、抛出 `ApiError`。
 
 **禁止**：不做数据访问（交给 Repository）。
+
+⚠️ **唯一的例外，且只此一处**：Mock 存储的**生命周期**操作 —— `lib/services/mockStores.ts`（DEV-2）。
+它转发的是「把整族 store 丢回预置」，**不读任何业务数据、不经过任何仓储**，因此不属于
+本条禁止的「数据访问」。它存在是为了让 `app/api/debug/reset` 不违反 §2.1
+（`app/` 不得直接 import `lib/data`），而 §六 明令新代码不得模仿既有破例。
+**除它以外，service 仍然一律经 Repository 取数。**
 
 **⚠️ 服务端与浏览器的同名文件必须分开。**
 `lib/services/companionDispatch.ts` 顶部注释把理由写得很清楚：

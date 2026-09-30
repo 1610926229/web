@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 import { fileURLToPath } from "node:url";
 import { findAppFile } from "./app-path.mjs";
 import {
@@ -50,6 +52,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ADMIN_API_DIR = path.join(ROOT, "app", "api", "admin");
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP_HTTP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过管理端 HTTP 用例";
 
 /** 去掉注释后再做「源码里不该出现某标识」的断言：文档注释里说明「本页没有 X」不算出现 X。 */
@@ -592,6 +597,9 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/refunds/page.tsx",
     "admin/complaints/page.tsx",
     "admin/aftersales/page.tsx",
+    // P1-6：券模板列表。它与 `coupons/[id]`、`coupons/new`、`coupons/grant`
+    // 是同级的三条兄弟路由，加载边界**只能**收在 `(list)` 这一段里
+    "admin/coupons/page.tsx",
   ]) {
     const file = findAppFile(route);
     assert.ok(file.includes("(list)"), `${route} 应当待在 (list) 里，加载边界才收得住`);
@@ -604,6 +612,10 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/complaints/[id]/page.tsx",
     // P1-3：售后工作台的详情页是**两级动态段**（案件类型 + id），仍然一个 loading.tsx 都不许有
     "admin/aftersales/[caseType]/[id]/page.tsx",
+    // P1-6：券详情与新建页。详情页会 `notFound()`，新建成功后会 `router.push`，
+    // 两种情况下先发出的 200 都改不回来
+    "admin/coupons/[id]/page.tsx",
+    "admin/coupons/new/page.tsx",
   ]) {
     const dir = path.dirname(findAppFile(route));
     assert.equal(
@@ -728,7 +740,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件 + 运营内容十九件 + 发券三件 + 平台参数一件 + 经营首页一件 + 售后聚合一件", () => {
+test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件 + 运营内容十九件 + 券模板四件 + 发券三件 + 平台参数一件 + 经营首页一件 + 售后聚合一件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -797,6 +809,18 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "content/quick-entries/[id]/remove/route.ts",
       "content/quick-entries/[id]/route.ts",
       "content/quick-entries/route.ts",
+      // P1-6：优惠券**模板**管理（列表 / 新建、详情 / 编辑、启用、停用）
+      // ⚠️ 四个地址，**没有**第五个 `remove`：§6 明文不提供硬删除，
+      // 停用就是 `enabled = false`。开一个删除地址等于把「已发出的券」的归属抽走。
+      // ⚠️ 也没有「改券面文案」地址：`valueLabel` / `conditionLabel` 是按金额**派生**的，
+      // 请求体里没有这两个字段，界面也没有输入框（§3）。
+      // ⚠️ 主键是 `coupon-templates` 而不是复用 `coupons`：`/api/admin/coupons`
+      // 已经被「可发放的模板」占了（P1-4），两者回答的问题不同——
+      // 那一个只回 enabled 的满减券，这一个回**全部**模板含已停用的历史券。
+      "coupon-templates/[id]/disable/route.ts",
+      "coupon-templates/[id]/enable/route.ts",
+      "coupon-templates/[id]/route.ts",
+      "coupon-templates/route.ts",
       // P1-4 验收整改轮：管理员向指定用户发放优惠券
       // ⚠️ 三个地址各有分工，**没有**「撤销发放」「编辑已发的券」：
       // 券一旦发出去就是用户的资产，管理端不能悄悄改它或收回它
