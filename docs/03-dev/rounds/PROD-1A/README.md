@@ -1,6 +1,6 @@
 Round ID: PROD-1A
 Title: PostgreSQL 基础层 + 竖切片（选型落地 / 连接与事务 / 版本化迁移 / 种子与重置 / 健康检查 / 两个仓储的真实现）
-Status: AWAITING_ACCEPTANCE   # 2026-10-03 —— 已交付，门禁全绿，**等人工验收**。⚠️ 未 `DONE`，不得由 Claude 自行 `DONE`
+Status: DONE   # 2026-10-03 —— 人工验收全部通过（A/B/C/D/E 五项 PASS），用户已提交
 Depends On:
 - P0-15（仓储接口层已稳定，DB 实现才可能只是「再加一个实现」）
 - `docs/02-tech-design/architecture-rules.md` §2.4（仓储两种形态）/ §2.5（伪事务适用范围的收窄）
@@ -10,8 +10,8 @@ Primary Domain: 数据访问基础设施（`lib/data/pg/**`、`db/migrations/**`
 Primary State Transition: 无（不触碰任何业务状态机）
 Started At: 2026-10-03
 Development Completed At: 2026-10-03
-Accepted At: ——（等用户人工验收）
-Git Commit: ——（本轮**零 Git 写操作**，改动保留在工作区）
+Accepted At: 2026-10-03（用户人工验收通过）
+Git Commit: b9588cd   # `P1-6、P1-7、P1-8 归档 + PROD-1A：PostgreSQL 基础层与竖切片`。⚠️ 该提交为四轮合并提交，非本轮独占
 
 ---
 
