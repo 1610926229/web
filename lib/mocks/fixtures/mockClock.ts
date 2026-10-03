@@ -29,3 +29,32 @@ export function getMockSeedNow(): Date {
 export function resetMockSeedNow(): void {
   seedNow = null;
 }
+
+/**
+ * 把基准时间**钉死**成一个指定值。仅供测试使用，与 `resetMockSeedNow` 同一条纪律。
+ *
+ * ## 它解决什么
+ *
+ * 「基准时间」有两种取法，混在一起就会让**断言随日历漂移**：
+ *
+ * - 订单 / 派单种子在**建仓时**现取（`mockPaymentRepository` / `mockDispatchRepository`
+ *   的 `createStore()`），因此每次 `resetMockStore("payment")` 都按当时的值重建；
+ * - 但周期榜那批订单的时间是**相对基准时间**算出来的（`buildRankingPeriodOrders`），
+ *   其中 u-1001 的「今日」那一单会落在**真实当天**。
+ *
+ * 于是「预置数据下最近 30 天消费是多少」这个数**每天都不一样**：写死一个期望值的用例
+ * 只会绿到「跨过它锚定的那一刻」为止，之后开始红——而红的原因与它要守护的业务规则
+ * 毫无关系。这与 CRLF 假失败同源：**测试的时钟与数据的时钟不同源**。
+ *
+ * 在本函数把基准时间钉成用例自己的 `NOW` 之后，订单数据与断言就同源了：
+ * 同一份数据、同一个窗口，结果不再随执行日期变化。
+ *
+ * ⚠️ **它只对「建仓时现取」的消费者生效**（订单 / 派单）。`catalogSeed` / `messageSeed` /
+ * `seed.ts` / `staffSeed` 都在**模块加载那一刻**就把它取走了
+ * （`const X = getMockSeedNow()`），此后再改对它们无效——调用它之前那些模块已经加载完了。
+ * 因此本函数**不保证**全进程只有一个时间：它保证的是「本进程内**之后**建仓的
+ * 订单 / 派单数据」与用例的 `NOW` 同源。这正是需要使用它的场景。
+ */
+export function setMockSeedNow(now: Date): void {
+  seedNow = new Date(now.getTime());
+}

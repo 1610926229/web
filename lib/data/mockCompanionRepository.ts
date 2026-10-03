@@ -19,10 +19,14 @@ import { getMockStore } from "./mockStore";
  * 不写文件、不写数据库。将来由真实数据库替换（`(user_id)` 唯一索引 + 软删除 + 事务），
  * 本文件的删除不影响上层接口。
  *
- * 建仓时把预置陪玩**逐字段复制**进 Map（连 `reviews` 数组也复制一层），
+ * 建仓时把预置陪玩**逐字段复制**进 Map（数组字段也复制一层），
  * 而不是把 `companionSeed` 里的对象直接放进去：后台会改这些记录，
  * 如果 Map 里存的就是模块级常量里的那个对象，一次编辑就把常量改了——
  * 测试之间互相污染，热更新后也再也回不到初始数据。
+ *
+ * ⚠️ P1-8 起记录上**没有 `reviews` 数组可复制了**：陪玩的公开评价不再存在实体上，
+ * 而是每次由 `lib/services/reviewAggregates.ts` 从评价仓储现算（`D17`）。
+ * 数组字段只剩 `gameIds` / `regions` / `serviceTags` 三个。
  *
  * 并发安全的前提：Node 是单线程的，下面「读—判断—写」的**原子区段内没有 `await`**。
  *
@@ -46,7 +50,7 @@ function createStore(): MockCompanionStore {
   const companions = new Map<string, Companion>();
 
   for (const seed of companionSeed) {
-    companions.set(seed.id, { ...seed, reviews: [...seed.reviews] });
+    companions.set(seed.id, { ...seed });
   }
 
   const companionIdByUser = new Map<string, string>();
@@ -85,7 +89,7 @@ function store(): MockCompanionStore {
  */
 export function readCompanionRecord(id: string): Companion | null {
   const record = store().companions.get(id);
-  return record ? { ...record, reviews: [...record.reviews] } : null;
+  return record ? { ...record } : null;
 }
 
 export const mockCompanionRepository: CompanionRepository = {
@@ -200,7 +204,7 @@ export function createCompanionRecord(companion: Companion): CompanionCreateOutc
     }
   }
 
-  current.companions.set(companion.id, { ...companion, reviews: [...companion.reviews] });
+  current.companions.set(companion.id, { ...companion });
   if (companion.userId && companion.removedAt === null) {
     current.companionIdByUser.set(companion.userId, companion.id);
   }

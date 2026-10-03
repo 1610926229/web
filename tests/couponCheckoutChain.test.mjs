@@ -1117,9 +1117,29 @@ test("结构：建单原子区段里不许出现 await，核销点必须在区�
   const code = stripComments(readSource(resolveSource("lib/services/checkout.ts")));
   const start = code.indexOf("function buildOrderFromRequest(");
   assert.notEqual(start, -1, "建单函数必须还在 `lib/services/checkout.ts` 里");
-  const end = code.indexOf("\n}\n", start);
-  assert.notEqual(end, -1, "建单函数必须还能圈出函数体");
+
+  // ⚠️ 圈函数体**不能**用 `code.indexOf("\n}\n", start)`：
+  // 本仓 `core.autocrlf=true`，`lib/services/checkout.ts` 检出为 **CRLF**，
+  // 而 CRLF 里 `}` 后面跟的是 `\r` 不是 `\n`，所以 `"\n}\n"` **永远匹配不到**、
+  // `end` 恒为 `-1`——这条断言在 Windows 上**无条件失败**。
+  // 那是**假失败**：它红的原因与它要守护的「原子区段里没有 await」毫无关系，
+  // 于是真正的回归信号被这条噪音盖住。
+  //
+  // 改成「切到**下一个顶层声明**为止」：`^` 配 `/m` 在 LF 与 CRLF 下都落在行首，
+  // 因此与行尾符、缩进、函数在文件中的位置都无关。
+  // （与 `tests/companionServing.test.mjs` 的 `functionBody()` 同一策略；
+  // 这里不能直接用它——那个辅助函数要求函数**已导出**，而本函数未导出。）
+  const rest = code.slice(start + 1);
+  const next = rest.search(
+    /^(?:export\s+)?(?:async\s+)?(?:function|const|let|var|type|class|interface)\s/m,
+  );
+  const end = next === -1 ? code.length : start + 1 + next;
   const body = code.slice(start, end);
+
+  // 圈出来的必须真的是一个**完整的函数体**，否则下面那条「没有 await」可能是在
+  // 一个空片段或半截片段上通过——那才是真的把断言放空了
+  assert.ok(body.startsWith("function buildOrderFromRequest("), "圈出的片段必须以函数声明开头");
+  assert.ok(body.trimEnd().endsWith("}"), "圈出的片段必须以右花括号收尾（函数体是完整的）");
 
   assert.equal(
     /\bawait\b/.test(body),

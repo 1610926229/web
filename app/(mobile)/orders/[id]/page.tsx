@@ -226,7 +226,7 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
  * - `allowedActions.canSubmitComplaint` —— 提交投诉（带上订单 id，自动关联这一单）；
  * - `complaintSummary` —— 投诉过就引到最近一条投诉的详情；
  * - `allowedActions.canReview` —— 评价服务（已完成、未评价、且没有进行中 / 已通过的退款）；
- * - `reviewSummary` —— 评价过就显示星级，并引到我的评价。
+ * - `reviewSummary` —— 评价过就显示**状态**（不显示星级），被驳回时额外给重提入口。
  *
  * 前端只读这些值，不拿 `status` 自己推断——写接口那边还会再校验一次，按钮只是提示，不是权限。
  */
@@ -295,16 +295,25 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
           />
         ) : null}
 
-        {/* 已完成且还没评价：给一个入口；评价过之后换成「我的评价」，不会两个同时出现 */}
+        {/* 已完成且还没评价：给一个入口；评价过之后换成状态入口，不会两个同时出现 */}
         {allowedActions.canReview ? (
           <ActionRow href={`/reviews/new/${detail.id}`} label="评价服务" hint="已完成，可以评价" />
         ) : null}
 
+        {/*
+          评价摘要：**只有状态，没有星级**。一条评价最多有两个星级（商品 / 打手），
+          在订单详情上挑一个显示，等于替用户决定「哪个星级代表这次消费」——
+          那是评价页要回答的问题。这里只回答「评价这件事走到哪一步了」。
+          文案一律用服务端给的 `statusLabel`（审核中 / 已通过 / 已驳回 / 已被管理员隐藏），
+          页面不自己拿 `status` 拼状态名。
+        */}
         {reviewSummary ? (
           <ActionRow
-            href="/reviews"
-            label="我的评价"
-            hint={`已评价 · ${reviewSummary.rating} 星`}
+            // 被驳回时**直接回到表单**（D9 / D14）：这是唯一还能改这条评价的入口。
+            // 其余状态下订单详情不提供任何修改入口，链到「我的评价」。
+            href={reviewSummary.canResubmit ? `/reviews/new/${detail.id}` : "/reviews"}
+            label={reviewSummary.canResubmit ? "重新提交评价" : "我的评价"}
+            hint={reviewSummary.statusLabel}
           />
         ) : null}
       </div>

@@ -1,6 +1,5 @@
 import type { UserRecord } from "@/lib/data/userRepository";
 import type { Companion } from "@/lib/types/companion";
-import { getMockSeedNow } from "./mockClock";
 
 /**
  * Mock 用户与陪玩名单的种子。
@@ -237,22 +236,22 @@ export const userSeed: UserRecord[] = [
  * 这里就不留「先填个数字」的字段。
  *
  * 覆盖的边界（缺一个就会有某个界面状态看不到）：
- * - `cp-1`…`cp-3`、`cp-8`、`cp-9` 当前可选；其中 `cp-3` 与 `cp-8` **没有任何评价**
- *   （详情页显示「暂无评分」而不是 0 分）；
+ * - `cp-1`…`cp-3`、`cp-8`、`cp-9` 当前可选；其中 `cp-2` 与 `cp-8` **没有任何 approved 评价**
+ *   （详情页显示「暂无评分」而不是 0 分）。⚠️ 从 P1-8 起这句话说的是**真实评价记录**
+ *   （`reviewSeed.ts` 里那些关联到实际订单的评价），不再是本文件里手写的数字；
+ *   `cp-2` 与 `cp-8` 之所以是 0，理由不同、都值得留着：`cp-2` **有订单但没人评过打手维度**，
+ *   `cp-8` 则根本没进过任何已完成订单——页面上两者长得一样，成因不同；
  * - `cp-4`（休息中）与 `cp-6`（已排满）**在架但当前不可选**：仍然出现在列表里并标注原因，
  *   不静默隐藏——直接消失会让人以为名单里没有这个人；
  *   `cp-4` 同时是「不可用陪玩不能被写入支付请求」这条服务端规则的验证用例；
  * - `cp-7` **已下架**（`enabled: false`）：不进公开列表，直链打开只有一页只读资料，
  *   没有任何选择或下单入口；
- * - `cp-5` 是超长昵称 + 超长自我介绍，`cp-9` 是超长自我介绍 + 4 条评价
- *   （详情页因此能看到「评价只展示前几条」的状态）；
+ * - `cp-5` 是超长昵称 + 超长自我介绍；
  * - 游戏覆盖 g-delta 与 g-valorant 两个游戏、手游与端游两个大区，
  *   服务标签覆盖目录里的五项。
  * - `cp-10` / `cp-11` 是**唯一两条由入驻审核产生**的记录（`userId` / `applicationId` 都有值），
  *   也是 Mock 身份切换工具里「打手 A / 打手 B」两个身份对应的资料（DEV-1）。
  *
- * 评价时间相对**进程内冻结的基准时间**构造（`getMockSeedNow()`），不写绝对日期：
- * 写死日期的话，过一段时间打开详情页看到的全是几个月前的评价。
  *
  * P8A 给每条记录补上了三个**平台侧**字段：
  * - `cp-1`…`cp-9` 的 `userId: null` / `applicationId: null`：这批陪玩是平台早期数据，
@@ -272,13 +271,22 @@ export const userSeed: UserRecord[] = [
  * ——`tests/companions.test.mjs` 与 `tests/adminCompanionManagement.test.mjs` 按 id 写死了这三条，
  * 新增记录保持 `available: true && enabled: true` 就不会撞上它们。
  */
-const DAY_MS = 24 * 60 * 60 * 1000;
-const COMPANION_SEED_NOW_MS = getMockSeedNow().getTime();
-
-/** 评价时间：相对基准时间往前推若干天。 */
-function reviewDaysAgo(days: number): string {
-  return new Date(COMPANION_SEED_NOW_MS - days * DAY_MS).toISOString();
-}
+/**
+ * ⚠️ **本数组不再有 `rating` / `reviewCount` / `reviews`**（P1-8，`D17`）。
+ *
+ * 这里曾经每一条陪玩都手写着一个形如 `rating: 4.8, reviewCount: 3, reviews: [...]`
+ * 的字面量，页面上那个「4.8 分 · 3 条评价」就是从它来的。它与用户真实提交的评价
+ * **没有任何关系**——用户写一条差评，卡片上的分数纹丝不动；管理员隐藏一条评价，
+ * 那个数字也不变。把一份手写的常量摆在「评分」的位置上，比不显示评分更糟：
+ * 读者会拿它做判断，而它其实什么也没测过。
+ *
+ * 现在陪玩的评分由 `lib/services/reviewAggregates.ts` 从**真实评价仓储**现算：
+ * 只计入 `approved`（`D14`），数量按维度统计（`D15`），与商品侧同源（`R3`）。
+ * 陪玩真实存在的评价在 `lib/mocks/fixtures/reviewSeed.ts` 里，与订单一一对应。
+ *
+ * `completedOrderCount` / `tipsCount` **保留**：它们是平台侧的历史计数，
+ * 不是评价聚合的产物，也没有第二处真值源。它们的口径未变。
+ */
 
 export const companionSeed: Companion[] = [
   {
@@ -297,34 +305,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 128,
-    rating: 4.8,
     tipsCount: 21,
-    reviewCount: 3,
     sortOrder: 10,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-1-r1",
-        nickname: "老板A（占位）",
-        rating: 5,
-        content: "全程在线，节奏很好。（Mock 评价）",
-        createdAt: reviewDaysAgo(4),
-      },
-      {
-        id: "cp-1-r2",
-        nickname: "老板B（占位）",
-        rating: 5,
-        content: "沟通顺畅，按时交付。（Mock 评价）",
-        createdAt: reviewDaysAgo(11),
-      },
-      {
-        id: "cp-1-r3",
-        nickname: "星野（占位）",
-        rating: 4,
-        content: "整体不错，中间等了十分钟。（Mock 评价）",
-        createdAt: reviewDaysAgo(26),
-      },
-    ],
   },
   {
     id: "cp-2",
@@ -341,20 +324,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 29,
-    rating: 5,
     tipsCount: 4,
-    reviewCount: 1,
     sortOrder: 20,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-2-r1",
-        nickname: "日落（占位）",
-        rating: 5,
-        content: "讲得很细，第二把就能自己走了。（Mock 评价）",
-        createdAt: reviewDaysAgo(2),
-      },
-    ],
   },
   {
     id: "cp-3",
@@ -370,14 +342,11 @@ export const companionSeed: Companion[] = [
     serviceTags: ["上分", "语音开黑"],
     available: true,
     unavailableReason: "",
-    // 没有任何评价：详情页要能显示「暂无评分」，而不是用 0 分冒充
+    // 没有任何 approved 评价：详情页要能显示「暂无评分」，而不是用 0 分冒充
     completedOrderCount: 31,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
     sortOrder: 30,
     enabled: true,
-    reviews: [],
   },
   {
     id: "cp-4",
@@ -394,27 +363,9 @@ export const companionSeed: Companion[] = [
     available: false,
     unavailableReason: "该陪玩当前休息中，暂不接单",
     completedOrderCount: 12,
-    rating: 4.1,
     tipsCount: 2,
-    reviewCount: 2,
     sortOrder: 40,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-4-r1",
-        nickname: "叶缘（占位）",
-        rating: 4,
-        content: "打完了，中间换过一次大区。（Mock 评价）",
-        createdAt: reviewDaysAgo(9),
-      },
-      {
-        id: "cp-4-r2",
-        nickname: "阿柴（占位）",
-        rating: 4,
-        content: "还行，回复稍慢。（Mock 评价）",
-        createdAt: reviewDaysAgo(38),
-      },
-    ],
   },
   {
     id: "cp-5",
@@ -432,27 +383,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 306,
-    rating: 4.6,
     tipsCount: 57,
-    reviewCount: 2,
     sortOrder: 50,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-5-r1",
-        nickname: "晚风（占位）",
-        rating: 5,
-        content: "凌晨两点还接单，很难得。（Mock 评价）",
-        createdAt: reviewDaysAgo(1),
-      },
-      {
-        id: "cp-5-r2",
-        nickname: "拾光（占位）",
-        rating: 4,
-        content: "单子有点多，等了一会儿。（Mock 评价）",
-        createdAt: reviewDaysAgo(16),
-      },
-    ],
   },
   {
     id: "cp-6",
@@ -469,20 +402,9 @@ export const companionSeed: Companion[] = [
     available: false,
     unavailableReason: "该陪玩本周已排满，暂不接单",
     completedOrderCount: 74,
-    rating: 4.9,
     tipsCount: 13,
-    reviewCount: 1,
     sortOrder: 60,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-6-r1",
-        nickname: "云开（占位）",
-        rating: 5,
-        content: "很稳，一晚上上了两段。（Mock 评价）",
-        createdAt: reviewDaysAgo(6),
-      },
-    ],
   },
   {
     id: "cp-7",
@@ -499,21 +421,10 @@ export const companionSeed: Companion[] = [
     available: false,
     unavailableReason: "该陪玩已下线",
     completedOrderCount: 58,
-    rating: 4.4,
     tipsCount: 9,
-    reviewCount: 1,
     sortOrder: 70,
     // 已下架：不进公开列表，直链详情只有只读资料页
     enabled: false,
-    reviews: [
-      {
-        id: "cp-7-r1",
-        nickname: "听澜（占位）",
-        rating: 4,
-        content: "已经是最后一单了。（Mock 评价）",
-        createdAt: reviewDaysAgo(52),
-      },
-    ],
   },
   {
     id: "cp-8",
@@ -529,14 +440,11 @@ export const companionSeed: Companion[] = [
     serviceTags: ["陪练"],
     available: true,
     unavailableReason: "",
-    // 刚接单：既没有评价也没有鸡腿，列表卡片要能显示「暂无评分」
+    // 刚接单：既没有 approved 评价也没有鸡腿，列表卡片要能显示「暂无评分」
     completedOrderCount: 3,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
     sortOrder: 80,
     enabled: true,
-    reviews: [],
   },
   {
     id: "cp-9",
@@ -554,42 +462,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 512,
-    rating: 4.9,
     tipsCount: 96,
-    reviewCount: 4,
     sortOrder: 90,
     enabled: true,
-    // 4 条评价 > 详情页上限，用于验证「只展示前几条」的提示确实会出现
-    reviews: [
-      {
-        id: "cp-9-r1",
-        nickname: "老板A（占位）",
-        rating: 5,
-        content: "第三次找他了，还是稳。（Mock 评价）",
-        createdAt: reviewDaysAgo(3),
-      },
-      {
-        id: "cp-9-r2",
-        nickname: "老板B（占位）",
-        rating: 5,
-        content: "全程没换人，体验很好。（Mock 评价）",
-        createdAt: reviewDaysAgo(13),
-      },
-      {
-        id: "cp-9-r3",
-        nickname: "星野（占位）",
-        rating: 5,
-        content: "响应很快，半夜也在。（Mock 评价）",
-        createdAt: reviewDaysAgo(21),
-      },
-      {
-        id: "cp-9-r4",
-        nickname: "阿柴（占位）",
-        rating: 4,
-        content: "价格没变，速度稍慢一点。（Mock 评价）",
-        createdAt: reviewDaysAgo(45),
-      },
-    ],
   },
   {
     // DEV-1 验收用：**由入驻审核产生**的打手 A。
@@ -612,27 +487,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 76,
-    rating: 4.7,
     tipsCount: 12,
-    reviewCount: 2,
     sortOrder: 100,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-10-r1",
-        nickname: "老板A（占位）",
-        rating: 5,
-        content: "约的时间很准，全程没换人。（Mock 评价）",
-        createdAt: reviewDaysAgo(6),
-      },
-      {
-        id: "cp-10-r2",
-        nickname: "青柠（占位）",
-        rating: 4,
-        content: "打得不急不躁，适合新手。（Mock 评价）",
-        createdAt: reviewDaysAgo(19),
-      },
-    ],
   },
   {
     // DEV-1 验收用：由入驻审核产生的打手 B。
@@ -653,19 +510,8 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 41,
-    rating: 4.6,
     tipsCount: 5,
-    reviewCount: 1,
     sortOrder: 110,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-11-r1",
-        nickname: "星野（占位）",
-        rating: 5,
-        content: "排位稳，语音一直在。（Mock 评价）",
-        createdAt: reviewDaysAgo(9),
-      },
-    ],
   },
 ];

@@ -216,8 +216,8 @@ allowBuilds:
 | 类别 | 当前状态 | 引入前提 |
 |---|---|---|
 | **状态管理框架**（Redux / Zustand / Jotai…） | 无 | 必须说明**当前方案具体在哪个场景下做不到**。而不是「项目变大了」 |
-| **ORM**（Prisma / Drizzle…） | 无 | **属 TBD，禁止自行选定**。必须先确认数据库选型 |
-| **DB library**（pg / mysql2…） | 无 | 同上 |
+| **ORM**（Prisma / Drizzle…） | **无，且已裁定不用**（PROD-1A） | **已关闭**：裁定为不使用 ORM。理由见 §十一。引入 ORM 属于推翻已裁定架构，需产品负责人重新裁定 |
+| **DB library**（pg / mysql2…） | **`pg` @ 8.x**（PROD-1A 引入） | **已裁定**：`node-postgres (pg)` 直连。更换驱动需产品负责人确认 |
 | **UI 组件库**（shadcn / Ant Design / MUI…） | 无 | 必须说明现有 Tailwind + 自研组件的缺口。**用户端是移动优先微信 H5**，桌面型组件库默认不合适 |
 | **validation 框架**（zod / yup / valibot…） | 无。当前是手写校验，放在 `lib/constants/*.ts` | 必须说明手写校验在哪一类输入上已经失控 |
 | **event bus** | 无。跨聚合协作靠「同一原子区段内顺序调用写入器」 | 必须说明哪个跨聚合场景**无法**用原子区段表达 |
@@ -232,7 +232,7 @@ allowBuilds:
 
 - ❌ 替换现有技术栈（Next.js / React / Tailwind / pnpm / Node 内置测试）
 - ❌ 为了「更现代」引入并行方案（例如新加一个 HTTP 客户端而 `lib/api/client.ts` 仍在用）
-- ❌ 自己决定数据库或 ORM（**TBD**）
+- ❌ 自行更换数据库、驱动或 ORM（**均已裁定**，见 §十一）
 
 ---
 
@@ -240,8 +240,23 @@ allowBuilds:
 
 | 项 | 状态 |
 |---|---|
-| 数据库选型 | **TBD**。PostgreSQL / MySQL / 其他**均未确认** |
-| ORM 选型 | **TBD**。Prisma / Drizzle / 其他**均未确认** |
+| ~~数据库选型~~ | ✅ **已裁定（PROD-1A）**：`PostgreSQL`。MySQL 不再作为本项目当前候选 |
+| ~~ORM 选型~~ | ✅ **已裁定（PROD-1A）**：**不使用 ORM**。数据访问用 `node-postgres (pg)`；结构变更走**版本化 SQL 迁移文件** |
 | 真实支付渠道接入方式 | **TARGET**（计划 TD-3）。具体 SDK 与流程未确认 |
 | 部署环境与 CI | **TBD**。当前无 CI 配置 |
 | 定时调度器的运行环境（cron / 平台调度 / 常驻进程） | **TBD**。只确认了「必须复用同一个 domain service」 |
+
+## 11.1 数据库与数据访问的已裁定口径（PROD-1A）
+
+**为什么不用 ORM**（产品负责人裁定理由，逐条记录以免日后被「更现代」重新提起）：
+
+1. 项目**已有稳定的 Repository 接口层**——数据库实现只需要**再增加一个实现**，ORM 的建模能力没有用武之地；
+2. 本项目的核心难点是**跨实体的数据库事务**，不是 CRUD 代码生成；
+3. 手写 SQL 让**事务、唯一约束、锁语义**保持显式可见，而这三样正是本项目最需要看清楚的东西；
+4. 给一个「基本能跑」的项目叠加 ORM 的 schema / DSL / 生成器三层抽象，收益低于它带来的不确定性与调试成本。
+
+**结构性后果（不是建议，是约束）：**
+
+- `pg` **只允许**出现在 `lib/data/pg/**`。`lib/services/**`、`app/**` 不得 `import "pg"`，也不得自行读 `DATA_SOURCE` 判断数据源——**切换点只有一个**（`lib/data/*Repository.ts` 的 accessor）。这条由 `tests/pgConfig.test.mjs` 以源码扫描方式强制。
+- 结构变更**一律**通过 `db/migrations/<版本号>_<名字>.sql`。**禁止**用运行时 `CREATE TABLE IF NOT EXISTS` 代替正式迁移（唯一例外是迁移运行器自己引导的记账表 `schema_migrations`，理由见 `lib/data/pg/migrate.ts`）。
+- **分波次迁移是允许的，但 active datasource 的切换必须满足事务闭包完整**：禁止某个跨域事务「一半写 PostgreSQL、一半写 `globalThis` Mock store」。在闭包完整之前，Mock 仍可以是 active datasource。

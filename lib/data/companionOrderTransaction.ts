@@ -26,6 +26,7 @@ import {
   findCompanionReleaseIdByKey,
 } from "./mockCompanionReleaseRepository";
 import { readCompanionRecord } from "./mockCompanionRepository";
+import { appendCompanionService } from "./mockCompanionServiceRepository";
 import {
   applyDispatchAccepted,
   applyDispatchToPublic,
@@ -452,7 +453,7 @@ export async function cancelAcceptedOrder(
  * 2. status === "serving"                  → replayed（已经是我的服务中订单，一个字节都不写）
  * 3. 结构校验 canTransitionOrder(…, serving) → false 则 not-startable（对外 400）
  * 4. 领域 Guard：status 必须恰好是 accepted → false 则 not-startable（对外 400）
- * 5. 原子写入（applyOrderServing）
+ * 5. 原子写入（订单 → serving + servingAt，**并追加一条服务历史**，P1-7）
  * ```
  *
  * - **第 1 步先于第 2 步**：归属是**事实**，状态只是它的属性。先看状态的话，
@@ -532,6 +533,25 @@ export async function startCompanionOrder(
       changed: false,
     };
   }
+
+  // P1-7（产品裁定 `D10` 附加要求）：真实进入 `serving` 必须留下一条**只增不改**的
+  // 服务历史。它与上面那次订单写入在**同一段无 `await` 的同步代码**里，因此不可能出现
+  // 「订单写着服务中、历史里却没有这次服务」。
+  //
+  // ⚠️ 为什么不能只靠 `Order.servingAt`：它表达的是「**当前这位**打手从何时开始服务」
+  // （P0-11 §九 D-Q1），换人回池时会被清空——于是 A 服务过、后来换成 B，
+  // **A 的服务时刻就再也不存在**。而「常用打手」正要以「谁真实服务过」为准。
+  //
+  // ⚠️ 写在这里而不是 `applyOrderServing` 里：写入器（`mockPaymentRepository`）
+  // 只负责订单本身，跨仓储的历史由**伪事务**串起来，与接单事件 / 退出历史同一分工。
+  appendCompanionService({
+    orderId: written.updated.id,
+    companionId: written.updated.actualCompanionId ?? ctx.companionId,
+    dispatchId: dispatchStore().dispatchIdByOrder.get(written.updated.id) ?? null,
+    servingAt: written.updated.servingAt ?? ctx.at,
+    companionName: written.updated.companion?.name ?? order.companion?.name ?? "",
+    companionAvatarUrl: written.updated.companion?.avatarUrl ?? order.companion?.avatarUrl ?? "",
+  });
 
   // —— 原子区段结束 ——
 

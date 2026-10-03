@@ -12,6 +12,7 @@ import {
   DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED,
   plusMinutes,
 } from "../lib/constants/dispatch.ts";
+import { buildCompanionUsage } from "../lib/constants/bossStats.ts";
 import { ORDER_STATUS_LABELS, canTransitionOrder } from "../lib/constants/orders.ts";
 import { acceptDispatch } from "../lib/data/companionDispatchTransaction.ts";
 import {
@@ -20,6 +21,10 @@ import {
 } from "../lib/data/companionOrderTransaction.ts";
 import { getCompanionReleaseRepository } from "../lib/data/companionReleaseRepository.ts";
 import { getDispatchRepository } from "../lib/data/dispatchRepository.ts";
+import {
+  deriveLegacyServiceEvents,
+  mockCompanionServiceRepository,
+} from "../lib/data/mockCompanionServiceRepository.ts";
 import { getNotificationRepository } from "../lib/data/notificationRepository.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
 import { getAdminOrderDetail } from "../lib/services/adminOrders.ts";
@@ -152,6 +157,16 @@ async function dispatchOf(orderId) {
 
 async function releasesOf(orderId) {
   return getCompanionReleaseRepository().listReleasesByOrderId(orderId);
+}
+
+/**
+ * 服务历史事件表的**全量**（P1-7 `D7` / `D10`）。
+ *
+ * ⚠️ 断言只用**前后差值**，不用绝对条数：本文件不重置存储，预置数据与前面用例的写入
+ * 都可能已经留下事件。这与本文件「断言不依赖全局列表长度」那条纪律是同一件事。
+ */
+async function serviceEventsOf() {
+  return mockCompanionServiceRepository.listServiceEvents();
 }
 
 /** 下单用户的收件箱。通知是逐字比较的对象——条数与内容都必须一模一样。 */
@@ -399,6 +414,68 @@ test("开始 3b：预置的 serving 单走同一条重放路径——`servingAt`
 
   assert.deepEqual(await orderOf(SEEDED_SERVING), before, "重放不写任何字段");
   assert.deepEqual(await releasesOf(SEEDED_SERVING), []);
+});
+
+test("开始 3c：真实开始服务会在**同一次写入**里留下恰好一条服务历史（P1-7 `D7` / `D10`）", async () => {
+  // 这一条是 P1-7 加在 `startCompanionOrder` 里的那半个写入点（`appendCompanionService`）
+  // 唯一的生产路径覆盖。「常用打手」的准确性完全依赖它：把它删掉，面板**不会报错**，
+  // 而是悄悄退回 `deriveLegacyServiceEvents()` 的下界——换过人的历史服务永久丢失，
+  // 而那正是 `D7` / `D10` 要解决的原始缺陷。没有这条用例，那种回退**不会被任何测试发现**。
+  const { user, order, acceptedAt } = await acceptedOrder(COMPANION_A);
+
+  const before = await serviceEventsOf();
+  const startedAt = plusMinutes(acceptedAt, 30);
+
+  const outcome = await startCompanionOrderTransaction({
+    companionId: COMPANION_A,
+    orderId: order.id,
+    at: startedAt,
+  });
+  assert.equal(outcome.kind, "ok");
+
+  const after = await serviceEventsOf();
+  const added = after.filter((event) => !before.some((old) => old.id === event.id));
+  assert.equal(added.length, 1, "一次 accepted → serving 恰好写一条服务历史");
+
+  // 事件必须描述**这一次**服务：订单、打手、时刻三者都要与订单上冻结的那一份一致
+  const [event] = added;
+  const stored = await orderOf(order.id);
+  assert.equal(event.orderId, order.id);
+  assert.equal(event.companionId, COMPANION_A);
+  assert.equal(event.companionId, stored.actualCompanionId);
+  assert.equal(event.servingAt, startedAt);
+  assert.equal(event.servingAt, stored.servingAt, "历史里的时刻与订单上的 servingAt 必须是同一个");
+  assert.equal(event.dispatchId, (await dispatchOf(order.id)).id, "派单 id 一并留档");
+  assert.equal(event.companionName, stored.companion?.name ?? "", "名字是**快照**，不读当前打手实体");
+  assert.equal(event.companionAvatarUrl, stored.companion?.avatarUrl ?? "");
+
+  // 重放（重复点击 / 服务层同一动作）**不得**多记一条：否则「常用打手」的次数会虚高
+  const replay = await startCompanionOrderTransaction({
+    companionId: COMPANION_A,
+    orderId: order.id,
+    at: plusMinutes(startedAt, 60),
+  });
+  assert.equal(replay.kind, "replayed");
+  assert.deepEqual(await serviceEventsOf(), after, "重放不写任何事件");
+
+  // ⚠️ 这一单现在**同时**出现在两个来源里：事件表（上面刚写的那条）与 legacy 派生
+  // （订单的 `servingAt` / `actualCompanionId` 都在，派生条件成立）。
+  // 这不是缺陷——派生描述的是「存量数据的可获得性」，而这一单在写入之前**确实**只能靠派生。
+  // 但它意味着**去重是必需的**：两边都算就会把同一次服务数成两次。
+  const derived = deriveLegacyServiceEvents().filter((row) => row.orderId === order.id);
+  assert.equal(derived.length, 1, "派生照旧看得到这一单——正因为如此，去重不能省");
+
+  // 端到端钉住「一次真实服务只数一次」。去重坏了页面上不会报错，只会让「常用打手」
+  // 的次数偏大——这正是本用例存在的理由。
+  const ordersOfUser = await getPaymentRepository().listOrdersByUser(user);
+  const usage = buildCompanionUsage(ordersOfUser, [
+    ...(await serviceEventsOf()),
+    ...deriveLegacyServiceEvents(),
+  ]);
+
+  assert.equal(usage.length, 1, "这位用户只服务过一位打手");
+  assert.equal(usage[0].companionId, COMPANION_A);
+  assert.equal(usage[0].serviceCount, 1, "事件表与 legacy 派生描述的是同一次服务，必须只算一次");
 });
 
 // ————————————————————————— 二、谁不能开始 —————————————————————————

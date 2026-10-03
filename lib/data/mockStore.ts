@@ -97,6 +97,14 @@ export type MockStoreName =
    */
   | "companionAccept"
   /**
+   * 服务事件（**真实进入 `serving`** 留下的只增不改历史）。P1-7 起由进入服务的事务写入、
+   * **没有预置数据、不 backfill**。它存在的唯一理由是「`Order.servingAt` 只表达
+   * **当前这位**打手，换人时会被清空」——先后有几位打手真实服务过这一单，
+   * 只能由这张表回答（产品裁定 `D10` 附加要求）。
+   * 见 `lib/data/mockCompanionServiceRepository.ts`。
+   */
+  | "companionService"
+  /**
    * 打手收益（订单完成后生成、随投诉窗口冻结、到期释放）。P0-9 起由完成事务写入，
    * 之后只被 `sweepMaturedEarnings` 改状态，**没有预置数据**
    * （P0-9 之前就已经 completed 的历史订单不回溯补收益，见 `lib/types/order.ts`

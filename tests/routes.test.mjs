@@ -668,7 +668,10 @@ test("列表项与详情的共有字段只有一份：同一个字段不会在�
     3,
     "列表项与详情应当共用同一份共有字段（一个定义 + 两处引用）",
   );
-  assert.ok(source.includes("...toCompanionBase(companion, gameNameById)"));
+  // ⚠️ P1-8 之后共有字段多了一位入参：评分与评价数不再存在实体上，
+  // 而是由调用方传入的**同一份**聚合结果（`stats`）算出来（`D17` / `R3`）。
+  // 断言跟着入参一起更新，但守的东西不变：两份 DTO 仍然从同一个函数出发。
+  assert.ok(source.includes("...toCompanionBase(companion, gameNameById, stats)"));
 });
 
 test("陪玩的选择交互不产生任何业务结果：不发请求、不写存储、不进结算页", () => {

@@ -389,8 +389,16 @@ export type OrderAllowedActions = {
   /**
    * 能不能评价这一单。
    *
-   * 与退款同理，**不是只看订单状态**：还要看这一单有没有评价、有没有进行中 / 已通过的退款
-   * （见 `lib/constants/reviews.ts` 的 `canReviewOrder`）。前端只按这个值显示入口。
+   * ⚠️ 判据是**这一单有没有完成过服务**（`completedAt`）＋**有没有评价过**，
+   * 见 `lib/constants/reviews.ts` 的 `canReviewOrder`。
+   *
+   * ⚠️ **退款不参与这个判断**（P1-8 `D18` / `D19`）：已经完成过的订单，
+   * 哪怕后来部分或全额退款，照样可以评价。因此这里**不能**用订单当前状态
+   * （`status === "completed"`）来判断——一张全额退款的订单状态是 `refunded`，
+   * 但它仍然可评；反过来，`paid → refunded` 那种**没完成就退款**的订单一律不可评，
+   * 而它的状态同样不是 `completed`。两个方向的差异都只有 `completedAt` 分得清。
+   *
+   * 前端只按这个值显示入口，不自己推断。
    */
   canReview: boolean;
 };

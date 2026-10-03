@@ -72,6 +72,15 @@ export const ADMIN_ORDERS_PAGE_TITLE = "订单管理";
 export const ADMIN_REFUNDS_PAGE_TITLE = "退款审核";
 export const ADMIN_COMPLAINTS_PAGE_TITLE = "投诉处理";
 /**
+ * 评价审核（P1-8）。
+ *
+ * ⚠️ 它是一张**公开闸**，不是数据删除（`R2`）：管理员只能改「这条内容能不能被公开看到」，
+ * 四个动作（通过 / 驳回 / 隐藏 / 恢复公开）里**没有**任何「改星级 / 改正文」的位置（`D12`）。
+ * 页面的标题与口径说明都从这里取，前后台不各写一份。
+ */
+export const ADMIN_REVIEWS_PAGE_TITLE = "评价审核";
+export const ADMIN_REVIEWS_DETAIL_TITLE = "评价审核详情";
+/**
  * 售后工作台（P1-3）。
  *
  * ⚠️ 它是一个**聚合入口**，不是把退款与投诉合成一个模块——
@@ -278,6 +287,16 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     href: "/admin/aftersales",
     label: ADMIN_AFTERSALES_PAGE_TITLE,
     description: "退款与投诉的混合待办队列",
+  },
+  // P1-8：评价审核。它是**内容公开闸**，不是售后动作——不改任何订单、不产生退款，
+  // 只决定一条用户评价能不能出现在商品页与打手页上。因此排在售后工作台之后、
+  // 客服账号之前：它与「售后」相邻是因为两者都是「平台对用户提交的东西做一次判定」，
+  // 但它不属于售后流程（`D20`：退款与评价审核是两条互不干涉的线）。
+  {
+    key: "reviews",
+    href: "/admin/reviews",
+    label: ADMIN_REVIEWS_PAGE_TITLE,
+    description: "用户评价的公开审核：通过、驳回、隐藏与恢复",
   },
   // P8D-1：客服账号。**独立于用户与管理员**的第三类身份，
   // 只管「谁可以登录 /staff 的客服工作台」，与用户端名单、排行榜没有交集。

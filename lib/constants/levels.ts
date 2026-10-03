@@ -25,16 +25,53 @@ import type {
  * 用户端订单没有「待付款」状态（订单只在支付成功那一刻生成），因此口径就是
  * **已完成**：已付款 / 已接单 / 护航中都还在进行中，已退款要把钱退回去。
  *
- * 当前没有部分退款模型，因此**不自行发明**部分退款算法：已退款订单一分都不计。
+ * ⚠️ **P1-7 起金额口径变了，状态口径没变。** 产品裁定（`R1`）把「钱」与「行为历史」
+ * 分开：钱的公式是净留存（见 `effectiveSpendOf`），但**计不计入**仍然只看状态。
+ * 注意「已全额退款」的订单状态已变成 `refunded`，本就在这个过滤之外——
+ * 它的净额本来也会是 0，两条路殊途同归。
  */
 export const CONSUMPTION_ORDER_STATUS: OrderStatus = "completed";
 
 /**
  * 消费金额的统计口径说明。页面上必须原样展示这一句——
  * 用户看到「累计有效消费」时最容易自己脑补一个口径。
+ *
+ * ⚠️ **P1-7 起这句话必须与 `effectiveSpendOf` 同时改。** 旧文案说的是「已完成**且未退款**」，
+ * 那句在部分退款订单上**已经不再成立**（现在按净额计入），留着它等于页面在说谎。
  */
 export const CONSUMPTION_CALCULATION_NOTICE =
-  "累计有效消费金额只统计本人「已完成」且未退款的订单实付金额；已付款、已接单、护航中、已退款以及支付失败、支付取消的订单均不计入；优惠券领取与鸡腿记录不产生消费金额。";
+  "累计有效消费金额只统计本人「已完成」订单的实付金额，并减去已经退还给你的金额（不会低于 0）；已付款、已接单、护航中以及已全额退款的订单不计入；部分退款的订单按退款后的净额计入；优惠券领取与鸡腿记录不产生消费金额。";
+
+/**
+ * 单笔订单的**净留存消费金额**（分）—— 全仓**唯一**的金额公式（P1-7 `R2`）。
+ *
+ * ```
+ * max(0, actualPaidAmount − refundedAmount)
+ * ```
+ *
+ * 这是产品在 `docs/01-requirements/超哥电竞_业务流程表.md`（§19 消费累计）那句
+ * 「消费累计按 `actualPaidAmount` 增加。**退款以后：按真实退款金额回滚消费累计**」
+ * 的落地。同一句也早已被 `docs/02-tech-design/database-schema.md` 的 ConsumptionLevel
+ * 一节记成 TARGET 形式 `Σ max(0, actualPaidAmount − refundedAmount)`。
+ *
+ * ⚠️ **`R2`：这个公式只允许有一份实现。** 消费等级、用户消费排行榜、老板累计消费、
+ * 最近 30 天消费四处**全部**经 `sumEffectiveSpend` / `sumSpendWithinRange` 走到这里。
+ * 任何地方出现第二份 `actualPaidAmount - refundedAmount` 都是缺陷——两处迟早算出两个数。
+ *
+ * 三条收敛，保证金额永远是**非负整数分**：
+ * - `actualPaidAmount` 非有限值 → 0（调用方另有过滤，这里是第二道）；
+ * - `refundedAmount` 非有限值 → 当 0（**不是**当无穷：读不出来时不该把钱全扣掉）；
+ * - 结果 `max(0, …)` —— 防御「已退金额大于实付」的脏数据，**绝不产生负数**。
+ *
+ * ⚠️ 退款会让**金额**下降，因此累计消费与消费等级**允许**随之下降；
+ * 但退款**不会**抹掉订单本身（`R1`：退款 ≠ 删除历史），订单笔数与行为类统计不受影响。
+ */
+export function effectiveSpendOf(order: Order): number {
+  if (!Number.isFinite(order.actualPaidAmount)) return 0;
+  const paid = Math.trunc(order.actualPaidAmount);
+  const refunded = Number.isFinite(order.refundedAmount) ? Math.trunc(order.refundedAmount) : 0;
+  return Math.max(0, paid - refunded);
+}
 
 /**
  * 累计有效消费金额（分）。
@@ -44,18 +81,13 @@ export const CONSUMPTION_CALCULATION_NOTICE =
  * 1. **只累计 `completed`**：其余状态一律跳过，函数本身不信任调用方已经筛过；
  * 2. **同一订单只算一次**：按订单 id 去重。仓储返回的就是一个按 id 键控的 Map，
  *    正常不会有重复；这里仍显式去重，使「不重复累计」成为可单独测试的保证；
- * 3. **金额取订单的服务端快照 `actualPaidAmount`（用户实付）**，不读任何客户端字段，
- *    也不做四舍五入之外的处理（分是整数，本函数保持整数运算）。
+ * 3. **每笔金额取 `effectiveSpendOf`**（实付减去已退，不低于 0），不读任何客户端字段。
  *
  * ⚠️ 第 3 条读的是**实付**，不是 `totalAmount`（P1-4 修正）。
  * `totalAmount` 是**优惠前**应付总额；接满减券之前两者恒等，所以这个错一直看不出来。
  * 两者不等之后继续读它，就会让**用券用户的累计消费虚高**——而 `CONSUMPTION_CALCULATION_NOTICE`
  * （用户可见文案）与 `docs/02-tech-design/database-schema.md` 的 ConsumptionLevel 一节
  * 都写的是「按 `actualPaidAmount` 计入」，代码与它自己的口径说明当场自相矛盾。
- *
- * ⚠️ 这与 `database-schema.md` 里那条**部分退款** TBD（`Σ max(0, actualPaidAmount − refundedAmount)`）
- * 是两件事，不要混：本条只解决「有券时读哪个字段」，部分退款要不要按实退扣减仍未裁定，
- * 因此这里**不做**任何 `refundedAmount` 扣减，保持现状。
  */
 export function sumEffectiveSpend(orders: readonly Order[]): number {
   const counted = new Set<string>();
@@ -67,7 +99,7 @@ export function sumEffectiveSpend(orders: readonly Order[]): number {
     if (!Number.isFinite(order.actualPaidAmount)) continue;
 
     counted.add(order.id);
-    total += Math.trunc(order.actualPaidAmount);
+    total += effectiveSpendOf(order);
   }
 
   return total;
@@ -78,6 +110,33 @@ export function countEffectiveOrders(orders: readonly Order[]): number {
   const counted = new Set<string>();
   for (const order of orders) {
     if (order.status !== CONSUMPTION_ORDER_STATUS) continue;
+    counted.add(order.id);
+  }
+  return counted.size;
+}
+
+/**
+ * 「累计订单数」（P1-7 `D1`）—— 本人**历史上成功创建的 Order 数量**。
+ *
+ * 与 `countEffectiveOrders` 是**两个不同的指标**，刻意用不同的名字：
+ *
+ * | | `countEffectiveOrders` | `countLifetimeOrders` |
+ * |---|---|---|
+ * | 数的是 | 参与消费统计的**有效**订单 | **下过**的订单 |
+ * | 状态过滤 | 只数 `completed` | **不过滤** |
+ * | 退款后 | 全额退款退出计数 | **仍然计入** |
+ *
+ * 产品裁定原文：「退款只影响『消费金额』，不抹掉『我曾经下过这一单』的历史事实。」
+ * 并明确要求**不得**为了复用 `countEffectiveOrders()` 而改变它的产品语义——
+ * 因此这里是**新增**一个函数，而不是改那一个。
+ *
+ * ⚠️ 用户端订单没有「待付款」状态（订单在支付成功那一刻才生成，
+ * 见 `lib/services/checkout.ts`），因此「存在于仓储里的订单」**就等于**「成功付款过的订单」，
+ * 不需要也不应该再按 `paidAt` 之类去筛。这里仍然按 id 去重，理由与金额函数一致。
+ */
+export function countLifetimeOrders(orders: readonly Order[]): number {
+  const counted = new Set<string>();
+  for (const order of orders) {
     counted.add(order.id);
   }
   return counted.size;

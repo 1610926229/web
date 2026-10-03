@@ -569,6 +569,11 @@ test("页面必须标注 Mock 配置与统计口径，且不直接引用 lib/moc
     "components/rights/PrivilegeList.tsx",
     "components/rights/LevelProgress.tsx",
     "components/mine/LevelSummaryPanel.tsx",
+    // P1-7：老板数据面板的这两个同样是客户端组件（`"use client"`）。
+    // ⚠️ 新加客户端组件时要**一起加到这里**——这是本清单唯一的作用，
+    // 漏加了不会红，只会让那条「Mock 不得进浏览器产物」的规则在这两个文件上静默失效。
+    "components/mine/BossStatsCard.tsx",
+    "components/mine/BossStatsPanel.tsx",
   ]) {
     // 先去掉注释：注释里写一句「数据来自 lib/mocks/fixtures/...」不算引用
     const code = stripComments(readFileSync(resolveSource(file), "utf8"));

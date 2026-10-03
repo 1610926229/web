@@ -136,7 +136,24 @@ export type AdminAuditAction =
   | "coupon.create"
   | "coupon.update"
   | "coupon.enable"
-  | "coupon.disable";
+  | "coupon.disable"
+  // ————— 评价审核（P1-8）—————
+  // 四个动作，正好是评价状态机上「由管理员触发的每一步」：
+  // approve（待审 → 公开）、reject（待审 → 驳回）、hide（公开 → 隐藏）、
+  // unhide（隐藏 → 公开）。第四个不是第三个的反向简写——「谁在什么时候把一条
+  // 已经隐藏的评价放回公开列表」是一个必须能独立回答的问题，
+  // 合并成「又 hide 了一次」会让这句问话无从查起。
+  //
+  // ⚠️ **没有 `review.update`**：管理员改不了星级与正文（D12），
+  // 因此不存在「编辑评价」这个动作，词表里也就不该留一个永远写不下的名字。
+  //
+  // ⚠️ **没有 `review.resubmit`**：重新提交是**用户**的动作（D9），
+  // 审计记的是平台侧做过什么；用户改自己的内容不在审计范围内
+  // （与「撤销退款」不进审计是同一条理由）。
+  | "review.approve"
+  | "review.reject"
+  | "review.hide"
+  | "review.unhide";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
 export type AdminAuditTargetType =
@@ -176,7 +193,19 @@ export type AdminAuditTargetType =
    * 而模板的改动对已发出去的券**不追溯**——这在 before/after 里看得见：
    * 两次快照记的都是模板字段，与任何一张 Claim 无关。
    */
-  | "coupon";
+  | "coupon"
+  // ————— 评价审核（P1-8）—————
+  /**
+   * 订单评价（`OrderReview`）。`targetId` 是 `OrderReview.id`。
+   *
+   * ⚠️ **不是 `Order`**：评价的审核状态与订单状态是两条互不干涉的线
+   * （D7 / D20：订单全额退款不会让已公开的评价消失）。用订单 id 当审计目标，
+   * 事后就会把「这一单的评价被隐藏过」与「这一单本身发生过什么」混在一条时间线上。
+   *
+   * ⚠️ 隐藏与恢复公开记的是**同一个 `targetId`**：这正是 `D11` 要求可逆的落点——
+   * 一条评价的完整审核历史，是同一目标上按时间排列的若干条审计。
+   */
+  | "review";
 
 /**
  * 精简快照。

@@ -1,4 +1,4 @@
-import type { ReviewRating } from "./review";
+import type { PublicReviewItem } from "./review";
 
 /**
  * 陪玩的类型与对外 DTO。
@@ -85,35 +85,30 @@ export type Companion = {
   unavailableReason: string;
 
   completedOrderCount: number;
-  /** 平均分；**没有评价时为 null**（原型显示「暂无评分」），不用 0 冒充 */
-  rating: number | null;
   /** 收到的鸡腿数（展示用的计数，不涉及任何金额换算规则） */
   tipsCount: number;
-  reviewCount: number;
 
   /** 排序权重，越小越靠前；相等时按 id 兜底，保证分页顺序稳定 */
   sortOrder: number;
   /** 是否上架 */
   enabled: boolean;
-
-  /** Mock 评价摘要（详情页展示用）。列表 DTO 不带正文 */
-  reviews: CompanionReview[];
 };
 
 /**
- * 陪玩评价摘要。
+ * ⚠️ **本实体已不再携带评分**（P1-8 `D17`）。
  *
- * ⚠️ 只有「昵称 + 星级 + 正文 + 时间」四项，**没有 userId、没有 orderId、没有凭证**：
- * 陪玩详情是游客可见的公开页面，评价摘要里不需要、也不应该出现任何可以反查到
- * 具体订单或具体用户的信息。
+ * 这里曾经有 `rating` / `reviewCount` / `reviews` 三个字段，值来自 `seed.ts` 里手写的字面量
+ * （`rating: 4.8, reviewCount: 3, reviews: [...]`）。它们与用户真实提交的评价**没有任何关系**：
+ * 用户写一条五星评价，陪玩卡片的评分纹丝不动；管理员隐藏一条评价，那个数字也不变。
+ * 换句话说，页面上那个「4.8」从来就不是这个陪玩的评分，只是一个长得像评分的常量。
+ *
+ * 现在这三个值由 `lib/services/reviewAggregates.ts` 在**组 DTO 的那一刻**从评价仓储算出来：
+ * 只有 `approved` 的评价计入（`D14`），数量按**维度**统计（`D15`），商品侧与打手侧同源（`R3`）。
+ * 实体因此不再需要这三个字段——留着它们，就等于留着一条可以绕过聚合的旧真值源。
+ *
+ * 公开面的形状（`CompanionListItem.rating` / `CompanionDetail.reviews`）没有变，
+ * 变的只是**谁在什么时候把它算出来**：从「种子写死」变成「每次读取现算」。
  */
-export type CompanionReview = {
-  id: string;
-  nickname: string;
-  rating: ReviewRating;
-  content: string;
-  createdAt: string;
-};
 
 /** 陪玩关联的游戏（筛选用的 id + 展示用的名称，一次给全，前端不用自己维护映射）。 */
 export type CompanionGameTag = {
@@ -166,7 +161,12 @@ export type CompanionPage = {
  */
 export type CompanionDetail = Omit<CompanionListItem, "introBrief"> & {
   intro: string;
-  reviews: CompanionReview[];
+  /**
+   * 公开评价条目。**类型与商品详情用的是同一个 `PublicReviewItem`**（`R3`）——
+   * 两侧的形状若各写一份，就会出现「商品页带了订单号、打手页没有」这类
+   * 只在一边被发现的泄漏。
+   */
+  reviews: PublicReviewItem[];
   /** 评价是否只展示了前若干条 */
   reviewsTruncated: boolean;
   /**

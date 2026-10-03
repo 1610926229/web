@@ -298,14 +298,16 @@ function buildCompanionFromApplication(input: {
     enabled: true,
 
     // 统计从零开始，**不继承任何东西**：没有订单、没有评价、没有鸡腿。
-    // `rating` 用 null 而不是 0：0 分与「暂无评分」是两件事。
+    // 已完成单数与鸡腿数是**记录**（可以数出来），因此给 0。
+    //
+    // ⚠️ P1-8 起**没有 `rating` / `reviewCount` / `reviews` 可以写了**（`D17`）：
+    // 那三项不再是资料上的字段，而是从真实评价记录聚合出来的结果
+    // （`lib/services/reviewAggregates.ts`）。新护航一条评价都没有，
+    // 因此它在页面上显示的就是「暂无评分」——不需要、也不可能在这里预置一个数字。
     completedOrderCount: 0,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
 
     sortOrder: input.sortOrder,
-    reviews: [],
   };
 }
 

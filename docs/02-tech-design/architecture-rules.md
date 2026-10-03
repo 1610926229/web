@@ -109,12 +109,28 @@ Route Handler **只做四件事**：
 
 ## 2.4 Repository（`lib/data/*Repository.ts`）—— 数据访问层
 
-**结构**（CURRENT，全仓 23 个仓储同一形态）：
+**结构**（CURRENT，全仓 **28** 个仓储）：
+
+**A. 仅 Mock 形态（26 个）**：
 
 ```
 lib/data/xxxRepository.ts      类型 + 接口 + getXxxRepository()（硬编码返回 mock 单例）
 lib/data/mockXxxRepository.ts  唯一实现，通过 getMockStore 拿 store
 ```
+
+**B. 双实现形态（2 个，PROD-1A 竖切片：`favorite` / `suggestion`）**：
+
+```
+lib/data/xxxRepository.ts        类型 + 接口 + getXxxRepository()（按 DATA_SOURCE 二选一）
+lib/data/mockXxxRepository.ts    Mock 实现
+lib/data/pg/xxxRepository.ts     PostgreSQL 实现，createXxxRepository(db) 工厂
+```
+
+**⚠️ 两种形态的共同点，也是唯一必须守住的东西：`getXxxRepository()` 返回的是同一个接口。**
+调用方（`lib/services/**`、`app/**`）**永远看不到**自己拿到的是哪一份实现，也**不得**自己判断
+数据源。B 形态把「换数据源」收敛到 accessor 里的一次三目运算，因此上层一行都不用改——
+这一点由 `tests/pgConfig.test.mjs` 以源码扫描强制（服务层/路由层不得出现 `from "pg"`、
+`lib/data/pg`、`DATA_SOURCE`）。
 
 **禁止**：仓储不判断业务合法性。
 
@@ -143,9 +159,20 @@ adminWriteSupport.ts（公共支持，不是事务）
 **区段内出现 `await` 就是 bug。** 这是代码评审的逐段必查项。
 
 ```ts
-// ⚠️ 仅 Mock 阶段成立。换成真实数据库后**必然失效**——
+// ⚠️ 仅对**仍在 Mock 上**的实体成立。换成真实数据库后**必然失效**——
 // 届时每次查询都是 await，区段不再原子，必须改为数据库事务。
 ```
+
+**⚠️ 这条约束的适用范围正在缩小，但今天仍然覆盖绝大多数事务。** PROD-1A 已经把
+「数据库事务」的手段建好了（`lib/data/pg/executor.ts` 的 `withTransaction(tx => …)`，
+`tx` 本身就是一个 `PgQueryable`），但**只有 `favorite` / `suggestion` 两个实体迁了**。
+上表列出的 16 个 `*Transaction.ts` 文件**全部**仍在 Mock 上，因此**伪事务惯用法对它们依然是唯一正确的写法**，
+「区段内出现 `await` 就是 bug」这条评审项**一字未放松**。
+
+**⚠️ 反过来，下面这件事是本轮明令禁止的**：在某个跨域事务的参与实体只有一部分迁入 PostgreSQL 时，
+把该业务链切到 PostgreSQL。**绝不允许「一半写 PostgreSQL、一半写 `globalThis` Mock store」**——
+那既没有原子性（跨存储无法一起回滚），又没有任何机制能发现它。切换的前提是**该事务的参与实体已全部迁完**。
+判据与理由见 `docs/03-dev/rounds/PROD-1A/02-decisions.md`。
 
 ## 2.6 types / constants
 
@@ -416,7 +443,7 @@ sweepMaturedEarnings(now)            // CURRENT（P0-9）
 | — | **自动罚款规则**仍未定义；但 2026-09-23 已确认 accepted 主动取消当前 P0 **不处罚**。管理员人工余额调整/会费批扣是后续独立资金能力，不等于自动罚款 | V0.3 |
 | — | **用户封禁** | 全仓无对应实体 |
 | — | **换人/改派的复杂 Assignment 最终结构**仍不做；P0 已确认采用最小可用方案：客服可直接换人、次数不限，并保留最小退出历史。复杂聚合/统一操作史仍 TBD | V0.3 |
-| — | **真正的数据库选型（PostgreSQL / MySQL）与 ORM 选型（Prisma / Drizzle）** | **均未确认，禁止自行选定** |
+| — | ~~**真正的数据库选型（PostgreSQL / MySQL）与 ORM 选型（Prisma / Drizzle）**~~ ✅ **已裁定** | **产品负责人裁定（PROD-1A）**：数据库 `PostgreSQL`（MySQL 不再作为候选）；数据访问用 `node-postgres (pg)` 直连，**不使用任何 ORM**；结构变更走**版本化 SQL 迁移文件**。裁定原文与理由见 `docs/03-dev/rounds/PROD-1A/02-decisions.md`。**约束**：分波次迁 PostgreSQL 是允许的，但**禁止在某个跨域事务只有一部分参与实体迁入 PostgreSQL 时把该业务链切过去**（active datasource 的切换必须满足事务闭包完整） |
 
 ## 7.3 P0-5.5 批次边界（**已确认**）
 

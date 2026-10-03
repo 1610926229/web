@@ -16,8 +16,29 @@
 > ⚠️ P1-5 更新：**137 → 138**，**属于 P1-5 的只有一件**：
 > - `/api/rankings/companions`（面向用户，无守卫）：打手三榜的公开读取 —— **P1-5 新增**。
 >
-> 口径：本行的数字以 `find app/api -name route.ts | wc -l` 的实测为准，**不按增量推算**
-> ——推算出来的数正是上一版 136 对不上的原因。
+> ⚠️ P1-7 更新：**+1**，属于 P1-7 的只有一件：
+> - `/api/me/boss-stats`（`requireUser`）：老板数据面板的只读聚合（累计订单数 / 累计消费 /
+>   最近 30 天消费 / 常玩游戏 Top3 / 常用打手 Top3），见 §3。
+>
+> ⚠️ **实测总数是 147**（`admin` 71 · `staff` 25 · `companion` 12 · `me` 4）。
+> P1-7 只新增了 **1 个** `route.ts`，因此 **138 → 147 的其余差额不是 P1-7 造成的**：
+> 本文档此前已经落后于仓库（`admin` 由 64 增至 71 等），那段差额由 P1-6 前后的轮次累积，
+> 未在本文档补记。这里如实记下实测值，**不做「按增量推算」**——推算正是上一版对不上的原因。
+> 补记那段差额需要逐条核对归属，不属于 P1-7 的范围，留给文档同步轮次处理。
+>
+> 口径：本行的数字以 `find app/api -name route.ts | wc -l` 的实测为准，**不按增量推算**。
+>
+> ⚠️ P1-8 更新：**147 → 154**。P1-8 新增的 `route.ts` 是 **7 个**，两个口径不要混读：
+>
+> | 口径 | 数量 | 是哪些 |
+> |---|---|---|
+> | `admin` 子计数增量 | **6** | `/api/admin/reviews`、`/api/admin/reviews/[id]`、以及 `[id]/{approve,reject,hide,unhide}`（见 §12.10）。`admin` 由 **71 → 77** |
+> | 总数增量 | **7** | 上面 6 个 + **1 个用户端** `POST /api/reviews/[id]/resubmit`（被驳回后重提） |
+>
+> ⚠️ **`POST /api/orders/[id]/reviews` 与 `GET /api/reviews` 是本轮之前就存在的地址**，
+> 不占上面任何一条——本轮改的是它们的**语义**（单维度 → 双维度、提交即终态 → 从 `pending` 起），
+> 地址没变，所以 `route.ts` 文件数不变。
+> 147 + 7 = 154 ✓ —— 实测值与增量推算**这一次对上了**，说明 147 这一行本身已经与仓库一致。
 
 > **2026-09-23 需求重校准说明**：CURRENT 路由数量与现有行为保持不变；第三部分 TARGET 已按 `docs/01-requirements/` V0.3 更新。旧 P0-6/P0-7/P0-8 仅是历史计划编号，未来 Round 需重新分配。
 
@@ -81,6 +102,7 @@
 | PATCH | `/api/me` | `requireUser` | `profile` | 编辑资料（昵称 / 头像 / 简介） |
 | GET | `/api/me/consumption-level` | `requireUser` | `levels` | 消费等级与累计消费 |
 | GET | `/api/me/companion-application` | `requireUser` | `companionApplications` | 我的入驻申请状态 |
+| GET | `/api/me/boss-stats` | `requireUser` | `bossStats` | 老板数据面板聚合（**P1-7 新增**） |
 
 ---
 
@@ -105,7 +127,7 @@
 | GET | `/api/orders/[id]` | `requireUser` | `orders` | 订单详情（DTO 裁剪，不含 `clubNetIncome`） |
 | POST | `/api/orders/[id]/refunds` | `requireUser` | `refunds` | 对订单发起退款申请（幂等键，**仅 `serving` / `completed`**） |
 | POST | `/api/orders/[id]/direct-refund` | `requireUser` | `refunds` | **未开始服务的订单直接全额退款**（`paid` / `accepted`，免审批、幂等、**不读请求体**；P0-12） |
-| POST | `/api/orders/[id]/reviews` | `requireUser` | `reviews` | 对已完成订单提交评价（幂等键） |
+| POST | `/api/orders/[id]/reviews` | `requireUser` | `reviews` | 对已完成订单提交评价（幂等键）。体为**双维度** `productReview` / `companionReview`，至少一项非空（`D1`–`D3`）。触发条件只看 `completedAt`，与是否退款无关（`D18`/`D19`） |
 | GET | `/api/orders/[id]/messages` | `requireUser` | `conversations` | 订单会话消息列表 |
 | POST | `/api/orders/[id]/messages` | `requireUser` | `conversations` | 发送消息（幂等键）。`target` 选 `current`（当前履约段）或 `service`（客服段） |
 
@@ -404,7 +426,8 @@
 | GET | `/api/tips` | `requireUser` | `tips` | 鸡腿（打赏）记录 |
 | GET | `/api/suggestions` | `requireUser` | `suggestions` | 我的反馈列表 |
 | POST | `/api/suggestions` | `requireUser` | `suggestions` | 提交反馈（幂等键） |
-| GET | `/api/reviews` | `requireUser` | `reviews` | 我的评价（已评 / 待评两个 tab） |
+| GET | `/api/reviews` | `requireUser` | `reviews` | 我的评价（已评 / 待评两个 tab）。**作者侧回显全部四种状态**（`D8`） |
+| POST | `/api/reviews/[id]/resubmit` | `requireUser` | `reviews` | 被驳回的评价重新提交（`rejected → pending`，**同一条记录**，`D9`）。⚠️ **不带幂等键**：重提是「把这条改回待审」，重放判据是状态本身 |
 | GET | `/api/service/conversations` | `requireUser` | `conversations` | 客服会话列表 |
 
 ---
@@ -457,7 +480,7 @@ P0-11 开处置三个）：
 
 ---
 
-## 12. 管理后台（admin）—— 71 条
+## 12. 管理后台（admin）—— 77 条
 
 > ⚠️ **本节的数字 = `find app/api/admin -name route.ts | wc -l` 的实测值**。
 > 下面的小节只逐条列出**成组**的路由；订单 / 退款 / 投诉 / 申请等分散在 §5 / §6 / §7 / §9。
@@ -612,6 +635,43 @@ P0-11 开处置三个）：
 **⚠️ 路径为什么不是 `/api/admin/coupons`（复数）**：那个地址已经被 **P1-4 的发券**
 占用了，而它管的是 `CouponClaim`（发到某个人手里的券），与模板的增删改是两件事。
 模板用 `coupon-templates` 这个**独立主键**，两者在 URL 上就不共用命名空间。
+
+---
+
+### 12.10 评价审核（6 条，P1-8）
+
+| Method | URL | Guard | Service | 作用 |
+|---|---|---|---|---|
+| GET | `/api/admin/reviews` | `requireAdmin` | `adminReviews` | 评价列表。**默认落在 `pending` 队列**；`status=all` 看全部；关键词命中订单号 / 评价 id / 商品名 / 规格名 / 打手名 |
+| GET | `/api/admin/reviews/[id]` | `requireAdmin` | `adminReviews` | 详情。与列表项**同形**（同一个 `toAdminReviewListItem`），不存在 404 |
+| POST | `/api/admin/reviews/[id]/approve` | `requireAdmin` | `adminReviews` | `pending → approved`。**不读原因**（`D10`） |
+| POST | `/api/admin/reviews/[id]/reject` | `requireAdmin` | `adminReviews` | `pending → rejected`。**`reason` 必填**（`D10`） |
+| POST | `/api/admin/reviews/[id]/hide` | `requireAdmin` | `adminReviews` | `approved → hidden`。**`reason` 必填**（`D10`） |
+| POST | `/api/admin/reviews/[id]/unhide` | `requireAdmin` | `adminReviews` | `hidden → approved`。**不读原因**，但**必须**写一条 `review.unhide` 审计（`D11`/`D22`） |
+
+**⚠️ 四个动作是四个地址，不是一个 `PATCH /reviews/[id]`。** 动作名字必须出现在 URL 上，
+因为每一条都要进 `AdminAudit`，而审计的 `action` 直接取自这个地址
+（`review.approve` / `review.reject` / `review.hide` / `review.unhide`）。
+用一个 `PATCH` 带 `{action}` 提交，审计就得**再从请求体里解析一次动作名**——
+而请求体是可以被调用方写错的，URL 不会。
+
+**⚠️ 没有「改星级 / 改正文」的地址，也没有任何能改内容的请求体字段。**（`D12`）
+管理员的作用是**发布闸门**，不是编辑：`approve` / `reject` / `hide` / `unhide` 四个动作
+只写 `status` 与两个原因字段，**不碰** `productReview` / `companionReview` / `evidence`
+（`tests/reviewClosure.test.mjs` 有一条断言逐字段比对审核前后的内容）。
+
+**⚠️ 写接口一律要幂等键**：`POST` 体必须带 `idempotencyKey`，否则 400。
+重放（同键同动作）返回 **200 + `changed: false`**，不是错误——这不是「失败」，
+是「已经是你想要的样子了」，界面据此提示「该评价已是「X」状态，无需重复操作」。
+**同键换动作**返回 400 `ADMIN_REVIEW_OPERATION_CONFLICT_MESSAGE`（调用方复用了键，是真 bug）。
+
+**⚠️ 响应体只有四个键**：`{ reviewId, status, statusLabel, changed }`。
+界面据此就地更新那一行并 `router.refresh()`，不需要重取列表。
+
+**⚠️ 状态机外的动作一律 400，且文案必须说出该用哪个动作**：对已 `approved` 的评价
+点 `reject` → 「请改用「隐藏」」；对 `hidden` 的点 `approve` → 必须用 `unhide`。
+若把 `hidden → approved` 放行成 `approve`，审计里会留下 `review.approve`，
+读起来像「通过了一条新评价」——**审计要能回答「谁在什么时候把它放回公开列表」**。
 
 # 第二部分：API Conventions
 
@@ -1003,6 +1063,47 @@ P0-12 落地时**新增了一个路由** `POST /api/orders/[id]/direct-refund`�
 
 - 优惠券正式核销、B/A/S 并发、提现、管理员余额调整/会费批扣账本细节等继续按各自后续需求处理。
 - 完整 AfterSalesCase 聚合不是 P0 必需条件；P0 可复用现有 Complaint / Refund + 最小回池动作，禁止为了“模型漂亮”先造复杂系统。
+
+## 3.9 老板数据面板（P1-7）
+
+`GET /api/me/boss-stats` —— `requireUser`，服务层 `lib/services/bossStats.ts`。
+
+**不接受任何查询参数**：`userId` 只来自服务端会话（与 `/api/me/consumption-level` 同一条纪律），
+因此不存在「用别人的 id 看别人的数据」的入口。
+
+### 响应 DTO —— **恰好 8 个键，多一个少一个都是回归**
+
+| 键 | 类型 | 含义 |
+|---|---|---|
+| `orderCount` | `number` | 累计订单数（**含全部状态与已退款单**，`D1`） |
+| `totalSpendAmount` | `number`（分） | 累计消费（净额，复用 `sumEffectiveSpend`，`F1`/`R2`） |
+| `recent30dSpendAmount` | `number`（分） | 最近 30 天消费（UTC+8 自然日窗口，按 `completedAt` 归属，`D2`–`D4`） |
+| `recentGames` | `{ name, orderCount }[]` | 常玩游戏 Top3（`D5`/`D6`） |
+| `recentCompanions` | `{ companionId, name, avatarUrl, serviceCount }[]` | 常用打手 Top3（`D7`–`D9`） |
+| `spendNotice` | `string` | 金额口径说明，页面**原样展示** |
+| `gameNotice` | `string` | 常玩游戏口径说明 |
+| `companionNotice` | `string` | 常用打手口径说明 |
+
+**隐私硬约束**：DTO 是聚合结果，不是订单列表——响应里**不得**出现 `orderId` / `orderNo` /
+`gameAccountId` / `remark` / `refundReason` / `userId`。断言见 `tests/bossStats.test.mjs`
+（键集合精确匹配 + 序列化后扫禁止词）。
+
+### 两处容易改坏的地方
+
+1. **金额只有一份公式**（`R2`）：三个金额指标都必须经 `lib/constants/levels.ts` 的
+   `effectiveSpendOf` / `sumEffectiveSpend`。`tests/bossStats.test.mjs` 有一条源码扫描，
+   断言 `lib/constants/bossStats.ts` 与 `lib/services/bossStats.ts` 去掉注释后**不出现
+   `refundedAmount`**——在那里自己写一份减法会立刻变红。
+2. **服务历史是全量的**：`listServiceEvents()` 返回**所有用户**的事件，事件本身不带 `userId`；
+   收窄发生在 `buildCompanionUsage()`（按当前用户的订单 id 过滤）。漏掉就会把别人的打手
+   算进「我的常用打手」。
+
+### 本轮不做的部分
+
+- 「常用打手」的行**不可点击**、不跳打手主页、不提供「再来一单」（`D9`/`D11` 裁定：本轮是历史统计展示）。
+- 不新增二级页、不做趋势图 / 复杂图表（`D11`）。
+
+---
 
 # 第四部分：TBD — DO NOT INVENT
 

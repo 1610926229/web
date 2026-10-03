@@ -15,6 +15,7 @@ import type { OrderStatus } from "@/lib/types/order";
 import type { PlatformConfig } from "@/lib/types/platformConfig";
 import type { CatalogProductRecord } from "@/lib/types/product";
 import type { RefundRequest } from "@/lib/types/refund";
+import type { OrderReview } from "@/lib/types/review";
 import type { StaffAccount } from "@/lib/types/staff";
 import { listEffectiveSpecs, productDisplayPrice } from "./catalog";
 
@@ -109,6 +110,13 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
   "coupon.update": "编辑优惠券模板",
   "coupon.enable": "启用优惠券模板",
   "coupon.disable": "停用优惠券模板",
+  // ————— 评价审核（P1-8）—————
+  // 四个动作的文案都带「评价」，因为审计列表是多类目标混排的：
+  // 只写「通过」会与「通过退款申请」「通过入驻申请」在同一屏里分不清。
+  "review.approve": "通过评价",
+  "review.reject": "驳回评价",
+  "review.hide": "隐藏评价",
+  "review.unhide": "恢复公开评价",
 };
 
 export function adminAuditActionLabel(action: AdminAuditAction): string {
@@ -554,5 +562,42 @@ export function toCouponAuditSnapshot(coupon: Coupon): AdminAuditSnapshot {
     validTo: coupon.validTo,
     enabled: coupon.enabled,
     updatedAt: coupon.updatedAt,
+  };
+}
+
+/**
+ * 订单评价的精简快照（P1-8）。
+ *
+ * ⚠️ **刻意没有 `productReview.content` / `companionReview.content`**。
+ * 这与退款、投诉快照里不收用户正文（边界 5）是同一条理由的延伸：审计回答的是
+ * 「平台侧做了什么」，而星级与正文是**用户说的话**。正文还可能因为
+ * 「驳回 → 重新提交」被整段换掉，把它抄进审计，事后读的人会以为管理员改过内容——
+ * 那恰好是 `D12` 明文禁止的事，审计里却留下了「内容变了」的痕迹，反而是误导。
+ *
+ * ⚠️ 但**星级要进**：它不是自由文本，而是这次审核判断的直接对象，
+ * 而且已经公开（`approved` 之后谁都看得到）。两个维度各记一个，
+ * 缺维度记 `null`——「这一单只评了商品」是审核时要知道的事实。
+ *
+ * ⚠️ `rejectReason` / `hideReason` **要进且截断**：它们是管理员写的（属于"平台侧说过什么"，
+ * 与入驻申请的审核意见同类），而且"当时为什么驳回"正是审计最常被追问的一句。
+ *
+ * ⚠️ `reviewedByName` / `reviewedAt` 进快照，含义与平台参数的 `updatedByAdminId` 相同：
+ * 审计的 `actorId` 回答「**这一次**是谁改的」，这两个字段回答「改动**前**那份状态是谁留下的」。
+ *
+ * `status` 是这条快照的主字段——四个审核动作改的就是它，before/after 一眼就能看出迁移。
+ */
+export function toReviewAuditSnapshot(review: OrderReview): AdminAuditSnapshot {
+  return {
+    status: review.status,
+    orderNo: review.orderNo,
+    productId: review.productId,
+    companionId: review.companion?.id ?? null,
+    productRating: review.productReview?.rating ?? null,
+    companionRating: review.companionReview?.rating ?? null,
+    rejectReason:
+      review.rejectReason === null ? null : truncateAuditText(review.rejectReason),
+    hideReason: review.hideReason === null ? null : truncateAuditText(review.hideReason),
+    reviewedByName: review.reviewedByName,
+    reviewedAt: review.reviewedAt,
   };
 }

@@ -7,6 +7,7 @@ import type {
   Companion,
   CompanionGameOption,
 } from "@/lib/types/companion";
+import type { ReviewAggregate } from "@/lib/types/review";
 import { countCharacters } from "@/lib/utils/text";
 import { compareCompanionsForList, companionMatchesKeyword } from "./companions";
 import { clampPage, clampPageSize } from "./pagination";
@@ -649,13 +650,20 @@ function toGames(
 /**
  * 内部实体 → 管理端列表项 / 详情。
  *
- * ⚠️ **显式挑字段**：`reviews`（评价正文数组）不在管理端 DTO 里——后台要看的是
- * 「有几条评价」，不是每一条写了什么；评价内容的处置属于后续的投诉/评价模块。
+ * ⚠️ **显式挑字段**：评价正文不在管理端护航 DTO 里——后台这个页面要看的是
+ * 「有几条评价」，逐条评价的处置是**评价审核**页的事（P1-8：
+ * `app/admin/(console)/reviews/`），两个页面各有自己的入口，不在这里塞一份副本。
  * 与公开 DTO 一样，这里不是 `{ ...companion }` 再删几个，新增内部字段默认不外流。
+ *
+ * ⚠️ `stats` 是**必填参数**（P1-8 `D17`）：`rating` / `reviewCount` 曾经直接取自实体上
+ * 手写的字面量，现在由 `lib/services/reviewAggregates.ts` 从真实评价现算。
+ * 与公开 DTO 同一个理由——做成可选参数会出现「查了聚合的」与「默认成零分的」两种调用，
+ * 而后者在页面上看起来完全正常。
  */
 export function toAdminCompanionListItem(
   companion: Companion,
   gameNameById: Readonly<Record<string, string>>,
+  stats: ReviewAggregate,
 ): AdminCompanionListItem {
   return {
     id: companion.id,
@@ -672,9 +680,10 @@ export function toAdminCompanionListItem(
     removedAt: companion.removedAt,
     linkedUserId: companion.userId,
     applicationId: companion.applicationId,
-    rating: companion.rating,
+    // 与公开面**同一份**聚合结果（R3）：后台看到的 4.8 与用户端看到的 4.8 是同一个数
+    rating: stats.averageRating,
     completedOrderCount: companion.completedOrderCount,
-    reviewCount: companion.reviewCount,
+    reviewCount: stats.reviewCount,
     tipsCount: companion.tipsCount,
   };
 }

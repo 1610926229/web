@@ -255,8 +255,11 @@ export async function getOrderDetailForUser(
     allowedActions: {
       // 退款相关由退款规则统一算：既看订单状态，也看这一单有没有退款申请
       ...buildRefundActions(order, refund),
-      // 评价同样由评价规则统一算：已完成、未评价、且没有进行中 / 已通过的退款
-      ...buildReviewActions(order, review, refund),
+      // ⚠️ 评价资格由评价规则统一算，且**只看订单是否完成过服务**（`completedAt`）。
+      // P1-8 起退款**不再参与**这个判断（`D18` / `D19`）：已经完成过的订单，
+      // 哪怕后来部分或全额退款，照样可以评价。因此这里刻意不传 `refund`——
+      // 传进去只会让下一个人以为退款还管着这件事。
+      ...buildReviewActions(order, review),
       // 自己的订单一律可以沟通：它不会改写任何业务事实
       canOpenConversation: true,
       // ⚠️ P0-9：投诉入口不是恒真的。completed 的订单在投诉窗口关闭后，

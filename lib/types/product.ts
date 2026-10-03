@@ -10,6 +10,8 @@
  * 能不能买」。
  */
 
+import type { ReviewAggregate } from "./review";
+
 // ——————————————————————————— 公开 DTO ———————————————————————————
 
 /**
@@ -86,6 +88,28 @@ export type ProductDetail = Product & {
    * 因此进入对外的详情类型——它只暴露「这个商品属于哪个游戏」，不含任何筛选用的内部状态。
    */
   gameId: string;
+};
+
+/**
+ * 商品详情 DTO（对外）＝ 商品详情 + 公开评分聚合（P1-8）。
+ *
+ * ## 为什么聚合是**服务层**加上去的，而不在 `ProductDetail` 里
+ *
+ * `ProductDetail` 同时也是**数据源实体**（`getDataSource().getProductDetail()` 返回它）。
+ * 如果把 `reviews` 塞进去，Mock 数据源就得去读评价仓储——而数据源回答的是
+ * 「这件商品是什么」（标题、规格、价格、详图），**评价不是商品的属性**，
+ * 它是另一批记录在某个维度上的聚合结果（`R3`）。让数据源去查评价，
+ * 等于把「商品目录」与「评价」两张表焊在一起，将来接数据库时这一处必然是错的。
+ *
+ * 因此：实体保持干净，聚合由 `lib/services/catalog.ts` 在返回前贴上。
+ * 与打手侧的做法一致（那边是 `toCompanionDetail(companion, names, stats)`）。
+ *
+ * ⚠️ 与 `CompanionDetail` 一样，`reviews` 是**必填**的：
+ * 忘了贴聚合应当是编译错误，而不是页面上悄悄少一块评分。
+ */
+export type ProductDetailView = ProductDetail & {
+  /** 本商品的公开评分聚合（只含 `approved`，见 `ReviewAggregate`） */
+  reviews: ReviewAggregate;
 };
 
 // ——————————————————————————— 内部实体 ———————————————————————————

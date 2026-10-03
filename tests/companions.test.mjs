@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test, { afterEach } from "node:test";
 import {
   COMPANION_AVAILABILITY_INVALID_MESSAGE,
-  COMPANION_DETAIL_REVIEW_LIMIT,
   COMPANION_DETAIL_DISABLED_NOTICE,
   COMPANION_GAME_INVALID_MESSAGE,
   COMPANION_INTRO_BRIEF_LENGTH,
@@ -14,6 +13,7 @@ import {
   toCompanionListItem,
 } from "../lib/constants/companions.ts";
 import { companionSeed } from "../lib/mocks/fixtures/seed.ts";
+import { EMPTY_REVIEW_AGGREGATE, REVIEW_AGGREGATE_LIMIT } from "../lib/constants/reviews.ts";
 import {
   getCompanionDetail,
   listCompanionGameOptions,
@@ -297,15 +297,20 @@ test("详情 DTO：完整自我介绍、有限的评价摘要、selectable 由�
   assert.ok(dto);
   // 详情给完整自我介绍，列表给截断摘要——两者的差别只在这里
   assert.equal(dto.intro, entity.intro);
-  const listItem = toCompanionListItem(entity, {});
+  const listItem = toCompanionListItem(entity, {}, EMPTY_REVIEW_AGGREGATE);
   assert.ok(listItem.introBrief.length <= COMPANION_INTRO_BRIEF_LENGTH + 1);
   assert.equal(listItem.introBrief.endsWith("…"), true);
   assert.equal("intro" in listItem, false, "列表项不该带完整自我介绍");
 
-  // 评价只展示前若干条，并说明还有更多
-  assert.equal(dto.reviews.length, COMPANION_DETAIL_REVIEW_LIMIT);
-  assert.equal(entity.reviews.length > COMPANION_DETAIL_REVIEW_LIMIT, true);
-  assert.equal(dto.reviewsTruncated, true);
+  // 评价只展示最近 3 条，并说明还有更多。
+  // ⚠️ P1-8 起「有几条评价」不再由种子里的数组决定，而是由**真实评价记录**聚合出来
+  // （`D17`），因此这里从 `cp-9`（没有任何评价）改为 `cp-3`（4 条 approved）。
+  const truncated = await detail("cp-3");
+  assert.equal(truncated.reviews.length, REVIEW_AGGREGATE_LIMIT);
+  assert.equal(truncated.reviewCount > REVIEW_AGGREGATE_LIMIT, true);
+  assert.equal(truncated.reviewsTruncated, true);
+  // 详情上列出的评价就是聚合给出的那几条，不是另取一份
+  assert.equal(truncated.reviews.length, truncated.reviewCount > 3 ? 3 : truncated.reviewCount);
 
   // 没有评价的陪玩：评分是 null（不拿 0 分冒充「暂无评分」）
   const fresh = await detail("cp-8");
@@ -369,7 +374,7 @@ test("公开 DTO 显式挑字段：内部字段与身份字段一律不外泄", 
     ].sort(),
   );
   assert.deepEqual(
-    Object.keys(toCompanionDetail(companionSeed[0], {})).sort(),
+    Object.keys(toCompanionDetail(companionSeed[0], {}, EMPTY_REVIEW_AGGREGATE)).sort(),
     [
       "available",
       "avatarUrl",

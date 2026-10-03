@@ -369,10 +369,9 @@ function AfterSaleSection({ order }: { order: AdminOrderDetail }) {
               : ""
           }
         />
-        <DetailRow
-          label="评价"
-          value={order.reviewSummary ? `评分 ${order.reviewSummary.rating} 星` : ""}
-        />
+        {/* 评价摘要与用户端同口径：**只有状态，没有星级**（一条评价最多两个星级，
+            摘要里挑一个显示等于替人决定哪个更代表这次消费）。文案用服务端给的 statusLabel */}
+        <DetailRow label="评价" value={order.reviewSummary ? order.reviewSummary.statusLabel : ""} />
       </div>
 
       <div className="mt-2 flex flex-wrap gap-3 text-[13px]">

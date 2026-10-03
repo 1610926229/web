@@ -38,6 +38,8 @@ import {
   type AdminCompanionStateFilter,
 } from "@/lib/constants/adminCompanions";
 import { ADMIN_PRODUCT_PAGE_SIZE } from "@/lib/constants/adminProducts";
+import type { AdminReviewStatusFilter } from "@/lib/constants/adminReviews";
+import { REVIEW_PAGE_SIZE } from "@/lib/constants/reviews";
 import type { AdminDashboardDTO, AdminLoginResult, AdminSessionUser } from "@/lib/types/admin";
 import type { AdminAftersaleListData } from "@/lib/types/aftersale";
 import type {
@@ -69,6 +71,11 @@ import type {
   AdminComplaintWriteResult,
 } from "@/lib/types/complaint";
 import type { AdminOrderDetail, AdminOrderListData } from "@/lib/types/order";
+import type {
+  AdminReviewDetail,
+  AdminReviewListData,
+  AdminReviewWriteResult,
+} from "@/lib/types/review";
 import type {
   AdminPlatformConfigPatch,
   AdminPlatformConfigWriteResult,
@@ -1446,6 +1453,101 @@ export function disableCouponTemplate(
 ): Promise<AdminCouponTemplateWriteResult> {
   return apiPost<AdminCouponTemplateWriteResult>(
     `/api/admin/coupon-templates/${encodeURIComponent(id)}/disable`,
+    { idempotencyKey },
+  );
+}
+
+// ————————————————————— 评价审核（P1-8） —————————————————————
+//
+// ⚠️ 这一组**没有**「改星级 / 改正文」的函数（`D12`）：接口层根本没有接收这两个字段的位置，
+// 客户端也就没有可构造的请求。管理员能做的只有四个状态动作。
+//
+// ⚠️ 四个动作各自一个函数（不是一个「moderate(id, action)」）：它们的目标状态、
+// 是否需要原因、审计动作名都不同，页面上的按钮也就各接各的。请求体只有
+// `idempotencyKey`（拒绝与隐藏另加 `reason`），没有 `status` —— 目标状态由路径段决定。
+
+export type AdminReviewListRequest = {
+  status?: AdminReviewStatusFilter;
+  keyword?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 取一页评价（含作者摘要与服务端判定的四个可执行动作）。
+ *
+ * ⚠️ **缺省（不传 `status`）时服务端只看 `pending`**：这个页面的主用途是处理待审队列。
+ * 客户端因此要把「当前筛选」如实带上，而不是靠省略参数来表达「全部」——
+ * 那样打开页面会看到一个默认落在待审的列表，却以为它已经是全部。
+ *
+ * ⚠️ 关键词 **不按作者昵称匹配**（昵称为空也照样由服务端决定），只匹配
+ * 订单号 / 评价 id / 商品名 / 规格名 / 打手名。
+ */
+export function fetchAdminReviews(
+  input: AdminReviewListRequest = {},
+): Promise<AdminReviewListData> {
+  const params = new URLSearchParams();
+  if (input.status) params.set("status", input.status);
+  if (input.keyword) params.set("keyword", input.keyword);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? REVIEW_PAGE_SIZE));
+
+  return apiGet<AdminReviewListData>(`/api/admin/reviews?${params.toString()}`);
+}
+
+/** 取一条评价详情（含两个维度、凭证与审核历史）。 */
+export function fetchAdminReview(id: string): Promise<AdminReviewDetail> {
+  return apiGet<AdminReviewDetail>(`/api/admin/reviews/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 通过（`pending → approved`）：这条评价进入公开面，商品页与打手页的评分立刻把它算进去。
+ *
+ * ⚠️ **不传原因**：通过是默认预期。对一条**隐藏中**的评价点「通过」是无效的
+ * （那是「恢复公开」），服务端会 400；界面上这个按钮那时本来就是禁用的
+ * ——可用性完全来自 `allowedActions`，不是页面自己判断状态。
+ */
+export function approveAdminReview(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/approve`,
+    { idempotencyKey },
+  );
+}
+
+/** 驳回（`pending → rejected`）：**必须填写原因**（`D10`），用户在原评价上改完重提（`D9`）。 */
+export function rejectAdminReview(
+  id: string,
+  idempotencyKey: string,
+  reason: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/reject`,
+    { idempotencyKey, reason },
+  );
+}
+
+/** 隐藏（`approved → hidden`）：**必须填写原因**，原因作者可见（`D8`）。 */
+export function hideAdminReview(
+  id: string,
+  idempotencyKey: string,
+  reason: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/hide`,
+    { idempotencyKey, reason },
+  );
+}
+
+/** 恢复公开（`hidden → approved`）：不需要业务原因，但照样写审计（`D11` / `D22`）。 */
+export function unhideAdminReview(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/unhide`,
     { idempotencyKey },
   );
 }

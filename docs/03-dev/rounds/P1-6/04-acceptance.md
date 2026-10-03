@@ -190,12 +190,14 @@ pnpm build && pnpm exec next start -p 3105
 
 | 项 | 值 |
 |---|---|
-| `User Result` | （待填） |
-| `Final Result` | （待填） |
-| `Issues Found` | （待填） |
-| `Accepted At` | （待填） |
+| `User Result` | PASSED（用户本人在 P1-7 启动指令的 Phase 0 中明确：「`P1-6 人工验收完成 / PASSED`」） |
+| `Final Result` | PASSED |
+| `Issues Found` | 无（用户未提出任何待修项） |
+| `Accepted At` | 2026-09-30（随 `138dc5b` 提交一并确认；本行为归档时补记） |
+| `Git Commit` | `138dc5b`（`p1-6，1-7，1-8`，作者/提交者 `1610926229`） |
 
-> ⚠️ **`P1-6` 目前是 `AWAITING_ACCEPTANCE`。**
-> 按 `development-workflow.md` 的「DONE 双门槛」：① 用户本人说明验收通过；② 用户本人完成 Git 提交。
-> **两条都满足之前，本轮的 `Status` 不得写成 `DONE`**——Claude 也不得自行改判。
-> ⚠️ 本轮全部改动**未提交**（用户指令「禁止任何 Git 写操作」），第 ② 条需要用户自行 commit。
+> ✅ **`P1-6` 已闭合为 `DONE`。** DONE 双门槛**两条均已由用户本人满足**（只读核验，未执行任何 Git 写操作）：
+> ① 用户本人说明验收通过 → `Human Acceptance = PASSED`；
+> ② 用户本人完成 Git 提交 → `138dc5b`，`git show --name-only` 确认其中含本轮全部 6 个归档文件。
+>
+> ⚠️ §四 遗留的 `D6`（「列表行内启停」是否为必需）**未经书面回答**，但用户以「PASSED」整体接受了「启停放在详情页、列表只读」的落地形态 —— 记为**已由验收默认关闭**，不阻塞闭合。若日后产品要求列表行内启停，那是一次**独立的新增需求**，不是本轮的返工。

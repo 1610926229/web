@@ -1,19 +1,49 @@
 Round ID: P1-7
-Title: （未选中）—— 安全 P1 候选筛选（Requirement Check 结论：BLOCKED）
-Status: BLOCKED   # 不是「开发未完成」，是「没有任何候选能通过 `cmd_p1-next.md` 的 8 条判据」
-Blocked On:
-- 判据 ③「产品规则已经冻结」与判据 ④「没有 `TBD — DO NOT INVENT`」**对 P1 backlog 的每一族都不成立**
-- 权威需求 `docs/01-requirements/**` 与接口契约 `docs/02-tech-design/api-contract.md` 对 P1 功能**零覆盖**（逐条 grep 命中数为 0）
-- 项目自己的进度表把「消费累计」口径标为 🟠 `NEEDS_FIX`「需产品裁定后才可开工」
+Title: 老板数据面板 + 消费累计口径统一（累计订单数 / 累计消费 / 最近 30 天消费 / 常玩游戏 / 常用打手）
+Status: AWAITING_ACCEPTANCE   # 2026-10-01 —— 已交付，门禁走完，**等人工验收**。⚠️ 未 `DONE`，不得由 Claude 自行 `DONE`
+Blocked On:（无）
+- ✅ `D1`–`D12` 已由产品负责人一次性裁定（`02-decisions.md` §五 / §六 `R1` `R2`）
+- ✅ F1–F5 五条冻结规则已在 `02-decisions.md`（**第二次 Requirement Check** 的 §一「产品已冻结、本轮不再提问的规则」）登记；其中 F1 / F3 本轮落地，F4 / F5 只登记不实现；§19 消费累计那条 `⏳ 真实金额回滚` 由 F1 兑现
+- ✅ **验收前裁定（2026-10-02，`02-decisions.md` §八）**：`D10` 附加要求第 3 条**正式收窄**（服务事件不承担跨域 Assignment identity，三元组只是本轮去重语义）；`setMockSeedNow()` 作为 Mock / test 时钟稳定化**接受**（仅限 Mock / test，生产业务代码不得依赖）。**未再修改业务代码**
 Depends On:
 - `AUDIT-122`（前置，已完成 2026-09-30）
-Goal: 从 P1 backlog 里选**至多两个**「规则已冻结、无 TBD、不依赖外部凭据 / 钱包 / 调度器」的功能，编号 P1-7 / P1-8
-Primary Domain: 无（本轮**未进入开发**）
-Primary State Transition: 无
-Started At: 2026-09-30
-Development Completed At: ——（未开始）
-Accepted At: ——
-Git Commit: ——（本轮**零 Git 写操作**）
+- P1-4（优惠券交易链路与结算口径校准）
+- P0-15（退款与收益归零） / P0-13（管理员退款裁定）
+- P1-5（排行榜口径 —— 复用其 UTC+8 周期原语与稳定排序惯例）
+Goal: 让老板（下单用户）在自己的页面看到五项本人统计数据（累计订单数 / 累计消费 / 最近 30 天消费 / 常玩游戏 / 常用打手），并把**累计消费 / 消费等级 / 用户消费排行榜**三处收敛到**唯一**口径 `effectiveSpend = max(0, actualPaidAmount − refundedAmount)`
+Primary Domain: 用户端「我的」页 + 消费金额统计口径（`lib/constants/levels.ts`）
+Primary State Transition: 无（只读聚合，不新增状态机）
+Started At: 2026-10-01
+Development Completed At: 2026-10-01
+Accepted At: ——（等用户人工验收）
+Git Commit: ——（本轮**零 Git 写操作**，改动保留在工作区）
+
+---
+
+## 交付摘要（2026-10-01）
+
+> ⚠️ **下面 `## 一句话` 及之后的「本轮不做什么」是 `2026-10-01` 之前的旧结论
+> （`P1-7 BLOCKED`）。它已被产品裁定推翻，但按本轮纪律**逐字保留**，
+> 作为「为什么当时停下来了」的取证记录。当前状态以上面的 header 为准。**
+
+**已交付**：`D1`–`D12` 全部 `RESOLVED`（`02-decisions.md` §五）+ 总规则 `R1` / `R2`（§六），
+第二次 Requirement Check 未发现新的产品级 BLOCKING，据此完成开发。
+
+| 项 | 结果 |
+|---|---|
+| 交付内容 | 消费累计口径统一（净额，`R2` 单点）+ 总规则 `R1` + `/mine` 页内老板数据面板五项 |
+| 新增基础设施 | `CompanionServiceEvent`（只增不改的服务历史，`D7` 的前置），见 `database-schema.md` §T4c |
+| 测试 | `tests/bossStats.test.mjs` **36 条** + `tests/companionServing.test.mjs` 新增 `开始 3c` **1 条**；生产构建下 **37/37 全绿** |
+| 全量门禁 | `pnpm test`（生产构建 `APP_BASE_URL`）**1831 total / 1831 pass / 0 fail / 0 skip** |
+| typecheck / lint / build | 全部通过 |
+| reviewer | **0 BLOCKER / 2 MAJOR / 3 MINOR / 4 NOTE**；BLOCKER 与 MAJOR **已全部修复**（M2 含红绿验证），MINOR 已收，NOTE 已逐条记录处置 —— 见 `05-review.md` |
+| 人工验收 | **待办** —— 见 `04-acceptance.md` |
+| 验收前裁定（2026-10-02） | ① `setMockSeedNow()` **接受**（Mock / test 时钟稳定化，生产业务代码不得依赖）② `D10` 附加要求第 3 条**正式收窄**（`CompanionServiceEvent` 不承担跨域 Assignment identity）—— 逐字见 `02-decisions.md` §八。**两项均未改业务代码** |
+
+**档案**：`01-prompt.md`（本轮指令）· `02-decisions.md`（裁定）· `03-delivery.md`（交付）·
+`04-acceptance.md`（验收清单）· `05-review.md`（审查）。
+⚠️ 旧 README 的「不建 `P1-7` 的 5 件档案」那句话**随之作废**——那是 `BLOCKED` 状态下的结论，
+本轮既已开发，5 件档案即按 Protocol 建立。
 
 ---
 

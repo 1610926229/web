@@ -84,6 +84,13 @@ export type MockEmptyScope =
   // 反过来说，清 `aftersales` **不影响**退款与投诉两张专用列表，这是刻意的：
   // 它们与工作台是三个各自独立的取数入口。
   | "aftersales"
+  // 管理后台：评价审核列表清空（P1-8）。
+  // ⚠️ 它只清**后台这一张审核队列**（`queryReviewsForAdmin` 的返回），
+  // 评价记录本身一条没少——商品页 / 打手页的评分读的是同一份数据，因此**不受影响**。
+  // 这一点与 `refunds` / `complaints` 是同一种做法：空态是「这一张列表没有数据」，
+  // 而不是「把底层数据删掉」。用一个独立取值是为了让「是空态生效了还是页面坏了」
+  // 有答案——用 `all` 会连别的列表一起清空，看的人分不清是哪一处生效了。
+  | "reviews"
   | "all";
 
 const SCOPE_VALUES: readonly MockEmptyScope[] = [
@@ -107,6 +114,7 @@ const SCOPE_VALUES: readonly MockEmptyScope[] = [
   "staff",
   "dashboard",
   "aftersales",
+  "reviews",
   "all",
 ];
 

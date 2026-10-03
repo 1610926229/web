@@ -14,6 +14,7 @@
 web/
 ├── app/                    Next.js App Router：页面与接口
 ├── components/             132 个 .tsx，按业务域分目录
+├── db/migrations/          版本化 SQL 迁移文件（PROD-1A 新增，结构变更的唯一入口）
 ├── lib/                    全部业务逻辑（无 src/）
 ├── tests/                  66 个 .test.mjs + 测试基础设施
 ├── docs/                   需求、技术设计、开发、测试文档
@@ -168,20 +169,47 @@ components/
   文件头明令不许出现任何运行时 `import`，而本文件依赖 `lib/utils/format.ts`。
 - **集中配置**：`site.ts`（`PLATFORM_NAME = "超哥电竞"`、`PLACEHOLDER_NOTICE`）。**禁止在页面内硬编码平台名**。
 
-## 4.3 `lib/data/` —— 仓储与伪事务
+## 4.3 `lib/data/` —— 仓储、伪事务与 PostgreSQL 基础层
 
 ```
 lib/data/
-├── xxxRepository.ts        接口 + getXxxRepository()（硬编码返回 mock 单例）  ← 23 个
-├── mockXxxRepository.ts    唯一实现，通过 getMockStore 拿 store             ← 23 个
-├── *Transaction.ts         伪事务（原子区段）                              ← 9 个
-├── adminWriteSupport.ts    幂等重放 / 审计写入 / id 生成（公共支持）
-├── mockStore.ts            globalThis 挂载，23 个 store 名
-└── source.ts + mockSource.ts   服务端只读门面（11 个方法）
+├── xxxRepository.ts            接口 + getXxxRepository()                    ← 28 个
+│                               （26 个硬编码返回 mock 单例；
+│                                 favorite / suggestion 按 DATA_SOURCE 二选一）
+├── mockXxxRepository.ts        Mock 实现，通过 getMockStore 拿 store        ← 28 个
+├── *Transaction.ts             伪事务（原子区段）                            ← 16 个
+├── adminWriteSupport.ts        幂等重放 / 审计写入 / id 生成（公共支持）
+├── mockStore.ts                globalThis 挂载，28 个 store 名
+├── source.ts + mockSource.ts   服务端只读门面（11 个方法）
+└── pg/                         PostgreSQL 基础层（PROD-1A 新增，仅服务端）
+    ├── executor.ts             PgQueryable / TxHandle / withTransaction 的唯一入口
+    ├── pool.ts                 连接池单例 + TIMESTAMPTZ → ISO 的类型解析注册
+    ├── config.ts               DATABASE_URL / DATA_SOURCE 读取、脱敏、生产守卫
+    ├── migrate.ts              版本化 SQL 迁移运行器 + 记账表
+    ├── seed.ts / reset.ts      dev/test 种子与清库（生产拒绝执行）
+    ├── health.ts               健康检查（不抛错、只报状态）
+    ├── cli.ts                  db:migrate / db:seed / db:reset / db:health
+    ├── favoriteRepository.ts   ← 竖切片：收藏的 PostgreSQL 实现
+    └── suggestionRepository.ts ← 竖切片：反馈的 PostgreSQL 实现
 ```
+
+**⚠️ `pg/` 是唯一允许 `import "pg"` 的地方。** `lib/services/**` 与 `app/**` 不得引驱动、
+不得引 `lib/data/pg`、不得自行读 `DATA_SOURCE`——**切换点只有一个**，就是 `lib/data/*Repository.ts`
+里那个 accessor。这条由 `tests/pgConfig.test.mjs` 以源码扫描强制。
+见 `architecture-rules.md` §2.4 的两种仓储形态、`tech-stack.md` §11.1。
 
 **⚠️ 新增实体时的标准做法**：加一对 `xxxRepository.ts` + `mockXxxRepository.ts`，在 `mockStore.ts` 的 `MockStoreName` 里加一个 store 名。
 **不要**新建第二套 Order / Refund / Notification。
+
+**⚠️ 把某个实体迁到 PostgreSQL 时**（四步，缺一不可）：
+
+1. `db/migrations/<版本号>_<名字>.sql` 建表（**不写 `IF NOT EXISTS`**）；
+2. `lib/data/pg/<实体>Repository.ts` 用 `createXxxRepository(db: PgQueryable)` 工厂实现同一接口；
+3. 在 `lib/data/<实体>Repository.ts` 的 accessor 里加数据源分支；
+4. `tests/pgContract.test.mjs` 里补一格对照——**Mock 与 Pg 在同一份数据上必须逐字段相同**。
+
+**⚠️ 第 5 条是门槛而不是步骤**：只有当该实体参与的**跨域事务**的全部参与实体都已迁完，
+才允许把那条业务链切到 PostgreSQL。**严禁「一半写 PostgreSQL、一半写 Mock store」。**
 
 ## 4.4 `lib/services/` —— 服务端业务 + 浏览器客户端
 
@@ -461,7 +489,9 @@ tests/earning.test.mjs
 |---|---|---|
 | `lib/types/` | 类型、联合类型、DTO 结构 | 任何函数（映射函数放 constants） |
 | `lib/constants/` | 状态机表、校验、固定文案、DTO 映射、领域公式 | 数据访问、异步 |
-| `lib/data/` | 仓储接口、Mock 实现、伪事务、同步写原语 | 业务编排、DTO 裁剪 |
+| `lib/data/` | 仓储接口、Mock 实现、PostgreSQL 实现（`pg/`）、伪事务、同步写原语 | 业务编排、DTO 裁剪 |
+| `db/migrations/` | 版本化 SQL 迁移文件（只增不改） | 运行时建表、种子数据 |
+| `lib/data/pg/` | 连接池、事务、迁移运行器、种子/清库、健康检查、各实体的 SQL 实现 | 业务规则、DTO 裁剪 |
 | `lib/services/` | 服务端业务编排、DTO 裁剪、浏览器 HTTP 客户端 | 直接操作 store |
 | `app/api/` | 守卫、参数解析、调 service、response | 业务规则 |
 | `app/**/page.tsx` | 取数 + 渲染 | 直接 `fetch`、直接 import `lib/data` |
@@ -469,7 +499,7 @@ tests/earning.test.mjs
 
 ## 8.3 新增一个业务实体的检查清单
 
-以「新增一个实体 `Xxx`」为例（**不含数据库，当前阶段**）：
+以「新增一个实体 `Xxx`」为例：
 
 - [ ] `lib/types/xxx.ts` —— 类型
 - [ ] `lib/constants/xxx.ts` —— 规则 + 状态机表（若有状态）
@@ -482,6 +512,15 @@ tests/earning.test.mjs
 - [ ] `app/api/...` —— Route Handler
 - [ ] `components/...` + `app/.../page.tsx` —— 界面
 - [ ] `tests/xxx.test.mjs` —— 测试
+
+**若要同时给出 PostgreSQL 实现**（照 `favorite` / `suggestion` 的样子，见 §4.3）：
+
+- [ ] `db/migrations/<版本号>_<名字>.sql` —— 建表。⚠️ 时间列一律 `timestamptz`（见 `database-schema.md` C8）
+- [ ] `lib/data/pg/xxxRepository.ts` —— `createXxxRepository(db: PgQueryable)` 工厂，返回**同一个接口**
+- [ ] `lib/data/xxxRepository.ts` —— accessor 加数据源分支（**这是唯一的切换点**）
+- [ ] `lib/data/pg/seed.ts` —— 预置数据接进去（Pg 与 Mock 必须读**同一批 fixtures 常量**）
+- [ ] `tests/pgContract.test.mjs` —— 补一格对照：同输入下 Mock 与 Pg 逐字段相同
+- [ ] **门槛**：该实体参与的跨域事务**全部**参与实体都迁完之后，**才**允许把业务链切到 PostgreSQL
 - [ ] **`tests/admin.test.mjs` / `staff.test.mjs` / `companion.test.mjs` 的清单数组**（按新增接口所属边界同步扩充；未实现的 TARGET 不得预登记）
 - [ ] `docs/02-tech-design/api-contract.md` + `database-schema.md` —— 同步文档
 

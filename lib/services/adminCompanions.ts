@@ -22,6 +22,7 @@ import {
   type CompanionProfileInput,
 } from "@/lib/constants/adminCompanions";
 import { readCompanionGameId } from "@/lib/constants/companions";
+import { loadReviewAggregate, loadReviewStatsFor } from "./reviewAggregates";
 import { ORDER_DATA_INCONSISTENT_MESSAGE } from "@/lib/constants/dispatch";
 import { countCompanionStates } from "@/lib/constants/admin";
 import {
@@ -167,9 +168,15 @@ export async function queryAdminCompanionList(
     });
 
     const start = (query.page - 1) * query.pageSize;
-    const items = rows
-      .slice(start, start + query.pageSize)
-      .map((companion) => toAdminCompanionListItem(companion, names));
+    const visible = rows.slice(start, start + query.pageSize);
+
+    // 评分与评价数是算出来的（D17），且与公开面同源（R3）。
+    // 一次取整页的聚合，避免每行各查一遍用户表。
+    const statsRows = await loadReviewStatsFor(
+      "companion",
+      visible.map((companion) => ({ item: companion, id: companion.id })),
+    );
+    const items = statsRows.map(({ item, stats }) => toAdminCompanionListItem(item, names, stats));
 
     return {
       items,
@@ -201,7 +208,10 @@ export async function getAdminCompanionDetail(
       gameContext(),
     ]);
 
-    return companion ? toAdminCompanionListItem(companion, names) : null;
+    if (!companion) return null;
+
+    const stats = await loadReviewAggregate("companion", companion.id);
+    return toAdminCompanionListItem(companion, names, stats);
   });
 }
 

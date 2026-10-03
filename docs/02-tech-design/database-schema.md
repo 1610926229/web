@@ -1,16 +1,26 @@
 # Logical Data Model & Future Database Constraints
 
-> ⚠️ **本文件现在不是 SQL Schema 设计文档。**
+> ⚠️ **本文件描述的是逻辑数据模型，不是全量 SQL Schema。**
 >
-> **当前项目没有数据库，也没有 ORM。** 全部数据在进程内存里，dev server 重启即清空（这是预期行为）。
+> **当前项目已在迁移中，但尚未迁完。** 绝大多数数据仍在进程内存里，dev server 重启即清空（这是预期行为）。**只有下面点名的少数实体**已经有真正的 PostgreSQL 表。
 >
 > 因此本文件只描述：
 > 1. **CURRENT** —— 当前真实的逻辑实体与关系（可从 `lib/types/`、`lib/data/`、`lib/mocks/fixtures/` 验证）；
 > 2. **TARGET / TBD** —— 已确认但未实现、以及未确认的领域；
 > 3. **Future DB Migration Constraints** —— 迁移到真实数据库时**已经可以确定**的约束。
 >
-> **本文件不设计 SQL 类型、不设计表名、不设计 FK cascade、不设计 index。**
-> **数据库选型（PostgreSQL / MySQL）与 ORM 选型（Prisma / Drizzle）均未确认，禁止自行选定。**
+> **选型已裁定（PROD-1A）**：数据库 `PostgreSQL`，驱动 `node-postgres (pg)`，**不使用 ORM**，结构变更走**版本化 SQL 迁移文件**（`db/migrations/`）。裁定与理由见 `docs/03-dev/rounds/PROD-1A/02-decisions.md`、`tech-stack.md` §11.1。
+>
+> **已经有真实表结构的实体（仅此两个）：**
+>
+> | 实体 | 迁移文件 | 仓储实现 |
+> |---|---|---|
+> | `Favorite`（收藏） | `db/migrations/0001_favorites.sql` | `lib/data/pg/favoriteRepository.ts` |
+> | `Suggestion`（反馈） | `db/migrations/0002_suggestions.sql` | `lib/data/pg/suggestionRepository.ts` |
+>
+> 这两个是 **PROD-1A 的竖切片**，选取标准是「不参与跨域资金事务、有真实读写、能验证唯一约束」。**其余实体仍未迁移**，本文件后续章节对它们仍然只描述逻辑模型。
+>
+> **⚠️ 对未迁移的实体，本文件依旧不设计 SQL 类型、表名、FK cascade 与 index。** 已迁移的两个例外，其真实 DDL 以 `db/migrations/*.sql` 为准，本文件不重复（避免两份真值源）。
 
 > **2026-09-23 需求重校准说明**：第一部分 CURRENT 继续描述当前源码；第二部分 TARGET 已按需求 V0.3 更新。旧状态机、固定 48h 结算与“客服是唯一完成审核来源”等只能作为 CURRENT/历史事实，不能继续当作未来最终规则。
 
@@ -20,10 +30,17 @@
 
 ## 概览
 
-**26 个 Mock store，26 个仓储。** 统一挂载方式：`lib/data/mockStore.ts` 的 `getMockStore<T>(name, create)`，
+**28 个 Mock store，28 个仓储。其中 `favorite` / `suggestion` 两个已另有 PostgreSQL 实现，其余 26 个仍只有 Mock 实现。**
+
+统一挂载方式：`lib/data/mockStore.ts` 的 `getMockStore<T>(name, create)`，
 挂在 `globalThis.__youmuMockStore__` 上（`PREFIX` 前缀）。
 
-**CURRENT（P0-9 更新）**：`earning`（打手收益）是第 26 个域。
+⚠️ **`favorite` 与 `suggestion` 的 Mock 实现并没有被删掉，仍然完整可用**——它们是
+`DATA_SOURCE` 未设为 `postgres` 时的默认路径，也是契约对照测试（`tests/pgContract.test.mjs`）
+的一半。**「已迁移」不等于「Mock 可以拆」**：在事务闭包完整之前，Mock 仍可能是 active datasource。
+
+**CURRENT（P0-9 更新；计数已于 PROD-1A 校正）**：`earning`（打手收益）在 P0-9 时是第 26 个域，
+其后 P1-5 加 `companionAccept`、P1-7 加 `companionService`，现为 28 个域。
 它的特别之处是**没有种子数据**：记录只由完成结算事务写入
 （见 §T2），且 P0-9 之前已完成的历史订单**刻意不回填**。
 
@@ -76,7 +93,13 @@
 | 仓储 | `lib/data/companionRepository.ts` → `mockCompanionRepository` |
 | Mock Store | `"companion"` → `{ companions: Map<string, Companion>; companionIdByUser: Map<userId, companionId> }` |
 | 主键 | `id` |
-| 关键字段 | `id`、`userId`、`applicationId`、`displayName`、`avatarUrl`、`rankLabel`、`intro`、`gameIds[]`、`regions[]`、`serviceTags[]`、`available`、`unavailableReason`、`enabled`、`removedAt`、`completedOrderCount`、`rating`、`sortOrder`、内嵌 `reviews[]` |
+| 关键字段 | `id`、`userId`、`applicationId`、`displayName`、`avatarUrl`、`rankLabel`、`intro`、`gameIds[]`、`regions[]`、`serviceTags[]`、`available`、`unavailableReason`、`enabled`、`removedAt`、`completedOrderCount`、`sortOrder` |
+
+> ⚠️ **P1-8（`D17`）删掉了这里的三个字段**：`rating`、`reviewCount`、内嵌 `reviews[]`。
+> 评分不是护航的属性，而是**读的时候从 `OrderReview` 的 `approved` 记录聚合出来的派生值**
+> （口径见 §13.4）。实体上留着它们，就会出现「实体里的分数」与「评价算出来的分数」
+> 两个真值，而两者只在没人改动评价时恰好相等。
+> 公开 DTO 上仍然有 `rating` / `reviewCount` / `reviews`，但那是**每次读取现算**的，不落库。
 
 **唯一索引**：`companionIdByUser` —— **一名用户最多关联一条有效护航**。
 ⚠️ 移除后索引要删掉，否则这位用户再被审核通过时会被自己的历史记录挡住。
@@ -569,15 +592,107 @@ closed     → []
 
 | 项 | 值 |
 |---|---|
-| 类型 | `lib/types/review.ts` — `OrderReview`(:35)、`ReviewRating`(:21) |
+| 类型 | `lib/types/review.ts` — `OrderReview`、`ReviewRating`、`ReviewDimension`、`ReviewStatus` |
 | 仓储 | `lib/data/reviewRepository.ts` → `mockReviewRepository` |
 | Mock Store | `"review"` → `{ reviews: Map; reviewIdByOrder: Map<"${userId}:${orderId}", id>; reviewIdByKey: Map<"${userId}:${key}", id> }` |
 | 主键 | `id` |
-| 关键字段 | `id`、`userId`、`orderId`、`orderNo`、`rating`（1–5）、`content`、`evidence[]`、`createdAt`、`productTitle`、`productCoverUrl`、`specName`、`quantity`、`completedAt` |
+| 关键字段 | `id`、`userId`、`orderId`、`orderNo`、**`productId`**、`specId`、**`productReview`**、**`companionReview`**、`evidence[]`、**`status`**、**`rejectReason`**、**`hideReason`**、**`reviewedBy`**、**`reviewedByName`**、**`reviewedAt`**、`createdAt`、`updatedAt`、`productTitle`、`productCoverUrl`、`specName`、`quantity`、`completedAt`、`companion` |
 
-**唯一索引**：`reviewIdByOrder` —— **一单一评**。
-**⚠️ 注意**：`Companion.reviews[]` 是**内嵌在护航记录里的展示用评价**，与本实体的关系未在类型层声明。
-**TBD — DO NOT INVENT**：两者是否最终统一为一份数据。
+**唯一索引**：`reviewIdByOrder` —— **一单一评**（`R1`）。
+**幂等索引**：`reviewIdByKey` —— 同一个 `idempotencyKey` 只建一条（键的作用域是 `userId`）。
+
+### 13.1 双维度（`D1`–`D3`、P1-8）
+
+一份评价最多包含**两个维度**，各自是一个 `ReviewDimension | null`：
+
+```
+productReview:   { rating: 1–5; content: string | null } | null
+companionReview: { rating: 1–5; content: string | null } | null
+```
+
+- 两条**互不派生**（`D2`）：不存在「一边为空时从另一边复制」的写法——
+  那会让「商品 4 星、打手未评」被悄悄变成「商品 4 星、打手 4 星」。
+- 至少一个非 `null`（`D3`）；**星级必填、正文可选**；未评的那个维度**恒为 `null`**，
+  不是 `{rating: 0}` 或空对象——「没评」与「评了 0 分」是两件事。
+- 提交后**不能再补**另一个维度：本条评价的唯一写入口 `createReviewForOrder` 只在
+  首次提交时接受两个维度；唯一的后续写入口 `resubmitReviewForUser` 也要求
+  「至少一个有效维度」，且**不提供**「加上缺失的那一维」的语义。
+- **打手维度评的是最终实际履约打手**（`D4`）：快照写进 `companion`（`OrderCompanionSnapshot`），
+  聚合身份取 `companion.id`。⚠️ **不是** `exclusiveCompanionId`，也不是「所有曾 `serving` 的人」。
+  A→B 换人后**只评 B**（`D5`），不存在多人评价。
+
+### 13.2 `productId`：聚合身份（`R4`）
+
+`productId` 是**本轮新增**的字段（`C5` 的整改）。它与三个快照字段的分工是硬性的：
+
+| 字段 | 是什么 | 用途 |
+|---|---|---|
+| `productId` | **聚合身份** —— 这条评价计入哪件商品 | 平均分 / 评价数的分组键 |
+| `productTitle` / `productCoverUrl` / `specName` | **下单那一刻的快照** | 历史展示：商品改名、下架、换封面之后，这条评价仍然显示当时的名字 |
+| `companion`（含 `id` / `name` / `avatarUrl`） | 打手侧的同两份 | 打手侧聚合身份取 `.id`，名字是快照 |
+
+⚠️ **两者不可互相替代**：用快照反推身份，商品改名就会整批评价漂到别的对象上；
+用身份替代展示，历史评价会显示今天的名字，与用户当时看到的不符。
+
+### 13.3 审核状态（`D7`–`D12`）
+
+```
+pending    → [approved, rejected]     新提交一律 pending
+approved   → [hidden]
+rejected   → [pending]                作者重新提交（同一条记录，D9）
+hidden     → [approved]               恢复公开（D11）
+```
+
+- **四个状态 `pending | approved | rejected | hidden`**，定义在 `lib/constants/reviews.ts`
+  的 `REVIEW_STATUS_TRANSITIONS` / `canTransitionReviewStatus`。
+  ⚠️ **不得复用 `Order.status`**：订单的 `completed` / `refunded` 说的是钱与服务，
+  评价的 `approved` / `hidden` 说的是话能不能被看见，两者没有映射关系（`D20`）。
+- **审核是发布闸门，不是数据删除**（`R2`）：四个动作只写 `status` 与原因字段，
+  内容、`evidence`、`createdAt`、`updatedAt` 一个都不动（`D12`，有断言逐字段比对）。
+- **`reject` / `hide` 必须写原因**（非空、`REVIEW_REASON_MAX_LENGTH = 200`）；
+  `approve` / `unhide` **不读**原因。四个动作**全部**写一条 `AdminAudit`（`D22`），
+  `action` 分别是 `review.approve` / `review.reject` / `review.hide` / `review.unhide`。
+- **`updatedAt` 不随审核变化**：它记的是**作者最后一次改内容**的时刻，
+  不是「最后一次被管理员点过的时刻」——后者看 `reviewedAt`。
+
+### 13.4 聚合口径（`D14`、`D15`、`R3`）
+
+| 规则 | 取值 |
+|---|---|
+| 计入哪些 | **只有 `approved`**。`pending` 不计、`rejected` 不计、`hidden` **立刻扣掉**、`hidden → approved` **立刻加回** |
+| 分组键 | 商品侧按 `productId`；打手侧按 `companion.id`（`R4`） |
+| 平均分 | 1 位小数；无 `approved` 评价时为 **`null`**，展示为「暂无评分」（**不是 `0.0`**） |
+| `reviewCount` | 数的是**维度**，不是评价条数：一条同时评了两项的评价对商品侧 +1、对打手侧 +1；只评商品的评价对打手侧 **+0** |
+| 最近评价 | 最多 **3** 条，按 `createdAt` 倒序；超出时 `reviewsTruncated = true`，展示「仅显示最近 3 条评价」 |
+
+**⚠️ 商品侧与打手侧必须同源**（`R3`）：唯一入口是
+`lib/services/reviewAggregates.ts` 的 `loadReviewAggregate` / `loadReviewStatsFor`，
+纯函数部分在 `lib/constants/reviews.ts` 的 `buildReviewAggregate()`。
+两个页面各自实现一遍「查评价 → 滤状态 → 算平均 → 脱敏」**是不允许的**——
+两套实现都能看起来正常，差别只在有没有人点进那一条被隐藏的评价。
+
+### 13.5 静态评分数据已退出业务真值（`D17`）
+
+`Companion` / `Product` **实体上不再有** `rating` / `reviewCount` / `reviews` 字段
+（历史文档表格里那三项已删除；`rating` 与 `reviewCount` 只作为**公开 DTO 的派生字段**
+存在，由聚合在读取时算出）。种子里的假分数（`rating = 4.8` / `reviewCount = 3`）一并移除，
+改为在 `lib/mocks/fixtures/reviewSeed.ts` 里种 **11 条真实的 `OrderReview`**
+（9 `approved` / 1 `pending` / 1 `hidden`，各自用 `build()` 保证不变量）。
+
+⚠️ **`Companion.reviews[]` 与 `OrderReview` 的 TBD 已消解**：不再是两套并列的展示数据——
+展示面的一切都来自 `OrderReview`，且 `Companion.reviews[]` 这个**实体字段已删除**。
+（历史上那句「内嵌在护航记录里的展示用评价」描述的是旧模型。）
+
+### 13.6 迁移约束（`R5`）
+
+⚠️ **存量旧评价数据不得"猜"着迁移。** 只有当 `productId`、最终实际打手、
+以及星级·正文能够**从 `orderId` 唯一确定**时才迁移。**禁止**把旧模型里那份
+合一的 `rating` / `content` 在无裁定的情况下同时复制进 `productReview` 与 `companionReview`
+——那会凭空造出「用户给打手也打了分」的事实。
+
+⚠️ 本仓库当前的存量数据**全部是 Mock 预置**，因此按 `R5` 的末句处理：
+**重建为符合新模型的真实 fixture**（即 `reviewSeed.ts`），
+不为兼容一份演示数据而在长期数据模型里留兼容字段。
 
 ---
 
@@ -615,19 +730,24 @@ closed     → []
 | Mock Store | `"level"` → `{ levels: Map<string, ConsumptionLevel> }` |
 | 关键字段 | `id`、`name`、`thresholdAmount`、`privileges[]`、`sortOrder`、`enabled`、`createdAt`、`updatedAt` |
 
-**⚠️ 消费累计目前按订单状态过滤**（`CONSUMPTION_ORDER_STATUS`）：**已退款（`refunded`）的订单整单不计**，
-其余按 `actualPaidAmount` 计入。**P0-9 时未落地**改成「按实退金额扣减」的 TARGET 形式
-（`Σ max(0, actualPaidAmount − refundedAmount)`），该 TARGET **仍未实现**。
+**⚠️ 消费累计口径已于 P1-7 冻结并落地 —— 上面两段 TBD 均已作废。**
 
-**⚠️ P0-13 起这里出现一个新的业务空白 —— TBD，禁止自行决定：**
+- **`F1`**：金额改为**净留存** `Σ max(0, actualPaidAmount − refundedAmount)`。
+  实现只有一处：`lib/constants/levels.ts` 的 `effectiveSpendOf()`，
+  `sumEffectiveSpend()`（累计）与 `sumSpendWithinRange()`（最近 30 天）都消费它。
+  **P0-9 记下的那个 TARGET 至此实现。**
+- **P0-13 的空白已裁定**（`P1-7` 产品裁定）：部分退款**立即降低**累计消费。
+  「实付 100 元、已部分退 60 元」的订单算 **40 元**。
+  订单状态仍是 `completed`，因此它**仍在**「常玩游戏」里计一次（退款不删除行为历史）。
+- **状态过滤仍保留** `CONSUMPTION_ORDER_STATUS = "completed"`：已**全额**退款的订单整单不计。
+  这与净额公式**等价而不矛盾**——全额退款意味着 `refundedAmount ≥ actualPaidAmount`，
+  其净留存本来就必然为 0。
 
-部分退款**不改变订单状态**（订单仍是 `completed`），因此按当前口径，
-一张「实付 100 元、已部分退 60 元」的订单在消费累计里仍然算 **100 元**。
-这**可能**是对的（用户确实付过 100 元，「累计有效消费」按支付额算），
-也**可能**是错的（用户实际只花了 40 元）。
-⚠️ 两种解释都说得通，而它直接影响**消费等级**与**周期榜**，
-因此必须由产品负责人裁定，**不得**按「哪个更合理」自行选一个。
-裁定之前保持现状（不改代码），并把这一条记在 `rounds/P0-13/` 的遗留项里。
+⚠️ **同时确立的总规则 `R1`**：「钱」与「行为历史」分开。
+消费金额类（累计消费 / 最近 30 天 / 消费等级 / 消费排行榜）随退款**实时**变化；
+行为历史类（累计订单数 / 常玩游戏频次 / 常用打手服务频次）**不因退款而抹掉**。
+
+裁定原文见 `docs/03-dev/rounds/P1-7/02-decisions.md` §五（`D1`–`D12`）与 §六（`R1`/`R2`）。
 
 **TBD — DO NOT INVENT**：B/A/S 的 3/4/5 档门槛是**固定还是管理员可配**（计划 R6），P1-5 开工前必须定。
 
@@ -1089,6 +1209,64 @@ export type CompanionAcceptEvent = {
 | ⚠️ 迁移期数据 | 迁移当刻已存在的 `state = accepted` 派单记录只有**最后一次**可考据，因此**存量期的接单榜数字是下界**（只少不多）。这是**数据可获得性**限制，不是口径妥协——P1-5 的读取侧用 `DerivedAcceptEvent` 把这一次读出来（按 `dispatchId` 整体去重，**不写回表**） |
 | ⚠️ §九-F 裁定后的**收窄** | 派生**只认** `DispatchRecord.acceptedVia === "companion"`：`"staff"`（客服直换）与 `null`（**认不出来源**）**一律不派生**（fail-closed）。裁定原文：「`deriveLegacyAcceptEvents()` 不得把能够识别为 Staff direct replacement / Staff direct assignment 的历史绑定记录推导成 `CompanionAcceptEvent`。如果历史数据无法区分：**不得凭空补接单事件**。宁可继续保持『存量接单榜是历史下界』。**不要为了让历史数字好看而伪造主动接单行为。**」<br>📌 因此存量榜**只会更低、不会更高**，这是**有意选的保守方向**；真实事件表（`companion_accept_event`）不受影响——**裁定不影响新数据，只影响「读旧数据时猜不猜」** |
 
+## T4c. 服务事件 CompanionServiceEvent（真实服务历史）—— **已实现（P1-7）**
+
+**CURRENT（P1-7 落地）**：`lib/types/companionService.ts`、
+`lib/data/mockCompanionServiceRepository.ts`（**只增不改**的 `Map` + 去重索引），
+同步写原语 `appendCompanionService()`，写入者是原子区段。
+
+```ts
+export type CompanionServiceEvent = {
+  id: string;               // `svc_<uuid>`，写入器当场生成并确认未被占用
+  orderId: string;
+  companionId: string;
+  dispatchId: string | null;
+  servingAt: string;        // 这一位打手**真实开始服务**的时刻
+  companionName: string;    // 当时的历史公开快照（不随后续改名而变）
+  companionAvatarUrl: string;
+};
+```
+
+**它为什么必须是一张独立的只增表**：`Order.servingAt` 只保留**当前/最终**那位打手，
+打手被换走（客服直换 / 封禁释放）时它被**清成 `null`**（`mockPaymentRepository.ts` 的
+`applyOrderAcceptanceReleased`）。而 `DispatchRecord` 一单只有一行、`CompanionReleaseRecord`
+记的是「谁**走**了」、`CompanionAcceptEvent` 记的是「谁接的单」——
+**没有一处**能回答「这一单上先后有哪几位打手真实开始过服务、各是什么时候」。
+P1-7 `D7` 的产品裁定是「常用打手按**真实进入过 `serving`** 的次数统计，一单换人 A、B 各计 1 次」，
+这句话在旧模型里**读不出来**。这与 T4 / T4b 是同一个理由的第三处应用。
+
+**写入者唯一**：`lib/data/companionOrderTransaction.ts` 的 `startCompanionOrder`
+（`accepted → serving`），且必须在**无 `await` 的原子区段内**与订单状态推进同一段完成——
+分开写会出现「订单已经在护航中、服务历史里却没有这一次服务」。
+
+**去重键**：`(orderId, companionId, servingAt)`。同一打手在**不同时刻**两次开始服务
+（A 服务 → 被换走 → 又被换回服务）会留下**两条**，那是两次真实服务，合并会让人数算少。
+
+> ⚠️ **术语（2026-10-02 产品裁定，`rounds/P1-7/02-decisions.md` §8.1）**：这个三元组
+> **是**「本轮服务事件的去重语义」，**不是**一张正式的 Assignment identity。
+> 本表**不保存** `assignmentKey` / `seq`，**不得**把三元组称作「Assignment identity」。
+> 本轮 `D10` 附加要求第 3 条已被**正式收窄**：跨「聊天 assignment / release / service event」
+> 的统一身份模型，**只有在项目正式建立 Assignment 聚合时**才一起迁移；
+> 本轮**不提前创造**半填充的 `assignmentId`。
+
+**存量数据（`D10`，fail-closed）**：**不 backfill、不猜**。读取侧的
+`deriveLegacyServiceEvents()` 只对 `servingAt` 与 `actualCompanionId` **都非空**的订单派生
+**一条**（即「仍然写在订单上的那一次」），**不按订单状态过滤**——服务过、后来全额退款的
+订单其 `servingAt` / `actualCompanionId` 都还在，照常派生。被换过人的订单，
+旧打手的那次服务在存量数据里已经**不可考**，因此合并结果是一个**下界**（只少不多）。
+
+**未来 DB 迁移约束**：
+
+| 事项 | 要求 |
+|---|---|
+| 表 | `companion_service_event`，**只增不改**：没有 UPDATE / DELETE 路径，没有软删除字段。**取消 / 换人 / 封禁释放 / 退款都不回写、不删除**已经真实发生过的服务 |
+| 索引 | `(companion_id, serving_at)` 普通索引——面板按打手聚合、取「最近一次」 |
+| ⚠️ 唯一约束 | `(order_id, companion_id, serving_at)` 可建**唯一约束**——它正是「**同一服务段只记一次**」这条规则（即上文三元组去重语义，**不是** Assignment identity），在 DB 层应当由约束保证而不是靠应用层查重 |
+| 写入事务 | 必须与「订单 `accepted → serving`（含 `servingAt`）」**同一个事务** |
+| ⚠️ 迁移期数据 | 只有**当前/最终**那一位打手的服务可考据，因此存量期的「常用打手」是**下界**（只少不多）。这是**数据可获得性**限制，不是口径妥协 |
+
+---
+
 ## T5. AfterSales / Complaint 的 P0 边界
 
 P0 **不要求先造完整 `AfterSalesCase` 新聚合**。可以复用现有 Complaint / Refund 体系 + 已确认的客服回池动作跑通：
@@ -1117,12 +1295,12 @@ P0 **不要求先造完整 `AfterSalesCase` 新聚合**。可以复用现有 Com
 | **AfterSalesCase 结构** | **TBD — DO NOT INVENT**（计划 R4：谁触发、什么条件、如何进入售后区） |
 | **非普通投诉通道** | **TBD — DO NOT INVENT**（计划 R5） |
 | **`ProductSpec` 是否拆表** | **TBD — DO NOT INVENT** |
-| **`Companion.reviews[]` 与 `OrderReview` 是否统一** | **TBD — DO NOT INVENT** |
+| **`Companion.reviews[]` 与 `OrderReview` 是否统一** | ✅ **已裁定并落地（P1-8）**：统一到 `OrderReview` 一个真值源，`Companion.reviews[]` 这个实体字段**已删除**。口径见 §13.4 / §13.5 |
 | **`TipRecord` 的写入路径** | **TBD — DO NOT INVENT**。当前仓储只读 |
 | **`Order.companion` 是否保留指定打手** | **TBD — DO NOT INVENT**（计划 R10） |
 | **打手侧统一「操作史」** | **TBD — DO NOT INVENT**（计划 R7） |
 | **消费等级 B/A/S 的 3/4/5 是否可配** | **TBD — DO NOT INVENT**（计划 R6） |
-| **数据库选型 / ORM 选型** | **TBD — DO NOT INVENT** |
+| ~~**数据库选型 / ORM 选型**~~ | ✅ **已裁定并已开建（PROD-1A）**：`PostgreSQL` + `node-postgres (pg)`，**不使用 ORM**。见文件头与 `tech-stack.md` §11.1 |
 | **真实认证的凭据存储** | **TBD — DO NOT INVENT**。当前两个账号实体都没有密码字段 |
 
 ---
@@ -1200,6 +1378,18 @@ mockComplaintRepository 的 applyComplaintStatus
 
 **必须在真实支付上线前解决。**
 
+> **⚠️ PROD-1A 之后本项仍然完全开放，不要误读为「已经解决」。**
+> PROD-1A 只做了一件事与它相关：让「跨实体原子写入」在数据库侧有了可用手段
+> （`lib/data/pg/executor.ts` 的 `withTransaction(tx => …)`，`tx` 本身就是一个 `PgQueryable`）。
+> **调度器本身一行都没有**，三条 sweep 今天**依旧挂在读取路径上惰性触发**。
+>
+> 落地时的两条硬约束（`tech-stack.md` §11.1 + 下面 C5）：
+> 1. 调度器必须调用**同一批**函数，不得另写推进逻辑；
+> 2. 只有在这些 sweep 涉及的**全部参与实体都迁入 PostgreSQL**之后，才允许把该业务链切到数据库——
+>    在那之前，「一半写 PostgreSQL、一半写 Mock store」是**明令禁止**的。
+>
+> 该阻塞项同时登记在 `docs/03-dev/总需求进度表.md` 的 `🔴 PRODUCTION_BLOCKER` 行里（那是唯一真值源）。
+
 ## C5. 调度器必须复用同一个 domain service（硬约束）
 
 接入后台定时调度器时，调度器**必须**调用**同一套**已经存在的同步、幂等、可重复调用的业务入口：
@@ -1235,11 +1425,24 @@ companionRateSnapshot  companionBaseIncome  clubNetIncome
 
 **⚠️ `enabled`（停用，可逆）与 `removedAt`（软移除）是两个不同概念，不得合并成一个 `isDeleted` 布尔。**
 
-## C8. 时间统一为 ISO 8601 字符串
+## C8. 时间统一为 ISO 8601 字符串 —— ✅ 已裁定（PROD-1A）
 
 当前所有时间字段都是 `string`（ISO 8601），不是 `Date`。
-**⚠️ 迁移时需决定**：是继续用字符串，还是改用数据库原生时间类型。
-**⚠️ 时区策略未确认**——属 **TBD**。
+
+**裁定：列类型用 `timestamptz`，在驱动层统一转成 ISO 字符串。** 时区策略不再是 TBD。
+
+| 决定 | 内容 |
+|---|---|
+| 列类型 | `timestamptz`（`timestamp with time zone`）。**不是 `timestamp`，不是 `text`** |
+| 内部存储 | UTC。`timestamptz` 不存时区，存的是一个时间点，显示时按会话时区渲染——因此它天然没有「同一时刻两条记录比较不等」的问题 |
+| 驱动层转换 | `lib/data/pg/pool.ts` 模块级注册一次：`pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, v => new Date(v).toISOString())`，**1184 全局返回 ISO 字符串** |
+| 仓储边界 | **零改动**。写进去是 ISO 字符串，读出来还是同一个 ISO 字符串——`lib/types/**` 里 `createdAt: string` 的声明不需要动 |
+| 字符串比较 | **原样成立**。ISO 8601 在 UTC（`Z`）下的**字典序等于时间序**，因此既有的 `a.createdAt > b.createdAt` 排序、以及「时间相同再按 id 兜底」的分页 tie-break 全部继续有效 |
+| 代价 | 一次模块级全局覆盖。这是**故意选全局**的：只在某处局部改会让同一列在不同调用点呈现不同类型 |
+
+**⚠️ 刻意不注册 `timestamp`（OID 1114）。** 只注册 `timestamptz`，于是若哪天有迁移误用了无时区的 `timestamp` 列，读出来会是驱动默认的 `Date` 对象、而不是字符串，仓储的 `string` 声明与排序会立刻炸掉——**这是一个特性**：宁可让错误的列类型大声失败，也不要两边悄悄不一致。新增表一律写 `timestamptz`。
+
+**已证**：`tests/pgFoundation.test.mjs` 有一条往返用例，把预置数据里的 ISO 字符串写进 `timestamptz` 再读回来，逐字节相同；`tests/pgContract.test.mjs` 进一步证明 Mock 与 PostgreSQL 在同一份数据上的 `createdAt` 逐字段一致。
 
 ## C9. 金额统一为整数「分」
 
@@ -1259,11 +1462,12 @@ companionRateSnapshot  companionBaseIncome  clubNetIncome
 
 ## C10. 当前**不是**约束的（不要把它们升级成规范）
 
-- ❌ 表名 / 字段名 / 主键类型（当前用可读字符串 id，未来是否用自增或 UUID **未定**）
+- ❌ 表名 / 字段名（除已迁移的两个实体外，命名仍按实现期决定）
+- ⚠️ 主键类型：**已迁移的两个实体用可读字符串 id**（`text COLLATE "C"`），这是**当前约定而非全局规范**——其余实体用自增还是 UUID 仍未定，等各自迁移时再定
 - ❌ index 设计（除 C2 列出的唯一约束外）
 - ❌ FK cascade 行为
 - ❌ 分表 / 分区
 - ❌ 读写分离
 - ❌ 缓存层
 
-**以上全部属于实现期决策，需先确认数据库与 ORM 选型。**
+**选型已不再是阻塞**（PostgreSQL + `pg` + 无 ORM，见 C8 上方与文件头）。上述各项**仍是实现期决策**，在各自实体迁移时按需确定；决定时须遵守 `tech-stack.md` §11.1 的三条结构性约束（`pg` 只在 `lib/data/pg/**`、结构变更走版本化迁移、跨域事务闭包完整才能切数据源）。
