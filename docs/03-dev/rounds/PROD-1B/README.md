@@ -1,6 +1,6 @@
 Round ID: PROD-1B
 Title: Order Hub PostgreSQL Implementation & Concurrency Proof（订单核心事务闭包：Schema + Pg 实现 + 并发实证；**intentionally not activated**）
-Status: AWAITING_ACCEPTANCE
+Status: DONE
 Depends On:
 - PROD-1A（PostgreSQL 基础层：连接池 / withTransaction / 版本化迁移 / 种子与重置 / 健康检查 / 数据源开关，已 DONE）
 - `docs/02-tech-design/architecture-rules.md` §2.4（仓储两种形态）/ §2.5（伪事务适用范围 / 半迁移禁令）
@@ -14,8 +14,8 @@ Primary Domain: 数据访问层（`db/migrations/**`、`lib/data/pg/**`、`lib/d
 Primary State Transition: 无（不触碰任何业务状态机；仅替换同一批写入的持久化实现）
 Started At: 2026-10-03
 Development Completed At: 2026-10-05
-Accepted At:
-Git Commit:
+Accepted At: 2026-10-05
+Git Commit: 5acf616569d05aa3c553c366bde7b335f8dc65ce
 
 ---
 
@@ -76,9 +76,9 @@ Git Commit:
 **接受为非阻塞已知事项，本轮不返工**。收口时另更正 `04-acceptance.md` B3 的一处**文档勘误**
 （引用的 CHECK 字面串改为逐字引用 `0004_orders_and_payments.sql:99`，语义等价，不涉及代码）。
 
-⚠️ **Round 状态仍为 `AWAITING_ACCEPTANCE`**：只满足「① 用户明确说人工验收通过」，
-尚未满足「② 用户已自行完成 Git commit」。**在用户完成 commit 之前不得转 `DONE`**，
-`Git Commit` 一栏待用户提交后填写。验收全程**未执行任何 Git 写操作**。
+**双门槛已满足，Round 状态 = `DONE`**：① 用户明确说「人工验收通过」；② 用户本人已完成 Git commit
+（`5acf616569d05aa3c553c366bde7b335f8dc65ce`，`PROD-1B Order Hub PostgreSQL implementation and concurrency proof`）。
+`Accepted At` = `2026-10-05`。Claude 全程**未执行任何 Git 写操作**，`DONE` 的判定依据是用户本人的提交事实。
 
 ## 档案
 
@@ -87,5 +87,6 @@ Git Commit:
 
 ## 下一轮
 
-本轮结束后停在 `AWAITING_ACCEPTANCE`。切数据源（以及管理端审计的另外 8 个事务）属于**下一轮**，
+本轮已于 **2026-10-05 收口为 `DONE`**（`HEAD = 5acf616`）。⚠️ `DONE` 覆盖的是**实现与实证**，
+**不覆盖「切换」**：切数据源（以及管理端审计的另外 8 个事务）属于**下一轮 PROD-1C**，
 前置条件见 `02-decisions.md` Q1。

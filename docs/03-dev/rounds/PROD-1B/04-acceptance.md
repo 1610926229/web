@@ -1,7 +1,7 @@
 # Acceptance
 
 Round: PROD-1B
-Status: AWAITING_ACCEPTANCE（人工验收已通过 2026-10-05；**待用户自行完成 Git commit 后**方可转 `DONE`）
+Status: DONE（人工验收通过 2026-10-05；用户本人 Git commit 已完成 2026-10-05 → 双门槛满足）
 
 > ⚠️ 下面是**人工验收步骤**。自动化门禁（`lint` / `typecheck` / `build` / `pnpm test` / `pnpm test:pg`）
 > 在 `03-delivery.md` §5 记录为实测结果，不在此重复。这里只列**自动化测不到或不便覆盖**的部分。
@@ -168,9 +168,13 @@ Concurrency Proof`，**intentionally not activated**）。
       以及重启服务后重跑的结果——**红的记录没有被删掉**。
 - [x] **E3** `docs/03-dev/总需求进度表.md` 新增的 `PROD-1B` 行状态是
       **`⏳ AWAITING_ACCEPTANCE`**，**不是 ✅**（`development-workflow.md` §十八）。
-      ✅ 实测：进度表 `PROD-1B` 行状态列仍为 `⏳ AWAITING_ACCEPTANCE`，收口时**只追加人工验收结论**，未改状态。
+      ✅ 实测：验收时进度表 `PROD-1B` 行状态列仍为 `⏳ AWAITING_ACCEPTANCE`，收口时**只追加人工验收结论**，未改状态。
+      📌 该检查是**验收时点**的断言。此后用户本人完成 Git commit，第二条门槛满足，
+      状态已按协议推进为 `✅ DONE`（见 `Final Result`）。
 - [x] **E4** Round 状态是 `AWAITING_ACCEPTANCE`，**不是 `DONE`**。
-      ✅ 实测：本文件 Status 与 `README.md` 的 `Status:` 均为 `AWAITING_ACCEPTANCE`。
+      ✅ 实测：验收时本文件 Status 与 `README.md` 的 `Status:` 均为 `AWAITING_ACCEPTANCE`。
+      📌 同上：该检查是**验收时点**的断言。用户完成 Git commit 后，两份文件的状态均已按协议改为 `DONE`，
+      `Git Commit` 字段已回填 `5acf616569d05aa3c553c366bde7b335f8dc65ce`。
 
 ---
 
@@ -225,15 +229,22 @@ Concurrency Proof`，**intentionally not activated**）。
 
 ## Final Result
 
-**PASSED**（人工验收，2026-10-05）
+**PASSED**（人工验收，2026-10-05）· **Round Status = `DONE`**
 
-⚠️ **Round 状态仍为 `AWAITING_ACCEPTANCE`**。按协议 §四 / §十七，只有
-① 用户明确说「人工验收通过」**且** ② 用户已自行完成 Git commit，才可转 `DONE`。
-**当前只满足 ①**；`Git Commit` 待用户提交后填写。Claude 未执行任何 Git 写操作，也不会自行标记 `DONE`。
+按协议 §四 / §十七的**双门槛**：
+
+| 门槛 | 状态 | 依据 |
+|---|---|---|
+| ① 用户明确说「人工验收通过」 | ✅ 满足 | 2026-10-05 用户裁定 A–E 五组全部 PASS，Issues Found 无 BLOCKER / 无 MAJOR |
+| ② 用户已自行完成 Git commit | ✅ 满足 | `5acf616569d05aa3c553c366bde7b335f8dc65ce`（`PROD-1B Order Hub PostgreSQL implementation and concurrency proof`，2026-10-05 10:35:21 +0800） |
+
+**两个条件同时满足 → 状态由 `AWAITING_ACCEPTANCE` 推进为 `DONE`。**
+Claude **未执行任何 Git 写操作**；commit 由用户本人完成，hash 取自仓库实际提交记录。
 
 ## Git Commit
 
-（待用户提交后填写）
+`5acf616569d05aa3c553c366bde7b335f8dc65ce`（short `5acf616`）
+`PROD-1B Order Hub PostgreSQL implementation and concurrency proof` — 2026-10-05 10:35:21 +0800
 
 ---
 
