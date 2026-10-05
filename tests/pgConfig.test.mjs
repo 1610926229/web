@@ -179,7 +179,19 @@ test("迁移顺序固定：按版本号数字升序，且与目录里的文件�
   const versions = migrations.map((migration) => migration.version);
 
   assert.deepEqual(versions, [...versions].sort((a, b) => Number(a) - Number(b)));
-  assert.deepEqual(versions, ["0001", "0002"]);
+
+  // ⚠️ 下面这条是**结构性**的：加载出来的版本必须与目录里的文件名一一对应。
+  // 比「等于某个手写的清单」更能说明问题——手写清单只能证明「我数对了」，
+  // 证明不了「没有哪个文件被漏读」。两条一起留着：结构的那条防漏，清单的那条防悄悄变多。
+  const dir = migrationsDir();
+  const fromFiles = (await readdir(dir))
+    .filter((name) => name.endsWith(".sql"))
+    .map((name) => name.split("_")[0])
+    .sort((a, b) => Number(a) - Number(b));
+  assert.deepEqual(versions, fromFiles, "加载到的版本必须与目录里的迁移文件一一对应");
+
+  // 显式清单：新增一条迁移就要在这里加一项（刻意的。见 tests/pgFoundation.test.mjs 的同名常量）
+  assert.deepEqual(versions, ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]);
   assert.equal(new Set(versions).size, versions.length, "版本号不能重复");
 
   // 再读一次必须是同一个结果：顺序来自排序，不是来自 readdir 的返回顺序

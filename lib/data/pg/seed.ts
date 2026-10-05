@@ -1,5 +1,14 @@
 import { favoriteSeed } from "@/lib/mocks/fixtures/favoriteSeed";
 import { suggestionSeed } from "@/lib/mocks/fixtures/suggestionSeed";
+import { buildDispatchSeed } from "@/lib/mocks/fixtures/dispatchSeed";
+import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
+import { complaintSeed } from "@/lib/mocks/fixtures/complaintSeed";
+import { couponClaimSeed, couponSeed } from "@/lib/mocks/fixtures/couponSeed";
+import { notificationSeed } from "@/lib/mocks/fixtures/notificationSeed";
+import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
+import { platformConfigSeed } from "@/lib/mocks/fixtures/platformConfigSeed";
+import { refundSeed } from "@/lib/mocks/fixtures/refundSeed";
+import { companionSeed } from "@/lib/mocks/fixtures/seed";
 import { assertSeedAllowed } from "./config";
 import type { PgExecutor, PgQueryable } from "./executor";
 
@@ -29,7 +38,31 @@ export type SeedCounts = { inserted: number; skipped: number };
 export type SeedResult = {
   favorites: SeedCounts;
   suggestions: SeedCounts;
+  // —— PROD-1B · W1 订单写闭包。下面这些表**都真的有预置数据**，
+  //    因此必须与 Mock 装同一份；本文件里出现它们，正是「同一份输入」的落点。——
+  companions: SeedCounts;
+  orders: SeedCounts;
+  dispatchRecords: SeedCounts;
+  couponTemplates: SeedCounts;
+  couponClaims: SeedCounts;
+  notifications: SeedCounts;
+  complaints: SeedCounts;
+  refundRequests: SeedCounts;
+  platformConfig: SeedCounts;
 };
+
+/**
+ * ⚠️ W1 的这几张表在 Mock 里**建仓时是空的**，因此 PG 侧同样不写任何行：
+ *
+ * `payment_requests` · `payments`（`mockPaymentRepository.createStore` 里都是 `new Map()`）、
+ * `completion_submissions`（`mockCompletionRepository`）、
+ * `earnings` / `earning_adjustments`（`mockEarningRepository`）、
+ * `companion_accept_events` / `companion_release_records` / `companion_service_events`
+ * （三张只增不改的历史表，建仓即为空）。
+ *
+ * 「两边都空」也是 parity 的一部分。给它们编一份预置数据，等于凭空造出一段
+ * 从未发生过的历史——而那正是 `deriveLegacyAcceptEvents` 反复强调不许做的事。
+ */
 
 /**
  * 先校验预置数据自身没有重复，再往库里写。
@@ -66,6 +99,76 @@ function assertSeedFixtures(): void {
     }
     suggestionIds.add(suggestion.id);
   }
+}
+
+/** 逐行检查某个键不重复。命中重复就抛，绝不留给 `ON CONFLICT DO NOTHING` 去静默吞掉。 */
+function assertNoDuplicateKey<T>(
+  rows: readonly T[],
+  keyOf: (row: T) => string,
+  label: string,
+): void {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (seen.has(key)) throw new Error(`${label}出现重复：${key}`);
+    seen.add(key);
+  }
+}
+
+/**
+ * W1 预置数据的**唯一性**预检（PROD-1B）。
+ *
+ * ## 只查唯一性，不查业务规则
+ *
+ * 判据是「这条错误会不会被 `ON CONFLICT DO NOTHING` 吞掉」：
+ *
+ * - **会被吞**：任何唯一约束冲突。种子若有两条同行，`DO NOTHING` 会让第二条
+ *   悄悄消失，而所有检查都显示正常 → 必须在插入**之前**查出来。
+ *   这里查的 id / 单号 / 业务键都属于这一类。
+ * - **不会被吞**：CHECK 与 FK 违规。它们照样抛错、指名道姓地报出是哪一条约束。
+ *   在 JS 里再实现一遍等于给同一条规则建第二个真值源——**刻意不做**。
+ *
+ * ## 这些检查与 Mock 建仓行为的关系
+ *
+ * Mock 侧大多**不查**这些：`mockCouponRepository` 的 `new Map(claimIdByCoupon)`、
+ * `mockDispatchRepository` 的 `new Map(dispatchIdByOrder)` 遇到重复键都是**后者覆盖**，
+ * 一样是静默的。因此这里查出来的是一个**两边都有的**数据缺陷，
+ * 而不是 Pg 侧额外强加的要求。
+ */
+function assertOrderHubFixtures(): void {
+  const seedNow = getMockSeedNow();
+  const orders = [...orderSeed, ...buildRankingPeriodOrders(seedNow)];
+  const dispatches = buildDispatchSeed(orders, seedNow);
+
+  assertNoDuplicateKey(companionSeed, (companion) => companion.id, "预置护航数据 id ");
+  assertNoDuplicateKey(
+    companionSeed.filter((companion) => companion.userId !== null && companion.removedAt === null),
+    (companion) => companion.userId ?? "",
+    "预置护航数据「一名用户一条有效记录」",
+  );
+
+  assertNoDuplicateKey(orders, (order) => order.id, "预置订单数据 id ");
+  assertNoDuplicateKey(orders, (order) => order.orderNo, "预置订单数据 orderNo ");
+
+  assertNoDuplicateKey(dispatches, (record) => record.id, "预置派单数据 id ");
+  assertNoDuplicateKey(dispatches, (record) => record.orderId, "预置派单数据「一单一派单」");
+
+  assertNoDuplicateKey(couponSeed, (template) => template.id, "预置券模板数据 id ");
+  assertNoDuplicateKey(couponClaimSeed, (claim) => claim.id, "预置领券数据 id ");
+  assertNoDuplicateKey(
+    couponClaimSeed.filter((claim) => claim.source === "self_claim"),
+    (claim) => `${claim.userId}:${claim.couponId}`,
+    "预置领券数据「一人一券」",
+  );
+
+  assertNoDuplicateKey(notificationSeed, (item) => item.id, "预置通知数据 id ");
+
+  assertNoDuplicateKey(complaintSeed, (complaint) => complaint.id, "预置投诉数据 id ");
+  assertNoDuplicateKey(complaintSeed, (complaint) => complaint.complaintNo, "预置投诉数据 complaintNo ");
+
+  assertNoDuplicateKey(refundSeed, (refund) => refund.id, "预置退款数据 id ");
+  assertNoDuplicateKey(refundSeed, (refund) => refund.refundNo, "预置退款数据 refundNo ");
+  assertNoDuplicateKey(refundSeed, (refund) => refund.orderId, "预置退款数据「一单一退」");
 }
 
 /**
@@ -138,20 +241,471 @@ async function seedSuggestions(executor: PgQueryable): Promise<SeedCounts> {
   return { inserted, skipped: suggestionSeed.length - inserted };
 }
 
+// ————————————————————— PROD-1B · W1 订单写闭包 —————————————————————
+
+/**
+ * 通用的「逐行插入」。
+ *
+ * ## 为什么要一个通用件，而不是每张表手写一遍 INSERT
+ *
+ * 因为 17 张表里有 9 张要写数据，其中 `orders` 一张就有 38 列。手写 9 段
+ * 列名与占位符一一对应的 SQL，出错的方式是**静默的**：列顺序与值顺序错位时，
+ * 只要类型都对得上，PostgreSQL 会照单全收——把 `completed_at` 写进 `serving_at`
+ * 不会报任何错，只会让一条历史记录说谎。抽成「列定义 + 取值函数」之后，
+ * 错位只有在**同一个列表里**才可能发生，而那个列表就在取值函数的正上方。
+ *
+ * ## 与 PROD-1A 那两张表的差别
+ *
+ * `seedFavorites` / `seedSuggestions` 保持手写：它们是已交付、已被证明的实现，
+ * 本轮不改（Hard Rule 2 的同一精神——不顺手重构已验证的东西）。
+ */
+
+type SeedColumn = { name: string; cast?: string };
+
+/**
+ * jsonb 列的入参。
+ *
+ * ⚠️ `null` 必须**原样**交给驱动，不能 `JSON.stringify(null)`：
+ * 后者得到字符串 `"null"`，PG 会把它解析成 JSON 的 `null` 值而不是 SQL NULL。
+ * 两者在 `IS NULL` 判断下结果相反，而 `orders.coupon` 正是靠 NULL 表示「没用券」。
+ */
+function jsonbParam(value: unknown): string | null {
+  return value === null || value === undefined ? null : JSON.stringify(value);
+}
+
+function insertSql(table: string, columns: SeedColumn[]): string {
+  const placeholders = columns.map((column, index) =>
+    column.cast ? `$${index + 1}::${column.cast}` : `$${index + 1}`,
+  );
+  return [
+    `INSERT INTO ${table} (${columns.map((column) => column.name).join(", ")})`,
+    `VALUES (${placeholders.join(", ")})`,
+    "ON CONFLICT DO NOTHING",
+    "RETURNING 1 AS inserted",
+  ].join("\n");
+}
+
+async function seedRows<T>(
+  executor: PgQueryable,
+  table: string,
+  columns: SeedColumn[],
+  rows: readonly T[],
+  toValues: (row: T) => unknown[],
+): Promise<SeedCounts> {
+  const sql = insertSql(table, columns);
+  let inserted = 0;
+  for (const row of rows) {
+    const result = await executor.query<{ inserted: number }>(sql, toValues(row));
+    if (result.length > 0) inserted += 1;
+  }
+  return { inserted, skipped: rows.length - inserted };
+}
+
+const COMPANION_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "user_id" },
+  { name: "application_id" },
+  { name: "removed_at" },
+  { name: "display_name" },
+  { name: "avatar_url" },
+  { name: "rank_label" },
+  { name: "intro" },
+  { name: "game_ids", cast: "jsonb" },
+  { name: "regions", cast: "jsonb" },
+  { name: "service_tags", cast: "jsonb" },
+  { name: "available" },
+  { name: "unavailable_reason" },
+  { name: "enabled" },
+  { name: "completed_order_count" },
+  { name: "tips_count" },
+  { name: "sort_order" },
+];
+
+const ORDER_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "order_no" },
+  { name: "user_id" },
+  { name: "status" },
+  { name: "created_at" },
+  { name: "paid_at" },
+  { name: "accepted_at" },
+  { name: "serving_at" },
+  { name: "completed_at" },
+  { name: "refunded_at" },
+  { name: "ever_accepted_at" },
+  { name: "product_id" },
+  { name: "product_title" },
+  { name: "product_cover_url" },
+  { name: "spec_id" },
+  { name: "spec_name" },
+  { name: "unit_price" },
+  { name: "quantity" },
+  { name: "game_name" },
+  { name: "region" },
+  { name: "game_account_id" },
+  { name: "remark" },
+  { name: "addons", cast: "jsonb" },
+  { name: "items_amount" },
+  { name: "addons_amount" },
+  { name: "total_amount" },
+  { name: "original_amount" },
+  { name: "coupon_discount_amount" },
+  { name: "actual_paid_amount" },
+  { name: "companion_rate_snapshot" },
+  { name: "companion_base_income" },
+  { name: "club_net_income" },
+  { name: "refunded_amount" },
+  { name: "coupon", cast: "jsonb" },
+  { name: "actual_companion_id" },
+  { name: "companion", cast: "jsonb" },
+  { name: "complaint_window_minutes_snapshot" },
+  { name: "complaint_deadline_at" },
+];
+
+const DISPATCH_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "order_id" },
+  { name: "state" },
+  { name: "exclusive_companion_id" },
+  { name: "exclusive_entered_at" },
+  { name: "exclusive_deadline_at" },
+  { name: "exclusive_timeout_minutes_snapshot" },
+  { name: "public_pool_entered_at" },
+  { name: "public_deadline_at" },
+  { name: "public_timeout_minutes_snapshot" },
+  { name: "accepted_by_companion_id" },
+  { name: "accepted_at" },
+  { name: "accepted_via" },
+  { name: "timed_out_at" },
+  { name: "created_at" },
+  { name: "updated_at" },
+];
+
+const COUPON_TEMPLATE_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "name" },
+  { name: "form_key" },
+  { name: "form_label" },
+  { name: "value_label" },
+  { name: "condition_label" },
+  { name: "valid_from" },
+  { name: "valid_to" },
+  { name: "threshold_amount" },
+  { name: "discount_amount" },
+  { name: "enabled" },
+  { name: "created_at" },
+  { name: "updated_at" },
+];
+
+const COUPON_CLAIM_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "user_id" },
+  { name: "coupon_id" },
+  { name: "status" },
+  { name: "source" },
+  { name: "claimed_at" },
+  { name: "used_at" },
+  { name: "granted_by_admin_id" },
+  { name: "idempotency_key" },
+  { name: "snapshot", cast: "jsonb" },
+];
+
+const NOTIFICATION_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "user_id" },
+  { name: "kind" },
+  { name: "title" },
+  { name: "summary" },
+  { name: "body" },
+  { name: "created_at" },
+  { name: "read_at" },
+  { name: "href" },
+];
+
+const COMPLAINT_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "complaint_no" },
+  { name: "user_id" },
+  { name: "order_id" },
+  { name: "order_no" },
+  { name: "status" },
+  { name: "type_key" },
+  { name: "type_label" },
+  { name: "description" },
+  { name: "evidence", cast: "jsonb" },
+  { name: "contact" },
+  { name: "idempotency_key" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "processing_at" },
+  { name: "handled_at" },
+  { name: "handled_by_id" },
+  { name: "handled_by_role" },
+  { name: "handled_by_name" },
+  { name: "result" },
+];
+
+const REFUND_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "refund_no" },
+  { name: "user_id" },
+  { name: "order_id" },
+  { name: "status" },
+  { name: "amount" },
+  { name: "decision", cast: "jsonb" },
+  { name: "reason_key" },
+  { name: "reason_label" },
+  { name: "description" },
+  { name: "evidence", cast: "jsonb" },
+  { name: "idempotency_key" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "reviewing_at" },
+  { name: "reviewed_at" },
+  { name: "reviewed_by" },
+  { name: "reviewed_by_role" },
+  { name: "reviewed_by_name" },
+  { name: "review_note" },
+  { name: "cancelled_at" },
+];
+
+const PLATFORM_CONFIG_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "exclusive_pool_timeout_minutes" },
+  { name: "public_pool_timeout_minutes" },
+  { name: "completion_auto_approval_minutes" },
+  { name: "complaint_window_minutes" },
+  { name: "updated_at" },
+  { name: "updated_by_admin_id" },
+];
+
+/**
+ * ⚠️ 订单集合**不能只用 `orderSeed`**：`mockPaymentRepository.createStore()` 装的是
+ * `[...orderSeed, ...buildRankingPeriodOrders(seedNow)]`，`mockDispatchRepository` 也是。
+ * 少装那一批周期榜订单，两个实现从一开始就不是同一份输入，
+ * 「结果一致」这句话就再也证明不了什么——而且**不会报错**，只会让比对跑在更小的集合上。
+ *
+ * ⚠️ `seedNow` 取自 `getMockSeedNow()`，与 Mock 建仓时用的是同一个进程基准时间。
+ * 因此派单的截止时间是**相对这份基准**算出来的：同一次进程里两边一致（这正是 parity 要的），
+ * 但**跨进程不保证相同**——`buildDispatchSeed` 的注释已经写明这是有意为之。
+ * 这里**不**把它改成绝对时间：那会让预置的等待单在几天后全部超时退款。
+ */
+
 /**
  * 写入预置数据。
  *
- * 整体一个事务：要么两张表都拿到完整的种子，要么一张都没写。
+ * 整体一个事务：要么全部表都拿到完整的种子，要么一张都没写。
  * 半份种子会让「Mock 与 Pg 结果一致」的比对得出一个假结论。
+ *
+ * ⚠️ **顺序不是风格问题**：外键要求被引用的行先存在。
+ * companions → orders → dispatch_records →（coupon_templates → coupon_claims）→
+ * notifications / complaints / refund_requests → platform_config。
  *
  * ⚠️ 生产环境直接抛错（`assertSeedAllowed`）。
  */
 export async function seedDatabase(executor: PgExecutor): Promise<SeedResult> {
   assertSeedAllowed();
   assertSeedFixtures();
+  assertOrderHubFixtures();
+
+  const seedNow = getMockSeedNow();
+  const orders = [...orderSeed, ...buildRankingPeriodOrders(seedNow)];
+  const dispatches = buildDispatchSeed(orders, seedNow);
 
   return executor.withTransaction(async (tx) => ({
     favorites: await seedFavorites(tx),
     suggestions: await seedSuggestions(tx),
+    companions: await seedRows(tx, "companions", COMPANION_COLUMNS, companionSeed, (companion) => [
+      companion.id,
+      companion.userId,
+      companion.applicationId,
+      companion.removedAt,
+      companion.displayName,
+      companion.avatarUrl,
+      companion.rankLabel,
+      companion.intro,
+      jsonbParam(companion.gameIds),
+      jsonbParam(companion.regions),
+      jsonbParam(companion.serviceTags),
+      companion.available,
+      companion.unavailableReason,
+      companion.enabled,
+      companion.completedOrderCount,
+      companion.tipsCount,
+      companion.sortOrder,
+    ]),
+    orders: await seedRows(tx, "orders", ORDER_COLUMNS, orders, (order) => [
+      order.id,
+      order.orderNo,
+      order.userId,
+      order.status,
+      order.createdAt,
+      order.paidAt,
+      order.acceptedAt,
+      order.servingAt,
+      order.completedAt,
+      order.refundedAt,
+      order.everAcceptedAt,
+      order.productId,
+      order.productTitle,
+      order.productCoverUrl,
+      order.specId,
+      order.specName,
+      order.unitPrice,
+      order.quantity,
+      order.gameName,
+      order.region,
+      order.gameAccountId,
+      order.remark,
+      jsonbParam(order.addons),
+      order.itemsAmount,
+      order.addonsAmount,
+      order.totalAmount,
+      order.originalAmount,
+      order.couponDiscountAmount,
+      order.actualPaidAmount,
+      order.companionRateSnapshot,
+      order.companionBaseIncome,
+      order.clubNetIncome,
+      order.refundedAmount,
+      jsonbParam(order.coupon),
+      order.actualCompanionId,
+      jsonbParam(order.companion),
+      order.complaintWindowMinutesSnapshot,
+      order.complaintDeadlineAt,
+    ]),
+    dispatchRecords: await seedRows(tx, "dispatch_records", DISPATCH_COLUMNS, dispatches, (record) => [
+      record.id,
+      record.orderId,
+      record.state,
+      record.exclusiveCompanionId,
+      record.exclusiveEnteredAt,
+      record.exclusiveDeadlineAt,
+      record.exclusiveTimeoutMinutesSnapshot,
+      record.publicPoolEnteredAt,
+      record.publicDeadlineAt,
+      record.publicTimeoutMinutesSnapshot,
+      record.acceptedByCompanionId,
+      record.acceptedAt,
+      record.acceptedVia,
+      record.timedOutAt,
+      record.createdAt,
+      record.updatedAt,
+    ]),
+    couponTemplates: await seedRows(
+      tx,
+      "coupon_templates",
+      COUPON_TEMPLATE_COLUMNS,
+      couponSeed,
+      (template) => [
+        template.id,
+        template.name,
+        template.formKey,
+        template.formLabel,
+        template.valueLabel,
+        template.conditionLabel,
+        template.validFrom,
+        template.validTo,
+        template.thresholdAmount,
+        template.discountAmount,
+        template.enabled,
+        template.createdAt,
+        template.updatedAt,
+      ],
+    ),
+    couponClaims: await seedRows(tx, "coupon_claims", COUPON_CLAIM_COLUMNS, couponClaimSeed, (claim) => [
+      claim.id,
+      claim.userId,
+      claim.couponId,
+      claim.status,
+      claim.source,
+      claim.claimedAt,
+      claim.usedAt,
+      claim.grantedByAdminId,
+      // ⚠️ 幂等键写 NULL：`mockCouponRepository.createStore()` 只把种子放进
+      // `claimIdByCoupon`，`claimIdByKey` 是**空的**。写一个编出来的键，
+      // 会让「预置券按幂等键查不到」这条 parity 反过来。
+      null,
+      jsonbParam(claim.snapshot),
+    ]),
+    notifications: await seedRows(
+      tx,
+      "notifications",
+      NOTIFICATION_COLUMNS,
+      notificationSeed,
+      (notification) => [
+        notification.id,
+        notification.userId,
+        notification.kind,
+        notification.title,
+        notification.summary,
+        notification.body,
+        notification.createdAt,
+        notification.readAt,
+        notification.href,
+      ],
+    ),
+    complaints: await seedRows(tx, "complaints", COMPLAINT_COLUMNS, complaintSeed, (complaint) => [
+      complaint.id,
+      complaint.complaintNo,
+      complaint.userId,
+      complaint.orderId,
+      complaint.orderNo,
+      complaint.status,
+      complaint.typeKey,
+      complaint.typeLabel,
+      complaint.description,
+      jsonbParam(complaint.evidence),
+      complaint.contact,
+      // 同上：`complaintIdByKey` 建仓为空
+      null,
+      complaint.createdAt,
+      complaint.updatedAt,
+      complaint.processingAt,
+      complaint.handledAt,
+      complaint.handledById,
+      complaint.handledByRole,
+      complaint.handledByName,
+      complaint.result,
+    ]),
+    refundRequests: await seedRows(tx, "refund_requests", REFUND_COLUMNS, refundSeed, (refund) => [
+      refund.id,
+      refund.refundNo,
+      refund.userId,
+      refund.orderId,
+      refund.status,
+      refund.amount,
+      jsonbParam(refund.decision),
+      refund.reasonKey,
+      refund.reasonLabel,
+      refund.description,
+      jsonbParam(refund.evidence),
+      // 同上：`refundIdByKey` 建仓为空
+      null,
+      refund.createdAt,
+      refund.updatedAt,
+      refund.reviewingAt,
+      refund.reviewedAt,
+      refund.reviewedBy,
+      refund.reviewedByRole,
+      refund.reviewedByName,
+      refund.reviewNote,
+      refund.cancelledAt,
+    ]),
+    platformConfig: await seedRows(
+      tx,
+      "platform_config",
+      PLATFORM_CONFIG_COLUMNS,
+      [platformConfigSeed],
+      (config) => [
+        1,
+        config.exclusivePoolTimeoutMinutes,
+        config.publicPoolTimeoutMinutes,
+        config.completionAutoApprovalMinutes,
+        config.complaintWindowMinutes,
+        config.updatedAt,
+        config.updatedByAdminId,
+      ],
+    ),
   }));
 }

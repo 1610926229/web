@@ -14,6 +14,14 @@ import { createFavoriteRepository, pgFavoriteRepository } from "../lib/data/pg/f
 import { createSuggestionRepository, pgSuggestionRepository } from "../lib/data/pg/suggestionRepository.ts";
 import { favoriteSeed } from "../lib/mocks/fixtures/favoriteSeed.ts";
 import { suggestionSeed } from "../lib/mocks/fixtures/suggestionSeed.ts";
+import { buildDispatchSeed } from "../lib/mocks/fixtures/dispatchSeed.ts";
+import { getMockSeedNow } from "../lib/mocks/fixtures/mockClock.ts";
+import { buildRankingPeriodOrders, orderSeed } from "../lib/mocks/fixtures/orderSeed.ts";
+import { couponClaimSeed, couponSeed } from "../lib/mocks/fixtures/couponSeed.ts";
+import { complaintSeed } from "../lib/mocks/fixtures/complaintSeed.ts";
+import { notificationSeed } from "../lib/mocks/fixtures/notificationSeed.ts";
+import { refundSeed } from "../lib/mocks/fixtures/refundSeed.ts";
+import { companionSeed } from "../lib/mocks/fixtures/seed.ts";
 
 /**
  * PROD-1A · PostgreSQL 基础层与竖切片的**集成**用例（打真库）。
@@ -51,6 +59,101 @@ if (TEST_URL) {
 
 const executor = () => getPgExecutor();
 
+/**
+ * 当前迁移清单，**按版本号顺序**。
+ *
+ * ⚠️ 新增一条迁移就要在这里加一项。这是**刻意**留的人工动作：
+ * 它逼着改动者在「库的结构变了」这件事上做一次明确声明，
+ * 而不是让新表悄悄出现在测试已经通过的那一层下面。
+ */
+const ALL_VERSIONS = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"];
+
+/**
+ * 迁移跑到最新之后，`public` 下应当有这些表（含记账表）。
+ *
+ * 与 `ALL_VERSIONS` 同理：**全部列出**，而不是「至少包含这几个」。
+ * 后者接不住「某条迁移多建了一张没人知道的表」——而那正是记账表要防的事。
+ */
+const ALL_TABLES = [
+  "companion_accept_events",
+  "companion_release_records",
+  "companion_service_events",
+  "companions",
+  "completion_submissions",
+  "complaints",
+  "coupon_claims",
+  "coupon_templates",
+  "dispatch_records",
+  "earning_adjustments",
+  "earnings",
+  "favorites",
+  "notifications",
+  "orders",
+  "payment_requests",
+  "payments",
+  "platform_config",
+  "refund_requests",
+  MIGRATION_TABLE,
+  "suggestions",
+];
+
+/**
+ * 按**码位**比较，不用 `Array.prototype.sort()` 的默认比较器之外的任何东西。
+ *
+ * ⚠️ 为什么不直接拿 SQL 的 `ORDER BY tablename` 结果去比：
+ * 表名是 `name` 类型，排序走的是**数据库的默认排序规则**，而 `_` 与字母的先后
+ * 在 C 规则和 glibc 的 en_US.UTF-8 下**不一样**（后者会在主级忽略标点）。
+ * `earnings` / `earning_adjustments`、`payments` / `payment_requests` 这两对
+ * 正好卡在这个差别上——同一份代码在两台机器上会给出不同的顺序。
+ * 因此这里只比**集合**：两侧都按码位排一遍再比。SQL 里那句 ORDER BY 仍然保留，
+ * 它保证的是查询本身的确定性，与本断言的判据无关。
+ */
+function byCodeUnit(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * W1（订单写闭包）里**真的有预置数据**的表，以及各有多少行。
+ *
+ * ⚠️ 订单集合必须与 `seedDatabase` 的取法**逐字一致**：`orderSeed` 加上
+ * `buildRankingPeriodOrders`。少算那一批，「种子条数与预置数据一致」这条断言
+ * 会以「少了几条」的形式失败——这正是它该有的表现。
+ */
+const SEED_NOW = getMockSeedNow();
+const SEED_ORDERS = [...orderSeed, ...buildRankingPeriodOrders(SEED_NOW)];
+const SEED_DISPATCHES = buildDispatchSeed(SEED_ORDERS, SEED_NOW);
+
+const SEEDED_HUB_TABLES = {
+  companions: companionSeed.length,
+  orders: SEED_ORDERS.length,
+  dispatch_records: SEED_DISPATCHES.length,
+  coupon_templates: couponSeed.length,
+  coupon_claims: couponClaimSeed.length,
+  notifications: notificationSeed.length,
+  complaints: complaintSeed.length,
+  refund_requests: refundSeed.length,
+  platform_config: 1,
+};
+
+/**
+ * W1 里**建仓即为空**的表。
+ *
+ * 「两边都空」同样是 parity：Mock 的这几张 store 在 `createStore()` 里就是空的，
+ * 给 Pg 编一份预置数据会凭空造出一段从未发生过的历史。
+ * `earnings` / `earning_adjustments` / 三张历史事件表尤其如此
+ * （见 `lib/types/companionAccept.ts` 关于「不伪造历史」的那段）。
+ */
+const EMPTY_HUB_TABLES = [
+  "payment_requests",
+  "payments",
+  "completion_submissions",
+  "earnings",
+  "earning_adjustments",
+  "companion_accept_events",
+  "companion_release_records",
+  "companion_service_events",
+];
+
 /** 回到「已迁移 + 已装预置数据」的基线。 */
 async function reseed() {
   await resetDatabase(executor());
@@ -69,7 +172,7 @@ before(async () => {
   // 从**空库**出发：这一句本身就是「空库能一路迁到最新」的前提
   await dropDatabaseObjects(executor());
   const result = await migrate(executor());
-  assert.deepEqual(result.applied, ["0001", "0002"], "两条迁移都应当被执行");
+  assert.deepEqual(result.applied, ALL_VERSIONS, "全部迁移都应当被执行");
 });
 
 beforeEach(async () => {
@@ -125,7 +228,7 @@ test("健康检查报出库名、版本、延迟与迁移进度", { skip: SKIP }
   assert.equal(health.database, databaseNameOf(TEST_URL));
   assert.match(health.serverVersion, /^\d+\./);
   assert.ok(health.latencyMs >= 0);
-  assert.deepEqual(health.migrations, { applied: 2, pending: 0 });
+  assert.deepEqual(health.migrations, { applied: ALL_VERSIONS.length, pending: 0 });
 
   const password = new URL(TEST_URL).password;
   assert.ok(password.length > 0, "测试库连接串里应当带密码，否则这条断言证明不了什么");
@@ -139,7 +242,7 @@ test("迁移没跑完时健康检查会报「还差几条」——连得上不�
   try {
     const health = await checkDatabaseHealth(executor());
     assert.equal(health.ok, true, "库本身是通的");
-    assert.deepEqual(health.migrations, { applied: 0, pending: 2 });
+    assert.deepEqual(health.migrations, { applied: 0, pending: ALL_VERSIONS.length });
   } finally {
     await migrate(executor());
     await reseed();
@@ -148,22 +251,23 @@ test("迁移没跑完时健康检查会报「还差几条」——连得上不�
 
 // ————————————————————————————— 迁移 —————————————————————————————
 
-test("空库能一路迁到最新：两张表建出来，记账表记了两条", { skip: SKIP }, async () => {
+test("空库能一路迁到最新：全部表建出来，记账表逐条记下", { skip: SKIP }, async () => {
   await dropDatabaseObjects(executor());
 
   try {
     const result = await migrate(executor());
-    assert.deepEqual(result.applied, ["0001", "0002"]);
+    assert.deepEqual(result.applied, ALL_VERSIONS);
     assert.deepEqual(result.skipped, []);
 
     const tables = await executor().query(
       `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`,
     );
     assert.deepEqual(
-      tables.map((row) => row.tablename),
-      ["favorites", MIGRATION_TABLE, "suggestions"],
+      tables.map((row) => row.tablename).sort(byCodeUnit),
+      [...ALL_TABLES].sort(byCodeUnit),
+      "建出来的表必须与迁移清单**一一对应**：既不能少，也不能多出没人登记的一张",
     );
-    assert.deepEqual(await appliedVersions(executor()), ["0001", "0002"]);
+    assert.deepEqual(await appliedVersions(executor()), ALL_VERSIONS);
   } finally {
     await migrate(executor());
     await reseed();
@@ -174,11 +278,11 @@ test("重复执行是幂等的：第二次全部跳过，一条也不重跑", { 
   const result = await migrate(executor());
 
   assert.deepEqual(result.applied, [], "已经跑过的不许再跑");
-  assert.deepEqual(result.skipped, ["0001", "0002"]);
+  assert.deepEqual(result.skipped, ALL_VERSIONS);
 
   // 第三次也一样——幂等不是「第二次恰好没事」
-  assert.deepEqual((await migrate(executor())).skipped, ["0001", "0002"]);
-  assert.equal(await countRows(MIGRATION_TABLE), 2);
+  assert.deepEqual((await migrate(executor())).skipped, ALL_VERSIONS);
+  assert.equal(await countRows(MIGRATION_TABLE), ALL_VERSIONS.length);
 });
 
 test("已执行迁移的内容被改过就报错：两个库不能各自跑出不同结构却都显示「最新」", { skip: SKIP }, async () => {
@@ -208,9 +312,13 @@ test("迁移是「全有或全无」：一条 SQL 中途失败，它前半段建
   // 造一条**故意坏掉**的迁移：前半段建表，后半段在同一张表上再建一次。
   // 若迁移没有事务，前半段的表会留下，库就处在「半迁移」状态——那是记账表存在的
   // 意义所在：要么整体成功，要么什么都没发生。
+  // ⚠️ 版本号必须**未被占用**。用 `0003` 会撞上真实存在的 `0003_companions.sql`：
+  // 记账表里已经有 0003，迁移运行器会先报「内容与已执行的记录不一致（checksum 不符）」，
+  // 于是这个用例变成在测 checksum 门禁，而不再是「失败的迁移不留半成品」。
+  // 取一个远离正式序列的号，让它成为一条**真正待执行**的迁移。
   const dir = await mkdtemp(path.join(os.tmpdir(), "pg-migrations-"));
   await writeFile(
-    path.join(dir, "0003_halfway_broken.sql"),
+    path.join(dir, "9999_halfway_broken.sql"),
     [
       "CREATE TABLE halfway_probe (id text PRIMARY KEY);",
       "CREATE TABLE halfway_probe (id text PRIMARY KEY);",
@@ -228,7 +336,7 @@ test("迁移是「全有或全无」：一条 SQL 中途失败，它前半段建
       `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'halfway_probe'`,
     );
     assert.equal(leftovers.length, 0, "失败的迁移不该留下半成品表");
-    assert.equal(await countRows(MIGRATION_TABLE), 2, "失败的迁移不该被记账");
+    assert.equal(await countRows(MIGRATION_TABLE), ALL_VERSIONS.length, "失败的迁移不该被记账");
   } finally {
     if (saved === undefined) delete process.env.PG_MIGRATIONS_DIR;
     else process.env.PG_MIGRATIONS_DIR = saved;
@@ -242,10 +350,14 @@ test("两个进程同时迁移不会重复执行：抢不到锁的那个会等�
   try {
     const [a, b] = await Promise.all([migrate(executor()), migrate(executor())]);
 
-    // 两条迁移各被执行**一次**，合计恰好 2 次；另一侧要么跳过、要么看到已记账后返回
-    assert.equal(a.applied.length + b.applied.length, 2, "同一条迁移不能被两个进程各跑一遍");
-    assert.equal(await countRows(MIGRATION_TABLE), 2);
-    assert.deepEqual(await appliedVersions(executor()), ["0001", "0002"]);
+    // 每条迁移各被执行**一次**，合计恰好等于迁移总数；另一侧要么跳过、要么看到已记账后返回
+    assert.equal(
+      a.applied.length + b.applied.length,
+      ALL_VERSIONS.length,
+      "同一条迁移不能被两个进程各跑一遍",
+    );
+    assert.equal(await countRows(MIGRATION_TABLE), ALL_VERSIONS.length);
+    assert.deepEqual(await appliedVersions(executor()), ALL_VERSIONS);
   } finally {
     await reseed();
   }
@@ -355,6 +467,56 @@ test("唯一约束由**数据库**强制：绕过仓储直接插重复行，一�
     (error) => {
       assert.equal(error.code, "23505", "必须是唯一约束冲突（SQLSTATE 23505）");
       assert.match(error.constraint, /favorites_user_product_key/);
+      return true;
+    },
+  );
+});
+
+test("W1 表的唯一性同样由**数据库**强制：一单一派单、一人一券都绕不过去", { skip: SKIP }, async () => {
+  // 这两条都是**业务规则**（「一张订单只有一条派单记录」「同一个人对同一张券只能领一次」），
+  // 实现把它们交给了唯一索引，而不是「先查再写」的应用层判断。
+  // 这里用 `INSERT … SELECT` 复制一条**真实的预置行**、只换 id，因此
+  // 除 id 之外每一个字段都与既有行相同——能撞上唯一约束，靠的只可能是索引本身。
+  // ⚠️ 不手写各列的值：抄一份真实行才不会被「列漏了 / 值凑错」这两件事污染结论。
+  await assert.rejects(
+    () =>
+      executor().query(
+        `INSERT INTO dispatch_records
+           (id, order_id, state, exclusive_companion_id, exclusive_entered_at,
+            exclusive_deadline_at, exclusive_timeout_minutes_snapshot, public_pool_entered_at,
+            public_deadline_at, public_timeout_minutes_snapshot, accepted_by_companion_id,
+            accepted_at, accepted_via, timed_out_at, created_at, updated_at)
+         SELECT $1, order_id, state, exclusive_companion_id, exclusive_entered_at,
+                exclusive_deadline_at, exclusive_timeout_minutes_snapshot, public_pool_entered_at,
+                public_deadline_at, public_timeout_minutes_snapshot, accepted_by_companion_id,
+                accepted_at, accepted_via, timed_out_at, created_at, updated_at
+           FROM dispatch_records ORDER BY id LIMIT 1`,
+        ["dsp-dup-raw"],
+      ),
+    (error) => {
+      assert.equal(error.code, "23505", "必须是唯一约束冲突（SQLSTATE 23505）");
+      assert.match(error.constraint, /dispatch_records_order_key/);
+      return true;
+    },
+  );
+
+  // 「一人一券」落在**部分**唯一索引 `coupon_claims_self_claim_key`
+  // （`(user_id, coupon_id) WHERE source = 'self_claim'`）上——只复制一行自己领的记录，
+  // 幂等键写 NULL（预置行本来就是 NULL），因此冲突只可能来自那条部分索引。
+  await assert.rejects(
+    () =>
+      executor().query(
+        `INSERT INTO coupon_claims
+           (id, user_id, coupon_id, status, source, claimed_at, used_at, granted_by_admin_id,
+            snapshot, idempotency_key)
+         SELECT $1, user_id, coupon_id, status, source, claimed_at, used_at, granted_by_admin_id,
+                snapshot, NULL
+           FROM coupon_claims WHERE source = 'self_claim' ORDER BY id LIMIT 1`,
+        ["claim-dup-raw"],
+      ),
+    (error) => {
+      assert.equal(error.code, "23505", "必须是唯一约束冲突（SQLSTATE 23505）");
+      assert.match(error.constraint, /coupon_claims_self_claim_key/);
       return true;
     },
   );
@@ -493,21 +655,45 @@ test("预置反馈没有幂等键，用任何键都查不到——与 Mock 的�
 // ————————————————————————————— 预置数据 —————————————————————————————
 
 test("seed 写进去的条数与预置数据一致；重复执行全部跳过，不产生第二份", { skip: SKIP }, async () => {
-  const first = await seedDatabase(executor());
-  assert.deepEqual(first, {
-    favorites: { inserted: 0, skipped: favoriteSeed.length },
-    suggestions: { inserted: 0, skipped: suggestionSeed.length },
+  const counts = (total, inserted) =>
+    inserted ? { inserted: total, skipped: 0 } : { inserted: 0, skipped: total };
+  const expected = (inserted) => ({
+    favorites: counts(favoriteSeed.length, inserted),
+    suggestions: counts(suggestionSeed.length, inserted),
+    companions: counts(companionSeed.length, inserted),
+    orders: counts(SEED_ORDERS.length, inserted),
+    dispatchRecords: counts(SEED_DISPATCHES.length, inserted),
+    couponTemplates: counts(couponSeed.length, inserted),
+    couponClaims: counts(couponClaimSeed.length, inserted),
+    notifications: counts(notificationSeed.length, inserted),
+    complaints: counts(complaintSeed.length, inserted),
+    refundRequests: counts(refundSeed.length, inserted),
+    platformConfig: counts(1, inserted),
   });
+
+  const first = await seedDatabase(executor());
+  assert.deepEqual(first, expected(false), "刚 seed 过，第二次必须全部跳过");
 
   await resetDatabase(executor());
   const afterReset = await seedDatabase(executor());
-  assert.deepEqual(afterReset, {
-    favorites: { inserted: favoriteSeed.length, skipped: 0 },
-    suggestions: { inserted: suggestionSeed.length, skipped: 0 },
-  });
+  assert.deepEqual(afterReset, expected(true), "reset 之后每一张表都要重新装进去");
 
   assert.equal(await countRows("favorites"), favoriteSeed.length);
   assert.equal(await countRows("suggestions"), suggestionSeed.length);
+
+  // 库里真的有多少行，与预置数据逐表对齐——不是只信 seed 自己报的数
+  for (const [table, rows] of Object.entries(SEEDED_HUB_TABLES)) {
+    assert.equal(await countRows(table), rows, `${table} 的行数与预置数据不一致`);
+  }
+});
+
+test("W1 里建仓即为空的那几张表，在 Pg 里也必须一条都没有", { skip: SKIP }, async () => {
+  // ⚠️ 这条断言的对手不是「忘了插」，而是「忍不住替它编一份数据」。
+  // 三张只增不改的历史事件表尤其如此：凭空补一段接单 / 服务 / 退出历史，
+  // 正是 lib/types/companionAccept.ts 里产品裁定明令禁止的事。
+  for (const table of EMPTY_HUB_TABLES) {
+    assert.equal(await countRows(table), 0, `${table} 在 Mock 侧建仓即为空，Pg 侧也必须为空`);
+  }
 });
 
 test("reset 之后重新 seed，数据是**确定的**：两次结果逐字段相同", { skip: SKIP }, async () => {
