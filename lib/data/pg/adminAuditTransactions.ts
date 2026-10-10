@@ -21,20 +21,16 @@ import {
   resolveCompanionRefundCopy,
   type RefundDecisionInput,
 } from "@/lib/constants/refunds";
-import type { AdminAuditAction, AdminAuditEntry, AdminAuditSnapshot } from "@/lib/types/adminAudit";
+import type { AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { Companion } from "@/lib/types/companion";
 import type { CompletionSubmissionStatus } from "@/lib/types/completion";
 import type { CompanionOrdersReleaseOutcome, Order } from "@/lib/types/order";
 import type { RefundDecision, RefundRequest, RefundStatus } from "@/lib/types/refund";
 import type { AdminCompanionWriteResult } from "../adminCompanionTransaction";
 import type { AdminRefundWriteResult, RefundReviewWriteResult } from "../adminRefundTransaction";
-import {
-  buildAuditEntry,
-  evaluateReplay,
-  refineReplayByAction,
-  type AdminWriteContext,
-} from "../adminWriteSupport";
-import { appendAuditEntryTx, readAuditEntryByOperationIdTx } from "./adminAuditRepository";
+import { buildAuditEntry, type AdminWriteContext } from "../adminWriteSupport";
+import { appendAuditEntryTx } from "./adminAuditRepository";
+import { takeReplayForActionTx, takeReplayTx } from "./adminWriteTx";
 import { applyCompanionFlagsTx, lockCompanionForFlagsTx } from "./companionRepository";
 import { getPgExecutor, type TxHandle } from "./executor";
 import {
@@ -166,39 +162,10 @@ import {
 
 /* ─────────────────────────── 事务内共用原语 ─────────────────────────── */
 
-/**
- * 幂等重放判定（**事务内**，已知目标 id）。
- *
- * 与 Mock 的 `takeReplay` 一一对应：读哪里是参数（这里读 `admin_audit_entries`），
- * 判定本身仍是两个实现共用的纯函数 `evaluateReplay`。
- *
- * ⚠️ **结论只在取到竞争行锁之后采信**，理由见文件头。
- */
-async function takeReplayTx(
-  tx: TxHandle,
-  actor: AdminWriteContext,
-  targetType: AdminAuditEntry["targetType"],
-  targetId: string,
-): Promise<ReturnType<typeof evaluateReplay>> {
-  const entry = await readAuditEntryByOperationIdTx(tx, actor.operationId);
-  return evaluateReplay(entry, actor, targetType, targetId);
-}
-
-/**
- * 同上，再收一轴**意图**——与 Mock 的 `takeReplayForAction` 一一对应。
- *
- * ⚠️ 只用于「意图在读到记录之前就已确定」的迁移类动作（退款的那三个）。
- * 编辑类动作不适用，理由见 `adminWriteSupport.ts` 的 `takeReplayForAction` 原注释。
- */
-async function takeReplayForActionTx(
-  tx: TxHandle,
-  actor: AdminWriteContext,
-  action: AdminAuditAction,
-  targetType: AdminAuditEntry["targetType"],
-  targetId: string,
-): Promise<ReturnType<typeof evaluateReplay>> {
-  return refineReplayByAction(await takeReplayTx(tx, actor, targetType, targetId), action);
-}
+// `takeReplayTx` / `takeReplayForActionTx` 在 PROD-1D 搬去了 `./adminWriteTx`：
+// 本轮又添了平台参数、投诉、券模板三组写事务，五组事务用的是**同一条**
+// 「读账本 → 比操作者 × 目标（× 意图）」规则。判定一个字没改，只是换了住处，
+// 免得三份新拷贝各自长歪（见 `./adminWriteTx.ts` 的文件头）。
 
 /** 一次写入前后的一对快照。与 Mock 的 `refundSnapshots` 同形，判据来自常量层。 */
 function refundSnapshots(

@@ -305,3 +305,129 @@ export function createComplaintRepository(db: PgQueryable): ComplaintRepository 
  */
 export const pgComplaintRepository: ComplaintRepository =
   createComplaintRepository(lazyPgExecutor());
+
+// ——————————————————————— 事务内原语（PROD-1D） ———————————————————————
+
+/**
+ * 取一条投诉并**锁住它**（`SELECT … FOR UPDATE`），供管理端处理事务使用。
+ *
+ * ⚠️ 与 `adminAuditTransactions.ts` 的 `lockRefund` 同形：这是投诉处理路径的
+ * **唯一一把锁**。状态机判定、写入与审计全部发生在持有这把锁的区间里，
+ * 因此两个管理员同时点「开始处理」时，第二个会先等第一个提交，
+ * 再看到 `processing` 而不是也把它推一遍。
+ *
+ * ⚠️ 返回 `null` 表示这条投诉不存在，调用方据此返回 `not-found`——
+ * **不是**「锁拿到了但是空的」。
+ *
+ * ⚠️ 复用本文件的 `COLUMNS` / `ComplaintRow` / `toComplaint`，不在事务模块里
+ * 另写一份行映射：列名与字段名的对应只有一处定义，少写一列会在读侧暴露，
+ * 而不是变成一个静默的 `undefined`。
+ */
+export async function lockComplaintTx(
+  db: PgQueryable,
+  id: string,
+): Promise<Complaint | null> {
+  const rows = await db.query<ComplaintRow>(
+    `SELECT ${COLUMNS} FROM complaints WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  return rows[0] ? toComplaint(rows[0]) : null;
+}
+
+/** 处理动作写入器的入参。含义与 `mockComplaintRepository.applyComplaintStatus` 的同名入参逐条相同。 */
+export type ComplaintStatusWriteInput = {
+  at: string;
+  result: string;
+  actorId: string;
+  actorRole: ActorRole;
+  actorName: string | null;
+};
+
+/**
+ * 「开始处理 / 解决 / 关闭」三个动作的投诉写入器 ——
+ * `mockComplaintRepository.applyComplaintStatus` 的 Pg 版本。
+ *
+ * ## 写哪几列，逐条照抄 Mock
+ *
+ * | 目标状态 | 这次**写**的列 | 其余列 |
+ * |---|---|---|
+ * | `processing` | `status` / `updated_at` / `processing_at` | 一律保持原值 |
+ * | `resolved` / `closed` | `status` / `updated_at` / `handled_at` / `handled_by_id` / `handled_by_role` / `handled_by_name` / `result` | `processing_at` 保持原值 |
+ *
+ * ⚠️ **`result` 只在后两个动作写**。`start-processing` 分支里连 `result` 这个 SQL
+ * 参数都不存在——这不是「传进来但没写」，而是那一条语句里根本没有这一列。
+ * 与 Mock 的「`start-processing` 时连读都不读 `result`」结构上等价：
+ * 提交上来的文本不可能变成一条「处理中但已经有结果」的记录。
+ *
+ * ⚠️ **窄写入，不是整行 `UPDATE`**。整行写会把 `description` / `evidence` /
+ * `contact` / `orderId` / `userId` / `complaintNo` 这些**本次动作根本不碰**的列
+ * 也写一遍，而它们的值来自锁下读到的那一份——一旦将来有人在这两条语句之间插进
+ * 第三个写者（今天没有），整行写就会把别人的改动覆盖回去，且**不会报错**。
+ * 用户提交的原始材料因此结构上不可被这条路径覆盖（§投诉处理）。
+ *
+ * ⚠️ 入参 `complaint` 必须是**取锁之后读到的**那一份：`processing_at` 在
+ * `resolved` / `closed` 分支是「保持原值」，传一个陈旧快照进来，那个「原值」就是错的。
+ *
+ * ⚠️ 与 Mock 一样**只负责写**，不判断这次迁移合不合法——合法性由调用方在
+ * 同一把锁下判（`canTransitionComplaint`）。
+ */
+export async function applyComplaintStatusTx(
+  db: PgQueryable,
+  complaint: Complaint,
+  to: Extract<ComplaintStatus, "processing" | "resolved" | "closed">,
+  input: ComplaintStatusWriteInput,
+): Promise<{ previous: Complaint; updated: Complaint }> {
+  const previous = { ...complaint };
+  const settled = to === "resolved" || to === "closed";
+
+  // 与 Mock 逐字段相同：`settled` 为假时六个字段都取「原值」——
+  // 它们的值正是锁下读到的那一份，因此「保持原值」在这里是精确的
+  const updated: Complaint = {
+    ...complaint,
+    status: to,
+    updatedAt: input.at,
+    processingAt: to === "processing" ? input.at : complaint.processingAt,
+    handledAt: settled ? input.at : complaint.handledAt,
+    handledById: settled ? input.actorId : complaint.handledById,
+    handledByRole: settled ? input.actorRole : complaint.handledByRole,
+    handledByName: settled ? input.actorName : complaint.handledByName,
+    result: settled ? input.result : complaint.result,
+  };
+
+  if (settled) {
+    await db.query(
+      `UPDATE complaints
+          SET status = $2,
+              updated_at = $3,
+              handled_at = $4,
+              handled_by_id = $5,
+              handled_by_role = $6,
+              handled_by_name = $7,
+              result = $8
+        WHERE id = $1`,
+      [
+        complaint.id,
+        updated.status,
+        updated.updatedAt,
+        updated.handledAt,
+        updated.handledById,
+        updated.handledByRole,
+        updated.handledByName,
+        updated.result,
+      ],
+    );
+  } else {
+    // 开始处理：只有这三列。`handled_*` 与 `result` 不出现在这条语句里，
+    // 因此「处理中」的记录不可能带着处理人或处理结果（与 Mock 同）
+    await db.query(
+      `UPDATE complaints
+          SET status = $2,
+              updated_at = $3,
+              processing_at = $4
+        WHERE id = $1`,
+      [complaint.id, updated.status, updated.updatedAt, updated.processingAt],
+    );
+  }
+
+  return { previous, updated };
+}

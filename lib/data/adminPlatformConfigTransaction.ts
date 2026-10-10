@@ -100,8 +100,16 @@ export type PlatformConfigInput = {
  *
  * ⚠️ 合并（上面那个 `next` 字面量）不靠这份清单：`PlatformConfig` 的字段都是必填的，
  * 少写一个同样是编译错误。两边因此各有各的编译期保险，不依赖人的记性。
+ *
+ * ⚠️ PROD-1D 起**导出**：PostgreSQL 的等价事务（`lib/data/pg/platformConfigTransactions.ts`）
+ * 也要判 `nothingChanged`，而它**必须用同一份键集合**。若在 Pg 侧再抄一份
+ * `Record<keyof PlatformConfigInput, true>`，上面那条「加第五个参数时忘记更新判定
+ * 会变成编译错误」的保险就在 Pg 侧失效了——加字段时改了一处、漏了另一处，
+ * 而 `tsc` 一声不吭。导出的是**这份清单**，不是把判定复制到第二处：
+ * 判定本身（`Object.keys(PATCHABLE_FIELDS).every(...)`）仍在两个调用点各写一次，
+ * 但两边读的是同一个对象，漏加键时**两处同时**编译报错。
  */
-const PATCHABLE_FIELDS: Record<keyof PlatformConfigInput, true> = {
+export const PATCHABLE_FIELDS: Record<keyof PlatformConfigInput, true> = {
   exclusivePoolTimeoutMinutes: true,
   publicPoolTimeoutMinutes: true,
   completionAutoApprovalMinutes: true,

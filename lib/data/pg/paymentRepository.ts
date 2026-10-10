@@ -8,7 +8,8 @@ import type {
   PaymentStatus,
 } from "@/lib/types/payment";
 import type { AdminOrderQueryFilter, PaymentRepository } from "../paymentRepository";
-import { lazyPgExecutor, type PgQueryable } from "./executor";
+import { getPgExecutor, lazyPgExecutor, type PgQueryable } from "./executor";
+import { insertDispatchForOrderTx, redeemCouponClaimForOrderTx } from "./w1Transactions";
 // ⚠️ `orders` 的列清单与行 → 领域对象映射从 `w1Rows.ts` 取，**不在这里再写一份**。
 // 本轮有 6 个 Pg 事务与 13 个 Pg 仓储在读这张表；各写一份的话，漏掉一个列不会报错，
 // 只会让某个页面悄悄少显示一个字段。（原实现是本文件私有的，已合并回唯一真值源。）
@@ -418,9 +419,30 @@ export function createPaymentRepository(db: PgQueryable): PaymentRepository {
 
       // 订单长什么样属于业务，由 service 传入的纯函数决定；仓储只负责「恰好生成一次」。
       // 传的是**认领之前**的那份 request（与 Mock 传 `request` 一致），它只读快照与金额，
-      // 不读 status / confirmedAt。⚠️ 这一步可能抛错（如券不可用），
+      // 不读 status / confirmedAt。⚠️ 这一步可能抛错（金额域算不出来），
       // 因此整个方法必须跑在调用方的事务里——抛错时认领的那一行随之回滚。
+      // ⚠️ PROD-1D 起这个回调**必须是纯函数**（不写任何存储），见接口文件的说明。
       const order = buildOrder(request);
+
+      // —— 券核销（PROD-1D）：与订单 / 支付 / 派单**同一个事务** ——
+      // 顺序与 Mock 一致：先核销、再落任何订单与派单记录，因此核销被拒时
+      // 事务里除了「认领支付请求」那句话之外一个字节都没写（而那句话会被 ROLLBACK 掉）。
+      //
+      // ⚠️ `at` 取 `order.createdAt`：在 Mock 里核销时刻与建单时刻本来就是同一个 `at`，
+      // 因此这不是近似，是**逐字等价**。
+      if (request.coupon) {
+        const redemption = await redeemCouponClaimForOrderTx(db, {
+          userId: request.userId,
+          claimId: request.coupon.claimId,
+          // 门槛基数是**优惠前应付**（裁定 §2），不是实付、也不是分账基数
+          originalAmount: request.totalAmount,
+          at: order.createdAt,
+        });
+        // 券不可用：**不抛错**，而是把结论交给调用方（数据层不产生界面文案）。
+        // ⚠️ 事务入口 `confirmPaymentRequestPg()` 见到这一支会**主动回滚**
+        // ——绝不能让它落成一次提交，否则留下「支付成功、没有订单」。
+        if (!redemption.ok) return { kind: "coupon-unavailable", reason: redemption.reason };
+      }
 
       // —— 原子区段（由调用方的数据库事务提供）——
       await insertOrder(order);
@@ -440,6 +462,16 @@ export function createPaymentRepository(db: PgQueryable): PaymentRepository {
         amount: claimed.actualPaidAmount,
         status: "success",
         paidAt: confirmedAt,
+      });
+
+      // —— 派单（PROD-1D）：订单存在的那一刻，派单记录就必须已经存在（P0-5）——
+      // 时长取 `platform_config` 此刻的值并当场冻结（与 Mock 的 `createDispatchForOrder` 同规则）。
+      // 必须与订单同事务：分开写会留下「已付款、没人能接、也不会超时退款」的订单。
+      await insertDispatchForOrderTx(db, {
+        orderId: order.id,
+        // 结算页选了人 → 专属池；没选 → 直接进公共池
+        exclusiveCompanionId: request.snapshot.companion ? request.snapshot.companion.id : null,
+        at: order.createdAt,
       });
 
       // 订单号回填到支付请求（与 Mock 的 `updated.orderId` 是同一处事实）。
@@ -562,5 +594,85 @@ export function createPaymentRepository(db: PgQueryable): PaymentRepository {
  *
  * ⚠️ `confirmPaymentRequest` / `createPaymentRequest` 的原子性依赖调用方传入的事务句柄，
  * 进程级实例只适合读取方法与单条语句，不要用它承载需要原子性的业务链。
+ * **T1 支付确认建单请走 `confirmPaymentRequestPg()`**（下面那个事务入口）。
  */
 export const pgPaymentRepository: PaymentRepository = createPaymentRepository(lazyPgExecutor());
+
+/* ─────────────────────── T1 的事务入口（PROD-1D） ─────────────────────── */
+
+/**
+ * 内部信号：券在核销那一刻不可用。
+ *
+ * ⚠️ 它**不是**给上层看的错误——它唯一的职责是「把整个事务掀翻」。用抛错表达
+ * 「回滚」是必须的：`withTransaction` 只在回调抛错时才 `ROLLBACK`，
+ * 而 T1 在券不可用时**已经把支付请求认领掉了**（`UPDATE … SET status = 'success'`），
+ * 若只是正常返回一个失败结论，`withTransaction` 会把那句话**提交**，
+ * 留下「支付成功、没有订单」的半成品——正是本轮明令禁止的状态。
+ *
+ * 抛出后由 `confirmPaymentRequestPg()` 在事务**外面**翻译成
+ * `{ kind: "coupon-unavailable" }` 这个联合分支（`withTransaction` 会 rethrow 原错误）。
+ */
+class CouponUnavailableSignal extends Error {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(reason);
+    this.name = "CouponUnavailableSignal";
+    this.reason = reason;
+  }
+}
+
+/**
+ * **T1「支付确认建单」的 PostgreSQL 事务入口。**
+ *
+ * 一个 `BEGIN … COMMIT` 覆盖完整的冻结写闭包：
+ *
+ * ```
+ * payment_requests 认领（pending → success）
+ *   → orders INSERT
+ *   → payments INSERT
+ *   → dispatch_records INSERT
+ *   → coupon_claims 条件核销（有券时）
+ *   → payment_requests.order_id 回填
+ * ```
+ *
+ * 任何一步失败（金额算不出来 / 券不可用 / 数据库报错）都整体回滚，
+ * 因此「券核销成功但订单没建」「订单建了但券没核销」「支付成功但券永久 used」
+ * 这三种半成品在结构上不可能出现。
+ *
+ * ⚠️ **它是本文件唯一为本仓储开事务的入口，且只用一条连接**：
+ * `getPgExecutor().withTransaction` 由执行器给出一个 `TxHandle`，仓储建在**它**上面
+ * （`createPaymentRepository(tx)`），因此这条链上的每一条语句都走同一条连接、
+ * 同一个提交点。**不是**「仓储自己再拿一条连接」——那种写法会让 BEGIN 与 COMMIT
+ * 落在两条连接上，事务根本不存在（`TxHandle.connectionId` 正是用来证伪它的探针）。
+ *
+ * ⚠️ **本轮不激活**：`DATA_SOURCE` 未设置时应用仍走 Mock 伪事务，本函数目前的调用方
+ * 只有测试（`tests/pgCheckoutTransactions.test.mjs`）。正式切换留到 activation round。
+ */
+export async function confirmPaymentRequestPg(
+  id: string,
+  result: MockPaymentResult,
+  buildOrder: (request: PaymentRequest) => Order,
+): Promise<
+  | { request: PaymentRequest; order: Order | null; orderCreated: boolean }
+  | { kind: "coupon-unavailable"; reason: string }
+  | null
+> {
+  try {
+    return await getPgExecutor().withTransaction(async (tx) => {
+      const outcome = await createPaymentRepository(tx).confirmPaymentRequest(
+        id,
+        result,
+        buildOrder,
+      );
+      // 券不可用 → 把结论扔出去触发 ROLLBACK。翻译在事务**之外**做（见 catch）。
+      if (outcome && "kind" in outcome) throw new CouponUnavailableSignal(outcome.reason);
+      return outcome;
+    });
+  } catch (error) {
+    if (error instanceof CouponUnavailableSignal) {
+      return { kind: "coupon-unavailable", reason: error.reason };
+    }
+    throw error;
+  }
+}

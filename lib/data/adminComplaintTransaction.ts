@@ -61,8 +61,15 @@ export type AdminComplaintWriteResult =
 /** 一次投诉处理动作的目标状态。与三个服务函数一一对应。 */
 export type AdminComplaintIntent = "start-processing" | "resolve" | "close";
 
-/** 意图 → 目标状态。**这是全站唯一的一处映射**，服务层与审计动作都从它推导。 */
-const INTENT_TO_STATUS: Record<
+/**
+ * 意图 → 目标状态。**这是全站唯一的一处映射**，服务层与审计动作都从它推导。
+ *
+ * ⚠️ PROD-1D 起 `export`：投诉的 PostgreSQL 事务（`lib/data/pg/complaintTransactions.ts`）
+ * 要复用**同一份**映射。本文件的行为因此**一个字没改**——只是多了一个出口。
+ * 在 Pg 侧再抄一份 `{ "start-processing": "processing", … }` 意味着将来新增一个
+ * 处理动作时只改一处，另一处的投诉会安静地迁到错误的状态上。
+ */
+export const INTENT_TO_STATUS: Record<
   AdminComplaintIntent,
   Extract<ComplaintStatus, "processing" | "resolved" | "closed">
 > = {
@@ -140,8 +147,14 @@ export async function applyAdminComplaintIntent(
  * 与 `INTENT_TO_STATUS` 分开写而不是从状态反推：两者恰好一一对应，但**含义不同**——
  * 一个是「记录变成了什么」，一个是「管理者做了什么」。将来若新增一个能到达
  * `closed` 的动作，状态反推会把两条审计记成同一件事。
+ *
+ * ⚠️ 与 `INTENT_TO_STATUS` 同理，PROD-1D 起 `export` 给 Pg 事务复用，
+ * 行为不变。审计动作名一旦分叉，两个存储上「同一个幂等键算不算同一个意图」
+ * （`refineReplayByAction` 那一轴）就会给出不同答案。
  */
-function auditActionOf(intent: AdminComplaintIntent): Parameters<typeof writeAudit>[0]["action"] {
+export function auditActionOf(
+  intent: AdminComplaintIntent,
+): Parameters<typeof writeAudit>[0]["action"] {
   switch (intent) {
     case "start-processing":
       return "complaint.start-processing";

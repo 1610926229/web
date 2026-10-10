@@ -9,6 +9,11 @@ import {
   DISPATCH_NOTIFICATION_STAFF_REPLACED,
   plusMinutes,
 } from "@/lib/constants/dispatch";
+import {
+  COUPON_CLAIM_NOT_FOUND_REASON,
+  COUPON_USE_USED_REASON,
+  resolveCouponApplication,
+} from "@/lib/constants/coupons";
 import { isEarningFullyReversed, isEarningMatured } from "@/lib/constants/earnings";
 import { canTransitionOrder } from "@/lib/constants/orders";
 import {
@@ -28,6 +33,7 @@ import type {
   StaffCompletionRejectOutcome,
 } from "@/lib/types/completion";
 import type { CompanionWriteContext, DispatchAcceptResult, DispatchRecord } from "@/lib/types/dispatch";
+import type { CouponClaimStatus, CouponSnapshot } from "@/lib/types/coupon";
 import type { Earning } from "@/lib/types/earning";
 import type { Notification, NotificationInput } from "@/lib/types/notification";
 import type {
@@ -42,7 +48,7 @@ import type {
 import type { RefundStatus } from "@/lib/types/refund";
 import type { DispatchSweepResult } from "../companionDispatchTransaction";
 import type { DirectRefundOutcome } from "../directRefundTransaction";
-import { getPgExecutor, type TxHandle } from "./executor";
+import { getPgExecutor, type PgQueryable, type TxHandle } from "./executor";
 import {
   COMPANION_COLUMNS,
   COMPLETION_COLUMNS,
@@ -214,7 +220,18 @@ export async function readCompanion(tx: TxHandle, id: string) {
 
 /** 读平台参数（单行表）。超时 / 窗口快照的冻结就靠它。 */
 export async function readPlatformConfig(tx: TxHandle) {
-  const rows = await tx.query<{
+  return readPlatformConfigFrom(tx);
+}
+
+/**
+ * 同上，但只要求「能执行 SQL」——给那些**拿得到执行器、拿不到 `TxHandle` 类型**的
+ * 写入器用（例如 `insertDispatchForOrderTx`：它的 `tx` 参数被刻意放宽到 `PgQueryable`，
+ * 好让建在事务句柄上的仓储工厂能直接把它传进来）。
+ *
+ * ⚠️ 业务语义不变：**读不到 `id = 1` 那一行仍然抛错**（见下）。放宽的只是类型。
+ */
+async function readPlatformConfigFrom(db: PgQueryable) {
+  const rows = await db.query<{
     exclusive_pool_timeout_minutes: number;
     public_pool_timeout_minutes: number;
     completion_auto_approval_minutes: number;
@@ -1091,6 +1108,142 @@ export async function restoreCouponClaimForOrderTx(
         SET status = 'unused', used_at = NULL
       WHERE id = $1 AND user_id = $2 AND status = 'used'`,
     [input.claimId, input.userId],
+  );
+}
+
+/* ─────────────── 核销与派单：T1 事务内的两个写入参与者（PROD-1D） ─────────────── */
+
+/**
+ * 核销券 —— `redeemCouponClaimForOrder` 的 **Pg 版本**（给 T1 用）。
+ *
+ * ## 判定与 Mock 逐条同序、同因
+ *
+ * 归属 → 券模板此刻是否启用 → `resolveCouponApplication()`（共享纯函数）判
+ * 「已用 / 已停用 / 未开始 / 已过期 / 门槛未达 / 形态不支持」。**判定逻辑只有一份**，
+ * 因此「试算说能用、真下单却被拒」在两个存储上都不可能发生。
+ *
+ * ⚠️ 券模板的 `enabled` 是**普通读**（与 `readCompanion` / `readPlatformConfig` 同口径），
+ * 不加行锁。含义是：一位管理员在本事务读完之后、提交之前**停用了**这张模板，
+ * 本单仍然按「启用」核销。这与 Mock 的读——它在原子区段里读同一份 store——
+ * 只在「真的有并发停用」这一种情形下有差别，且**不产生自相矛盾的落库状态**
+ * （券被核销、订单成立、模板停用，三者各自都是已提交的事实）。
+ * 这是本轮**如实登记的已知残留**，不是被忽略的窗口。
+ *
+ * ## 并发的唯一保证是那条条件 `UPDATE`，不是前面的那次读
+ *
+ * `SELECT … → 判 unused → UPDATE` 这一串在 READ COMMITTED 下**不足以**防双花：
+ * 两个事务可以双双读到 `unused`。真正把它堵死的是写入语句上的
+ * `AND status = 'unused'`——两个并发 UPDATE 会在同一行上串行化，后到者在锁释放后
+ * 按**新**快照重求值该谓词，于是改 0 行、返回 `used`。
+ * 返回 `0 行` 因此是「券已经被这一单之外的人用掉了」的**唯一**信号，
+ * 与 Mock 的 `status === 'used'` 闸同因（`COUPON_USE_USED_REASON`）。
+ *
+ * ## 失败**不抛错**
+ *
+ * 与 Mock 同：调用方（建单）要区分「券的问题」（用户可纠正、要看到原因）与
+ * 「系统的问题」（抛错），因此这里返回失败种类。⚠️ 调用方拿到 `{ ok: false }` 时
+ * **必须**让整个事务回滚（本仓的 T1 入口是**抛出一个内部信号**触发 ROLLBACK，
+ * 见 `lib/data/pg/paymentRepository.ts`）——否则认领支付请求那一步会被提交，
+ * 留下「支付成功但没有订单」。
+ *
+ * @param originalAmount 券的门槛基数（**优惠前应付**，裁定 §2），**不是实付**
+ */
+export async function redeemCouponClaimForOrderTx(
+  tx: PgQueryable,
+  input: { userId: string; claimId: string; originalAmount: number; at: string },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const claimRows = await tx.query<{
+    id: string;
+    user_id: string;
+    coupon_id: string;
+    status: CouponClaimStatus;
+    snapshot: CouponSnapshot;
+  }>(
+    `SELECT id, user_id, coupon_id, status, snapshot FROM coupon_claims WHERE id = $1`,
+    [input.claimId],
+  );
+  const claim = claimRows[0];
+  // 与 Mock 同一句话：不区分「不存在」与「不属于你」，避免被用来试探
+  if (!claim || claim.user_id !== input.userId) {
+    return { ok: false, reason: COUPON_CLAIM_NOT_FOUND_REASON };
+  }
+
+  // Mock：`current.coupons.get(claim.couponId)?.enabled ?? false`——查不到模板按「未启用」
+  const templateRows = await tx.query<{ enabled: boolean }>(
+    `SELECT enabled FROM coupon_templates WHERE id = $1`,
+    [claim.coupon_id],
+  );
+  const enabled = templateRows[0]?.enabled ?? false;
+
+  // ⚠️ `at` 由调用方传入，且必须是**建单那一刻**（`order.createdAt`）——
+  // 在 Mock 里核销时刻与订单创建时刻本来就是同一个 `at` 变量
+  const application = resolveCouponApplication(
+    { status: claim.status, snapshot: claim.snapshot },
+    input.originalAmount,
+    new Date(input.at),
+    enabled,
+  );
+  if (!application.applicable) return { ok: false, reason: application.reason };
+
+  // —— 写入：条件核销（并发下唯一赢家由这一行的行锁决定）——
+  const used = await tx.query<{ id: string }>(
+    `UPDATE coupon_claims
+        SET status = 'used', used_at = $3
+      WHERE id = $1 AND user_id = $2 AND status = 'unused'
+      RETURNING id`,
+    [input.claimId, input.userId, input.at],
+  );
+  if (!used[0]) return { ok: false, reason: COUPON_USE_USED_REASON };
+
+  return { ok: true };
+}
+
+/**
+ * 为一张**刚刚支付成功**的订单建立派单记录 —— `createDispatchForOrder` 的 **Pg 版本**。
+ *
+ * ## 冻结快照的规则一字不差
+ *
+ * 时长取 `platform_config` **此刻**的值（`readPlatformConfig(tx)`），并**当场冻结**成
+ * `*TimeoutMinutesSnapshot` + 对应的 deadline：管理员之后改参数不影响这一单。
+ * 两条分支只有一件事不同——**在哪一个池子里开始等人**：指定了打手进专属池
+ * （`exclusivePoolTimeoutMinutes`），没指定直接进公共池（`publicPoolTimeoutMinutes`）。
+ * 两条分支都**不写** `acceptedByCompanionId`：那一刻还没有人接单。
+ *
+ * ⚠️ `readPlatformConfig(tx)` 在**读不到 `id = 1` 那一行时抛错**，而 Mock 的
+ * `readPlatformConfig()` 是兜底不抛的（store 恒有一份配置）。这是本仓 Pg 侧
+ * 既定的取舍：不猜默认值，由种子保证那一行存在（见 `w1Transactions.ts` 该函数的注释）。
+ *
+ * ⚠️ 本函数**必须**在同一条连接、同一个提交点里被调用——订单与派单要么一起存在，
+ * 要么一起不存在。分开写会留下「已付款、没人能接、也不会超时退款」的订单。
+ */
+export async function insertDispatchForOrderTx(
+  tx: PgQueryable,
+  input: { orderId: string; exclusiveCompanionId: string | null; at: string },
+): Promise<void> {
+  const config = await readPlatformConfigFrom(tx);
+  const exclusive = input.exclusiveCompanionId !== null;
+
+  await tx.query(
+    `INSERT INTO dispatch_records (${DISPATCH_COLUMNS})
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+    [
+      `dsp_${crypto.randomUUID()}`,
+      input.orderId,
+      exclusive ? "exclusive" : "public",
+      input.exclusiveCompanionId,
+      exclusive ? input.at : null,
+      exclusive ? plusMinutes(input.at, config.exclusivePoolTimeoutMinutes) : null,
+      exclusive ? config.exclusivePoolTimeoutMinutes : null,
+      exclusive ? null : input.at,
+      exclusive ? null : plusMinutes(input.at, config.publicPoolTimeoutMinutes),
+      exclusive ? null : config.publicPoolTimeoutMinutes,
+      null,
+      null,
+      null,
+      null,
+      input.at,
+      input.at,
+    ],
   );
 }
 

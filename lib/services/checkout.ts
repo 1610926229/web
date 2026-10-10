@@ -13,8 +13,6 @@ import {
 } from "@/lib/constants/coupons";
 import { resolveOrderMoneyDomain, type OrderMoneyDomain } from "@/lib/constants/orderAmount";
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/constants/writes";
-import { createDispatchForOrder } from "@/lib/data/companionDispatchTransaction";
-import { redeemCouponClaimForOrder } from "@/lib/data/couponRedemptionTransaction";
 import { getCouponRepository } from "@/lib/data/couponRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getDataSource } from "@/lib/data/source";
@@ -414,15 +412,29 @@ function makeOrderNo(now: Date): string {
 }
 
 /**
- * 由支付请求生成订单 —— **并且在这里同时建立派单记录**（P0-5）。
+ * 由支付请求**纯构造**一张订单 —— 金额域 + 订单字面量，**不带任何副作用**。
  *
- * ⚠️ 本函数跑在支付仓储的**原子区段**里（`confirmPaymentRequest` 的 `buildOrder` 回调），
- * 因此它里面不能有任何 `await`：金额只能从支付请求上冻结的那份数据算，
- * 派单也必须用**同步**的 `createDispatchForOrder()` 建立。
+ * ## 为什么必须纯（PROD-1D 立的规矩，不是风格偏好）
  *
- * ⚠️ **订单与派单必须同时诞生**。分成两步（先建订单、再建派单）会留下一个真实的窗口：
- * 那一刻的订单既没有截止时间、也不会被任何池子看到、更不会超时退款——
- * 一旦第二步失败，这张单就永远卡在「已付款、没人能接」。
+ * PROD-1B 时期这个函数体内还顺手做了两件写操作：**Mock 券核销**
+ * （`redeemCouponClaimForOrder`）与 **Mock 派单写入**（`createDispatchForOrder`）。
+ * 它被当作支付仓储 `confirmPaymentRequest` 的 `buildOrder` 回调传入，
+ * 于是只要支付仓储换成 PostgreSQL 实现，跑出来的就是
+ *
+ * > 订单 / 支付进 PostgreSQL，**券核销与派单进 Mock**。
+ *
+ * ——正好是 Hard Rule 1（`architecture-rules.md` §2.5 半迁移禁令）明令禁止的那半套事务。
+ * 本函数因此只**算**、不**写**；那两件写操作改由各存储自己的事务参与者完成：
+ *
+ * | 存储 | 参与者 |
+ * |---|---|
+ * | Mock | `lib/data/checkoutCommitTransaction.ts` 的 `commitMockCheckoutParticipants()`（同步，跑在 Mock 仓储那段无 `await` 的原子区段里） |
+ * | PostgreSQL | `lib/data/pg/paymentRepository.ts` 事务内的券核销 + 派单写入（同一 `BEGIN…COMMIT`） |
+ *
+ * 两个存储共用**这一个**函数，因此「支付成功生成的订单长什么样」只有一处定义。
+ *
+ * ⚠️ **无 `await`、且可能抛错**（金额域算不出来时）。
+ * 「先算金额、再动任何存储」这条顺序是调用方的义务：算不出来时一个字节都还没写。
  *
  * ⚠️ 订单创建时**不带打手**：`actualCompanionId` 与 `companion` 都是 null。
  * 用户在结算页选的那位进的是 `Dispatch.exclusiveCompanionId`——「用户指定的人」
@@ -450,42 +462,10 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     couponDiscountAmount: request.couponDiscountAmount,
   });
 
-  // —— 核销（裁定 §5）：唯一的核销点，也是**最后一道**券可用性闸门 ——
-  //
-  // - 放在**原子区段内**，是为了堵住双花：用户对同一张券建两笔待支付请求
-  //   （换个幂等键即可），第 2 笔在这里会看到券已经是 `used`，于是抛错、不建单。
-  //   区段内没有 `await`，因此两次确认不可能交错看到「都还是 unused」；
-  // - 排在 `createDispatchForOrder()` **之前**，是因为那一步会写下派单记录。
-  //   若在它之后再发现券不可用，派单已经写下去了，抛错留下的是
-  //   「有派单、没有订单」的半成品。上面那道纯计算闸门已经先行排掉了这一批失败。
-  //
-  // 失败一律抛错（而不是建一张没有券的订单）：金额在产品看来已经是「减完的」，
-  // 悄悄按原价成交就是裁定 §2 禁止的那种静默降级。
-  //
-  // ⚠️ **残留窗口（如实记录，不假装已关闭）**：核销成功之后、订单写下去之前，
-  // 只剩下 `createDispatchForOrder()` 与几行 Map 写入。
-  //
-  // ⚠️ 准确地说：在**当前的 mock 实现**里，这一小段没有已知的抛错点——
-  // Map 写入不会抛，`crypto.randomUUID()` / `plusMinutes(at, 正整数)` 不会抛，
-  // 而派单路径上的 `normalizePlatformConfig()`（`mockPlatformConfigRepository.ts`）
-  // 是**兜底不抛**的：非法 / 缺失字段一律回退默认值，`{...undefined}` / `{...null}` 也不抛。
-  //
-  // 但这**不能**升级成「窗口已关闭」。关不严是**架构性质**的：订单与券核销记录
-  // 在两个不同的 Mock 存储上，没有跨存储事务可依，因此「核销已落、订单未落」这个
-  // 中间态在原理上可达；上面那句「当前没有已知抛错点」修饰的是**今天的实现**，
-  // 不是一条不变量——将来任何一处引入异步（换真仓储、加一次 `await`）它就会失效。
-  // 这个窗口**先于 P1-4 存在**（派单本来就在建单之前写），P1-4 只是把它收窄到最小。
-  if (request.coupon) {
-    const redemption = redeemCouponClaimForOrder({
-      userId: request.userId,
-      claimId: request.coupon.claimId,
-      // 门槛基数是**优惠前应付**（裁定 §2）
-      originalAmount: request.totalAmount,
-      at,
-    });
-    if (!redemption.ok) rejectCoupon(redemption.reason);
-  }
-
+  // ⚠️ **券核销**与**派单写入**在 PROD-1D 之前就写在这里（见函数头）。现在它们
+  // 由各存储的事务参与者在**本函数返回之后、同一次原子提交之内**完成：
+  // 顺序仍是「先算金额（可能失败）→ 核销（可能被拒）→ 建单 → 写派单」，
+  // 只是后两步的落点由调用方的存储决定。金额仍然只从支付请求上冻结的那份数据算。
   const order: Order = {
     id: `ord_${crypto.randomUUID()}`,
     orderNo: makeOrderNo(now),
@@ -540,14 +520,6 @@ function buildOrderFromRequest(request: PaymentRequest): Order {
     complaintWindowMinutesSnapshot: null,
     complaintDeadlineAt: null,
   };
-
-  // 与订单同一段、无 `await`：订单存在的那一刻，派单记录就必须已经存在
-  createDispatchForOrder({
-    orderId: order.id,
-    // 结算页选了人 → 专属池；没选 → 直接进公共池
-    exclusiveCompanionId: request.snapshot.companion ? request.snapshot.companion.id : null,
-    at,
-  });
 
   return order;
 }
@@ -710,6 +682,11 @@ export async function confirmPaymentRequest(
     buildOrderFromRequest,
   );
   if (!settled) return { ok: false, reason: "not_found" };
+  // 券在核销那一刻不可用（已用 / 停用 / 过期 / 未达门槛 / 不属于本人）。
+  // 仓储已经在**它自己的原子提交里整体回滚**（Mock 是一个字节都没写、Pg 是 ROLLBACK），
+  // 因此这里只剩一件事：把它翻成用户能看到的 400。文案来自共享常量层，
+  // 数据层不产生界面文案（与其它仓储的失败联合类型同一口径）。
+  if ("kind" in settled) rejectCoupon(settled.reason);
 
   return { ok: true, ...settled };
 }

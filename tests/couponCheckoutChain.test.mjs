@@ -1106,52 +1106,99 @@ test("券相关 DTO 的键集合精确固定：多一个少一个都要红", asy
 
 // —————————————— 八、结构约束：让上面的双花测试不会静默失去意义 ——————————————
 
-test("结构：建单原子区段里不许出现 await，核销点必须在区段内且排在派单之前", () => {
+test("结构：建单是纯构造，核销与派单在仓储的原子区段内同步完成且核销在前", () => {
   // 上面那条「双花」用例是在单线程里**顺序**调用两笔确认的。它之所以成立，
-  // 靠的是一个没有写进任何断言的前提：`buildOrderFromRequest` 里「复查券状态 →
-  // 核销 → 建单」之间**没有 `await`**，因此「读—判断—写」不会被让出执行权。
+  // 靠的是一个没有写进任何断言的前提：**券核销与派单写入发生在支付仓储那一段
+  // 没有 `await` 的原子区段之内**，因此「复查券状态 → 核销 → 建单」不会被让出执行权。
   //
   // 一旦有人往区段里加一个 `await`，真正的并发（两个请求各跑一半）就会交错，
   // 而顺序调用的测试**照样全绿**——这类静默失效只能靠源码结构断言拦住。
   // 与 `tests/companionServing.test.mjs` 的同类断言同一个理由。
-  const code = stripComments(readSource(resolveSource("lib/services/checkout.ts")));
-  const start = code.indexOf("function buildOrderFromRequest(");
-  assert.notEqual(start, -1, "建单函数必须还在 `lib/services/checkout.ts` 里");
-
-  // ⚠️ 圈函数体**不能**用 `code.indexOf("\n}\n", start)`：
-  // 本仓 `core.autocrlf=true`，`lib/services/checkout.ts` 检出为 **CRLF**，
-  // 而 CRLF 里 `}` 后面跟的是 `\r` 不是 `\n`，所以 `"\n}\n"` **永远匹配不到**、
-  // `end` 恒为 `-1`——这条断言在 Windows 上**无条件失败**。
-  // 那是**假失败**：它红的原因与它要守护的「原子区段里没有 await」毫无关系，
-  // 于是真正的回归信号被这条噪音盖住。
   //
-  // 改成「切到**下一个顶层声明**为止」：`^` 配 `/m` 在 LF 与 CRLF 下都落在行首，
-  // 因此与行尾符、缩进、函数在文件中的位置都无关。
-  // （与 `tests/companionServing.test.mjs` 的 `functionBody()` 同一策略；
-  // 这里不能直接用它——那个辅助函数要求函数**已导出**，而本函数未导出。）
-  const rest = code.slice(start + 1);
-  const next = rest.search(
-    /^(?:export\s+)?(?:async\s+)?(?:function|const|let|var|type|class|interface)\s/m,
-  );
-  const end = next === -1 ? code.length : start + 1 + next;
-  const body = code.slice(start, end);
+  // ⚠️ PROD-1D 起这三件事分到了三处，断言也随之分成三条（**少了任何一条，
+  // 上面那条双花用例就又变成「不知道在守护什么」**）：
+  //   ① `lib/services/checkout.ts` 的 `buildOrderFromRequest` 必须**纯**（一行都不写），
+  //      否则 Pg 侧会变成「订单进库、券核销与派单进 Mock」的半迁移（Hard Rule 1）；
+  //   ② Mock 侧的参与者 `commitMockCheckoutParticipants` 必须**同步**，
+  //      且核销排在派单之前（否则失败时留下「有派单、没有订单」）；
+  //   ③ 那个参与者必须**真的在**支付仓储的原子区段里被调用（放进区段外等于没保护）。
+  const functionBody = (code, name) => {
+    const start = code.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `\`${name}\` 必须还在源码里`);
+    // ⚠️ 圈函数体**不能**用 `code.indexOf("\n}\n", start)`：
+    // 本仓 `core.autocrlf=true`，这些文件检出为 **CRLF**，
+    // 而 CRLF 里 `}` 后面跟的是 `\r` 不是 `\n`，所以 `"\n}\n"` **永远匹配不到**、
+    // `end` 恒为 `-1`——这条断言在 Windows 上**无条件失败**。
+    // 那是**假失败**：它红的原因与「原子区段里没有 await」毫无关系，
+    // 于是真正的回归信号被这条噪音盖住。
+    //
+    // 改成「切到**下一个顶层声明**为止」：`^` 配 `/m` 在 LF 与 CRLF 下都落在行首，
+    // 因此与行尾符、缩进、函数在文件中的位置都无关。
+    const rest = code.slice(start + 1);
+    const next = rest.search(
+      /^(?:export\s+)?(?:async\s+)?(?:function|const|let|var|type|class|interface)\s/m,
+    );
+    const end = next === -1 ? code.length : start + 1 + next;
+    const body = code.slice(start, end);
+    // 圈出来的必须真的是一个**完整的函数体**，否则下面那条「没有 await」可能是在
+    // 一个空片段或半截片段上通过——那才是真的把断言放空了
+    assert.ok(body.trimEnd().endsWith("}"), `圈出的 \`${name}\` 片段必须以右花括号收尾`);
+    return body;
+  };
 
-  // 圈出来的必须真的是一个**完整的函数体**，否则下面那条「没有 await」可能是在
-  // 一个空片段或半截片段上通过——那才是真的把断言放空了
-  assert.ok(body.startsWith("function buildOrderFromRequest("), "圈出的片段必须以函数声明开头");
-  assert.ok(body.trimEnd().endsWith("}"), "圈出的片段必须以右花括号收尾（函数体是完整的）");
-
+  /* ① 纯构造：一行都不写 */
+  const checkout = stripComments(readSource(resolveSource("lib/services/checkout.ts")));
+  const buildOrder = functionBody(checkout, "buildOrderFromRequest");
   assert.equal(
-    /\bawait\b/.test(body),
+    /\bawait\b/.test(buildOrder),
+    false,
+    "建单的纯构造函数里出现 await：Pg 侧会变成「订单进库、券核销与派单进 Mock」的半迁移",
+  );
+  assert.equal(
+    buildOrder.includes("redeemCouponClaimForOrder("),
+    false,
+    "券核销必须离开纯构造函数——留在里面，Pg 支付仓储一跑就把券核销写进 Mock",
+  );
+  assert.equal(
+    buildOrder.includes("createDispatchForOrder("),
+    false,
+    "派单写入必须离开纯构造函数——留在里面，Pg 支付仓储一跑就把派单写进 Mock",
+  );
+
+  /* ② Mock 参与者：同步，且核销排在派单之前 */
+  const commit = stripComments(
+    readSource(resolveSource("lib/data/checkoutCommitTransaction.ts")),
+  );
+  const participants = functionBody(commit, "commitMockCheckoutParticipants");
+  assert.equal(
+    /\bawait\b/.test(participants),
     false,
     "原子区段里出现任何一个 await，双花测试就会静默失去意义（「读—判断—写」被拆到两个 tick 上）",
   );
   assert.ok(
-    body.includes("redeemCouponClaimForOrder("),
+    participants.includes("redeemCouponClaimForOrder("),
     "核销必须发生在这个原子区段里——放到区段外，双花窗口就重新打开了",
   );
   assert.ok(
-    body.indexOf("redeemCouponClaimForOrder(") < body.indexOf("createDispatchForOrder("),
+    participants.indexOf("redeemCouponClaimForOrder(") <
+      participants.indexOf("createDispatchForOrder("),
     "核销必须排在派单记录写入之前，否则失败时留下「有派单、没有订单」的半成品",
   );
+
+  /* ③ 参与者必须在支付仓储的原子区段里被调用（且那一段本身没有 await）  */
+  const repo = stripComments(readSource(resolveSource("lib/data/mockPaymentRepository.ts")));
+  const segmentStart = repo.indexOf("confirmPaymentRequest(id, result, buildOrder) {");
+  assert.notEqual(segmentStart, -1, "Mock 支付仓储必须还有 `confirmPaymentRequest`");
+  const segmentEnd = repo.indexOf("async queryOrders(", segmentStart);
+  const segment = repo.slice(segmentStart, segmentEnd === -1 ? repo.length : segmentEnd);
+  assert.ok(
+    segment.includes("commitMockCheckoutParticipants("),
+    "券核销与派单必须在 `confirmPaymentRequest` 的原子区段里被调用，而不是在服务层另起一段",
+  );
+  assert.equal(
+    /\bawait\b/.test(segment),
+    false,
+    "`confirmPaymentRequest` 的原子区段里出现 await，双花测试就会静默失去意义",
+  );
+
 });

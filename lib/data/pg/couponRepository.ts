@@ -430,6 +430,210 @@ export function createCouponRepository(db: PgQueryable): CouponRepository {
   };
 }
 
+/* ───────────── 事务内原语（PROD-1D · 券模板管理端写闭包） ─────────────
+ *
+ * ⚠️ 下面这几个 `export` **不是** `CouponRepository` 的方法——那个接口一个字没改。
+ * 它们是 `lib/data/pg/couponTemplateTransactions.ts` 的 Pg 事务专用的
+ * **窄写入器**，与 `pg/companionRepository.ts` 的 `lockCompanionForFlagsTx` /
+ * `applyCompanionFlagsTx`、`pg/platformConfigRepository.ts` 的同名一组同一形状：
+ * `UPDATE` 只写这一次语义对应的列，绝不整行覆盖。
+ *
+ * 把它们放在本文件而不是新开一个文件，是因为它们操作的就是这一张表、这一组列
+ * （`COUPON_COLUMNS` / `CouponTemplateRow` / `toCoupon` 三个定义都在上面）；
+ * 分散两处迟早会让 `SELECT` 的列与 `UPDATE` 的列各自演化——而列名错位不会报错，
+ * 只会让某一行悄悄少写一个字段。
+ */
+
+/**
+ * 编辑券模板时可改的字段集合 —— 与 `mockCouponRepository.applyCouponPatch` 的入参
+ * **逐字段相同**（`id` / `formKey` / `formLabel` / `createdAt` 不在其中：它们不可能被
+ * 一次编辑改到）。窄写入器的列清单由它和 `applyCouponPatch` 的注释共同钉住。
+ */
+export type CouponTemplatePatchFields = Pick<
+  Coupon,
+  | "name"
+  | "valueLabel"
+  | "conditionLabel"
+  | "validFrom"
+  | "validTo"
+  | "enabled"
+  | "thresholdAmount"
+  | "discountAmount"
+>;
+
+/**
+ * 列清单与占位符**从同一个字符串派生**，不可能错位。
+ *
+ * 与 `seed.ts` 的 `insertSql()` 同一条做法：手写 13 个列名与 13 个 `$n`，出错的方式
+ * 是**静默的**（只要类型对得上，PostgreSQL 会照单全收，把 `valid_to` 写进 `valid_from`）。
+ * 这里以 `COUPON_COLUMNS` 为唯一真值源：列名与占位符个数永远一致，改列清单只改一处。
+ */
+const COUPON_INSERT_SQL =
+  `INSERT INTO coupon_templates (${COUPON_COLUMNS})\n` +
+  `VALUES (${COUPON_COLUMNS.split(", ")
+    .map((_, index) => `$${index + 1}`)
+    .join(", ")})`;
+
+/**
+ * 取一条券模板并**锁住它**（`SELECT … FOR UPDATE`）。
+ *
+ * 「读—判断—写」的全部判定都围着这一行，`FOR UPDATE` 把两个同时编辑同一张券的请求
+ * 串行化：第二个要等第一个提交，之后读到的是第一个写下的结果。
+ * 这与 Mock 的「同步区段内没有 `await`」在效果上等价。
+ */
+export async function lockCouponTemplateForUpdateTx(
+  db: PgQueryable,
+  id: string,
+): Promise<Coupon | null> {
+  const rows = await db.query<CouponTemplateRow>(
+    `SELECT ${COUPON_COLUMNS} FROM coupon_templates WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  return rows[0] ? toCoupon(rows[0]) : null;
+}
+
+/**
+ * 按 id **普通读**一条券模板（不加锁）。
+ *
+ * 只给「新建重放」那条路径用：同一个幂等键第二次到达时，账本上留着一个 `targetId`，
+ * 本函数拿它回表把**第一次真正建出来的那张券**读出来还给调用方。
+ * 它不参与任何判定，因此不需要锁——加锁只会让一次纯读去和别人的写入抢行。
+ *
+ * ⚠️ 读不到时返回 `null`（调用方据此报 `not-found`），**绝不照着账本编一条出来**：
+ * 账本说的是「当时建过」，而不是「它现在还在」。
+ */
+export async function readCouponTemplateTx(db: PgQueryable, id: string): Promise<Coupon | null> {
+  const rows = await db.query<CouponTemplateRow>(
+    `SELECT ${COUPON_COLUMNS} FROM coupon_templates WHERE id = $1`,
+    [id],
+  );
+  return rows[0] ? toCoupon(rows[0]) : null;
+}
+
+/**
+ * 新建一条券模板记录 —— `mockCouponRepository.createCouponRecord` 的 Pg 版本。
+ *
+ * ## 为什么是**硬 INSERT**，没有 `ON CONFLICT`
+ *
+ * Mock 用 `nextRecordId("cpn_", candidate => store.coupons.has(candidate), …)` 保证
+ * id 不冲突，而那个写法要求一个**同步**的 `taken()` 回调——Pg 侧判存在性是异步的，
+ * 没法照搬。因此这里改成「直接 `INSERT`，主键冲突即硬失败」：
+ *
+ * - 新 id 由调用方用 `cpn_${crypto.randomUUID()}` 现取，撞上既有记录的概率可忽略；
+ * - 万一真撞上，主键冲突会让整个事务回滚——**这恰好与 Mock 想要的那条不变量一致**：
+ *   绝不覆盖一条既有记录（`ON CONFLICT DO UPDATE` 会把「新建」变成「改写」，
+ *   而那是一个本轮明令禁止的语义）。宁可失败，也不静默改掉别人的券。
+ *
+ * ## 没有 `RETURNING`：返回值就是刚构造的那一份
+ *
+ * Mock 的 `createCouponRecord` 返回它写进去的那个对象（一份浅拷贝）；时间戳
+ * `createdAt` / `updatedAt` 都是调用方给的 `ctx.at`。这里保持同一形状，不在
+ * `INSERT` 之后回读一次——回读会把 `ctx.at` 交给 `timestamptz` 往返一遍，
+ * 只为了拿到同一个值。
+ */
+export async function insertCouponTemplateTx(db: PgQueryable, coupon: Coupon): Promise<Coupon> {
+  await db.query(COUPON_INSERT_SQL, [
+    coupon.id,
+    coupon.name,
+    coupon.formKey,
+    coupon.formLabel,
+    coupon.valueLabel,
+    coupon.conditionLabel,
+    coupon.validFrom,
+    coupon.validTo,
+    coupon.thresholdAmount,
+    coupon.discountAmount,
+    coupon.enabled,
+    coupon.createdAt,
+    coupon.updatedAt,
+  ]);
+  return coupon;
+}
+
+/**
+ * 编辑券模板 —— `applyCouponPatch` 的 Pg 版本（**窄写入**）。
+ *
+ * ## 只写这九列
+ *
+ * `name` / `value_label` / `condition_label` / `valid_from` / `valid_to` / `enabled` /
+ * `threshold_amount` / `discount_amount` / `updated_at`。
+ * `id` / `form_key` / `form_label` / `created_at` **一律不动**：
+ * 「顺手把一张折扣券改成满减券」在 `CouponTemplatePatchFields` 类型里没有位置可写，
+ * 形态决定了这张券能不能参与结算（§1），要换形态只能新建一张。
+ *
+ * ## `previous` 必须是**锁下读到的那一份**
+ *
+ * 返回值直接喂给审计快照（`toCouponAuditSnapshot`），而审计的 before 应当回答
+ * 「改动前那张券是什么」。传一个事务外读到的陈旧快照进去，审计会记下一次不存在的改动。
+ *
+ * ## 0 行 = 不可能状态，但**不抛错**
+ *
+ * 调用方刚在锁下确认过这一行存在；`UPDATE` 命中 0 行只可能是数据被并发删掉了。
+ * 这里返回 `null`，由调用方翻成 `not-found`——与 Mock 的
+ * `if (!written) return { kind: "not-found" }` 逐字段同构，而不是另造一个错误形状。
+ */
+export async function applyCouponPatchTx(
+  db: PgQueryable,
+  previous: Coupon,
+  patch: CouponTemplatePatchFields & { at: string },
+): Promise<{ previous: Coupon; updated: Coupon } | null> {
+  const rows = await db.query<CouponTemplateRow>(
+    `UPDATE coupon_templates
+        SET name = $2,
+            value_label = $3,
+            condition_label = $4,
+            valid_from = $5,
+            valid_to = $6,
+            enabled = $7,
+            threshold_amount = $8,
+            discount_amount = $9,
+            updated_at = $10
+      WHERE id = $1
+      RETURNING ${COUPON_COLUMNS}`,
+    [
+      previous.id,
+      patch.name,
+      patch.valueLabel,
+      patch.conditionLabel,
+      patch.validFrom,
+      patch.validTo,
+      patch.enabled,
+      patch.thresholdAmount,
+      patch.discountAmount,
+      patch.at,
+    ],
+  );
+  if (!rows[0]) return null;
+  return { previous: { ...previous }, updated: toCoupon(rows[0]) };
+}
+
+/**
+ * 只改券模板的启用状态 —— `applyCouponEnabled` 的 Pg 版本（**窄写入**）。
+ *
+ * ⚠️ **只写 `enabled` 与 `updated_at` 两列**：详情页上的开关只应当改这两个字段。
+ * 走「先读出来、拼一个完整 patch 再保存」的话，两位管理员同时操作时，
+ * 后写的那次会把另一位刚改好的金额覆盖回旧值——而 `enabled` 与金额在库里
+ * 本就没有任何耦合，覆盖是纯粹的并发缺陷。Mock 侧的 `applyCouponEnabled`
+ * 与它的长注释同此。
+ */
+export async function applyCouponEnabledTx(
+  db: PgQueryable,
+  previous: Coupon,
+  enabled: boolean,
+  at: string,
+): Promise<{ previous: Coupon; updated: Coupon } | null> {
+  const rows = await db.query<CouponTemplateRow>(
+    `UPDATE coupon_templates
+        SET enabled = $2,
+            updated_at = $3
+      WHERE id = $1
+      RETURNING ${COUPON_COLUMNS}`,
+    [previous.id, enabled, at],
+  );
+  if (!rows[0]) return null;
+  return { previous: { ...previous }, updated: toCoupon(rows[0]) };
+}
+
 /**
  * 进程级 PostgreSQL 实现。执行器**延迟解析**——模块加载期不读 `DATABASE_URL`、不建池。
  * 理由见 `executor.ts` 的 `lazyPgExecutor`。

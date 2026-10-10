@@ -170,6 +170,12 @@ export function refineReplayByAction(
   return outcome;
 }
 
+/** `takeCreateReplay` 的结论。`null` 表示这个幂等键没用过。 */
+export type CreateReplayOutcome =
+  | { kind: "replay"; targetId: string }
+  | { kind: "conflict" }
+  | null;
+
 /**
  * 幂等重放检查（**新建**类写操作）。
  *
@@ -183,8 +189,29 @@ export function refineReplayByAction(
 export function takeCreateReplay(
   actor: ActorScope,
   targetType: AdminAuditEntry["targetType"],
-): { kind: "replay"; targetId: string } | { kind: "conflict" } | null {
-  const entry = findAuditEntryByOperationId(actor.operationId);
+): CreateReplayOutcome {
+  return evaluateCreateReplay(findAuditEntryByOperationId(actor.operationId), actor, targetType);
+}
+
+/**
+ * 「这条账本记录算不算这次**新建**的重放」的**纯判定** —— `evaluateReplay` 的兄弟。
+ *
+ * ⚠️ 与 `evaluateReplay` 同样是 PROD-1D 抽出来给两个存储共用的纯函数，
+ * **判定一字未改**：它只是把 `takeCreateReplay` 里原来内联的那几行原样搬出来，
+ * 让**读哪里**成为参数——Mock 侧读进程内的 `findAuditEntryByOperationId`，
+ * PostgreSQL 侧在同一事务里 `SELECT … FROM admin_audit_entries WHERE operation_id = $1`
+ * （`lib/data/pg/adminWriteTx.ts`）。
+ *
+ * 两处判据不同，因此不能合并成一个函数：`evaluateReplay` 比的是**目标 id 相等**
+ * （已知目标的写操作），这里比的是**目标类型相同**（新建时目标 id 尚不存在）。
+ * 合成一个「有时比 id、有时比类型」的函数，等于把「这次是新建还是编辑」
+ * 藏进一个运行期分支里，而那是调用方在调用之前就已经知道的事。
+ */
+export function evaluateCreateReplay(
+  entry: AdminAuditEntry | null,
+  actor: ActorScope,
+  targetType: AdminAuditEntry["targetType"],
+): CreateReplayOutcome {
   if (!entry) return null;
 
   if (entry.targetType !== targetType || !isSameActor(entry, actor)) return { kind: "conflict" };

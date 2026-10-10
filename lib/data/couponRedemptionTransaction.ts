@@ -1,4 +1,8 @@
-import { resolveCouponApplication, toOrderCouponSnapshot } from "@/lib/constants/coupons";
+import {
+  COUPON_CLAIM_NOT_FOUND_REASON as CLAIM_NOT_FOUND_REASON,
+  resolveCouponApplication,
+  toOrderCouponSnapshot,
+} from "@/lib/constants/coupons";
 import type { Order, OrderCouponSnapshot } from "@/lib/types/order";
 import { couponStore } from "./mockCouponRepository";
 
@@ -33,9 +37,6 @@ import { couponStore } from "./mockCouponRepository";
 export type CouponRedemptionResult =
   | { ok: true; coupon: OrderCouponSnapshot }
   | { ok: false; reason: string };
-
-/** 没找到券 / 券不属于这个人时的说明。与「不属于当前用户」用同一句话，避免被用来试探。 */
-const CLAIM_NOT_FOUND_REASON = "优惠券不存在或不属于当前用户";
 
 /**
  * 把一张券核销在**这一单**上（**同步**）。

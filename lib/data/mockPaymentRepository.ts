@@ -11,6 +11,7 @@ import type {
   PaymentRequest,
   PaymentStatus,
 } from "@/lib/types/payment";
+import { commitMockCheckoutParticipants } from "./checkoutCommitTransaction";
 import { getMockStore } from "./mockStore";
 import type { AdminOrderQueryFilter, PaymentRepository } from "./paymentRepository";
 
@@ -130,6 +131,12 @@ export const mockPaymentRepository: PaymentRepository = {
     let order: Order | null = null;
     if (status === "success") {
       order = buildOrder(request);
+      // —— 券核销 + 派单（PROD-1D）：仍在这一段无 `await` 的原子区段之内 ——
+      // 核销被拒时**一个字节都还没写**（券是假的、订单/支付/派单都不存在），
+      // 与旧实现「`buildOrder` 抛错、整个方法抛错」的可观察结果逐字相同，
+      // 只是把「抛错」换成了「返回失败种类」，由服务层翻成 400。
+      const committed = commitMockCheckoutParticipants({ request, order });
+      if (!committed.ok) return { kind: "coupon-unavailable", reason: committed.reason };
       const payment: Payment = {
         id: `pay_${crypto.randomUUID()}`,
         paymentRequestId: request.id,

@@ -142,6 +142,15 @@ export const COUPON_USE_DISABLED_REASON = "该券已停用，无法使用";
 export const COUPON_USE_EXPIRED_REASON = "该券已过有效期，无法使用";
 export const COUPON_USE_NOT_STARTED_REASON = "该券尚未到可用时间";
 export const COUPON_USE_USED_REASON = "该券已使用";
+/**
+ * 核销时**找不到那张券**、或那张券不属于当前用户时的说明（PROD-1D 从
+ * `couponRedemptionTransaction.ts` 搬来这里：Mock 与 PostgreSQL 两个核销实现
+ * 必须用**同一句话**，否则同一次失败会在两个存储上给出两种文案）。
+ *
+ * ⚠️ 「不存在」与「不属于你」刻意共用一句：分开写等于提供一个
+ * 「拿别人的 claimId 来试」的探测器。
+ */
+export const COUPON_CLAIM_NOT_FOUND_REASON = "优惠券不存在或不属于当前用户";
 /** 非满减券：可计算字段恒为 null，因此不存在「优惠 0 元」这种解释空间。 */
 export const COUPON_USE_UNSUPPORTED_REASON = "该券类型暂不支持抵扣";
 /** 券的数据不完整（可计算字段缺失或非法）。属于坏数据，不猜、不按 0 处理。 */
