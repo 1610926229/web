@@ -3,7 +3,7 @@
 Round: PROD-1C
 记录人: Claude
 记录时间: 2026-10-05
-状态: `AWAITING_ACCEPTANCE`
+状态: `DONE`（2026-10-10 收口；交付时点为 `AWAITING_ACCEPTANCE`，见本目录 `04-acceptance.md` 的《Manual Acceptance Record》）
 
 > 所有数字均为**本文件写作时实际命令输出**。命令与退出码逐条列在 §4。
 > 本轮 **Claude 全程未执行任何 Git 写操作**。

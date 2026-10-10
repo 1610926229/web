@@ -1,6 +1,6 @@
 Round ID: PROD-1C
 Title: AdminAudit Closure + Deferred Transactions（管理审计写闭包 + PROD-1B 延期事务 T8 / T14 / T15 的 Pg 实现与实证；**intentionally not activated**）
-Status: AWAITING_ACCEPTANCE
+Status: DONE   # 2026-10-10 —— 人工验收全部通过（A/B/C/D 四组 PASS），用户本人已完成 Git 提交
 Depends On:
 - PROD-1B（Order Hub PostgreSQL Implementation & Concurrency Proof，已 DONE）——尤其其 `02-decisions.md` Q1 §13b/§13d（延期清单与切换前置条件）
 - PROD-1A（PostgreSQL 基础层，已 DONE）——`withTransaction` / 版本化迁移 / 种子与重置 / 安全守卫
@@ -15,8 +15,8 @@ Primary Domain: 数据访问层（`db/migrations/**`、`lib/data/pg/**`、`lib/d
 Primary State Transition: 无（不触碰任何业务状态机；仅替换同一批写入的持久化实现）
 Started At: 2026-10-05
 Development Completed At: 2026-10-05
-Accepted At: —
-Git Commit: —
+Accepted At: 2026-10-10（用户人工验收通过）
+Git Commit: a6d5ed7de058837e08d5c6d2b1c66091ba16615a   # `PROD-1C AdminAudit closure and deferred`（2026-10-10 22:39:58 +0800），用户本人提交
 
 ---
 
@@ -73,7 +73,7 @@ Pg 侧要写同一组列，就必须有同一组规则。因此把 `resolveRefun
 
 `01-prompt.md`（本轮指令与三条 Hard Rule）· `02-decisions.md`（D1–D9 与判据）·
 `03-delivery.md`（交付 · **33 处写者登记** · **激活就绪报告（6 问）** · 验证证据）·
-`04-acceptance.md`（人工验收清单，**待验收**）。
+`04-acceptance.md`（人工验收清单 + **Manual Acceptance Record（2026-10-10，PASSED）**）。
 
 ## 下一轮
 

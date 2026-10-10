@@ -1,7 +1,8 @@
 # Acceptance
 
 Round: PROD-1C
-Status: **`AWAITING_ACCEPTANCE`**（尚未人工验收；Claude 不得自行置 `DONE`）
+Status: **`DONE`**（人工验收 2026-10-10 通过 + 用户本人 Git 提交 `a6d5ed7` 双门槛满足；
+交付时点曾为 `AWAITING_ACCEPTANCE`，收口依据见文末《Manual Acceptance Record（2026-10-10）》）
 
 > ⚠️ 下面是**人工验收步骤**。自动化门禁（`lint` / `typecheck` / `build` / `pnpm test` / `pnpm test:pg`）
 > 已在 `03-delivery.md` §4 记录为**实测结果**，此处不重复。这里只列
@@ -9,7 +10,8 @@ Status: **`AWAITING_ACCEPTANCE`**（尚未人工验收；Claude 不得自行置 
 >
 > ⚠️ 收口规则（`development-workflow.md` §十七）：`DONE` 需要**双门槛**——
 > ① 产品负责人明确说「人工验收通过」；② 产品负责人**本人**完成 Git 提交。
-> 本轮 Claude **未执行任何 Git 写操作**，因此当前只能是 `AWAITING_ACCEPTANCE`。
+> 本轮 Claude **未执行任何 Git 写操作**；交付时点因此只能是 `AWAITING_ACCEPTANCE`，
+> 两个门槛于 2026-10-10 由产品负责人本人满足（见文末《Manual Acceptance Record（2026-10-10）》）。
 
 ---
 
@@ -107,20 +109,104 @@ Status: **`AWAITING_ACCEPTANCE`**（尚未人工验收；Claude 不得自行置 
 
 ---
 
-## Manual Acceptance Record
+## Manual Acceptance Record（2026-10-10）
 
-> 待产品负责人验收后填写。Claude **不得**自行填写本节。
+> 本节原定的规则是「待产品负责人验收后填写，Claude 不得自行填写」。2026-10-10 产品负责人
+> 明确裁定 **`PROD-1C Manual Acceptance = PASSED`**、并**授权 Claude 回填本节**，故此处由 Claude 代笔，
+> 内容全部来自**当轮在真库（`TEST_DATABASE_URL` = `chaoge_esports_test`）实跑的命令输出**，不是复述文档。
 
-| 项 | 结果 | 备注 |
+产品负责人指定按**四组**做最短人工验收，四组全部通过。
+
+| 组 | 内容 | 结论 | 关键证据 |
+|---|---|---|---|
+| **A** | AdminAudit Atomicity（审计写失败 ⇒ 业务改动全部回滚） | **PASS** | 定向套件 `tests/pgAdminAuditTransactions.test.mjs` 真库 **37 / pass 37 / fail 0 / skipped 0**；4 个 `getPgExecutor().withTransaction(async (tx) => {` 入口（`:466 / :557 / :686 / :948`），无第二条连接；幂等落点是**数据库**约束 `0009` 的 `CONSTRAINT admin_audit_entries_operation_key UNIQUE (operation_id)`（`:88`）。**红-绿（亲自复做）**：摘掉 `lib/data/pg/executor.ts` 的 `BEGIN` → 5 条回滚用例**挂 4 条**，报错逐字符合预期（`★ 标志位回滚 actual: false, expected: true`、`★ 退款状态回滚 actual: 'approved', expected: 'pending'` ×2、`★ 状态回滚 actual: 'reviewing', expected: 'pending'`）；还原后 `sha256sum -c` 逐字节 OK |
+| **B** | T14 Concurrency（两个管理员同时批同一笔退款） | **PASS** | 「同时通过」（`:822`）：恰好 1 个 `ok` / 1 个 `invalid-transition`；`refunded_amount` 只等于实付一次；`earning_adjustments` 1 条；`admin_audit_entries` 1 条；`reversed_amount` 只冲一次。「通过 vs 拒绝」（`:857`）：恰好 1 个赢、审计 1 条，且**两个分支都断言**——批了则 `order.status='refunded'` 且退足实付，驳回则订单状态与金额原样不动 ⇒ **无混合终态**。**红-绿（亲自复做，即本文档 §C3 预告的那一条）**：把锁后权威读 `takeReplayTx` 改成 `const entry = null as null;` → **3 条同键并发用例全挂**，报错为 `★ 恰好一个自认重放 0 !== 1`（T8）与 `第二个必须正常返回（重放），实际 invalid-transition`（T14）及 T15 同款；还原后 `sha256sum -c` 逐字节 OK |
+| **C** | T8 Companion Release（停用护航的解除与状态清理） | **PASS** | 本轮 T8 用例（`:331` 起）断言：订单 → `paid`、`actual_companion_id` → `null`、`ever_accepted_at` **保留非空**、`serving_at` → `null`、`accepted_at` → `null`；派单回 `public` 且 `accepted_by_companion_id` → `null`；`companion_release_records` 恰 1 条、`source='companion_disabled'`、`actor_id='admin-1'`；1 条 `dispatch` 通知；1 条 `companion.disable` 审计；**已完成 / 已退款订单保留履约人**不受牵连。待审完成材料随解除作废：`:900` 用例断言 `completion_submissions.status='invalidated'` 且完成审核返回 `invalid-status`。重放不重复：`:1028` 同键 + `:815` `again.replayed===true`、审计仍 1 条、`writePids()` 为空 |
+| **D** | Runtime Boundary（未激活 / 无半 Pg 半 Mock） | **PASS** | `.env` / `.env.local` **无 `DATA_SOURCE`**（仅 `.env.example` 有文档化的空值行），且**无任何代码写入该变量**；`isPostgresDataSourceEnabled()` 恰好 2 个消费者（`favoriteRepository.ts:73`、`suggestionRepository.ts:66`），其余 **26 个 accessor 硬返回 Mock**；`getAdminAuditRepository()` → `mockAdminAuditRepository`（全仓仅一行）；运行时 `writeAudit → appendAuditEntry → adminAuditStore()`（Mock），Pg 侧只复用纯函数 `buildAuditEntry` + `INSERT`、**只有测试引用**；`app/**` 与 `lib/services/**` **零** import `lib/data/pg/**`；5 个 `pg*.test.mjs` 全部 `TEST_DATABASE_URL` 门控，普通 `pnpm test` 下不贡献断言 |
+
+**与本文档上方《Manual Acceptance Checklist》五组的对应关系**（两组编号不同，不是遗漏）：
+A → 清单 **B**（同生共死）+ 清单 **A1–A4**（未激活）· B → 清单 **C**（并发）·
+C → 清单 **B**（同生共死，T8 侧）+ 清单 **D**（迁移纪律）· D → 清单 **A**（未激活）+ 清单 **D**（迁移纪律）。
+清单 **E**（文档）由本次收口时的文件清点覆盖：本目录 `01-prompt.md` · `02-decisions.md` · `03-delivery.md` ·
+`04-acceptance.md` · `README.md` **五个文件齐全**。
+
+### 收口核验（无残留）
+
+临时用于红-绿的两处改动（`lib/data/pg/executor.ts`、`lib/data/pg/adminAuditTransactions.ts`）均已从备份还原，
+`sha256sum -c` 与基线逐字节一致；还原后定向套件重跑 **37 / pass 37 / fail 0 / skipped 0**；
+`git status --short` 与会话开始时逐行一致 ⇒ **本次验收对业务代码零改动、零残留**。
+
+---
+
+## User Result
+
+**人工验收通过（2026-10-10）。**
+
+- A AdminAudit Atomicity：**PASS**
+- B T14 Concurrency：**PASS**
+- C T8 Companion Release：**PASS**
+- D Runtime Boundary：**PASS**
+- Issues Found：**无 BLOCKER / 无 MAJOR**（1 MINOR + 2 NOTE，均为非阻塞，见下）
+- Final Result：**PASSED**
+
+## Issues Found
+
+**无 BLOCKER、无 MAJOR。** 以下三条均为**非阻塞**、**本轮不返工**（不改代码）：
+
+1. **MINOR（测试强度）** — `回滚 · T8 退出历史写不进去` 在「摘掉 `BEGIN`」这一变异下**不具区分度**：
+   该用例要证伪的那次写失败（`companion_release_records`）排在标志位写**之前**，此刻尚无已提交内容可回滚，
+   去掉事务它照样绿。5 条回滚探针里只有 4 条真正具备判别力。**建议**在激活前给该用例补一条
+   排在失败写**之前**的已提交写入。
+2. **NOTE** — `accepted_via` **未在本轮 T8 用例里复断言**。代码确实清它（`lib/data/pg/w1Transactions.ts:1497`，
+   与 `accepted_by_companion_id` 同批置 NULL），且该路径由 `tests/pgW1Transactions.test.mjs`
+   （`:1418 / :1694 / :1823 / :1979`）证明——属**证据链复用**，不是缺口。
+3. **NOTE** — T14 并发用例未直接断言**通知条数**；「不重复通知」由「输的一方返回 `invalid-transition`、
+   根本没进写路径」间接推出。单飞行路径的通知在 `:625` 有直断。
+
+**另（非本轮范围、已知 P0）**：T1 券核销闭包缺口**依然存在**（Pg `confirmPaymentRequest` 无 `coupon_claims` 写、
+核销仍落 Mock），已在 `rounds/AUDIT-PG-1/README.md` §十 10.1 登记并并入暂定 `PROD-1D`。本轮未触碰。
+
+**独立复审**（`reviewer-agent`，只读）：首轮 `0 BLOCKER / 1 MAJOR / 1 MINOR / 2 NOTE` → 整改后回执确认
+`0 BLOCKER / 0 MAJOR / 0 MINOR / 2 NOTE`；两条 NOTE 经产品负责人确认**接受为非阻塞已知项、不要求返工**。
+
+## Rework
+
+无需返工。
+
+## Final Result
+
+**PASSED**（人工验收，2026-10-10）· **Round Status = `DONE`**
+
+按协议 §四 / §十七的**双门槛**：
+
+| 门槛 | 状态 | 依据 |
 |---|---|---|
-| A 未激活 | ⏳ 待验收 | |
-| B 同生共死 | ⏳ 待验收 | |
-| C 并发 | ⏳ 待验收 | |
-| D 迁移纪律 | ⏳ 待验收 | |
-| E 文档 | ⏳ 待验收 | |
-| **Issues Found** | ⏳ | BLOCKER / MAJOR / MINOR 待记录 |
-| **User Result** | ⏳ | PASSED / FAILED |
-| **Accepted At** | ⏳ | |
+| ① 产品负责人明确说「人工验收通过」 | ✅ 满足 | 2026-10-10 产品负责人裁定 `PROD-1C Manual Acceptance = PASSED`，A–D 四组全 PASS，Issues Found 无 BLOCKER / 无 MAJOR |
+| ② 产品负责人本人完成 Git commit | ✅ 满足 | `a6d5ed7de058837e08d5c6d2b1c66091ba16615a`（`PROD-1C AdminAudit closure and deferred`，2026-10-10 22:39:58 +0800） |
 
-**双门槛**：① 产品负责人明确说「人工验收通过」；② 产品负责人本人完成 Git 提交。
-两者都满足后，状态才由 `AWAITING_ACCEPTANCE` 推进为 `DONE`。
+**两个条件同时满足 → 状态由 `AWAITING_ACCEPTANCE` 推进为 `DONE`。**
+Claude **未执行任何 Git 写操作**；commit 由产品负责人本人完成，hash 取自仓库实际提交记录（只读 `git show` 核验）。
+
+## Git Commit
+
+`a6d5ed7de058837e08d5c6d2b1c66091ba16615a`（short `a6d5ed7`）
+`PROD-1C AdminAudit closure and deferred` — 2026-10-10 22:39:58 +0800
+
+只读核验：`git show --name-status a6d5ed7` 确认该提交含本轮全部交付物
+（`db/migrations/0009_admin_audit_entries.sql` · `lib/data/pg/adminAuditRepository.ts` ·
+`lib/data/pg/adminAuditTransactions.ts` · `tests/pgAdminAuditTransactions.test.mjs` ·
+`docs/03-dev/rounds/PROD-1C/` 五文件 · `docs/03-dev/rounds/AUDIT-PG-1/README.md` 及本轮修改的
+`lib/constants/**` / `lib/data/**` / `tests/**`），提交时工作区已干净。
+
+---
+
+## ⚠️ 附：DONE 的双重门槛（协议 §四 / §十七）
+
+```
+① 产品负责人明确说「人工验收通过」
+② 产品负责人本人完成 Git commit（提供 hash 或明确表示提交完成）
+```
+
+**两个条件同时满足**才可以把状态改为 `DONE` 并记录 `Git Commit`；
+缺任何一个，Round 都停在 `AWAITING_ACCEPTANCE`。
+**Claude 不执行任何 Git 写操作，也无权自行标记 `DONE`。**
