@@ -20,6 +20,7 @@ import { pgRefundRepository } from "../lib/data/pg/refundRepository.ts";
 import { pgComplaintRepository } from "../lib/data/pg/complaintRepository.ts";
 import { pgPlatformConfigRepository } from "../lib/data/pg/platformConfigRepository.ts";
 import { pgCouponRepository } from "../lib/data/pg/couponRepository.ts";
+import { appendAuditEntryTx, pgAdminAuditRepository } from "../lib/data/pg/adminAuditRepository.ts";
 import { mockFavoriteRepository } from "../lib/data/mockFavoriteRepository.ts";
 import { mockSuggestionRepository } from "../lib/data/mockSuggestionRepository.ts";
 import { mockDispatchRepository } from "../lib/data/mockDispatchRepository.ts";
@@ -30,6 +31,7 @@ import { mockRefundRepository } from "../lib/data/mockRefundRepository.ts";
 import { mockComplaintRepository } from "../lib/data/mockComplaintRepository.ts";
 import { mockPlatformConfigRepository } from "../lib/data/mockPlatformConfigRepository.ts";
 import { mockCouponRepository } from "../lib/data/mockCouponRepository.ts";
+import { appendAuditEntry, mockAdminAuditRepository } from "../lib/data/mockAdminAuditRepository.ts";
 import { mockCompanionRepository } from "../lib/data/mockCompanionRepository.ts";
 import { mockCompletionRepository } from "../lib/data/mockCompletionRepository.ts";
 import { mockEarningRepository } from "../lib/data/mockEarningRepository.ts";
@@ -1149,4 +1151,127 @@ test("退款写侧等价：幂等创建 → 一单一退 → 撤销 → 重复�
   assert.equal(observed.cancelMissing.reason, "not_found");
   assert.equal(observed.byKey.id, "rf-w-1");
   assert.equal(observed.byOrder.id, "rf-w-1");
+});
+
+// ————————————————————————— 管理审计读侧 —————————————————————————
+
+/**
+ * 写入两条账本时共用的那一批审计记录。
+ *
+ * ⚠️ 刻意**盖满三个查询轴**：两个 `targetType`、两个 `targetId`、三种 `action`，
+ * 外加一条 `before === null`（创建类动作）与一个 `actorName === null`（管理端本阶段一律为 null）。
+ * 只用一条记录去比，`whereOf` 里漏掉任何一个条件都看不出来。
+ */
+const AUDIT_FIXTURE = [
+  {
+    id: "a-1",
+    actorId: "admin-1",
+    actorRole: "admin",
+    actorName: null,
+    action: "companion.pause",
+    targetType: "companion",
+    targetId: "cp-1",
+    before: { available: true, enabled: true },
+    after: { available: false, enabled: true },
+    operationId: "op-a-1",
+    createdAt: "2026-10-05T01:00:00.000Z",
+  },
+  {
+    id: "a-2",
+    actorId: "staff-2",
+    actorRole: "customer_service",
+    actorName: "客服二号",
+    action: "refund.reject",
+    targetType: "refund",
+    targetId: "rf-1",
+    before: { status: "pending", orderStatus: "completed" },
+    after: { status: "rejected", orderStatus: "completed" },
+    operationId: "op-a-2",
+    createdAt: "2026-10-05T02:00:00.000Z",
+  },
+  {
+    id: "a-3",
+    actorId: "admin-1",
+    actorRole: "admin",
+    actorName: null,
+    action: "companion.disable",
+    targetType: "companion",
+    targetId: "cp-1",
+    before: { available: false, enabled: true },
+    after: { available: false, enabled: false },
+    operationId: "op-a-3",
+    createdAt: "2026-10-05T03:00:00.000Z",
+  },
+  {
+    id: "a-4",
+    actorId: "admin-1",
+    actorRole: "admin",
+    actorName: null,
+    action: "refund.reject",
+    targetType: "companion",
+    targetId: "cp-9",
+    // 创建类动作：before 必须是 null，而不是空对象
+    before: null,
+    after: { status: "pending" },
+    operationId: "op-a-4",
+    createdAt: "2026-10-05T04:00:00.000Z",
+  },
+];
+
+test("管理审计读侧等价：三个查询轴、按幂等键查、计数，两侧逐字段相同", { skip: SKIP }, async () => {
+  // 两个实现必须暴露同一组方法——契约的第一步是「形状一致」
+  assert.deepEqual(
+    Object.keys(pgAdminAuditRepository).sort(),
+    Object.keys(mockAdminAuditRepository).sort(),
+    "审计仓储：两个实现暴露的方法集合必须一致",
+  );
+
+  // Mock 侧：同步写进内存 store
+  for (const entry of AUDIT_FIXTURE) appendAuditEntry(entry);
+  // Pg 侧：同一批记录，经事务内的写入器落库
+  await getPgExecutor().withTransaction(async (tx) => {
+    for (const entry of AUDIT_FIXTURE) await appendAuditEntryTx(tx, entry);
+  });
+
+  const observe = async (repo) => ({
+    all: await repo.listAudits(),
+    byCompanion: await repo.listAudits({ targetType: "companion" }),
+    byRefundType: await repo.listAudits({ targetType: "refund" }),
+    byTargetId: await repo.listAudits({ targetId: "cp-1" }),
+    byAction: await repo.listAudits({ action: "refund.reject" }),
+    // 三个轴同时给：`whereOf` 里少一个 AND 都会在这里露出来
+    combined: await repo.listAudits({ targetType: "companion", targetId: "cp-1", action: "companion.pause" }),
+    // 组合查空：轴之间是「与」不是「或」
+    emptyCombination: await repo.listAudits({ targetType: "refund", targetId: "cp-1" }),
+    unknownTarget: await repo.listAudits({ targetId: "cp-does-not-exist" }),
+    hit: await repo.findAuditByOperationId("op-a-3"),
+    miss: await repo.findAuditByOperationId("op-never-used"),
+    count: await repo.countAudits(),
+  });
+
+  const [fromMock, fromPg] = await Promise.all([observe(mockAdminAuditRepository), observe(pgAdminAuditRepository)]);
+
+  // ⚠️ 先证明**这份对照不是拿两个空集在比**：两边都空时 `deepEqual` 一定通过，
+  //    那时它证明的是「两个实现都不工作」，不是「两个实现一样」。
+  assert.equal(fromMock.all.length, AUDIT_FIXTURE.length, "对照必须建立在非空账本上");
+  assert.equal(fromMock.count, AUDIT_FIXTURE.length);
+
+  assert.deepEqual(fromPg, fromMock, "管理审计读侧：Pg 与 Mock 的结果必须逐字段相同");
+
+  // 把语义也钉住：顺序是发生顺序，不是插入顺序
+  assert.deepEqual(
+    fromMock.all.map((entry) => entry.id),
+    ["a-1", "a-2", "a-3", "a-4"],
+  );
+  assert.deepEqual(fromMock.byCompanion.map((e) => e.id), ["a-1", "a-3", "a-4"], "companion 类型的两条都在");
+  assert.deepEqual(fromMock.byTargetId.map((e) => e.id), ["a-1", "a-3"], "targetId 单独给也要生效");
+  assert.equal(fromMock.combined.length, 1);
+  assert.equal(fromMock.emptyCombination.length, 0, "不同轴之间是「与」不是「或」");
+  assert.equal(fromMock.hit.id, "a-3");
+  assert.equal(fromMock.miss, null, "查不到必须是 null，不是 undefined");
+  assert.equal(fromMock.all[3].before, null, "创建类动作的 before 必须是 null");
+
+  // 顺带证明 `countAudits` 返回的是 number：Pg 的 `count(*)` 默认给字符串，
+  // 少了那次 Number() 转换，这里会因为 "4" !== 4 失败
+  assert.equal(typeof fromPg.count, "number");
 });

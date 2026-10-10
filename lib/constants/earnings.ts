@@ -161,6 +161,48 @@ export function isEarningFullyReversed(input: { incomeAmount: number; reversedAm
 }
 
 /**
+ * 一次冲回之后，这一笔收益的**那两个会变的列**长什么样（**纯函数**）。
+ *
+ * ⚠️ PROD-1C 从 `mockEarningRepository.ts` 的 `applyEarningReversal` 里抽出来，
+ * **钳制与状态规则一个字没改**。理由与 `resolveRefundReview` 相同：
+ * 退款批准这条路径现在有两个实现（Mock 伪事务与 PostgreSQL 的 T14 事务），
+ * 冲回口径写两遍，就会出现「Mock 里整笔冲完回到 `frozen`、Pg 里忘了改状态」
+ * 这类**只在生产库里发生**的漂移。
+ *
+ * 三条要点（原实现里的注释，逐条保留）：
+ * - **钳在 `[0, incomeAmount]`**：下界防负、上界防「冲回得比挣的还多」。
+ *   负的 `reversedAmount` 会让净额大于收入，超额的会让净额变负——
+ *   两个都会把收益页上的数字变成打手无法理解的数；
+ * - **整笔冲完 ⇒ `status` 回到 `frozen`**（P0-15 产品裁定）。
+ *   ⚠️ 不是 `reversed`——那个取值本批次没有写入路径；
+ * - **只返回这两个字段**，不返回整条记录：调用方（两边的存储层）都是
+ *   `UPDATE … SET reversed_amount = …, status = …`，把它表达成「只改这两列」
+ *   可以让「冲回顺手改了别的列」这种 bug 在类型上无处安放。
+ *
+ * ⚠️ `amount <= 0` 的判定**不在这里**：那是「要不要写」的判定，属于调用方
+ * （见 `applyEarningReversal` 与 Pg 的 T14）。本函数只回答「写什么」——
+ * 把 `0` 交给它同样会得到一个等值结果，而一次等值的 `UPDATE` 不是写入，是噪音。
+ */
+export function resolveEarningReversal(
+  earning: { incomeAmount: number; reversedAmount: number; status: EarningStatus },
+  amount: number,
+): { reversedAmount: number; status: EarningStatus } {
+  const reversedAmount = Math.min(
+    Math.max(0, earning.reversedAmount + amount),
+    earning.incomeAmount,
+  );
+
+  return {
+    reversedAmount,
+    // 一眼看不出这是「退款」的存储层写法，所以解释一句：
+    // 整笔冲完 ⇒ 这笔钱已经不可能是「可提现」的了，状态回到 `frozen`（P0-15 产品裁定）。
+    status: isEarningFullyReversed({ incomeAmount: earning.incomeAmount, reversedAmount })
+      ? "frozen"
+      : earning.status,
+  };
+}
+
+/**
  * 一笔收益的**净额**（= 当前真正归属于打手的那部分）。
  *
  * ⚠️ **这是唯一一处算式**。**三个下游**都读这一个数：「我的收益」列表

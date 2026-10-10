@@ -151,6 +151,18 @@ import {
 
 /* ─────────────────────────── 读 / 锁 原语 ─────────────────────────── */
 
+/*
+ * ⚠️ PROD-1C：本段与下面几处**事务内原语**（`lockOrder` / `lockDispatchByOrder` /
+ * `readCompanion` / `readPlatformConfig` / `planNotification` / `appendNotification` /
+ * `restoreCouponClaimForOrderTx` / `applyOrderRefundTx` / `releaseCurrentAssignmentTx`）
+ * 从私有改成了 `export`，供 `adminAuditTransactions.ts` 的 T8 / T14 复用。
+ *
+ * **判定与写入一个字节都没改**，只是可见性。不这么做的话，那三个事务要么在第二个
+ * 文件里各写一份「怎么锁订单 / 怎么算金额 / 怎么造通知」，要么把整个 Mock 事务模块
+ * 拉进 Pg 的依赖图——前者会让同一条规则有两个落点（正是本仓反复拒绝的那类分叉），
+ * 后者会让 Pg 事务在运行时依赖 `globalThis` 存储。
+ */
+
 /**
  * 取一条订单并**锁住它**。所有事务的第一把锁都落在这一行（见文件头「加锁顺序」）。
  *
@@ -159,7 +171,7 @@ import {
  * 让出执行权；没有行锁，一次并发退款就能让「判的时候是 serving、写的时候已 refunded」
  * 变成真实可能——而那是 Mock 结构上做不到的事。
  */
-async function lockOrder(tx: TxHandle, id: string): Promise<OrderRow | null> {
+export async function lockOrder(tx: TxHandle, id: string): Promise<OrderRow | null> {
   const rows = await tx.query<OrderRow>(
     `SELECT ${ORDER_COLUMNS} FROM orders WHERE id = $1 FOR UPDATE`,
     [id],
@@ -177,7 +189,7 @@ async function lockDispatch(tx: TxHandle, id: string): Promise<DispatchRow | nul
 }
 
 /** 按订单取派单并锁住它（T12 用；`order_id` 上有唯一索引，至多一行）。 */
-async function lockDispatchByOrder(tx: TxHandle, orderId: string): Promise<DispatchRow | null> {
+export async function lockDispatchByOrder(tx: TxHandle, orderId: string): Promise<DispatchRow | null> {
   const rows = await tx.query<DispatchRow>(
     `SELECT ${DISPATCH_COLUMNS} FROM dispatch_records WHERE order_id = $1 FOR UPDATE`,
     [orderId],
@@ -192,7 +204,7 @@ async function lockDispatchByOrder(tx: TxHandle, orderId: string): Promise<Dispa
  * 由管理端事务写。给它上锁会让接单与「管理员改一位打手的开关」互相阻塞，
  * 而 Mock 从来没有这条互斥——本轮的翻译不引入新的锁粒度。
  */
-async function readCompanion(tx: TxHandle, id: string) {
+export async function readCompanion(tx: TxHandle, id: string) {
   const rows = await tx.query<CompanionRow>(
     `SELECT ${COMPANION_COLUMNS} FROM companions WHERE id = $1`,
     [id],
@@ -201,7 +213,7 @@ async function readCompanion(tx: TxHandle, id: string) {
 }
 
 /** 读平台参数（单行表）。超时 / 窗口快照的冻结就靠它。 */
-async function readPlatformConfig(tx: TxHandle) {
+export async function readPlatformConfig(tx: TxHandle) {
   const rows = await tx.query<{
     exclusive_pool_timeout_minutes: number;
     public_pool_timeout_minutes: number;
@@ -260,7 +272,7 @@ async function readOrderBlockingFacts(tx: TxHandle, orderId: string) {
  * ⚠️ 与 Mock 的 `planNotification` 一样，**校验发生在写入之前**：
  * 文案非法要在订单已经被改掉之前抛出来，否则留下的是「钱退了、通知没了」。
  */
-function planNotification(input: {
+export function planNotification(input: {
   userId: string;
   kind: Notification["kind"];
   content: { title: string; summary: string; body: string };
@@ -299,7 +311,7 @@ function planNotification(input: {
  * **抛错**（「拒绝覆盖已有记录」），而一条已经发给用户的业务事实不能被新记录顶掉。
  * 主键冲突因此是**正确行为**，不是需要被吞掉的噪音——让整段失败，把 bug 暴露出来。
  */
-async function appendNotification(tx: TxHandle, record: Notification): Promise<void> {
+export async function appendNotification(tx: TxHandle, record: Notification): Promise<void> {
   await tx.query(
     `INSERT INTO notifications (${NOTIFICATION_COLUMNS})
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -1066,7 +1078,7 @@ export async function directRefundOrderPg(
  * 这张券能不能再用，由「当下重新判」决定——返还的是**未使用资格**，
  * 不是绕过门槛与有效期。
  */
-async function restoreCouponClaimForOrderTx(
+export async function restoreCouponClaimForOrderTx(
   tx: TxHandle,
   input: { userId: string; everAcceptedAt: string | null; claimId: string | null },
 ): Promise<void> {
@@ -1101,15 +1113,22 @@ async function restoreCouponClaimForOrderTx(
  *
  * 部分退款**不改订单状态**——订单按原进度继续履约。因此返回的 `changed` 只说明
  * 「这一次出款真的发生了」，不说明订单变成了什么。
+ *
+ * ## 为什么还返回 `previous` / `updated`
+ *
+ * PROD-1C 加宽了返回值：T14（`approveRefund`）需要**写入器亲眼看到的前后两份订单**
+ * ——审计快照的 `orderStatus` 与退券判定读的都是它们。让调用方在外面另读一次
+ * 会得到一个可能与写入瞬间不同的快照（并发下），而「审计里记的订单状态」
+ * 必须是**这次写入造成的那个变化**。`updated` 为 `null` 表示没更新到行（不可能状态）。
  */
-async function applyOrderRefundTx(
+export async function applyOrderRefundTx(
   tx: TxHandle,
   order: Order,
   at: string,
   refundedAmount?: number,
-): Promise<{ changed: boolean }> {
+): Promise<{ changed: boolean; previous: Order; updated: Order | null }> {
   if (isRefundExecutionClosed(order) || order.refundedAmount >= order.actualPaidAmount) {
-    return { changed: false };
+    return { changed: false, previous: order, updated: null };
   }
 
   const remainingAmount = order.actualPaidAmount - order.refundedAmount;
@@ -1117,12 +1136,13 @@ async function applyOrderRefundTx(
     order.refundedAmount + Math.max(0, Math.min(refundedAmount ?? 0, remainingAmount));
   const fullyRefunded = nextRefundedAmount >= order.actualPaidAmount;
 
-  await tx.query(
+  const updatedRows = await tx.query<OrderRow>(
     `UPDATE orders
         SET status = $2,
             refunded_at = $3,
             refunded_amount = $4
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING ${ORDER_COLUMNS}`,
     [
       order.id,
       fullyRefunded ? "refunded" : order.status,
@@ -1132,7 +1152,13 @@ async function applyOrderRefundTx(
     ],
   );
 
-  return { changed: true };
+  // `previous` 是**写入器亲眼看到的前一状态**——调用方（T14 的审计快照与退券判定）
+  // 必须拿它，而不是事务开始时另读的那一份：并发下两者可能不同。
+  return {
+    changed: true,
+    previous: order,
+    updated: updatedRows[0] ? toOrder(updatedRows[0]) : null,
+  };
 }
 
 /* ──────────────────── T3 · 派单超时清扫（自动转池 / 退款） ──────────────────── */
@@ -1339,7 +1365,7 @@ export async function sweepExpiredDispatchesPg(at: string): Promise<DispatchSwee
  * 由部分唯一索引 `(companion_id, idempotency_key) WHERE idempotency_key IS NOT NULL`
  * 保证「同一打手 + 同一键只产生一条退出记录」。
  */
-async function releaseCurrentAssignmentTx(
+export async function releaseCurrentAssignmentTx(
   tx: TxHandle,
   input: {
     orderId: string;

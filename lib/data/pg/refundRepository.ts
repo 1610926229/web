@@ -1,11 +1,4 @@
-import type { ActorRole } from "@/lib/types/actor";
-import type { SupportEvidence } from "@/lib/types/evidence";
-import type {
-  RefundDecision,
-  RefundReasonKey,
-  RefundRequest,
-  RefundStatus,
-} from "@/lib/types/refund";
+import type { RefundRequest, RefundStatus } from "@/lib/types/refund";
 import type {
   AdminRefundQueryFilter,
   CancelRefundOutcome,
@@ -13,6 +6,10 @@ import type {
   RefundRepository,
 } from "../refundRepository";
 import { lazyPgExecutor, type PgQueryable } from "./executor";
+// ⚠️ `refund_requests` 的列清单与行 → 领域对象映射从 `w1Rows.ts` 取，**不在这里再写一份**：
+// PROD-1C 起退款事务（`adminAuditTransactions.ts` 的 T14/T15）也要读这张表，
+// 两份映射会各自演化。理由与 `earningRepository.ts` 头部那句相同。
+import { REFUND_COLUMNS, jsonbParam, toRefund, type RefundRow } from "./w1Rows";
 
 /**
  * `RefundRepository` 的 PostgreSQL 实现。
@@ -45,84 +42,13 @@ import { lazyPgExecutor, type PgQueryable } from "./executor";
  * 每个 `ORDER BY` 都补了 id 兜底 tie-break，与 `compareRefundsForAdmin` 逐字段对齐。
  */
 
-type RefundRow = {
-  id: string;
-  refund_no: string;
-  user_id: string;
-  order_id: string;
-  status: RefundStatus;
-  amount: number;
-  /** jsonb：未决策时为 SQL NULL，映射后仍是领域里的 `null`（不是零值决策）。 */
-  decision: RefundDecision | null;
-  reason_key: RefundReasonKey;
-  reason_label: string;
-  description: string;
-  /** jsonb：驱动已解析成数组，直接取值。 */
-  evidence: SupportEvidence[];
-  created_at: string;
-  updated_at: string;
-  reviewing_at: string | null;
-  reviewed_at: string | null;
-  reviewed_by: string | null;
-  reviewed_by_role: ActorRole | null;
-  reviewed_by_name: string | null;
-  review_note: string;
-  cancelled_at: string | null;
-};
-
-/**
- * 领域对象会读到的列。
- *
- * ⚠️ **不含 `idempotency_key`**：它不是实体字段，Mock 里只活在
- * `refundIdByKey` 索引上（见 `mockRefundRepository.ts`）。读侧把它带出来
- * 会让「幂等键是索引、不是数据」这件事在类型上说不清。
- */
-const COLUMNS =
-  "id, refund_no, user_id, order_id, status, amount, decision, reason_key, reason_label, " +
-  "description, evidence, created_at, updated_at, reviewing_at, reviewed_at, reviewed_by, " +
-  "reviewed_by_role, reviewed_by_name, review_note, cancelled_at";
+/** 列清单的**本地别名**：本文件的语句读起来短一些，真值源仍是 `w1Rows.ts`。 */
+const COLUMNS = REFUND_COLUMNS;
 
 /** 写入侧的列：相比 `COLUMNS` 多一个幂等键。 */
 const INSERT_COLUMNS = `${COLUMNS}, idempotency_key`;
 
 const INSERT_VALUE_COUNT = 21;
-
-function toRefund(row: RefundRow): RefundRequest {
-  return {
-    id: row.id,
-    refundNo: row.refund_no,
-    userId: row.user_id,
-    orderId: row.order_id,
-    status: row.status,
-    amount: row.amount,
-    // jsonb 已由驱动解析：`decision` 直接就是 RefundDecision 或 null
-    decision: row.decision,
-    reasonKey: row.reason_key,
-    reasonLabel: row.reason_label,
-    description: row.description,
-    // jsonb 同上，直接赋值
-    evidence: row.evidence,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    reviewingAt: row.reviewing_at,
-    reviewedAt: row.reviewed_at,
-    reviewedBy: row.reviewed_by,
-    reviewedByRole: row.reviewed_by_role,
-    reviewedByName: row.reviewed_by_name,
-    reviewNote: row.review_note,
-    cancelledAt: row.cancelled_at,
-  };
-}
-
-/**
- * jsonb 列的入参。
- *
- * ⚠️ `null` 必须**原样**交给驱动，不能 `JSON.stringify(null)`：后者得到字符串
- * `"null"`，PG 会解析成 JSON 的 null 值而不是 SQL NULL，两者在 `IS NULL` 下结果相反。
- */
-function jsonbParam(value: unknown): string | null {
-  return value === null || value === undefined ? null : JSON.stringify(value);
-}
 
 /**
  * 取值顺序**必须**与 `INSERT_COLUMNS` 逐位对应。

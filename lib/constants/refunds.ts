@@ -219,6 +219,53 @@ export const REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE = {
   body: "这一单在护航开始服务后经售后处理全额退款，订单已关闭。本单不产生收益，你无需再做任何操作。",
 } as const;
 
+/**
+ * 按**退款发生前的订单档位**挑一条**每一句都为真**的打手退款文案。
+ *
+ * ⚠️ PROD-1C 从 `lib/data/adminRefundTransaction.ts` 搬到这里，**一个字没改**
+ * （那次搬家只是把 `resolveCompanionRefundCopy` 换成这个导出名。
+ * 搬家的理由：退款批准现在有两个实现（Mock 伪事务与 PostgreSQL 的 T14 事务），
+ * 而 PostgreSQL 侧**不能**从 `adminRefundTransaction.ts` 导入——
+ * 那个模块的依赖里有整片 `globalThis` Mock 存储，导进来就等于让 Pg 事务
+ * 在运行时依赖进程内状态）。文案的选择规则属于**常量层**，本来也不该住在事务里。
+ *
+ * ⚠️ 三档缺一不可，见 `REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION`
+ * 的长注释（那里记着为什么不能写成 `completed ? A : B`）。
+ *
+ * ⚠️ **未列入三档的档位直接抛错**（而不是给个默认文案）：`refunded` 不可能
+ * 还存在可批准的申请，真出现说明不变式已经破了。调用方都把它排在**写入之前**，
+ * 因此抛错等于整个审核**零副作用**地失败——比退完钱再发一句错话好。
+ */
+export function resolveCompanionRefundCopy(orderStatus: OrderStatus): {
+  title: string;
+  summary: string;
+  body: string;
+} {
+  switch (orderStatus) {
+    case "paid":
+    case "accepted":
+      return REFUND_NOTIFICATION_COMPANION_REFUNDED;
+    case "serving":
+      return REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE;
+    case "completed":
+      return REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION;
+    default:
+      throw new Error(`退款通知无对应文案：订单档位 ${orderStatus}`);
+  }
+}
+
+/**
+ * 退款通知指向的页面：**打手端**的订单页。
+ *
+ * ⚠️ 不是 `/orders/[id]`——那个页面会重新校验订单归属，发给打手等于点进去 404。
+ *
+ * ⚠️ 与 `resolveCompanionRefundCopy` 同批搬到常量层，同样是给两个存储共用。
+ * 只把文案共用、把 href 各写一份的话，「收件人点进去看到什么」会重新变成两处规则。
+ */
+export function companionRefundNotificationHref(orderId: string): string {
+  return `/companion/orders/${orderId}`;
+}
+
 export function isRefundStatus(value: string): value is RefundStatus {
   return (REFUND_STATUSES as readonly string[]).includes(value);
 }

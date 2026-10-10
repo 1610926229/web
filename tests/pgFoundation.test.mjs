@@ -66,7 +66,19 @@ const executor = () => getPgExecutor();
  * 它逼着改动者在「库的结构变了」这件事上做一次明确声明，
  * 而不是让新表悄悄出现在测试已经通过的那一层下面。
  */
-const ALL_VERSIONS = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"];
+const ALL_VERSIONS = [
+  "0001",
+  "0002",
+  "0003",
+  "0004",
+  "0005",
+  "0006",
+  "0007",
+  "0008",
+  // PROD-1C：管理审计落库的那一张表。它排在最后，是**续号**的结果——
+  // 已执行过的迁移一个字都不许改（PROD-1C Phase 2）。
+  "0009",
+];
 
 /**
  * 迁移跑到最新之后，`public` 下应当有这些表（含记账表）。
@@ -75,6 +87,7 @@ const ALL_VERSIONS = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0
  * 后者接不住「某条迁移多建了一张没人知道的表」——而那正是记账表要防的事。
  */
 const ALL_TABLES = [
+  "admin_audit_entries",
   "companion_accept_events",
   "companion_release_records",
   "companion_service_events",
@@ -144,6 +157,10 @@ const SEEDED_HUB_TABLES = {
  * （见 `lib/types/companionAccept.ts` 关于「不伪造历史」的那段）。
  */
 const EMPTY_HUB_TABLES = [
+  // PROD-1C：审计账本建仓即为空。Mock 的审计 store 同样是空的——
+  // 预置数据里没有任何一次「管理员做过什么」，给 Pg 编一份会凭空造出一段
+  // 从未发生过的管理动作历史（与下面几张历史事件表同一条理由）。
+  "admin_audit_entries",
   "payment_requests",
   "payments",
   "completion_submissions",

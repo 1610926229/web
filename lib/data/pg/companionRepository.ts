@@ -343,6 +343,62 @@ export function createCompanionRepository(db: PgQueryable): CompanionRepository 
 }
 
 /**
+ * 只改「能不能接单」那三个字段（**事务内窄写入器**，T8 用）。
+ *
+ * ⚠️ PROD-1C 新增，是 `mockCompanionRepository.applyCompanionFlags` 的 Pg 等价物。
+ * 它**不是** `CompanionRepository` 上的方法：那个接口一个字没改，本函数只对
+ * `adminAuditTransactions.ts` 的 T8 开放。
+ *
+ * ## 为什么不能复用上面的 `updateCompanion`
+ *
+ * `updateCompanion` 写的是**整份资料**（昵称、介绍、游戏、排序……）。
+ * 「暂停接单」只应当改这三个字段——如果改成「先把整条记录读出来、拼一个完整 patch
+ * 再调用编辑」，两位管理员同时操作时，后写的那次会把另一位刚改好的昵称**覆盖回旧值**，
+ * 而那个读取发生在事务之外。窄写入器让这种覆盖在结构上不可能发生
+ * （Mock 侧 `applyCompanionFlags` 的注释同此）。
+ *
+ * ## 为什么也要锁
+ *
+ * T8 的「这个幂等键做过没有」判定排在**取到这一行的锁之后**（见
+ * `adminAuditTransactions.ts` 的说明）。不锁的话，两个并发请求会双双读空账本、
+ * 双双写入，撞的是 `23505` 而不是正确地重放。因此这里先 `FOR UPDATE` 读一次当前行，
+ * 由调用方在**这一步之后**再回读审计账本。
+ *
+ * 返回 `null` = 这一行不存在（调用方按不可能状态处理）。
+ */
+export async function lockCompanionForFlagsTx(
+  db: PgQueryable,
+  id: string,
+): Promise<Companion | null> {
+  const rows = await db.query<CompanionRow>(
+    `SELECT ${COLUMNS} FROM companions WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  return rows[0] ? toCompanion(rows[0]) : null;
+}
+
+/**
+ * 写那三个字段。`previous` / `updated` 由同一条语句一起返回（理由见 `UPDATE_RETURNING`）。
+ */
+export async function applyCompanionFlagsTx(
+  db: PgQueryable,
+  id: string,
+  flags: { enabled: boolean; available: boolean; unavailableReason: string },
+): Promise<{ previous: Companion; updated: Companion } | null> {
+  const rows = await db.query<CompanionPairRow>(
+    `UPDATE companions AS c
+        SET enabled = $2,
+            available = $3,
+            unavailable_reason = $4
+       FROM companions AS prev
+      WHERE c.id = $1 AND prev.id = $1
+     RETURNING ${UPDATE_RETURNING}`,
+    [id, flags.enabled, flags.available, flags.unavailableReason],
+  );
+  return rows[0] ? pairFrom(rows[0]) : null;
+}
+
+/**
  * 进程级 PostgreSQL 实现。执行器**延迟解析**——模块加载期不读 `DATABASE_URL`、不建池。
  */
 export const pgCompanionRepository: CompanionRepository =

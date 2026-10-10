@@ -600,6 +600,71 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
+// ————————————— 「能不能接单」的四个动作（暂停 / 恢复 / 启用 / 停用） —————————————
+
+/**
+ * 一次「能不能接单」动作。与审计动作一一对应，不经过差异推导。
+ *
+ * ⚠️ **PROD-1C 从 `lib/data/adminCompanionTransaction.ts` 搬到这里**，判定一字未改。
+ * 搬家的理由与 `adminCompanionActionFromPatch` / `isCompanionProfileUnchanged` 住在
+ * 本文件同一条：它们是**规则**，而现在有两个调用方——Mock 伪事务与 PostgreSQL 事务
+ * （`lib/data/pg/adminAuditTransactions.ts`）。规则留在 `lib/data/` 里，
+ * Pg 侧要复用它就得把整个 Mock 事务模块拉进依赖图。
+ *
+ * ⚠️ 这四个函数**没有运行时依赖**，因此本文件「客户端组件引用它不会把服务端模块
+ * 打进浏览器产物」这条性质不变（文件头那段话仍然成立）。
+ */
+export type CompanionFlagIntent = "pause" | "resume" | "enable" | "disable";
+
+/** 一次「能不能接单」动作对应哪一个审计动作。与 `CompanionFlagIntent` 一一对应。 */
+export function companionFlagAction(intent: CompanionFlagIntent): AdminAuditAction {
+  switch (intent) {
+    case "pause":
+      return "companion.pause";
+    case "resume":
+      return "companion.resume";
+    case "enable":
+      return "companion.enable";
+    default:
+      return "companion.disable";
+  }
+}
+
+/** 目标状态：只算这三个字段，其余一概不碰。 */
+export function nextCompanionFlags(
+  existing: Pick<Companion, "enabled" | "available" | "unavailableReason">,
+  intent: CompanionFlagIntent,
+  input: { unavailableReason: string },
+): { enabled: boolean; available: boolean; unavailableReason: string } {
+  switch (intent) {
+    case "pause":
+      return { enabled: true, available: false, unavailableReason: input.unavailableReason };
+    case "resume":
+      return { enabled: true, available: true, unavailableReason: "" };
+    case "disable":
+      // 下架强制不可接单：一条「已停用但可接单」的记录在结算页会解释不清
+      return { enabled: false, available: false, unavailableReason: existing.unavailableReason };
+    default:
+      return {
+        enabled: true,
+        available: existing.available,
+        unavailableReason: existing.unavailableReason,
+      };
+  }
+}
+
+/** 这次动作是否什么都没改。没改就不写数据、也不写审计。 */
+export function areCompanionFlagsUnchanged(
+  existing: Pick<Companion, "enabled" | "available" | "unavailableReason">,
+  flags: { enabled: boolean; available: boolean; unavailableReason: string },
+): boolean {
+  return (
+    existing.enabled === flags.enabled &&
+    existing.available === flags.available &&
+    existing.unavailableReason === flags.unavailableReason
+  );
+}
+
 // ——————————————————————————— 二次确认（§八） ———————————————————————————
 
 /**

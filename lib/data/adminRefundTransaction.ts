@@ -1,13 +1,12 @@
 import { toRefundAuditSnapshot } from "@/lib/constants/adminAudit";
 import { canTransitionRefund } from "@/lib/constants/adminRefunds";
 import {
-  REFUND_NOTIFICATION_COMPANION_REFUNDED,
-  REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION,
-  REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE,
   assertRefundAmountWithinPaid,
   assertRefundApprovalOrderStatus,
+  companionRefundNotificationHref,
   computeRefundDecisionAmounts,
   isFullyRefunded,
+  resolveCompanionRefundCopy,
   type RefundDecisionInput,
 } from "@/lib/constants/refunds";
 import { parseNotificationInput } from "@/lib/constants/service";
@@ -253,47 +252,6 @@ export async function startReviewRefund(
 // ——————————————————————————— 通过（§退款审核 的核心） ———————————————————————————
 
 /**
- * 按**退款发生前**的订单档位，挑一条**每一句都为真**的打手退款文案。
- *
- * ⚠️ 这张表就是产品裁定 `D20` 的落点，**三档缺一不可**：
- *
- * | 退款前档位 | 文案 | 为什么这几句是真的 |
- * |---|---|---|
- * | `paid` / `accepted` | `REFUND_NOTIFICATION_COMPANION_REFUNDED` | 服务尚未开始；不生成收益 |
- * | `serving` | `..._IN_SERVICE` | 服务已开始；全额退款不生成 completed Earning |
- * | `completed` | `..._AFTER_COMPLETION` | 收益已生成过并按本次核定结果结算 |
- *
- * ⚠️ **为什么不能写成两分支**：`completed ? A : B` 会把 `paid` / `accepted`
- * 静默归进 `B`（「服务已开始」），而这两档**根本没有开始过**——
- * 于是通知又成了一句与事实相反的话，只是换到了另一档。
- * 写两分支时这**是**一条真实路径：存量申请 `rf-seed-1001-01` 挂在 `accepted` 的
- * `ord-seed-1001-03` 上，`tests/adminRefunds.test.mjs` 当时确实在批准它。
- *
- * ✅ **P0-13 §十三 `D22`（2026-09-27）之后 `paid` / `accepted` 分支不可达**：
- * 产品裁定那两档不允许批准售后退款，审核入口已由 `assertRefundApprovalOrderStatus`
- * 把守（见本文件 `approveRefund` 里的状态闸）。三档因此是**防御性**的。
- * ⚠️ 若将来这一档变得可达（有测试能批准一张 `paid` / `accepted` 单的售后申请），
- * **那是闸门被绕过的信号，该修的是闸门**——不要反过来把这一档当成合法路径。
- *
- * ⚠️ **未列入上表的档位直接抛错**（而不是给个默认文案）：`refunded` 不可能
- * 还存在可批准的申请，真出现说明不变式已经破了。这里**位于写入之前**，
- * 抛错等于整个审核**零副作用**地失败——比退完钱再发一句错话好。
- */
-function resolveCompanionRefundCopy(orderStatus: Order["status"]) {
-  switch (orderStatus) {
-    case "paid":
-    case "accepted":
-      return REFUND_NOTIFICATION_COMPANION_REFUNDED;
-    case "serving":
-      return REFUND_NOTIFICATION_COMPANION_REFUNDED_IN_SERVICE;
-    case "completed":
-      return REFUND_NOTIFICATION_COMPANION_REFUNDED_AFTER_COMPLETION;
-    default:
-      throw new Error(`退款通知无对应文案：订单档位 ${orderStatus}`);
-  }
-}
-
-/**
  * 构造并校验一条**发给被退单打手**的通知（尚未写入）。
  *
  * ⚠️ 与 `directRefundTransaction` / `companionOrderTransaction` 里的同名逻辑
@@ -334,7 +292,7 @@ function planCompanionRefundNotification(input: {
     summary: copy.summary,
     body: copy.body,
     // 打手端的订单页，不是用户端的 `/orders/[id]`——那里会重新校验订单归属
-    href: `/companion/orders/${input.orderId}`,
+    href: companionRefundNotificationHref(input.orderId),
   };
 
   const parsed = parseNotificationInput(payload);

@@ -1,4 +1,4 @@
-import { compareRefundsForAdmin } from "@/lib/constants/adminRefunds";
+import { compareRefundsForAdmin, resolveRefundReview } from "@/lib/constants/adminRefunds";
 import { refundSeed } from "@/lib/mocks/fixtures/refundSeed";
 import type { ActorRole } from "@/lib/types/actor";
 import type { RefundDecision, RefundRequest, RefundStatus } from "@/lib/types/refund";
@@ -242,25 +242,12 @@ export function applyRefundReview(
   if (!refund) return null;
 
   const previous = { ...refund };
-  const settled = to === "approved" || to === "rejected";
-  const approved = to === "approved";
-
-  const updated: RefundRequest = {
-    ...refund,
-    status: to,
-    updatedAt: input.at,
-    decision: approved ? (input.decision ?? null) : refund.decision,
-    // 只有「开始审核」这一步写 reviewingAt。`pending → approved` 是合法迁移（§退款审核），
-    // 那条路径上平台没有单独走「开始审核」，因此**不替它补一个时间**——
-    // 补了会让进度时间轴凭空多出一个没人做过的节点。
-    reviewingAt: to === "reviewing" ? input.at : refund.reviewingAt,
-    // 只有出了结果才写审核人与审核时间；开始审核只更新「审核中」这一格
-    reviewedAt: settled ? input.at : refund.reviewedAt,
-    reviewedBy: settled ? input.actorId : refund.reviewedBy,
-    reviewedByRole: settled ? input.actorRole : refund.reviewedByRole,
-    reviewedByName: settled ? input.actorName : refund.reviewedByName,
-    reviewNote: settled ? input.reviewNote : refund.reviewNote,
-  };
+  // 八条字段规则住在 `lib/constants/adminRefunds.ts` 的 `resolveRefundReview`（纯函数）。
+  // PROD-1C 把它从本函数里抽了出去：PostgreSQL 侧的 T14/T15 事务
+  // 也要写同一组字段，两份 `SET` 各自演化会让规则静默漂移。
+  // ⚠️ 传进去的必须是**当前存储里那一份**（这里就是 `refund`），
+  // 否则「保持原值」会保持成一个陈旧快照。
+  const updated: RefundRequest = resolveRefundReview(refund, to, input);
   current.refunds.set(id, updated);
 
   return { previous, updated };

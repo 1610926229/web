@@ -1,3 +1,4 @@
+import type { ActorRole } from "@/lib/types/actor";
 import type { Companion } from "@/lib/types/companion";
 import type {
   CompletionSubmission,
@@ -15,6 +16,12 @@ import type {
   OrderCouponSnapshot,
   OrderStatus,
 } from "@/lib/types/order";
+import type {
+  RefundDecision,
+  RefundReasonKey,
+  RefundRequest,
+  RefundStatus,
+} from "@/lib/types/refund";
 
 /**
  * W1 写闭包里**每一张表 ↔ 领域对象**的**唯一**一份映射。
@@ -46,9 +53,27 @@ import type {
  * 不写 `JSON.parse`——多解析一次会把一个对象塞进 `JSON.parse` 并当场抛错。
  */
 
-/* ───────────────────────────────── orders ───────────────────────────────── */
+/* ────────────────────────────── 写入侧的小工具 ────────────────────────────── */
 
-export const ORDER_COLUMNS = [
+/**
+ * `jsonb` 列的入参。
+ *
+ * ⚠️ `null` 必须**原样**交给驱动，不能 `JSON.stringify(null)`：后者得到字符串
+ * `"null"`，PG 会解析成 **JSON 的 null 值**而不是 SQL NULL，两者在 `IS NULL`
+ * 下结果相反——而 `0009_admin_audit_entries.sql` 的 `before_shape` 约束
+ * （`before IS NULL OR jsonb_typeof(before) = 'object'`）正是按 SQL NULL 判的。
+ * 把 `"null"` 写进去，一条「新建类动作没有 before」的审计会当场违反约束。
+ *
+ * ⚠️ PROD-1C 把它收进本文件：`adminAuditRepository` / `refundRepository` /
+ * `adminAuditTransactions` 三处都要写 jsonb 列，而这是一条**容易写错、错了不会
+ * 编译报错**的规则（`JSON.stringify(null)` 完全合法）。与行映射同一个理由——
+ * 同一份事实只留一个落点。
+ */
+export function jsonbParam(value: unknown): string | null {
+  return value === null || value === undefined ? null : JSON.stringify(value);
+}
+
+/* ───────────────────────────────── orders ───────────────────────────────── */export const ORDER_COLUMNS = [
   "id",
   "order_no",
   "user_id",
@@ -432,5 +457,76 @@ export function toCompletionSubmission(row: CompletionSubmissionRow): Completion
     reviewedAt: row.reviewed_at,
     rejectReason: row.reject_reason,
     invalidatedAt: row.invalidated_at,
+  };
+}
+
+/* ───────────────────────────── refund_requests ───────────────────────────── */
+
+/**
+ * 退款申请的列清单。
+ *
+ * ⚠️ **不含 `idempotency_key`**：它不是实体字段，Mock 里只活在
+ * `refundIdByKey` 索引上（见 `mockRefundRepository.ts`）。读侧把它带出来
+ * 会让「幂等键是索引、不是数据」这件事在类型上说不清。
+ *
+ * ⚠️ PROD-1C 把它从 `refundRepository.ts` **搬到这里**，一个字没改。
+ * 理由与 `earningRepository.ts` 头部那句完全相同：这张表现在有两个读者
+ * （退款仓储与 `adminAuditTransactions.ts` 的 T14 事务），
+ * 两份映射会各自演化。
+ */
+export const REFUND_COLUMNS =
+  "id, refund_no, user_id, order_id, status, amount, decision, reason_key, reason_label, " +
+  "description, evidence, created_at, updated_at, reviewing_at, reviewed_at, reviewed_by, " +
+  "reviewed_by_role, reviewed_by_name, review_note, cancelled_at";
+
+export type RefundRow = {
+  id: string;
+  refund_no: string;
+  user_id: string;
+  order_id: string;
+  status: RefundStatus;
+  amount: number;
+  /** jsonb：未决策时为 SQL NULL，映射后仍是领域里的 `null`（不是零值决策）。 */
+  decision: RefundDecision | null;
+  reason_key: RefundReasonKey;
+  reason_label: string;
+  description: string;
+  /** jsonb：驱动已解析成数组，直接取值。 */
+  evidence: SupportEvidence[];
+  created_at: string;
+  updated_at: string;
+  reviewing_at: string | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  reviewed_by_role: ActorRole | null;
+  reviewed_by_name: string | null;
+  review_note: string;
+  cancelled_at: string | null;
+};
+
+export function toRefund(row: RefundRow): RefundRequest {
+  return {
+    id: row.id,
+    refundNo: row.refund_no,
+    userId: row.user_id,
+    orderId: row.order_id,
+    status: row.status,
+    amount: row.amount,
+    // jsonb 已由驱动解析：`decision` 直接就是 RefundDecision 或 null
+    decision: row.decision,
+    reasonKey: row.reason_key,
+    reasonLabel: row.reason_label,
+    description: row.description,
+    // jsonb 同上，直接赋值
+    evidence: row.evidence,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    reviewingAt: row.reviewing_at,
+    reviewedAt: row.reviewed_at,
+    reviewedBy: row.reviewed_by,
+    reviewedByRole: row.reviewed_by_role,
+    reviewedByName: row.reviewed_by_name,
+    reviewNote: row.review_note,
+    cancelledAt: row.cancelled_at,
   };
 }

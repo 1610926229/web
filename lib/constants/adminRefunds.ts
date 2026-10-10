@@ -13,12 +13,14 @@ import {
   type RefundDecisionAmounts,
   type RefundDecisionInput,
 } from "@/lib/constants/refunds";
+import type { ActorRole } from "@/lib/types/actor";
 import type { OrderStatus } from "@/lib/types/order";
 import type {
   AdminRefundAllowedActions,
   AdminRefundDetail,
   AdminRefundListItem,
   AdminRefundOrderMoney,
+  RefundDecision,
   RefundRequest,
   RefundStatus,
 } from "@/lib/types/refund";
@@ -949,4 +951,59 @@ export function buildAdminRefundTimeline(refund: RefundRequest): AdminRefundDeta
   }
 
   return entries.sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? -1 : 1));
+}
+
+/**
+ * 一次「审核结果」写入之后的退款申请**长什么样**（**纯函数**）。
+ *
+ * ⚠️ PROD-1C 从 `mockRefundRepository.ts` 的 `applyRefundReview` 里抽出来，
+ * **八条字段规则一个字没改**。抽出来的理由是那份实现现在有两个调用方：
+ * Mock 伪事务（`adminRefundTransaction.ts`）与 PostgreSQL 事务
+ * （`lib/data/pg/adminAuditTransactions.ts` 的 T14 / T15）。
+ * 让 Pg 侧另写一份 `UPDATE … SET` 就等于把「开始审核不写审核人」「拒绝不写决策」
+ * 这类规则放在两处各自演化——而它们出错的方式是**静默的**：
+ * 多写一个字段不会报错，只会让一条审核记录说谎。
+ *
+ * 三条要点（原实现里的注释，逐条保留）：
+ * - **只有 `start-review` 写 `reviewingAt`**。`pending → approved` 是合法迁移，
+ *   那条路径上平台没有单独走「开始审核」，**不替它补一个时间**——
+ *   补了会让进度时间轴凭空多出一个没人做过的节点；
+ * - **只有出了结果（`approved` / `rejected`）才写审核人、审核时间与审核意见**；
+ * - `decision` **只在 `approved` 时写入**，其余两个目标状态保持原值
+ *   （拒绝一条申请不该抹掉它的历史决策；而实际上被拒的申请从来没有决策，
+ *   因此保持原值就是保持 `null`）。
+ *
+ * ⚠️ `refund` 必须是**当前存储里那一份**（Pg 侧即取行锁之后读到的那一行），
+ * 否则「保持原值」会保持成一个陈旧的快照。
+ */
+export function resolveRefundReview(
+  refund: RefundRequest,
+  to: Extract<RefundStatus, "reviewing" | "approved" | "rejected">,
+  input: {
+    at: string;
+    reviewNote: string;
+    actorId: string;
+    actorRole: ActorRole;
+    actorName: string | null;
+    /** 这一次退款的资金决策。只有 `to === "approved"` 时才会被写入。 */
+    decision?: RefundDecision | null;
+  },
+): RefundRequest {
+  const settled = to === "approved" || to === "rejected";
+  const approved = to === "approved";
+
+  return {
+    ...refund,
+    status: to,
+    updatedAt: input.at,
+    decision: approved ? (input.decision ?? null) : refund.decision,
+    // 只有「开始审核」这一步写 reviewingAt
+    reviewingAt: to === "reviewing" ? input.at : refund.reviewingAt,
+    // 只有出了结果才写审核人与审核时间；开始审核只更新「审核中」这一格
+    reviewedAt: settled ? input.at : refund.reviewedAt,
+    reviewedBy: settled ? input.actorId : refund.reviewedBy,
+    reviewedByRole: settled ? input.actorRole : refund.reviewedByRole,
+    reviewedByName: settled ? input.actorName : refund.reviewedByName,
+    reviewNote: settled ? input.reviewNote : refund.reviewNote,
+  };
 }

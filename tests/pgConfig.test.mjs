@@ -191,7 +191,18 @@ test("迁移顺序固定：按版本号数字升序，且与目录里的文件�
   assert.deepEqual(versions, fromFiles, "加载到的版本必须与目录里的迁移文件一一对应");
 
   // 显式清单：新增一条迁移就要在这里加一项（刻意的。见 tests/pgFoundation.test.mjs 的同名常量）
-  assert.deepEqual(versions, ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]);
+  assert.deepEqual(versions, [
+    "0001",
+    "0002",
+    "0003",
+    "0004",
+    "0005",
+    "0006",
+    "0007",
+    "0008",
+    // PROD-1C +管理审计表（续号，不改旧迁移）
+    "0009",
+  ]);
   assert.equal(new Set(versions).size, versions.length, "版本号不能重复");
 
   // 再读一次必须是同一个结果：顺序来自排序，不是来自 readdir 的返回顺序

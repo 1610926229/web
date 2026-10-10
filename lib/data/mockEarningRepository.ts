@@ -1,4 +1,4 @@
-import { isEarningFullyReversed } from "@/lib/constants/earnings";
+import { isEarningFullyReversed, resolveEarningReversal } from "@/lib/constants/earnings";
 import type { Earning, EarningAdjustment } from "@/lib/types/earning";
 import { getMockStore } from "./mockStore";
 import type { EarningRepository } from "./earningRepository";
@@ -256,18 +256,10 @@ export function applyEarningReversal(
   const previous = { ...earning };
   if (amount <= 0) return { previous, updated: previous, changed: false };
 
-  const nextReversed = Math.min(
-    Math.max(0, earning.reversedAmount + amount),
-    earning.incomeAmount,
-  );
-  // 一眼看不出这是「退款」的存储层写法，所以解释一句：
-  // 整笔冲完 ⇒ 这笔钱已经不可能是「可提现」的了，状态回到 `frozen`（P0-15 产品裁定，
-  // 见函数头第 2 条）。⚠️ 它不是 `reversed`——那个取值本批次没有写入路径。
-  const status = isEarningFullyReversed({ incomeAmount: earning.incomeAmount, reversedAmount: nextReversed })
-    ? "frozen"
-    : earning.status;
-
-  const updated: Earning = { ...earning, reversedAmount: nextReversed, status };
+  // 钳制与「整笔冲完回到 frozen」住在 `lib/constants/earnings.ts` 的
+  // `resolveEarningReversal`（纯函数）。PROD-1C 把它抽出去的理由与退款那条相同：
+  // PostgreSQL 的 T14 事务要写同一组列，规则写两遍就会各自演化。
+  const updated: Earning = { ...earning, ...resolveEarningReversal(earning, amount) };
   current.earnings.set(id, updated);
   return { previous, updated, changed: true };
 }

@@ -9,7 +9,11 @@ import {
   NEW_COMPANION_RANK_LABEL,
   NEW_COMPANION_UNAVAILABLE_REASON,
   adminCompanionActionFromPatch,
+  areCompanionFlagsUnchanged,
+  companionFlagAction,
   isCompanionProfileUnchanged,
+  nextCompanionFlags,
+  type CompanionFlagIntent,
 } from "@/lib/constants/adminCompanions";
 import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { AdminCompanionProfilePatch, Companion } from "@/lib/types/companion";
@@ -532,10 +536,10 @@ export async function setCompanionFlags(
     return { kind: "disabled" };
   }
 
-  const flags = nextFlags(existing, intent, input);
+  const flags = nextCompanionFlags(existing, intent, input);
   const action = companionFlagAction(intent);
 
-  if (replay?.kind === "replay" || areFlagsUnchanged(existing, flags)) {
+  if (replay?.kind === "replay" || areCompanionFlagsUnchanged(existing, flags)) {
     return {
       kind: "ok",
       value: { previous: { ...existing }, updated: { ...existing }, action },
@@ -580,55 +584,12 @@ export async function setCompanionFlags(
   return { kind: "ok", value: { ...written, action }, changed: true, replayed: false };
 }
 
-/** 一次「能不能接单」动作。与审计动作一一对应，不经过差异推导。 */
-export type CompanionFlagIntent = "pause" | "resume" | "enable" | "disable";
-
-function companionFlagAction(intent: CompanionFlagIntent): AdminAuditAction {
-  switch (intent) {
-    case "pause":
-      return "companion.pause";
-    case "resume":
-      return "companion.resume";
-    case "enable":
-      return "companion.enable";
-    default:
-      return "companion.disable";
-  }
-}
-
-/** 目标状态：只算这三个字段，其余一概不碰。 */
-function nextFlags(
-  existing: Companion,
-  intent: CompanionFlagIntent,
-  input: { unavailableReason: string },
-): { enabled: boolean; available: boolean; unavailableReason: string } {
-  switch (intent) {
-    case "pause":
-      return { enabled: true, available: false, unavailableReason: input.unavailableReason };
-    case "resume":
-      return { enabled: true, available: true, unavailableReason: "" };
-    case "disable":
-      // 下架强制不可接单：一条「已停用但可接单」的记录在结算页会解释不清
-      return { enabled: false, available: false, unavailableReason: existing.unavailableReason };
-    default:
-      return {
-        enabled: true,
-        available: existing.available,
-        unavailableReason: existing.unavailableReason,
-      };
-  }
-}
-
-function areFlagsUnchanged(
-  existing: Companion,
-  flags: { enabled: boolean; available: boolean; unavailableReason: string },
-): boolean {
-  return (
-    existing.enabled === flags.enabled &&
-    existing.available === flags.available &&
-    existing.unavailableReason === flags.unavailableReason
-  );
-}
+/**
+ * 一次「能不能接单」动作的类型，由 `lib/constants/adminCompanions.ts` 定义
+ * （PROD-1C 从本文件搬走，见那里的说明）。这里**再导出一次**，
+ * 是因为服务层与测试都从这个模块取它，搬家不该改变它们的引用路径。
+ */
+export type { CompanionFlagIntent };
 
 /**
  * 移除护航（软删除）。

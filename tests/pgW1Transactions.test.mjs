@@ -91,6 +91,11 @@ const PROBED_TABLES = [
   // 否则「回滚把退出历史也带走了吗」这句话在测试里无法证伪
   "companion_release_records",
   "companion_service_events",
+  // PROD-1C：管理审计也是一次事务里的**业务写入**（Hard Rule 2：
+  // 「业务写入与它的那一条审计必须同生共死」）。不盯上它，
+  // 「审计写不进去时业务写入是否回滚」这句话在本文件里无法证伪。
+  // 断言在 `pgAdminAuditTransactions.test.mjs`（那条事务的宿主文件）。
+  "admin_audit_entries",
 ];
 
 async function createProbes() {
