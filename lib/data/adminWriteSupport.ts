@@ -82,8 +82,29 @@ export function takeReplay(
   actor: ActorScope,
   targetType: AdminAuditEntry["targetType"],
   targetId: string,
+): ReturnType<typeof evaluateReplay> {
+  return evaluateReplay(findAuditEntryByOperationId(actor.operationId), actor, targetType, targetId);
+}
+
+/**
+ * 「这条账本记录与这次请求算不算同一次操作」的**纯判定**。
+ *
+ * ⚠️ 抽这一层是 PROD-1C 加的，但**判定一个字没改**——它只是把 `takeReplay` 里
+ * 原来内联的那几行原样搬出来，让**读哪里**成为参数：Mock 侧读进程内的
+ * `findAuditEntryByOperationId`，PostgreSQL 侧在同一事务里
+ * `SELECT … FROM admin_audit_entries WHERE operation_id = $1`
+ * （`lib/data/pg/adminAuditTransactions.ts`）。
+ *
+ * 不抽这一层的话，那条「replay 还是 conflict」的规则会在两个实现里各写一份，
+ * 而它正是「安静地返回另一个对象的结果」与「明确报 400」之间的分界——
+ * 分叉的那一天，同一个键在两个存储上会得到相反的解释。
+ */
+export function evaluateReplay(
+  entry: AdminAuditEntry | null,
+  actor: ActorScope,
+  targetType: AdminAuditEntry["targetType"],
+  targetId: string,
 ): { kind: "replay"; entry: AdminAuditEntry } | { kind: "conflict" } | null {
-  const entry = findAuditEntryByOperationId(actor.operationId);
   if (!entry) return null;
 
   if (entry.targetType !== targetType || entry.targetId !== targetId) return { kind: "conflict" };
@@ -128,7 +149,21 @@ export function takeReplayForAction(
   targetType: AdminAuditEntry["targetType"],
   targetId: string,
 ): ReturnType<typeof takeReplay> {
-  const outcome = takeReplay(actor, targetType, targetId);
+  return refineReplayByAction(takeReplay(actor, targetType, targetId), action);
+}
+
+/**
+ * 在「操作者 × 目标」的判定之上再收一轴：**同一个键必须指向同一个意图**。
+ *
+ * ⚠️ 与 `evaluateReplay` 同样是 PROD-1C 抽出来给两个存储共用的**纯函数**，
+ * 判据一字未改。它单独抽出来的理由见 `takeReplayForAction` 原注释：
+ * 这一轴只对「意图在读到记录之前就已确定」的迁移类动作成立，
+ * 因此它必须是一个**调用方显式选择**的步骤，而不是 `evaluateReplay` 里的默认行为。
+ */
+export function refineReplayByAction(
+  outcome: ReturnType<typeof evaluateReplay>,
+  action: AdminAuditAction,
+): ReturnType<typeof evaluateReplay> {
   // 键用在了同一个对象的另一个意图上：这是调用方复用了键，不是重放。
   // 归进 conflict 而不是 replay——安静地返回「已处理」会让调用方拿到与事实相反的结果。
   if (outcome?.kind === "replay" && outcome.entry.action !== action) return { kind: "conflict" };
@@ -175,7 +210,32 @@ export function writeAudit(input: {
   before: AdminAuditSnapshot | null;
   after: AdminAuditSnapshot | null;
 }): AdminAuditEntry {
-  return appendAuditEntry({
+  return appendAuditEntry(buildAuditEntry(input));
+}
+
+/**
+ * 把一次操作的上下文与变更前后**拼成一条审计记录**（**纯函数，不写任何存储**）。
+ *
+ * ⚠️ PROD-1C 抽出这一层，是因为 PostgreSQL 侧**不能调 `writeAudit`**：
+ * 那个函数末尾会 `appendAuditEntry(...)`，即写进**进程内的 Mock store**——
+ * 在 Pg 事务里调它，等于同一件事被同时写进 Mock 账本与数据库，
+ * 而这正是本轮要消灭的那类「一半 Mock、一半 Pg」。
+ * 于是 Pg 侧复用这一个拼装函数，把结果交给 `INSERT INTO admin_audit_entries`。
+ *
+ * ⚠️ 拼装规则**一个字没改**，逐条仍是要紧的：
+ * - `id` 带 `aud_` 前缀 + `crypto.randomUUID()`（**标识**，不是事实）；
+ * - `operationId` **直接就是** `ctx.operationId`（幂等键），不派生、不加工；
+ * - `createdAt` 取 `ctx.at`——事件发生的时刻由调用方给，不在这里 `new Date()`。
+ */
+export function buildAuditEntry(input: {
+  ctx: AdminWriteContext;
+  action: AdminAuditAction;
+  targetType: AdminAuditEntry["targetType"];
+  targetId: string;
+  before: AdminAuditSnapshot | null;
+  after: AdminAuditSnapshot | null;
+}): AdminAuditEntry {
+  return {
     id: `aud_${crypto.randomUUID()}`,
     actorId: input.ctx.actorId,
     actorRole: input.ctx.actorRole,
@@ -188,7 +248,7 @@ export function writeAudit(input: {
     // operationId 直接就是幂等键：同一个键重复到达时，靠它认出「做过了」
     operationId: input.ctx.operationId,
     createdAt: input.ctx.at,
-  });
+  };
 }
 
 /**

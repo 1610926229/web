@@ -1,6 +1,11 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { isComplaintWindowClosed } from "@/lib/constants/complaints";
+import { DISPATCH_POOL_LABELS } from "@/lib/constants/dispatch";
 import { ORDER_STATUS_LABELS, parseOrderListQuery } from "@/lib/constants/orders";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
+import { sweepExpiredDispatches, toDispatchProgress } from "@/lib/data/companionDispatchTransaction";
+import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
+import { getDispatchRepository } from "@/lib/data/dispatchRepository";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
@@ -11,12 +16,13 @@ import type {
   Order,
   OrderAllowedActions,
   OrderDetail,
+  OrderDispatchProgress,
   OrderListItem,
   OrderStatus,
   OrderTimelineEntry,
 } from "@/lib/types/order";
 import { toOrderComplaintSummary } from "./complaints";
-import { buildConversationStats } from "./conversations";
+import { buildOrderConversationStats } from "./conversations";
 import { buildRefundActions, toRefundSummary } from "./refunds";
 import { buildReviewActions, toReviewSummary } from "./reviews";
 
@@ -71,7 +77,10 @@ export function toOrderListItem(order: Order): OrderListItem {
     productCoverUrl: order.productCoverUrl,
     specName: order.specName,
     quantity: order.quantity,
-    totalAmount: order.totalAmount,
+    // 卡片上写「实付」，所以给**实付**（P1-4）。列表只带这一个金额：
+    // 优惠前的原价在详情页上叫 `originalAmount`（订单实体上那个 `totalAmount`
+    // 与它恒等，但全仓库对「原价」只保留一个名字，避免两个名字被当成两个数）
+    actualPaidAmount: order.actualPaidAmount,
     companion: order.companion,
   };
 }
@@ -90,8 +99,16 @@ export type OrderDetailExtras = {
   allowedActions: OrderAllowedActions;
 };
 
-/** 订单 → 详情。游戏 ID 与备注只在这里出现，且只返回给订单所属用户。 */
-export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDetail {
+/**
+ * 订单 → 详情。游戏 ID 与备注只在这里出现，且只返回给订单所属用户。
+ *
+ * `dispatchProgress` 与四份售后摘要一样由服务层查好传进来：它不在订单上，
+ * 而在派单记录里（见 `OrderDispatchProgress`）。
+ */
+export function toOrderDetail(
+  order: Order,
+  extras: OrderDetailExtras & { dispatchProgress: OrderDispatchProgress | null },
+): OrderDetail {
   return {
     ...toOrderListItem(order),
     createdAt: order.createdAt,
@@ -103,6 +120,21 @@ export function toOrderDetail(order: Order, extras: OrderDetailExtras): OrderDet
     itemsAmount: order.itemsAmount,
     addonsAmount: order.addonsAmount,
     addons: order.addons,
+    // 金额域（P0-3）：详情页显示「原价 / 优惠 / 实付 / 护航收益」几行。
+    // `clubNetIncome`（平台净收入）**刻意不在这里**：它是平台自己的账，
+    // 用户端没有展示位置，放进 DTO 只会顺着接口响应流到浏览器。
+    //
+    // P1-4 起 `actualPaidAmount` 会真的小于 `originalAmount`（用了满减券时），
+    // 页面不需要改——它读的一直是这两个不同的字段。
+    originalAmount: order.originalAmount,
+    couponDiscountAmount: order.couponDiscountAmount,
+    actualPaidAmount: order.actualPaidAmount,
+    companionRateSnapshot: order.companionRateSnapshot,
+    companionBaseIncome: order.companionBaseIncome,
+    refundedAmount: order.refundedAmount,
+    // 券快照（P1-4）。⚠️ **退款不清空它**（裁定 §6）：它记录的是「这一单当初
+    // 用了哪张券」，退款改变不了这个历史事实，页面也因此能把退款单显示完整
+    coupon: order.coupon,
     timeline: buildOrderTimeline(order),
     ...extras,
   };
@@ -123,11 +155,46 @@ export async function queryOrdersForUser(
   const parsed = parseOrderListQuery(params);
   if (!parsed.ok) throw new ApiError("BAD_REQUEST", parsed.message);
 
+  // 惰性物化超时事实（幂等）：一张在公共池里等到超时的订单，用户点开订单列表
+  // 就该看到它已经退款，而不是「等待接单」——那会让人以为还有希望。
+  // 放在查询**之前**，而且是不带 await 的同步调用（见全局约束 13）
+  materializeDispatchTimeouts();
+  // 完成材料到期自动通过的事实也一样（P0-8）：用户订单详情要显示得出「已完成」
+  materializeCompletionAutoApprovals();
+
   const page = await withMockDebug(params, surface, () =>
     getPaymentRepository().queryOrders({ ...parsed.query, userId }),
   );
 
   return { ...page, items: page.items.map(toOrderListItem) };
+}
+
+/**
+ * 把已经到点的派单写成事实。
+ *
+ * ⚠️ 这是**临时**的推进方式（决策 D1「deadline driven + lazy materialization」）：
+ * 超时不是被定时触发的，而是**到点就已经成立**，读取路径只是恰好把它写下来。
+ * 真实支付上线前必须换成后台调度器调用**同一个** `sweepExpiredDispatches()`
+ * （见整改计划 TD-1）——**不是**另写一套超时退款逻辑。
+ *
+ * ⚠️ 用 `new Date()` 而不是进程基准时间：超时是**真实时间**的事，
+ * 与「Mock 种子基准时间」无关（后者只用于让预置数据看起来新鲜）。
+ */
+function materializeDispatchTimeouts(): void {
+  sweepExpiredDispatches(new Date().toISOString());
+}
+
+/**
+ * 把已经到点的完成材料自动通过写成事实。
+ *
+ * 与 `materializeDispatchTimeouts()` 同一条惰性物化机制（P0-8）：自动通过不是被
+ * 定时触发的，而是「deadline 到点就已经成立」，读取路径只是恰好把它写下来。
+ * 重复执行幂等：第一次执行后 submission 已不是 pending，第二次直接跳过，
+ * 不重复完成、不刷新 `completedAt`。真实调度器上线后调用**同一个**
+ * `sweepCompletionAutoApprovals()`，**不是**另写一套。
+ */
+function materializeCompletionAutoApprovals(): void {
+  sweepCompletionAutoApprovals(new Date().toISOString());
 }
 
 /**
@@ -148,6 +215,9 @@ export async function getOrderDetailForUser(
 ): Promise<OrderDetail | null> {
   if (!orderId) return null;
 
+  materializeDispatchTimeouts();
+  materializeCompletionAutoApprovals();
+
   const order = await withMockDebug(params, surface, () =>
     getPaymentRepository().findOrderById(orderId),
   );
@@ -158,16 +228,26 @@ export async function getOrderDetailForUser(
   // 评价与退款一样属于「这一单做过什么」，因此按订单 id 查（并按用户隔离）
   const review = await getReviewRepository().findReviewByOrderId(userId, order.id);
 
-  // 会话不存在时摘要为 null（页面上不显示「订单沟通」的进度），存在就带上未读数
-  const conversation = await getMessageRepository().findConversation(userId, order.id);
-  const conversationSummary = conversation
-    ? buildConversationStats(
-        conversation,
+  // 会话不存在时摘要为 null（页面上不显示「订单沟通」的进度），存在就带上未读数。
+  // ⚠️ P0-14 起一张订单可以有多段会话（客服会话 + 各段履约会话），
+  // 因此未读是**全部段落**的合计，不是某一段的数字
+  const conversations = await getMessageRepository().listConversationsByOrder(userId, order.id);
+  const conversationSummary = conversations.length
+    ? buildOrderConversationStats(
+        conversations,
         await getMessageRepository().listMessages(userId, order.id),
       )
     : null;
 
+  // 派单进度：还在等人接就带上「现在在哪个池、还剩多久」，其余为 null。
+  // 退款订单在种子里没有派单记录，管理员手动退款也不动派单记录，因此必须容忍查不到
+  const dispatch = await getDispatchRepository().findDispatchByOrderId(order.id);
+  const progress = dispatch ? toDispatchProgress(dispatch, new Date().toISOString()) : null;
+
   return toOrderDetail(order, {
+    dispatchProgress: progress
+      ? { ...progress, poolLabel: DISPATCH_POOL_LABELS[progress.pool] }
+      : null,
     refundSummary: refund ? toRefundSummary(refund) : null,
     complaintSummary: toOrderComplaintSummary(complaintStats),
     conversationSummary,
@@ -175,11 +255,18 @@ export async function getOrderDetailForUser(
     allowedActions: {
       // 退款相关由退款规则统一算：既看订单状态，也看这一单有没有退款申请
       ...buildRefundActions(order, refund),
-      // 评价同样由评价规则统一算：已完成、未评价、且没有进行中 / 已通过的退款
-      ...buildReviewActions(order, review, refund),
-      // 自己的订单一律可以沟通、可以投诉：投诉不会自动退款，也不改订单状态
+      // ⚠️ 评价资格由评价规则统一算，且**只看订单是否完成过服务**（`completedAt`）。
+      // P1-8 起退款**不再参与**这个判断（`D18` / `D19`）：已经完成过的订单，
+      // 哪怕后来部分或全额退款，照样可以评价。因此这里刻意不传 `refund`——
+      // 传进去只会让下一个人以为退款还管着这件事。
+      ...buildReviewActions(order, review),
+      // 自己的订单一律可以沟通：它不会改写任何业务事实
       canOpenConversation: true,
-      canSubmitComplaint: true,
+      // ⚠️ P0-9：投诉入口不是恒真的。completed 的订单在投诉窗口关闭后，
+      // 普通投诉入口一并关闭（判定与接口用的是**同一个**纯函数，
+      // 因此不存在「页面还显示按钮、接口已经拒绝」的窗口期）。
+      // 在途订单与没有快照的历史订单不受影响（`isComplaintWindowClosed` 的注释）
+      canSubmitComplaint: !isComplaintWindowClosed(order, new Date().toISOString()),
     },
   });
 }

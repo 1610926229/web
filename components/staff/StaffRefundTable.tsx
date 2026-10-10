@@ -267,7 +267,15 @@ export default function StaffRefundTable({
                     </td>
                     <td className="px-4 py-3 text-ink-2">{item.productTitle}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-ink">
-                      ¥{formatYuan(item.amount)}
+                      {/* 第一行是**申请金额**（申请时的实付快照），第二行才是**实退金额**。
+                          P0-13 起部分退款下两者不相等，只给前者会让客服照着它回答
+                          「退了多少钱」——而那个数管理员压根没批过 */}
+                      <span className="block tabular-nums">¥{formatYuan(item.amount)}</span>
+                      {item.decidedAmount === null ? null : (
+                        <span className="block text-[12px] text-ink-3">
+                          实退 ¥{formatYuan(item.decidedAmount)}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <AdminStatusBadge

@@ -2,6 +2,7 @@
    不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
 
 import Link from "next/link";
+import { formatAverageRating } from "@/lib/constants/reviews";
 import type { CompanionListItem } from "@/lib/types/companion";
 import { abbreviateNumber } from "@/lib/utils/format";
 
@@ -61,8 +62,8 @@ export default function CompanionCard({ companion }: { companion: CompanionListI
               <span className="text-brand-yellow" aria-hidden>
                 ★
               </span>{" "}
-              {/* 没有评价时显示「暂无评分」，不用 0 分冒充 */}
-              {companion.rating === null ? "暂无评分" : companion.rating.toFixed(1)}
+              {/* 评分与文案都走共享 formatter：没有评价时「暂无评分」，不用 0 分冒充（D15） */}
+              {formatAverageRating(companion.rating)}
               <span className="ml-1 text-ink-3">({companion.reviewCount})</span>
             </span>
             <span className="text-ink-3">{abbreviateNumber(companion.completedOrderCount)} 单</span>

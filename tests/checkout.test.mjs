@@ -5,7 +5,11 @@ import {
   GAME_ACCOUNT_INVALID_MESSAGE,
   validateGameAccount,
 } from "../lib/constants/checkout.ts";
+import { getCatalogRepository } from "../lib/data/catalogRepository.ts";
+import { catalogStore } from "../lib/data/mockCatalogRepository.ts";
+import { companionStore } from "../lib/data/mockCompanionRepository.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
+import { isCompanionAcceptingOrders } from "../lib/constants/companions.ts";
 import {
   confirmPaymentRequest,
   createPaymentRequest,
@@ -13,6 +17,8 @@ import {
   previewCheckout,
 } from "../lib/services/checkout.ts";
 import { queryOrdersForUser } from "../lib/services/orders.ts";
+import { resolveSource } from "./app-path.mjs";
+import { readSource, stripComments } from "./source-text.mjs";
 
 /**
  * 结算、金额与支付幂等的测试。
@@ -57,7 +63,7 @@ function selection(overrides = {}) {
 }
 
 function preview(input = {}) {
-  return previewCheckout(selection(input), undefined, "server");
+  return previewCheckout(selection(input), "u-1001", undefined, "server");
 }
 
 function sleep(ms) {
@@ -94,7 +100,7 @@ test("游戏 ID 校验：首尾空格被裁掉，合法 ID 通过", () => {
 test("试算不要求填游戏 ID，正式下单要求", async () => {
   // 用户还没填完表单时就该看到金额，试算因此不校验游戏 ID
   const draft = await preview({ gameAccountId: "" });
-  assert.equal(draft.totalAmount, PRODUCT.specPrice);
+  assert.equal(draft.originalAmount, PRODUCT.specPrice);
 
   const user = uniqueUser();
   await assert.rejects(
@@ -130,9 +136,21 @@ test("金额以「分」为单位，全部是整数且等于单价 × 数量 + �
   assert.equal(result.spec.price, PRODUCT.specPrice);
   assert.equal(result.itemsAmount, PRODUCT.specPrice * 3);
   assert.equal(result.addonsAmount, ADDON_RUSH.price + ADDON_VOICE.price);
-  assert.equal(result.totalAmount, result.itemsAmount + result.addonsAmount);
+  // 「原价」是券前应付；P1-4 之后 `totalAmount` 这个名字不再存在——
+  // 它曾经表示「用户要付多少」，接券之后那个数是 `actualPaidAmount`
+  assert.equal(result.originalAmount, result.itemsAmount + result.addonsAmount);
+  // 没选券时三者必须自洽：不减钱、实付等于原价
+  assert.equal(result.couponDiscountAmount, 0);
+  assert.equal(result.actualPaidAmount, result.originalAmount);
 
-  for (const amount of [result.spec.price, result.itemsAmount, result.addonsAmount, result.totalAmount]) {
+  for (const amount of [
+    result.spec.price,
+    result.itemsAmount,
+    result.addonsAmount,
+    result.originalAmount,
+    result.couponDiscountAmount,
+    result.actualPaidAmount,
+  ]) {
     assert.ok(Number.isInteger(amount), "金额必须是整数分，不能出现浮点数");
   }
 });
@@ -197,6 +215,271 @@ test("商品、规格、大区、数量非法一律拒绝", async () => {
       `${JSON.stringify(override)} 应当被拒绝`,
     );
   }
+});
+
+// ————————————————— 结算页指定陪玩：复用中央接单资格判断（P0-5.5 R5）—————————————————
+//
+// 「这个人现在能不能被指定」与「这个人现在能不能接新单」是同一条规则，
+// 因此它必须只有一个定义处（`lib/constants/companions.ts` 的 `isCompanionAcceptingOrders`）。
+// 这一节从**两个方向**钉住它：
+//
+// ① **行为**：同一份资料喂给结算页与谓词本身，两者必须给出同一个答案（下面第 19 条）；
+// ② **源码**：结算页不再自己写一份「名单 + available」的判断（下面第 20 条）。
+//
+// ⚠️ 第 19 条**不是**把 `!isCompanionListed(x) || !x.available` 抄进测试里再比一遍——
+//    那只是把第三份拷贝搬到测试文件里，而真值源仍然有三份。
+
+/** 在架、当前可接单。 */
+const COMPANION_OK = "cp-1";
+/** 在架但暂停接单（`available: false`），资料仍在公开名单里。 */
+const COMPANION_PAUSED = "cp-4";
+/** 已下架（`enabled: false`）。 */
+const COMPANION_DISABLED = "cp-7";
+
+/** 结算页拒绝一个不可选的陪玩时给出的原文案（R5：不得改变任何对外文案）。 */
+const COMPANION_UNAVAILABLE_MESSAGE = "该陪玩当前不可选，请重新选择";
+
+/**
+ * 临时给一条陪玩资料打补丁，返回还原函数。
+ *
+ * 陪玩 store 的 `createStore` 会把种子里每条记录**复制**一层再放进 Map，
+ * 因此就地改 Map 里那条不会污染模块级的种子；但还是要还原——
+ * 同一份 store 在本文件内是共享的，不还原就会漏给后面的用例。
+ */
+function withCompanionPatch(id, patch) {
+  const record = companionStore().companions.get(id);
+  assert.ok(record, `预置陪玩 ${id} 必须存在`);
+  const original = { ...record };
+  Object.assign(record, patch);
+  return () => {
+    Object.assign(record, original);
+  };
+}
+
+/** 结算页是否**接受**这个陪玩。只关心「过不过」，不关心失败的文案（那是上面几条的事）。 */
+async function checkoutAccepts(companionId) {
+  try {
+    await preview({ companionId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("指定已下架的陪玩：试算与正式下单都被挡成 BAD_REQUEST + 原文案", async () => {
+  // 隔离 enabled 这一项：把在架且可接单的那位临时下架，available 与 removedAt 都不动，
+  // 这样红的只可能是「不在名单里」这一半判定（cp-7 那位同时 available=false，分不清是谁挡的）
+  const restore = withCompanionPatch(COMPANION_OK, { enabled: false });
+  try {
+    const record = companionStore().companions.get(COMPANION_OK);
+    assert.equal(record.available, true, "这条用例要隔离 enabled：available 必须仍是 true");
+    assert.equal(record.removedAt, null, "这条用例要隔离 enabled：removedAt 必须仍是 null");
+
+    await assert.rejects(
+      () => preview({ companionId: COMPANION_OK }),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+      "试算就该挡下：用户不该先看到一个能算出来的价",
+    );
+
+    const user = uniqueUser();
+    const idempotencyKey = uniqueKey();
+    await assert.rejects(
+      () =>
+        createPaymentRequest(
+          { ...selection({ companionId: COMPANION_OK }), idempotencyKey },
+          user,
+        ),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+      "绕过页面直接下单同样挡得住",
+    );
+
+    // 被挡下的请求不留痕迹：既没有支付请求，也没有订单
+    assert.equal(await getPaymentRepository().findPaymentRequestByKey(user, idempotencyKey), null);
+    assert.equal((await queryOrdersForUser(user, new URLSearchParams(), "server")).total, 0);
+  } finally {
+    restore();
+  }
+
+  // 预置的「已下架」那位同样挡得住（enabled 与 available 都是 false 的真实数据）
+  assert.equal(companionStore().companions.get(COMPANION_DISABLED).enabled, false);
+  await assert.rejects(
+    () => preview({ companionId: COMPANION_DISABLED }),
+    (error) => error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+  );
+});
+
+test("指定已被移除的陪玩：同样被挡——移除与下架是两件事，对外是同一个结果", async () => {
+  // 隔离 removedAt 这一项：enabled 与 available 都保持 true
+  const restore = withCompanionPatch(COMPANION_OK, { removedAt: "2026-09-20T00:00:00.000Z" });
+  try {
+    const record = companionStore().companions.get(COMPANION_OK);
+    assert.equal(record.enabled, true, "这条用例要隔离 removedAt：enabled 必须仍是 true");
+
+    await assert.rejects(
+      () => preview({ companionId: COMPANION_OK }),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+    );
+
+    await assert.rejects(
+      () =>
+        createPaymentRequest(
+          { ...selection({ companionId: COMPANION_OK }), idempotencyKey: uniqueKey() },
+          uniqueUser(),
+        ),
+      (error) =>
+        error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("指定暂停接单的陪玩：被挡（人还在名单里、详情页正常可见，只是现在不接新单）", async () => {
+  const record = companionStore().companions.get(COMPANION_PAUSED);
+  // 起点自检：这位是在架的、没有被移除，红的只可能是 available
+  assert.equal(record.enabled, true);
+  assert.equal(record.removedAt, null);
+  assert.equal(record.available, false);
+
+  await assert.rejects(
+    () => preview({ companionId: COMPANION_PAUSED }),
+    (error) => error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+    "暂停接单不该只是列表上的一个字",
+  );
+
+  await assert.rejects(
+    () =>
+      createPaymentRequest(
+        { ...selection({ companionId: COMPANION_PAUSED }), idempotencyKey: uniqueKey() },
+        uniqueUser(),
+      ),
+    (error) => error.code === "BAD_REQUEST" && error.message === COMPANION_UNAVAILABLE_MESSAGE,
+  );
+});
+
+test("指定正常陪玩：金额只受商品、数量与增值服务影响，与陪玩无关", async () => {
+  const draft = await preview({
+    companionId: COMPANION_OK,
+    quantity: 2,
+    addonIds: [ADDON_RUSH.id],
+  });
+
+  assert.equal(draft.itemsAmount, PRODUCT.specPrice * 2, "指定陪玩不影响商品金额");
+  assert.equal(draft.addonsAmount, ADDON_RUSH.price);
+  assert.equal(draft.originalAmount, PRODUCT.specPrice * 2 + ADDON_RUSH.price);
+  // 指定陪玩**不改钱**：它只影响派单，不参与任何金额计算
+  assert.equal(draft.couponDiscountAmount, 0);
+  assert.equal(draft.actualPaidAmount, draft.originalAmount);
+  // 返回结构是契约：这里逐一钉住字段名，任何增删都会让这条断言失败，
+  // 从而逼着改动者回来改这个清单（P1-4 加券字段时正是如此）
+  assert.deepEqual(Object.keys(draft).sort(), [
+    "actualPaidAmount",
+    "addons",
+    "addonsAmount",
+    "availableCoupons",
+    "coupon",
+    "couponDiscountAmount",
+    "couponReason",
+    "itemsAmount",
+    "originalAmount",
+    "product",
+    "quantity",
+    "spec",
+  ]);
+
+  const user = uniqueUser();
+  const created = await createPaymentRequest(
+    { ...selection({ companionId: COMPANION_OK }), idempotencyKey: uniqueKey() },
+    user,
+  );
+  assert.equal(created.created, true);
+  assert.equal(created.request.companionId, COMPANION_OK);
+  assert.equal(created.request.snapshot.companion?.id, COMPANION_OK);
+  assert.equal(created.request.snapshot.companion?.name.length > 0, true, "快照仍带上昵称");
+
+  const confirmed = await confirmPaymentRequest(created.request.id, "success", user);
+  // 下单只进池：订单上还没有「实际接单的人」
+  assert.equal(confirmed.order.actualCompanionId, null);
+  assert.equal(confirmed.order.companion, null);
+});
+
+/**
+ * 「复用中央谓词」要证明的是**行为一致**：同一份资料，两条判断路径给出同一个答案。
+ *
+ * ⚠️ 这条用例**刻意不**在测试里重写 `isCompanionListed(x) && x.available`：
+ *    把谓词抄进来再比对，只是把第三份拷贝搬了个地方——真值源仍然是两份，
+ *    而两份里任何一份改了，测试都只会安静地跟着一起变。
+ *    这里比对的是**结算页的行为**与**谓词本身**。
+ */
+test("行为一致：结算页的可选性与 isCompanionAcceptingOrders() 对同一份资料给出同一答案", async () => {
+  const fixtures = [
+    { id: COMPANION_OK, patch: {}, label: "在架 + 可接单" },
+    { id: COMPANION_PAUSED, patch: {}, label: "在架 + 暂停接单" },
+    { id: COMPANION_DISABLED, patch: {}, label: "已下架" },
+    { id: COMPANION_OK, patch: { removedAt: "2026-09-20T00:00:00.000Z" }, label: "在架 + 已被移除" },
+    {
+      id: COMPANION_OK,
+      patch: { available: false, removedAt: "2026-09-20T00:00:00.000Z" },
+      label: "同时暂停接单与已被移除",
+    },
+  ];
+
+  /** 每一格得到的答案。循环后要用它自检「两侧都覆盖到了」，见下面的断言。 */
+  const answers = [];
+
+  for (const fixture of fixtures) {
+    const restore = withCompanionPatch(fixture.id, fixture.patch);
+    try {
+      const record = companionStore().companions.get(fixture.id);
+      const expected = isCompanionAcceptingOrders({ ...record });
+      const accepted = await checkoutAccepts(fixture.id);
+
+      assert.equal(
+        accepted,
+        expected,
+        `${fixture.id}（${fixture.label}）结算页与谓词给出了不同答案`,
+      );
+      answers.push(accepted);
+    } finally {
+      restore();
+    }
+  }
+
+  // 自检：这张夹具表必须同时覆盖「可选」与「不可选」两侧。
+  // 若哪天所有夹具都变成不可选，「两边一致」就退化成了「两边都拒绝」，什么也证明不了。
+  assert.ok(answers.includes(true), "夹具里必须有一位是可选的，否则这条比对没有鉴别力");
+  assert.ok(answers.includes(false), "夹具里必须有一位是不可选的");
+});
+
+test("源码防回流：checkout.ts 不再内联「名单 + available」判断，改由一个谓词回答", () => {
+  const code = stripComments(readSource(resolveSource("lib/services/checkout.ts")));
+
+  // 第四份拷贝的回流：把 `!isCompanionListed(c) || !c.available` 再写一遍
+  assert.equal(
+    code.includes("isCompanionListed"),
+    false,
+    "结算页不该再自己判断「在不在名单里」——那会与列表 / 详情的口径分叉",
+  );
+  assert.equal(
+    code.includes(".available"),
+    false,
+    "结算页不该再直接读 available —— 那正是第四份拷贝的起点",
+  );
+
+  // 但判断必须还在（而不是被整段删掉）：由中央谓词回答
+  assert.match(
+    code,
+    /if\s*\(\s*!isCompanionAcceptingOrders\(\s*companion\s*\)\s*\)/,
+    "指定陪玩的资格判断必须由 isCompanionAcceptingOrders() 回答",
+  );
+  assert.match(
+    code,
+    /throw new ApiError\(\s*"BAD_REQUEST"\s*,\s*"该陪玩当前不可选，请重新选择"\s*\)/,
+    "挡住之后的失败语义与文案不得改变",
+  );
 });
 
 // ——————————————————————————— 幂等 ———————————————————————————
@@ -277,7 +560,121 @@ test("支付成功生成订单，金额与请求一致且状态为「已付款�
   assert.equal(confirmed.order.refundedAt, null);
   // 未选择陪玩时如实为 null，页面据此显示「等待接单」
   assert.equal(confirmed.order.companion, null);
-  assert.equal(confirmed.order.companionId, null);
+  // P0-5：下单**只是进了订单池**，还没有人接单——「实际接单的人」必须为空。
+  // 用户当初有没有指定人，记在派单的 exclusiveCompanionId 上，不写进这个字段。
+  assert.equal(confirmed.order.actualCompanionId, null);
+});
+
+// ——————————————————————————— 金额域（P0-3）———————————————————————————
+
+/** 预置商品的分账比例：不写死 8000，从目录里读——比例改了这条测试就该跟着变。 */
+async function productRateBp() {
+  const record = await getCatalogRepository().findProductById(PRODUCT.productId);
+  assert.ok(record, `预置商品 ${PRODUCT.productId} 应当存在`);
+  return record.companionRateBp;
+}
+
+/**
+ * 金额域是**下单那一刻冻结在订单上**的一组数，不是一个可以随时现算的视图。
+ *
+ * 这里逐条锁住 `lib/constants/orderAmount.ts` 的公式在真实下单路径上的落点：
+ * 比例来自商品快照、取整方向是向下、恒等式成立、累计已退从 0 起。
+ */
+test("支付成功时冻结金额域：原价 / 券 / 实付 / 比例快照 / 护航收益 / 平台净收入 / 累计已退", async () => {
+  const user = uniqueUser();
+  const rateBp = await productRateBp();
+  const key = uniqueKey();
+
+  // 带一个增值服务下单：这样「原价」与「实付」是否含增值服务才有区分度
+  const created = await createPaymentRequest(
+    { ...selection({ addonIds: [ADDON_RUSH.id] }), idempotencyKey: key },
+    user,
+  );
+  assert.equal(created.request.companionRateSnapshot, rateBp, "比例在下单这一刻冻结进支付请求");
+
+  const confirmed = await confirmPaymentRequest(created.request.id, "success", user);
+  const order = confirmed.order;
+  assert.ok(order);
+
+  // 原价 = 商品金额 + 全部增值服务金额（R3 已确认：增值服务参与分账，
+  // 但原价与分账基数是两个概念，这一点由 tests/orderAmountSplit.test.mjs 单独锁住）
+  assert.equal(order.originalAmount, order.itemsAmount + order.addonsAmount);
+  assert.ok(order.addonsAmount > 0, "这条用例必须带增值服务，否则区分不出原价含不含它");
+  assert.equal(order.originalAmount, order.totalAmount, "无券时原价与渠道实收是同一个数");
+
+  // P0 没有优惠券：抵扣恒为 0，所以实付 = 原价
+  assert.equal(order.couponDiscountAmount, 0);
+  assert.equal(order.actualPaidAmount, order.originalAmount - order.couponDiscountAmount);
+
+  assert.equal(order.companionRateSnapshot, rateBp);
+  assert.equal(
+    order.companionBaseIncome,
+    Math.floor((order.originalAmount * rateBp) / 10000),
+    "护航收益 = 原价 × 比例，向下取整",
+  );
+  // 平台净收入是**差额**而不是「实付 × 剩余比例」：两处各取一次整会让恒等式失效
+  assert.equal(order.clubNetIncome, order.actualPaidAmount - order.companionBaseIncome);
+  assert.equal(
+    order.companionBaseIncome + order.clubNetIncome,
+    order.actualPaidAmount,
+    "分掉的钱必须恰好等于实付：账面上不能凭空多一分或少一分",
+  );
+
+  // 刚创建的订单一笔都没退过
+  assert.equal(order.refundedAmount, 0);
+
+  // 全部是整数分
+  for (const amount of [
+    order.originalAmount,
+    order.couponDiscountAmount,
+    order.actualPaidAmount,
+    order.companionBaseIncome,
+    order.clubNetIncome,
+    order.refundedAmount,
+  ]) {
+    assert.ok(Number.isInteger(amount), "金额域也必须全是整数分");
+  }
+});
+
+test("下单后改商品比例：已经冻结的那一单一分不变", async () => {
+  const user = uniqueUser();
+  const rateBp = await productRateBp();
+  const key = uniqueKey();
+
+  // 先建支付请求（比例在此刻冻结），**确认之前**去改商品比例
+  const created = await createPaymentRequest({ ...selection(), idempotencyKey: key }, user);
+
+  // 直接改目录里那条记录：这是「管理员在后台改了比例」在数据层的样子
+  const record = catalogStore().products.get(PRODUCT.productId);
+  assert.ok(record, "预置商品应当在目录里");
+  const original = record.companionRateBp;
+  // 改成一个一定看得出差别的比例（70%）
+  record.companionRateBp = 7000;
+
+  try {
+    const confirmed = await confirmPaymentRequest(created.request.id, "success", user);
+    assert.ok(confirmed.order);
+    assert.equal(
+      confirmed.order.companionRateSnapshot,
+      rateBp,
+      "订单用的是下单那一刻冻住的比例，不是商品今天的比例",
+    );
+    assert.equal(
+      confirmed.order.companionBaseIncome,
+      Math.floor((confirmed.order.originalAmount * rateBp) / 10000),
+      "改商品比例不能改写已经发生的那一单的钱",
+    );
+
+    // 而**之后**的新订单才用新比例：这正是「历史订单读快照」该有的样子
+    const later = await createPaymentRequest(
+      { ...selection(), idempotencyKey: uniqueKey() },
+      uniqueUser(),
+    );
+    assert.equal(later.request.companionRateSnapshot, 7000);
+  } finally {
+    // 目录是全文件共享的：还原，免得后面的用例读到 70%
+    record.companionRateBp = original;
+  }
 });
 
 test("重复确认成功只生成一个订单", async () => {

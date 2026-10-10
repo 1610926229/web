@@ -66,8 +66,7 @@ test("已下架商品不出现在任何商品列表里，也不出现在搜索�
   // 1. 所属类目列表
   const inCategory = await queryProducts(
     { gameId: record.gameId, categoryId: record.categoryId, page: 1, pageSize: 100 },
-    undefined,
-    "server",
+    undefined, "server",
   );
   assert.equal(
     inCategory.items.some((item) => item.id === OFF_SHELF),
@@ -77,8 +76,7 @@ test("已下架商品不出现在任何商品列表里，也不出现在搜索�
   // 2. 该游戏下的全部类目
   const inGame = await queryProducts(
     { gameId: record.gameId, page: 1, pageSize: 100 },
-    undefined,
-    "server",
+    undefined, "server",
   );
   assert.equal(
     inGame.items.some((item) => item.id === OFF_SHELF),
@@ -88,8 +86,7 @@ test("已下架商品不出现在任何商品列表里，也不出现在搜索�
   // 3. 按名称搜索也搜不到（下架了就不该被逛到）
   const byKeyword = await queryProducts(
     { gameId: record.gameId, keyword: record.title, page: 1, pageSize: 100 },
-    undefined,
-    "server",
+    undefined, "server",
   );
   assert.equal(byKeyword.items.length, 0);
 
@@ -148,8 +145,7 @@ test("已下架商品不能购买：服务端拒绝，不依赖前端按钮置�
         companionId: null,
         region: "手游",
       },
-      undefined,
-      "server",
+      "u-1001", undefined, "server",
     ),
     "BAD_REQUEST",
     "商品已下架，无法支付",
@@ -168,8 +164,7 @@ test("已下架商品不能购买：服务端拒绝，不依赖前端按钮置�
         companionId: null,
         region: "手游",
       },
-      undefined,
-      "server",
+      "u-1001", undefined, "server",
     ),
     "NOT_FOUND",
     "商品不存在",

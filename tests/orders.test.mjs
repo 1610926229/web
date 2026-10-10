@@ -3,9 +3,13 @@ import test from "node:test";
 import {
   ORDER_PAGE_SIZE,
   ORDER_STATUSES,
+  ORDER_TRANSITIONS,
+  canTransitionOrder,
   mergeOrderPage,
 } from "../lib/constants/orders.ts";
 import { getOrderDetailForUser, queryOrdersForUser } from "../lib/services/orders.ts";
+import { resolveSource } from "./app-path.mjs";
+import { readSource, stripComments } from "./source-text.mjs";
 
 /**
  * 订单查询的仓储 / service 级测试。
@@ -209,8 +213,9 @@ test("列表 DTO 不返回游戏 ID、备注与金额明细", async () => {
   for (const field of ["gameAccountId", "remark", "unitPrice", "itemsAmount", "addonsAmount", "addons"]) {
     assert.ok(!(field in item), `列表项不应包含 ${field}`);
   }
-  // 详情页要用的字段仍在
-  assert.equal(typeof item.totalAmount, "number");
+  // 详情页要用的字段仍在。⚠️ 列表上唯一的金额是**实付**（P1-4）：
+  // 优惠前的原价只在详情里叫 `originalAmount`，列表刻意不带第二个金额
+  assert.equal(typeof item.actualPaidAmount, "number");
   assert.equal(typeof item.orderNo, "string");
 });
 
@@ -231,7 +236,83 @@ test("详情 DTO 含游戏 ID 与备注，金额以「分」为单位且算术�
       detail.addonsAmount,
       detail.addons.reduce((sum, addon) => sum + addon.price, 0),
     );
-    assert.equal(detail.totalAmount, detail.itemsAmount + detail.addonsAmount);
+    // 「小计 + 增值」等于的是**原价**（优惠前应付），不是实付（P1-4）
+    assert.equal(detail.originalAmount, detail.itemsAmount + detail.addonsAmount);
+    assert.equal(detail.actualPaidAmount, detail.originalAmount - detail.couponDiscountAmount);
+  }
+});
+
+test("详情 DTO 带上金额域的三行展示值，但不带平台净收入", async () => {
+  const [item] = (await list(USER_A)).items;
+  const detail = await getOrderDetailForUser(item.id, USER_A, undefined, "server");
+
+  // 页面上「原价 / 实付 / 护航收益」三行读的就是这几个字段
+  for (const field of [
+    "originalAmount",
+    "couponDiscountAmount",
+    "actualPaidAmount",
+    "companionRateSnapshot",
+    "companionBaseIncome",
+    "refundedAmount",
+  ]) {
+    assert.equal(typeof detail[field], "number", `详情应当带上 ${field}`);
+  }
+
+  // 平台净收入是平台自己的账：用户端没有展示位置，
+  // 放进 DTO 只会顺着接口响应流到浏览器
+  assert.equal("clubNetIncome" in detail, false);
+
+  // 列表仍然是摘要：金额域整块都不该出现在列表项里
+  for (const field of [
+    "originalAmount",
+    "couponDiscountAmount",
+    "companionRateSnapshot",
+    "companionBaseIncome",
+    "clubNetIncome",
+    "refundedAmount",
+    "coupon",
+  ]) {
+    assert.equal(field in item, false, `列表项不应包含 ${field}`);
+  }
+
+  // ⚠️ `actualPaidAmount` 是这条「列表不带金额域」规则**唯一的例外**（P1-4）：
+  // 订单卡片上那句「实付」就是它，不带这个数卡片就没得显示。但只此一个——
+  // 原价 `totalAmount` 虽然仍在列表上（详情页拿它当「原价」行），任何卡片都**不得**
+  // 拿它去渲染「实付」：用了券之后它比用户真正付掉的钱大。
+  assert.equal(typeof item.actualPaidAmount, "number", "列表项必须带上实付金额");
+  assert.ok(item.actualPaidAmount <= detail.originalAmount, "实付不可能大于优惠前应付");
+  // 列表与详情必须是**同一个**实付数字。列表刻意不带 `coupon`，所以这里无法从列表
+  // 自己推断「有没有用券」——只能拿详情对账。这也正是这条断言的价值：
+  // 两个入口各算一次金额时，对不上就会红。
+  assert.equal(item.actualPaidAmount, detail.actualPaidAmount, "列表与详情的实付金额对不上");
+});
+
+test("预置订单的金额域由公式算出，而不是手写的常量", async () => {
+  // 种子调用的是 `lib/constants/orderAmount.ts` 里那组函数本身（不是抄一份数字），
+  // 因此只要有人在种子里写死一个对不上的数，下面两条关系立刻就红
+  for (const item of await listAll(USER_A)) {
+    const detail = await getOrderDetailForUser(item.id, USER_A, undefined, "server");
+
+    assert.equal(
+      detail.actualPaidAmount,
+      detail.originalAmount - detail.couponDiscountAmount,
+      `订单 ${detail.orderNo} 的实付应当等于原价减抵扣`,
+    );
+    // ⚠️ 这里写的是「原价 × 比例」，成立的前提是 R3 确认的「分账基数 = 原价」。
+    // 原价与分账基数是两个概念（见 lib/constants/orderAmount.ts）——
+    // 将来出现「进原价但不进基数」的收费项时，这一条必须改成基数表达式，
+    // 而不是把期望值顺手调大。
+    assert.equal(
+      detail.companionBaseIncome,
+      Math.floor((detail.originalAmount * detail.companionRateSnapshot) / 10000),
+      `订单 ${detail.orderNo} 的护航收益应当等于分账基数 × 比例（向下取整）`,
+    );
+    // 已退款的整单退，其余一笔都没退过
+    assert.equal(
+      detail.refundedAmount,
+      detail.status === "refunded" ? detail.actualPaidAmount : 0,
+      `订单 ${detail.orderNo} 的累计已退不对`,
+    );
   }
 });
 
@@ -272,7 +353,9 @@ test("详情：已退款订单保留完整商品与金额快照", async () => {
   assert.ok(detail.productTitle.length > 0);
   assert.ok(detail.productCoverUrl.length > 0);
   assert.ok(detail.specName.length > 0);
-  assert.ok(detail.totalAmount > 0);
+  // 金额快照仍在：优惠前的原价与券抵扣不会被退款抹掉（退款改的是 `refundedAmount`）
+  assert.ok(detail.originalAmount > 0);
+  assert.ok(detail.actualPaidAmount >= 0);
   assert.equal(detail.timeline.at(-1).key, "refunded");
 });
 
@@ -325,4 +408,241 @@ test("真实数据下逐页加载：不重复、不丢单、末页正确收尾",
   assert.equal(ids.length, total, "逐页加载后应当拿到全部订单");
   assert.equal(new Set(ids).size, total, "逐页加载不应出现重复订单");
   assert.equal(merged.hasMore, false, "最后一页 hasMore 应为 false");
+});
+
+// ————————————————— 订单状态机：ORDER_TRANSITIONS / canTransitionOrder（P0-6）—————————————————
+//
+// 这一节守的是冻结的那张迁移表。它回答的**只是**「这种迁移在结构上讲不讲得通」，
+// 不是业务 Guard：`paid → accepted` 仍要过接单资格与 deadline，`serving → completed`
+// 仍要过完成审核，`completed → refunded` 仍要过售后流程，本轮新增的 `accepted → paid`
+// 仍要过「仅当前实际打手 + 必须填写原因」的领域 Guard。
+//
+// 因此这张表一旦被顺手改宽（例如为了某个页面方便而加一条 `paid → completed`），
+// 后果不是「少了一次检查」，而是**凭空多出一个看起来合法的入口**。
+// 下面每一条都写得比实现啰嗦：它们要挡住的是「改一行、谁都看不出来」的改动。
+//
+// ⚠️ P0-6（2026-09-23）相对 P0-5.5 的变化 —— 只动了 `accepted` 与 `serving` 两行，
+//    在各自数组的**最前面**插入 `"paid"`（顺序本身也是规范的一部分，见下面的首位断言）：
+//
+//      accepted: ["serving", "refunded"]   → ["paid", "serving", "refunded"]
+//      serving:  ["completed", "refunded"] → ["paid", "completed", "refunded"]
+//
+//    这表达的是「回池」这一**结构能力**：`accepted → paid` 由本轮的打手主动取消使用。
+//
+//    ⚠️ `serving → paid` **只是进了结构状态机**——本轮不实现封禁回池、不实现客服换人、
+//    也不提供 serving 的普通主动取消，因此它**没有任何 API 入口**（P0-6 scope 边界）。
+//    「结构表允许」≠「这个动作有入口」：表里多一条边只说明这种迁移讲得通，
+//    能不能做由领域 Guard 与入口是否存在共同决定。
+//    **不要**因为这条断言变绿就以为 serving 回池已经可用。
+//
+//    `paid` / `completed` / `refunded` 三行本轮**不应**变化，下面单独钉住它们防止误改。
+
+test("迁移表逐项冻结：五个状态的出边与冻结表完全相等，顺序也要一致", () => {
+  assert.deepEqual(ORDER_TRANSITIONS, {
+    paid: ["accepted", "refunded"],
+    // P0-6：回池边插在最前面，不是追加在末尾
+    accepted: ["paid", "serving", "refunded"],
+    serving: ["paid", "completed", "refunded"],
+    completed: ["refunded"],
+    refunded: [],
+  });
+
+  // 键的顺序也是契约的一部分：它与 ORDER_STATUSES 的五个 Tab 顺序一致，读起来才对得上
+  assert.deepEqual(Object.keys(ORDER_TRANSITIONS), [
+    "paid",
+    "accepted",
+    "serving",
+    "completed",
+    "refunded",
+  ]);
+});
+
+test("迁移表的键集合与 ORDER_STATUSES 是同一个：加了新状态却忘了补迁移规则会在这里现形", () => {
+  assert.deepEqual(Object.keys(ORDER_TRANSITIONS), [...ORDER_STATUSES]);
+  // 键集合「覆盖全部 OrderStatus」还要是同一个**五**元集合，不多不少：
+  // 上面那条只比了顺序与内容，这里把「一个都没有漏」再钉一次
+  const keySet = new Set(Object.keys(ORDER_TRANSITIONS));
+  for (const status of ORDER_STATUSES) {
+    assert.ok(keySet.has(status), `迁移表缺少状态 ${status} 的出边定义`);
+  }
+  assert.equal(keySet.size, ORDER_STATUSES.length, "迁移表的键不应多出 ORDER_STATUSES 之外的状态");
+});
+
+/**
+ * P0-6 新增的保护：**回池边必须排在各自数组的第一位。**
+ *
+ * 顺序在这张表里是规范的一部分，理由不是「好看」：
+ * - 这张表是**唯一**一份状态机定义处，读表、写文档、以及将来「取唯一一条回池边」
+ *   的代码都可能依赖它是第一条；
+ * - 一个只比对「集合相等」的断言，在有人按字母序 / 按生命周期序顺手重排整张表时，
+ *   会连同期望值一起被改掉而**静默变绿**——而重排本身就是一次没人看得见的规范改动。
+ *
+ * 回池迁移是 2026-09-23（P0-6）新增的能力：`accepted` / `serving` 的数组从两条变三条，
+ * 新增的 `"paid"` 插在**最前面**。位置变了，就说明有人无意（或有意）重排了这张表。
+ */
+test("回池边冻结在首位：accepted / serving 的第一条出边必须是 paid", () => {
+  assert.equal(
+    ORDER_TRANSITIONS.accepted[0],
+    "paid",
+    "accepted 的第一条出边必须是回池边 paid（P0-6 新增，插在最前面而不是追加在后面）",
+  );
+  assert.equal(
+    ORDER_TRANSITIONS.serving[0],
+    "paid",
+    "serving 的第一条出边必须是回池边 paid（P0-6 只进结构表，无入口）",
+  );
+
+  // 首元素之外，整行也逐字钉住：只允许「最前面多一条 paid」，不允许把 paid 挪到别处
+  assert.deepEqual(ORDER_TRANSITIONS.accepted, ["paid", "serving", "refunded"]);
+  assert.deepEqual(ORDER_TRANSITIONS.serving, ["paid", "completed", "refunded"]);
+});
+
+/**
+ * P0-6 的 scope 只覆盖 `accepted` / `serving` 两行；其余三行是「本轮没打算动」的地方。
+ * 它们单独钉住，是因为「改一处、动一片」的改动最容易在这里留下没人察觉的痕迹：
+ * 主 `deepEqual` 会一起变绿（期望值也被同步改了），而这三行本来不该出现在本轮的 diff 里。
+ */
+test("P0-6 未触及的三行仍然冻结：paid / completed / refunded 不得被顺手改动", () => {
+  assert.deepEqual(ORDER_TRANSITIONS.paid, ["accepted", "refunded"], "paid 本轮不应变化");
+  assert.deepEqual(ORDER_TRANSITIONS.completed, ["refunded"], "completed 本轮不应变化");
+  assert.deepEqual(ORDER_TRANSITIONS.refunded, [], "refunded 本轮不应变化（终态写空数组）");
+});
+
+test("合法迁移全部为 true：三条主线 + 两条回池 + 四条可退款", () => {
+  const legal = [
+    // 主线：付款 → 接单 → 护航 → 完成
+    ["paid", "accepted"],
+    ["accepted", "serving"],
+    ["serving", "completed"],
+    // 回池（P0-6 新增的结构能力）：已接单 / 护航中都能回到「等人接单」
+    // ⚠️ 本轮只有 `accepted → paid` 有入口（打手主动取消）；`serving → paid` 没有入口，
+    //    它在这里为 true 只说明「结构上讲得通」，不代表界面上有这条路
+    ["accepted", "paid"],
+    ["serving", "paid"],
+    // 退款：四个非终态都能进入退款
+    ["paid", "refunded"],
+    ["accepted", "refunded"],
+    ["serving", "refunded"],
+    ["completed", "refunded"],
+  ];
+
+  for (const [from, to] of legal) {
+    assert.equal(canTransitionOrder(from, to), true, `${from} → ${to} 应当允许`);
+  }
+});
+
+test("非法迁移全部为 false：前跳、非回池的回退、终态复活都不行", () => {
+  const illegal = [
+    // 前跳：没接单就不能已在护航，没护航就不能已完成，更不能不接单直接完成
+    ["paid", "completed"],
+    ["paid", "serving"],
+    ["accepted", "completed"],
+    // 回退：**只有回池（→ paid）是结构上允许的回退**（见上面的合法清单），其余回退一律不行。
+    // 注意 `serving → paid` 已从本条清单移走——它在 P0-6 之后是合法的。
+    ["completed", "serving"],
+    ["completed", "paid"],
+    ["completed", "accepted"],
+    // 终态：已退款不能回到任何活跃状态，也不能再「退一次」
+    ["refunded", "paid"],
+    ["refunded", "accepted"],
+    ["refunded", "refunded"],
+  ];
+
+  for (const [from, to] of illegal) {
+    assert.equal(canTransitionOrder(from, to), false, `${from} → ${to} 必须被拒`);
+  }
+});
+
+test("from === to 恒为 false：原地不动不是一次「迁移」", () => {
+  for (const status of ORDER_STATUSES) {
+    assert.equal(canTransitionOrder(status, status), false, `${status} → ${status} 不该被当成迁移`);
+  }
+});
+
+/**
+ * 5 × 5 的预期矩阵。**手写的**，不是用 `ORDER_TRANSITIONS[from].includes(to)` 现算的：
+ * 拿实现反推期望值等于用实现验证实现——表被改宽时，这样写出来的用例会跟着一起变绿，
+ * 而那正是这条用例唯一要防的事。列顺序与 `ORDER_STATUSES` 一致。
+ *
+ * 列：paid / accepted / serving / completed / refunded，1 = 允许，0 = 拒绝。
+ *
+ * P0-6（2026-09-23）只把 `accepted → paid` 与 `serving → paid` 两格从 0 改成 1
+ * （回池能力进了结构表），其余 23 格不变。
+ */
+const TRANSITION_MATRIX = [
+  ["paid", [0, 1, 0, 0, 1]],
+  ["accepted", [1, 0, 1, 0, 1]],
+  ["serving", [1, 0, 0, 1, 1]],
+  ["completed", [0, 0, 0, 0, 1]],
+  ["refunded", [0, 0, 0, 0, 0]],
+];
+
+test("穷举 25 格：逐格与手写的预期矩阵比对（矩阵自己也要先自检）", () => {
+  // 手写表最常见的错法是行数与列数对不上：先把它钉住，免得「25 格」名不副实
+  assert.deepEqual(ORDER_STATUSES, ["paid", "accepted", "serving", "completed", "refunded"]);
+  assert.equal(TRANSITION_MATRIX.length, ORDER_STATUSES.length, "矩阵的行数必须覆盖五个状态");
+  assert.deepEqual(
+    TRANSITION_MATRIX.map(([from]) => from),
+    [...ORDER_STATUSES],
+    "矩阵的行顺序必须与 ORDER_STATUSES 一致，否则对错了格子",
+  );
+
+  let cells = 0;
+  for (const [from, row] of TRANSITION_MATRIX) {
+    assert.equal(row.length, ORDER_STATUSES.length, `${from} 那一行必须写满五格`);
+    ORDER_STATUSES.forEach((to, index) => {
+      cells += 1;
+      assert.equal(
+        canTransitionOrder(from, to),
+        row[index] === 1,
+        `${from} → ${to} 与手写预期矩阵不一致`,
+      );
+    });
+  }
+  assert.equal(cells, 25, "五乘五必须一格不漏");
+});
+
+test("refunded 是终态：没有任何一条出边（已退款不能复活，也不能再退一次）", () => {
+  for (const to of ORDER_STATUSES) {
+    assert.equal(canTransitionOrder("refunded", to), false, `refunded → ${to} 必须被拒`);
+  }
+  assert.deepEqual(ORDER_TRANSITIONS.refunded, [], "终态写出空数组，而不是省略这一行");
+});
+
+test("源码约束：orders.ts 的依赖只有 import type + 同层的纯函数 ./pagination（仍可被客户端组件引用）", () => {
+  const code = stripComments(readSource(resolveSource("lib/constants/orders.ts")));
+
+  // 跨行的 import 也算一条；先去掉注释，否则文档注释里那句「不得出现任何运行时的 import」
+  // 会被当成一条真的 import 语句
+  const statements = code.match(/^import[\s\S]*?;$/gm) ?? [];
+  assert.equal(statements.length, 3, `扫到的 import 语句数量变了：\n${statements.join("\n")}`);
+
+  const typeImports = statements.filter((statement) => /^import\s+type\b/.test(statement));
+  const runtimeImports = statements.filter((statement) => !/^import\s+type\b/.test(statement));
+
+  // 类型 import 编译后完全消失，不构成「把服务端模块打进浏览器产物」的风险
+  assert.equal(typeImports.length, 2, "订单与分页的类型必须是 import type");
+
+  // ⚠️ 本文件**确实有一条运行时 import**（`./pagination` 的纯函数），因此
+  //    「所有 import 都是 import type」与仓库现状不符。真正要守的是 R1 的那句话：
+  //    依赖只有 import type + 纯函数。于是把运行时依赖**逐条冻结**——
+  //    多引一个模块（尤其 `@/lib/data/**`）立刻变红。
+  assert.deepEqual(
+    runtimeImports.map((statement) => statement.match(/from\s+"([^"]+)"/)?.[1]),
+    ["./pagination"],
+    "运行时依赖变了：多出来的那一个会被打进浏览器产物",
+  );
+
+  // 最容易发生的一种回流：顺手引一个服务端模块（这正是这条断言存在的理由）
+  for (const forbidden of [
+    "@/lib/data/",
+    "@/lib/services/",
+    "@/lib/mocks/",
+    "@/lib/api/",
+    "next/server",
+    "next/headers",
+    "server-only",
+  ]) {
+    assert.equal(code.includes(forbidden), false, `orders.ts 不该引用 ${forbidden}`);
+  }
 });

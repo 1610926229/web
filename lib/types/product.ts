@@ -10,6 +10,8 @@
  * 能不能买」。
  */
 
+import type { ReviewAggregate } from "./review";
+
 // ——————————————————————————— 公开 DTO ———————————————————————————
 
 /**
@@ -60,6 +62,17 @@ export type ProductDetail = Product & {
   /** 游戏标签（如「手游」）。平台侧展示标签，后台不可改 */
   gameTag: string;
   status: ProductStatus;
+  /**
+   * 本商品的分账比例（基点，8000 = 80%）。**下单时被冻结进订单**（`Order.companionRateSnapshot`），
+   * 此后商品改比例不影响已有订单。
+   *
+   * ⚠️ 它随商品详情一起到浏览器（购买面板拿的是整份 `ProductDetail`）。
+   * 这不是「平台抽成保密」的破例，而是因为**订单详情本身就要显示「护航收益」**——
+   * 比例与收益是同一件事的两种写法。若产品要求对用户隐藏比例，
+   * 改动点是让结算服务单独读商品记录（`getCatalogRepository().findProductById()`），
+   * 而不是把它从这里删掉。
+   */
+  companionRateBp: number;
   /** 单组规格，单选；只含有效规格。默认选中第一项 */
   specs: ProductSpec[];
   /** 运营配置的商品标签（如「热门」）。与 `gameTag` 不同：这个由后台维护 */
@@ -75,6 +88,28 @@ export type ProductDetail = Product & {
    * 因此进入对外的详情类型——它只暴露「这个商品属于哪个游戏」，不含任何筛选用的内部状态。
    */
   gameId: string;
+};
+
+/**
+ * 商品详情 DTO（对外）＝ 商品详情 + 公开评分聚合（P1-8）。
+ *
+ * ## 为什么聚合是**服务层**加上去的，而不在 `ProductDetail` 里
+ *
+ * `ProductDetail` 同时也是**数据源实体**（`getDataSource().getProductDetail()` 返回它）。
+ * 如果把 `reviews` 塞进去，Mock 数据源就得去读评价仓储——而数据源回答的是
+ * 「这件商品是什么」（标题、规格、价格、详图），**评价不是商品的属性**，
+ * 它是另一批记录在某个维度上的聚合结果（`R3`）。让数据源去查评价，
+ * 等于把「商品目录」与「评价」两张表焊在一起，将来接数据库时这一处必然是错的。
+ *
+ * 因此：实体保持干净，聚合由 `lib/services/catalog.ts` 在返回前贴上。
+ * 与打手侧的做法一致（那边是 `toCompanionDetail(companion, names, stats)`）。
+ *
+ * ⚠️ 与 `CompanionDetail` 一样，`reviews` 是**必填**的：
+ * 忘了贴聚合应当是编译错误，而不是页面上悄悄少一块评分。
+ */
+export type ProductDetailView = ProductDetail & {
+  /** 本商品的公开评分聚合（只含 `approved`，见 `ReviewAggregate`） */
+  reviews: ReviewAggregate;
 };
 
 // ——————————————————————————— 内部实体 ———————————————————————————
@@ -127,6 +162,14 @@ export type CatalogProductRecord = {
   monthlySales: number;
   /** 平台侧展示标签。**后台不可改** */
   gameTag: string;
+  /**
+   * 分账比例（基点，8000 = 80%）——**商品自己的配置，后台可改**（P0-3）。
+   *
+   * 单位是整数基点而不是 `0.8`：与钱有关的一切都用整数表示。
+   * 界面上填的百分比文本在 `toProductDraft()` 里换算（`lib/constants/shareRatio.ts`），
+   * 因此实体里永远不会出现「81.5%」这样的小数比例。
+   */
+  companionRateBp: number;
   createdAt: string;
   updatedAt: string;
   removedAt: string | null;
@@ -151,6 +194,8 @@ export type AdminProductListItem = {
   sortOrder: number;
   recommended: boolean;
   status: ProductStatus;
+  /** 分账比例（基点）。表单据此显示百分比初始值：`formatShareRatioBpForInput()` */
+  companionRateBp: number;
   removedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -307,13 +352,28 @@ export type ProductProfilePatch = {
    * 商品建不出来。服务端要的是元的十进制文本，类型就必须是元。
    */
   specs: ProductSpecInput[];
+  /**
+   * ⚠️ 线上传的是**百分比**文本（`"80"`、`"80.5"`），不是基点。
+   *
+   * 与 `priceYuan` 同一条规则：界面上是什么单位，线上就是什么单位；
+   * 换算（百分比 → 基点）只在服务端的 `toProductDraft()` 里发生。
+   * 因此客户端**没有传基点的通道**，也就不可能出现「界面填 80、
+   * 实体里存成 80 基点（0.8%）」这种差 100 倍而看不出来的错。
+   */
+  companionRatePercent: string;
 };
 
 /**
- * 商品草稿（**服务端内部**）：在 `ProductProfilePatch` 之上把规格金额换成整数分。
+ * 商品草稿（**服务端内部**）：在 `ProductProfilePatch` 之上把规格金额换成整数分、
+ * 把分账比例换成整数基点。
  *
- * 由服务端的 `toProductDraft()` 产出，直接交给原子写入。它不出现在任何线上契约里。
+ * 由服务端的 `toProductDraft()` 产出，直接交给原子写入。它不出现在任何线上契约里：
+ * 「界面单位」到这里为止，往下走的一律是存储单位。
  */
-export type ProductProfileDraft = Omit<ProductProfilePatch, "specs"> & {
+export type ProductProfileDraft = Omit<
+  ProductProfilePatch,
+  "specs" | "companionRatePercent"
+> & {
+  companionRateBp: number;
   specs: AdminProductSpecPatch[];
 };

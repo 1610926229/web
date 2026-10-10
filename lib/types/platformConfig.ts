@@ -1,0 +1,148 @@
+/**
+ * 平台级参数（P0-1）。
+ *
+ * ## 为什么是「一份全局记录」而不是「一堆散落的常量」
+ *
+ * 这些参数的共同点是：**产品要能改，而且改了之后要立刻对之后发生的业务生效**，
+ * 同时**不能影响已经发生的事**。因此它们必须存在数据里（可被后台写），
+ * 而不是写成源码常量（改一次要发一次版）。
+ *
+ * ## 与「订单快照」的分工（这一条是本节存在的理由）
+ *
+ * 参数被改之后，**已经在途的订单不受影响**：订单进入需要计时的环节时，
+ * 会把当时的参数值**冻结成快照**写进自己身上，之后一律看那个快照。
+ * 例：`Dispatch.publicTimeoutMinutesSnapshot`。
+ *
+ * 于是同一份参数在系统里同时存在两种读法，两者的用途完全不同：
+ * - **配置记录**（本类型）回答「现在新发生的业务按什么规则走」；
+ * - **订单快照**回答「这一单当初按什么规则走」。
+ *
+ * 任何时候都不要用配置记录去重算一张旧订单的截止时间——那不是「修正」，
+ * 那是把已经承诺给用户的规则事后改掉。
+ *
+ * ⚠️ **金额不在这里**：本类型只放「时长」这类规则参数。资金规则（分账比例、
+ * 退款比例）各自有归属——分账比例属于**商品**，退款比例属于**一次退款裁定**，
+ * 都不是全局参数。把资金规则塞进这张表，等于给「改一次全局配置就改变所有人的钱」
+ * 开了一个入口。
+ */
+
+/**
+ * 平台级参数。
+ *
+ * ⚠️ 本阶段**四项**，全部是「生命周期时长」：专属池超时、公共池超时、
+ * 完成材料自动审核时长、投诉窗口。不给它加「预留字段」或 `Record<string, unknown>`：
+ * 一个能装下任何东西的配置表，在半年后会变成「谁都能往里塞一个没人知道用途的键」，
+ * 而每一项配置的合法性校验、审计含义、对业务的影响面都不一样。
+ * 加一项就在这里加一个**具名、有类型、有校验**的字段。
+ *
+ * ⚠️ 四项**都有各自的 snapshot 落点**，没有一项是「读了立刻生效、用完就忘」的：
+ * 专属池 → `Dispatch.exclusiveTimeoutMinutesSnapshot`、
+ * 公共池 → `Dispatch.publicTimeoutMinutesSnapshot`、
+ * 完成材料 → `CompletionSubmission.autoApprovalMinutesSnapshot`、
+ * 投诉窗口 → `Order.complaintWindowMinutesSnapshot`。
+ */
+export type PlatformConfig = {
+  /**
+   * **专属**订单池「指定打手独占接单权持续多久」的时长，**单位：分钟**（P1-2）。
+   *
+   * 语义：订单被指定给某位打手的那一刻起算，该打手在这段时间内独占接单权；
+   * 达到这个时长仍未接单 → 订单**转入公共池**（不是退款、不是售后）。
+   *
+   * ⚠️ 与另外三项一样按**快照**语义：派单进入 `exclusive` 时把当时的取值冻结成
+   * `Dispatch.exclusiveTimeoutMinutesSnapshot` 并算出 `exclusiveDeadlineAt`，
+   * 之后改配置**不影响**已经进入专属池的派单。默认 10，取值 1 ~ 1440 分钟。
+   *
+   * ⚠️ 这一项的前身是源码常量 `EXCLUSIVE_WAIT_MINUTES = 10`（注释写着「固定 10 分钟，
+   * 不可配置」）。产品已裁定必须可配置（2026-09-23 需求校对 + EX-CONFIG-04），
+   * 那个常量在 P1-2 被删除——**「10」现在只作为本字段的默认值存在**。
+   */
+  exclusivePoolTimeoutMinutes: number;
+
+  /**
+   * 公共订单池「无人接单多久算超时」的时长，**单位：分钟**。
+   *
+   * 语义：订单进入公共池的时刻起算，达到这个时长仍无人接单 → 停止接取 → **自动全额退款**。
+   * 判定基于 `deadline <= now`，与「有没有人来访问」无关。
+   *
+   * ⚠️ 从专属池超时转进来的订单**会重新冻结**这一次的取值：本参数是**每次**进入公共池
+   * 时冻结，不是「一张订单只冻结一次」。
+   */
+  publicPoolTimeoutMinutes: number;
+
+  /**
+   * 完成材料「提交后等待多久算自动通过」的时长，**单位：分钟**（P0-8）。
+   *
+   * 语义：打手提交完成材料的那一刻起算，达到这个时长仍 pending、无阻塞，
+   * 且订单仍 serving → 由 System 自动通过（`reviewSource = "system"`）。
+   * 与公共池超时同一套快照语义：提交时冻结 `autoApprovalMinutesSnapshot` /
+   * `autoApprovalDeadlineAt`，之后改配置不影响已 pending 的材料。
+   */
+  completionAutoApprovalMinutes: number;
+
+  /**
+   * 订单完成后的「投诉窗口」时长，**单位：分钟**（P0-9）。
+   *
+   * 语义：订单真正进入 `completed` 的那一刻起算，用户在这么长时间内仍可发起投诉；
+   * 同时它决定打手这一单收益的冻结时长——`Earning.availableAt` 等于本单的
+   * `complaintDeadlineAt`。默认 1440（24 小时），取值 60 ~ 10080 分钟。
+   *
+   * ⚠️ 与另外两项一样按**快照**语义：订单进入 completed 时把当时的取值冻结成
+   * `Order.complaintWindowMinutesSnapshot` 并算出 `complaintDeadlineAt`，
+   * 之后改配置**不影响**已经 completed 的历史订单。
+   */
+  complaintWindowMinutes: number;
+
+  /** 最后一次修改时间（ISO 字符串）。 */
+  updatedAt: string;
+
+  /**
+   * 最后一次修改者的 `AdminAccount.id`；预置数据为 null。
+   *
+   * ⚠️ 与审计表的分工：这里只记「最近一次是谁改的」，**审计表记的是每一次**。
+   * 两者不重复——记录上的这个字段回答「现在这份值的责任人是谁」，
+   * 而审计回答「这个值是怎么变成现在这样的」。
+   */
+  updatedByAdminId: string | null;
+};
+
+/**
+ * 一次平台参数写入的结果（接口 ↔ 浏览器）。
+ *
+ * ⚠️ **把整份配置回给调用方**，而不是只回一个「成功」：表单保存后要就地更新显示的
+ * 取值与「最后修改时间」，只回成功的话页面得再拉一次才能把时间戳刷新。
+ *
+ * `changed: false` 有**两种**来源，接口不区分它们：
+ * - 提交的值与现状相同（管理员点了一次保存但没改任何东西）；
+ * - 同一个幂等键第二次到达。
+ *
+ * 两者对调用方的意义是一样的：「服务端没有产生新的改动」。页面据此提示
+ * 「值未变化」而不是「已保存」——后者会让管理员以为改生效了。
+ */
+export type AdminPlatformConfigWriteResult = {
+  config: PlatformConfig;
+  changed: boolean;
+};
+
+/**
+ * 后台表单能提交的字段（**白名单**）。
+ *
+ * ⚠️ 与 `PlatformConfig` 的区别就是它的存在理由：`updatedAt` 与 `updatedByAdminId`
+ * 不在这个类型里，因此它们**没有传上去的位置**——那两个字段由服务端在写入时
+ * 按会话与时钟填。把它们做成可选字段（`updatedAt?: string`）等于给「客户端
+ * 声称自己是谁、改动发生在什么时候」留了一个入口。
+ *
+ * ⚠️ 四个字段都是**可选**：PATCH 只带要改的那一项，服务端会把没带的字段
+ * 保持现状（不是清空）。但**至少要带一个**——空 PATCH 不算一次改动；
+ * 这个「至少一个」由服务端校验，不在这里用类型表达（联合类型表达不了）。
+ *
+ * 取值合法性由页面与服务端各自用 `isValidExclusivePoolTimeoutMinutes()` /
+ * `isValidPublicPoolTimeoutMinutes()` / `isValidCompletionAutoApprovalMinutes()` /
+ * `isValidComplaintWindowMinutes()` 判定，**不在这里**用类型表达
+ * （`number` 表达不了「60~10080 的整数」）。
+ */
+export type AdminPlatformConfigPatch = {
+  exclusivePoolTimeoutMinutes?: number;
+  publicPoolTimeoutMinutes?: number;
+  completionAutoApprovalMinutes?: number;
+  complaintWindowMinutes?: number;
+};

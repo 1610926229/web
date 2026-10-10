@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test, { beforeEach } from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 import { fileURLToPath } from "node:url";
 import { findAppFile } from "./app-path.mjs";
 
@@ -23,6 +25,7 @@ import { adminAuditStore } from "../lib/data/mockAdminAuditRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { getPaymentRepository } from "../lib/data/paymentRepository.ts";
 import { getRefundRepository } from "../lib/data/refundRepository.ts";
+import { refundSeed } from "../lib/mocks/fixtures/refundSeed.ts";
 import { staffSeed } from "../lib/mocks/fixtures/staffSeed.ts";
 import { approveAdminRefund } from "../lib/services/adminRefunds.ts";
 import {
@@ -62,6 +65,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STAFF_REFUND_API_DIR = path.join(ROOT, "app", "api", "staff", "refunds");
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP_HTTP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过客服退款 HTTP 用例";
 
 /** 客服会话守卫返回的会话里，写操作真正会读的两样：id 与显示名快照。 */
@@ -223,8 +229,12 @@ test("状态筛选解析：合法值通过，非法值在接口 400、在页面�
 // ——————————————————————————— 三、列表 ———————————————————————————
 
 test("列表：默认只看待审核，按申请时间倒序，排序稳定", async () => {
+  // 预置条数从种子里数出来，不写死：客服工作台看到的就是全部预置申请，
+  // 写死数字会让这个用例在每次加预置数据时变成「数字对不对」而不是「默认只看待审核」
+  const seedPending = refundSeed.filter((refund) => refund.status === "pending").length;
+
   const pending = await listStaffRefunds(resolveStaffRefundListQuery(page(), false), undefined, "server");
-  assert.equal(pending.total, 2);
+  assert.equal(pending.total, seedPending);
   assert.equal(pending.items.every((item) => item.status === "pending"), true);
   for (let index = 1; index < pending.items.length; index += 1) {
     assert.ok(compareStaffRefunds(pending.items[index - 1], pending.items[index]) <= 0);
@@ -235,7 +245,7 @@ test("列表：默认只看待审核，按申请时间倒序，排序稳定", as
     undefined,
     "server",
   );
-  assert.equal(all.total, 6);
+  assert.equal(all.total, refundSeed.length);
 
   // 稳定排序：同样的查询跑两次，顺序完全一致
   const again = await listStaffRefunds(
@@ -287,17 +297,26 @@ test("列表：分页不重不漏，total 不随页变", async () => {
     "server",
   );
 
+  // 前置：默认每页装得下全部预置数据——否则下面的 `all.items` 本身就是被截断的一页，
+  // 拿它当全集去比对只会得出一个看起来通过的错断言
+  assert.equal(all.items.length, all.total, "预置退款条数不能超过默认每页条数");
+
+  // 翻页次数由 `total` 推出来，不写死：写死的话，每加一条预置数据这个用例就会
+  // 变成「翻 3 页够不够」的断言，而不是它真正要守的「不漏、不重、total 稳定」
+  const pageSize = 2;
+  const pageCount = Math.ceil(all.total / pageSize);
+
   const seen = [];
-  for (const pageNumber of [1, 2, 3]) {
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
     const result = await listStaffRefunds(
-      resolveStaffRefundListQuery(page({ status: "all", page: pageNumber, pageSize: 2 }), false),
+      resolveStaffRefundListQuery(page({ status: "all", page: pageNumber, pageSize }), false),
       undefined,
       "server",
     );
-    assert.equal(result.pageSize, 2);
+    assert.equal(result.pageSize, pageSize);
     assert.equal(result.total, all.total);
-    assert.equal(result.hasMore, pageNumber * 2 < all.total);
-    assert.ok(result.items.length <= 2);
+    assert.equal(result.hasMore, pageNumber * pageSize < all.total);
+    assert.ok(result.items.length <= pageSize);
     seen.push(...result.items.map((item) => item.id));
   }
 
@@ -319,6 +338,12 @@ test("列表 DTO 只有摘要：没有原因 / 说明 / 凭证 / 审核意见 / 
     "status",
     "statusLabel",
     "amount",
+    /*
+      P0-13：客服看得到**实退金额**（`decidedAmount`），但看不到责任归属与平台承担额
+      ——那两项是管理员的决策依据。这里把这个边界一起钉住：加了 `decidedAmount`
+      不等于把 `decision` 也带出来（下面的 forbidden 列表里有它）。
+    */
+    "decidedAmount",
     "createdAt",
     "updatedAt",
     "user",
@@ -333,6 +358,14 @@ test("列表 DTO 只有摘要：没有原因 / 说明 / 凭证 / 审核意见 / 
     assert.deepEqual(new Set(Object.keys(item)), allowed, "列表项字段集合变了");
     // 客服端用户摘要只有三样：id / 昵称 / 头像，**没有**平台展示 ID
     assert.deepEqual(new Set(Object.keys(item.user)), new Set(["id", "nickname", "avatarUrl"]));
+
+    // 决策状态与实退额必须一致：没决策是 null，不是 0
+    if (item.status === "approved") {
+      assert.notEqual(item.decidedAmount, null, `已通过的 ${item.refundNo} 必须带实退额`);
+      assert.ok(item.decidedAmount > 0);
+    } else {
+      assert.equal(item.decidedAmount, null, `未决策的 ${item.refundNo} 的实退额必须是 null`);
+    }
   }
 
   const serialized = JSON.stringify(data);
@@ -357,6 +390,18 @@ test("列表 DTO 只有摘要：没有原因 / 说明 / 凭证 / 审核意见 / 
     "openId",
     "unionId",
     "cookie",
+    /*
+      P0-13：**管理员的决策依据**不进客服响应。
+      客服只该知道「这笔退了多少」，不该知道「这钱是平台担的还是打手担的、
+      打手被冲回多少」——那是责任认定，产品裁定它属于管理员。
+      字符串匹配用字段名而不是值：`0` 这种值会出现无数次，钉不住任何东西。
+    */
+    "decision",
+    "responsibility",
+    "refundRateBp",
+    "companionLiabilityRateBp",
+    "companionReversalAmount",
+    "platformBorneAmount",
   ]) {
     assert.equal(serialized.includes(forbidden), false, `列表 DTO 出现了 ${forbidden}`);
   }
@@ -375,7 +420,11 @@ test("详情：补齐原因 / 说明 / 凭证 / 金额对照 / 审核信息 / �
 
   const order = await orderOf(PENDING_REFUND);
   assert.equal(detail.amount, order.totalAmount, "退款金额取申请创建时的订单实付快照");
-  assert.equal(detail.orderTotalAmount, order.totalAmount);
+  // ⚠️ 期望值取 `actualPaidAmount`（P1-4）：这个字段标着「原订单实付金额」，
+  // 原先却取自 `order.totalAmount`（优惠前应付）。种子订单没有券、两者相等，
+  // 所以这条断言在改口径前后都会绿——它只是把规则本身写下来；
+  // 真正的守门符是「有券时两个数不相等」的用例（`tests/couponCheckoutChain.test.mjs`）
+  assert.equal(detail.orderTotalAmount, order.actualPaidAmount);
   assert.equal(detail.orderStatus, order.status);
 
   const cancelled = await getStaffRefundDetail(CANCELLED_REFUND, undefined, "server");
@@ -609,12 +658,21 @@ test("跨主体：客服带键 K 驳回 → 管理员带同一个 K 通过 → �
   assert.equal(rejected.status, "rejected");
   assert.equal(await auditCount(), 1);
 
-  // 管理员带着**同一个**键请求「通过」：绝不能因为 (targetType, targetId) 都匹配
-  // 就被判成重放而静默回 200——那是「管理员以为通过了，实际上没有」。
+  /*
+    管理员带着**同一个**键请求「通过」：绝不能因为 (targetType, targetId) 都匹配
+    就被判成重放而静默回 200——那是「管理员以为通过了，实际上没有」。
+
+    ⚠️ 请求体里必须把 P0-13 的资金决策一起写全（比例 + 责任归属）。
+    这一段验的是**幂等键冲突**，而口径是「先解析入参、再判冲突」：
+    少写决策字段的话，这条用例会因为「请填写退款比例」而变绿，
+    看着像通过，实际上面那条冲突规则一次都没被执行到。
+  */
   await expectApiError(
     approveAdminRefund(PENDING_REFUND, "admin-1", {
       idempotencyKey: operationId,
       reviewNote: "管理员通过",
+      refundRatePercent: "100",
+      responsibility: "platform",
     }),
     "BAD_REQUEST",
     ADMIN_REFUND_OPERATION_CONFLICT_MESSAGE,
@@ -824,4 +882,42 @@ test("HTTP：合法迁移 / 幂等重放 / 非法迁移 / 响应不含敏感字�
   });
   assert.equal(rejected.status, 200);
   assert.equal(JSON.parse(await rejected.text()).data.status, "rejected");
+});
+
+/**
+ * 履约退出历史（P0-6）在退款详情的**顶层**（不是某一层的子字段）。
+ *
+ * ⚠️ 它与 `conversationOrderId` 是两件独立的事：退款详情有自己的订单区，
+ * 而「进入会话」入口在没有沟通记录时是 `null`——只挂会话页会让这类退款漏掉退出历史，
+ * 因此它必须出现在退款详情自己的载荷里。
+ *
+ * ⚠️ 这里断言的是空数组：**字段在、类型对、没有被序列化吃掉**。为空不是因为
+ * 「没人能成为打手」（DEV-1 起预置的 `u-1022` / `u-1023` 就是有效打手），
+ * 而是这条预置退款对应的订单从未被取消过接单，且 HTTP 用例不写共享内存。
+ * 内容口径由 `tests/staffReleaseHistory.test.mjs` 覆盖。
+ * 只读 `rf-seed-1001-01`，与写用例占用的 `rf-seed-1002-01` 分开。
+ */
+test("退款详情接口：顶层带 releaseHistory，匿名一律 401", { skip: SKIP_HTTP }, async () => {
+  const pathname = `/api/staff/refunds/${PENDING_REFUND}`;
+
+  // 匿名：401。与客服端的既有身份矩阵同一结论，这一条不依赖任何开关
+  assert.equal((await requestWithCookie(pathname, null)).status, 401);
+
+  const login = await staffLogin("staff-1");
+  if (login.status !== 200) return;
+  const cookie = login.setCookie[0].split(";")[0];
+
+  const detail = await requestWithCookie(pathname, cookie);
+  assert.equal(detail.status, 200);
+  const payload = JSON.parse(detail.body);
+
+  assert.deepEqual(
+    payload.data.releaseHistory,
+    [],
+    "没有退出过就是空数组（正常情况），不是 null / undefined（查不到）",
+  );
+  // 退出历史的**内部字段**一个都不许顺着接口流出去
+  for (const hidden of ["actorId", "releaseRecordId"]) {
+    assert.equal(new RegExp(`"${hidden}"`).test(detail.body), false, `退款详情不该出现 ${hidden}`);
+  }
 });

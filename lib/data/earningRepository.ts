@@ -1,0 +1,76 @@
+import type { Earning, EarningAdjustment } from "@/lib/types/earning";
+import { mockEarningRepository } from "./mockEarningRepository";
+
+/**
+ * 打手收益的读取契约（P0-9）。
+ *
+ * ## 为什么这里**只有读**，写入在别处
+ *
+ * 与完成材料（`lib/data/completionRepository.ts`）是同一套结构：**写入不经过本接口**。
+ * 一条收益的创建必须与「订单写成 completed + 冻结投诉窗口快照」发生在**同一段
+ * 没有 `await` 的同步代码**里（`lib/data/earningTransaction.ts` 的伪事务），
+ * 而异步的仓储方法做不到这件事——在它前后让出执行权，就会出现「订单已 completed、
+ * 收益还没建」的半写状态。
+ *
+ * 因此本接口只服务读取（页面与接口），写原语由 `mockEarningRepository.ts` 以
+ * **同步导出的函数**形式提供，只允许伪事务调用。
+ *
+ * ## 归属是查询条件，不是过滤项
+ *
+ * `listEarningsForCompanion(companionId)` 只可能返回这一位打手的收益，
+ * 调用方不需要（也不应该）拿到结果后再过滤一次——与 `PaymentRepository`
+ * 的 `queryOrdersByCompanion` 同一条约定。打手端页面永远只回答「我挣了多少」。
+ */
+export type EarningRepository = {
+  /**
+   * 某个打手**自己**的全部收益，按产生时间倒序（最新在前）。
+   *
+   * 不分页：本阶段是一位打手自己的一份账，条数受他实际完成的订单数约束；
+   * 真实数据库接入时再按时间分页（届时排序键仍然由仓储回答）。
+   */
+  listEarningsForCompanion(companionId: string): Promise<Earning[]>;
+
+  /**
+   * **全部**收益记录（不分打手、不分页）。
+   *
+   * 与 `listEarningsForCompanion` 的区别是刻意的，不是重复：
+   * 那一个回答「**这位打手**挣了多少」（归属是查询条件，打手端只能看到自己），
+   * 这一个回答「**所有人**挣了多少」，是**跨打手聚合**的入口。
+   *
+   * ⚠️ 目前**只有一个调用方**：打手收入榜（P1-5）。
+   * 榜单要跨打手求净额，逐个打手各查一次是 N+1 次查询。
+   * ⚠️ 本方法只负责**把行取出来**，「按打手分组、按周期过滤、求和」是
+   * `lib/constants/companionRankings.ts` 里的纯函数——**Mock 阶段这样最省事，
+   * 但换成真实数据库时应当下推成一个 `GROUP BY`**，届时本方法的签名可以不变，
+   * 也可以换成返回聚合结果；不变的约束只有一条：**净额口径只在那里定义一次**。
+   *
+   * ⚠️ **它是内部聚合入口，不是对外接口**：返回的 `Earning` 带 `orderId` /
+   * `reversedAmount` / `fineAmount` 等字段，**一个都不许进公开 DTO**
+   * （裁定 §9 的白名单）——聚合后的榜单只给名次与一个指标值。
+   */
+  listAllEarnings(): Promise<Earning[]>;
+
+  /**
+   * 按订单取那一条收益；没有返回 null。
+   *
+   * 用于回答「这一单的收益状态是什么」这类单点问题，也是「一个订单最多一条收益」
+   * 这条约束的读取侧入口。**不做归属判断**：归属由调用方校验。
+   */
+  findEarningByOrderId(orderId: string): Promise<Earning | null>;
+
+  /**
+   * 一笔收益的全部**调整明细**（P0-13），按发生时间正序；没有调整过是空数组。
+   *
+   * ⚠️ 它是 `Earning.reversedAmount` 这个**总数**背后的**明细**，两者关系是
+   * 「读用总数、审计用明细」（见 `lib/types/earning.ts` 的 `EarningAdjustment`）。
+   * 页面上谁都不需要它——读的都是 `reversedAmount`；它服务的是对账与测试：
+   * 「这 3000 是哪一笔退款冲的、当时认定谁的责任」只能由明细回答。
+   *
+   * **不做归属判断**：与 `findEarningByOrderId` 同一条约定，归属由调用方校验。
+   */
+  listAdjustmentsForEarning(earningId: string): Promise<EarningAdjustment[]>;
+};
+
+export function getEarningRepository(): EarningRepository {
+  return mockEarningRepository;
+}

@@ -1,4 +1,5 @@
 import { canTransitionCompanionApplication } from "@/lib/constants/adminApplications";
+import { COMPANION_RELEASE_REASON_DISABLED } from "@/lib/constants/dispatch";
 import {
   toCompanionApplicationAuditSnapshot,
   toCompanionAuditSnapshot,
@@ -8,7 +9,11 @@ import {
   NEW_COMPANION_RANK_LABEL,
   NEW_COMPANION_UNAVAILABLE_REASON,
   adminCompanionActionFromPatch,
+  areCompanionFlagsUnchanged,
+  companionFlagAction,
   isCompanionProfileUnchanged,
+  nextCompanionFlags,
+  type CompanionFlagIntent,
 } from "@/lib/constants/adminCompanions";
 import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { AdminCompanionProfilePatch, Companion } from "@/lib/types/companion";
@@ -17,6 +22,7 @@ import type {
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
 import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
+import { releaseOrdersForCompanion } from "./companionOrderTransaction";
 import {
   applyApplicationReview,
   companionApplicationStore,
@@ -103,7 +109,16 @@ export type AdminCompanionWriteFailure =
   | { kind: "removed" }
   /** 已停用的记录谈不上「暂停 / 恢复接单」——那两个动作的前提是它还在架上 */
   | { kind: "disabled" }
-  | { kind: "operation-conflict" };
+  | { kind: "operation-conflict" }
+  /**
+   * 停用时要解除的订单数据不自洽（P0-11）：派单记录缺失，或完成材料的 pending
+   * 索引与记录对不上。**不可能状态**，报 500。
+   *
+   * ⚠️ 它是唯一一种「停用没做成」的原因，而**停用本身也一笔没写**——
+   * 扫单排在改标志位之前，正是为了不留下「人已停用、单还挂在他名下」
+   * （EX-COMP-01 要禁止的那一瞬）。管理员重试即可。
+   */
+  | { kind: "inconsistent" };
 
 export type AdminCompanionWriteResult =
   | {
@@ -287,14 +302,16 @@ function buildCompanionFromApplication(input: {
     enabled: true,
 
     // 统计从零开始，**不继承任何东西**：没有订单、没有评价、没有鸡腿。
-    // `rating` 用 null 而不是 0：0 分与「暂无评分」是两件事。
+    // 已完成单数与鸡腿数是**记录**（可以数出来），因此给 0。
+    //
+    // ⚠️ P1-8 起**没有 `rating` / `reviewCount` / `reviews` 可以写了**（`D17`）：
+    // 那三项不再是资料上的字段，而是从真实评价记录聚合出来的结果
+    // （`lib/services/reviewAggregates.ts`）。新护航一条评价都没有，
+    // 因此它在页面上显示的就是「暂无评分」——不需要、也不可能在这里预置一个数字。
     completedOrderCount: 0,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
 
     sortOrder: input.sortOrder,
-    reviews: [],
   };
 }
 
@@ -519,16 +536,36 @@ export async function setCompanionFlags(
     return { kind: "disabled" };
   }
 
-  const flags = nextFlags(existing, intent, input);
+  const flags = nextCompanionFlags(existing, intent, input);
   const action = companionFlagAction(intent);
 
-  if (replay?.kind === "replay" || areFlagsUnchanged(existing, flags)) {
+  if (replay?.kind === "replay" || areCompanionFlagsUnchanged(existing, flags)) {
     return {
       kind: "ok",
       value: { previous: { ...existing }, updated: { ...existing }, action },
       changed: false,
       replayed: replay?.kind === "replay",
     };
+  }
+
+  /* —— 第 5 步：**停用**还要立刻解除他手上在履约的订单（P0-11 / EX-COMP-01）—— */
+  // ⚠️ 排在 `applyCompanionFlags` **之前**：扫单可能失败（数据不自洽），
+  // 而失败时不能留下「人已停用、订单还挂在他名下」——那正是 EX-COMP-01 要禁止的那一瞬。
+  // 排在这里，失败时标志位与审计都还没写，管理员重试即可；
+  // 反过来（先改标志位再扫单）就只能二选一：报一个已经发生了一半的失败，或者假装成功。
+  //
+  // ⚠️ 只有 `disable` 会扫：暂停 / 恢复 / 启用都不解除任何履约
+  // （`available = false` 不解除已有订单，EX-SERVICE-05；`enable` 只是回到名单）。
+  // 「移除」（`removeCompanion`）本轮**不做**解除——需求里没有那一条，见 D10。
+  if (intent === "disable") {
+    const released = releaseOrdersForCompanion({
+      companionId,
+      // 触发者是这位管理员，写进每条退出历史的 actorId
+      actorId: ctx.actorId,
+      reason: COMPANION_RELEASE_REASON_DISABLED,
+      at: ctx.at,
+    });
+    if (released.kind !== "ok") return { kind: "inconsistent" };
   }
 
   const written = applyCompanionFlags(companionId, flags);
@@ -547,55 +584,12 @@ export async function setCompanionFlags(
   return { kind: "ok", value: { ...written, action }, changed: true, replayed: false };
 }
 
-/** 一次「能不能接单」动作。与审计动作一一对应，不经过差异推导。 */
-export type CompanionFlagIntent = "pause" | "resume" | "enable" | "disable";
-
-function companionFlagAction(intent: CompanionFlagIntent): AdminAuditAction {
-  switch (intent) {
-    case "pause":
-      return "companion.pause";
-    case "resume":
-      return "companion.resume";
-    case "enable":
-      return "companion.enable";
-    default:
-      return "companion.disable";
-  }
-}
-
-/** 目标状态：只算这三个字段，其余一概不碰。 */
-function nextFlags(
-  existing: Companion,
-  intent: CompanionFlagIntent,
-  input: { unavailableReason: string },
-): { enabled: boolean; available: boolean; unavailableReason: string } {
-  switch (intent) {
-    case "pause":
-      return { enabled: true, available: false, unavailableReason: input.unavailableReason };
-    case "resume":
-      return { enabled: true, available: true, unavailableReason: "" };
-    case "disable":
-      // 下架强制不可接单：一条「已停用但可接单」的记录在结算页会解释不清
-      return { enabled: false, available: false, unavailableReason: existing.unavailableReason };
-    default:
-      return {
-        enabled: true,
-        available: existing.available,
-        unavailableReason: existing.unavailableReason,
-      };
-  }
-}
-
-function areFlagsUnchanged(
-  existing: Companion,
-  flags: { enabled: boolean; available: boolean; unavailableReason: string },
-): boolean {
-  return (
-    existing.enabled === flags.enabled &&
-    existing.available === flags.available &&
-    existing.unavailableReason === flags.unavailableReason
-  );
-}
+/**
+ * 一次「能不能接单」动作的类型，由 `lib/constants/adminCompanions.ts` 定义
+ * （PROD-1C 从本文件搬走，见那里的说明）。这里**再导出一次**，
+ * 是因为服务层与测试都从这个模块取它，搬家不该改变它们的引用路径。
+ */
+export type { CompanionFlagIntent };
 
 /**
  * 移除护航（软删除）。

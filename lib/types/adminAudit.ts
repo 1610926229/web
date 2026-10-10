@@ -77,7 +77,83 @@ export type AdminAuditAction =
   | "staff.update"
   | "staff.enable"
   | "staff.disable"
-  | "staff.remove";
+  | "staff.remove"
+  // ————— 运营内容与协议（P8E-1）—————
+  // 三组内容（图片公告 / 活动 Banner / 快捷入口）各五个动作，形状完全一致：
+  // 新增 / 编辑 / 启用 / 停用 / 移除。
+  //
+  // ⚠️ 「启用」与「停用」分开记，与客服账号同一个理由：这两件事的后果不同
+  // （停用会让用户端立刻看不到这条内容），审计里必须一眼看得出发生的是哪一种。
+  // ⚠️ 动作名带**内容类别前缀**而不是统一的 `content.*`：一张公告与一个快捷入口
+  // 是两种完全不同的东西，「新建了一条内容」这句话回答不了任何问题。
+  | "announcement.create"
+  | "announcement.update"
+  | "announcement.enable"
+  | "announcement.disable"
+  | "announcement.remove"
+  | "banner.create"
+  | "banner.update"
+  | "banner.enable"
+  | "banner.disable"
+  | "banner.remove"
+  | "quickEntry.create"
+  | "quickEntry.update"
+  | "quickEntry.enable"
+  | "quickEntry.disable"
+  | "quickEntry.remove"
+  // ————— 协议正文（P8E-1）—————
+  // 只有三个动作，因为协议的改动面比上面三组窄得多：
+  // **不能新增、不能移除**——协议类型是固定枚举（用户 / 隐私 / 护航 / 平台 / 版本），
+  // 每个类型有且只有一条记录，前台五个页签永远都在（没有正文时显示「内容暂未配置」）。
+  // 「新建一条协议」与「删掉一个协议页签」因此都不是本阶段的能力。
+  //
+  // ⚠️ **没有单独的 `agreement.version`**：版本号是正文改动的一部分，
+  // 由服务端在同一次写入里递增。把「改正文」与「改版本」记成两条审计，
+  // 会让一次编辑看起来像两次操作。
+  | "agreement.update"
+  | "agreement.enable"
+  | "agreement.disable"
+  // ————— 平台参数（P0-1）—————
+  // 只有一个动作，因为本阶段只有一项参数、且它只有「编辑」这一种变更。
+  // 「启用 / 停用平台参数」这件事不存在：参数没有上架下架，只有取值。
+  //
+  // ⚠️ 动作名带模块前缀（`platformConfig.`）而不是笼统的 `platform.update`：
+  // 将来若出现「平台级开关」这类**另一类**配置，它会是一张不同的表、
+  // 有不同的校验规则，共用一个前缀会让审计里两种东西长得一样。
+  | "platformConfig.update"
+  // ————— 优惠券模板（P1-6）—————
+  // 四个动作，**没有第五个**：没有 `coupon.remove`。
+  // §6 明文「本轮不提供 hard delete，停用使用 `enabled=false`」，因此券模板的
+  // 生命周期止于停用——「这张券不存在了」这件事在本阶段写不出来，也就不该有一个
+  // 永远不会被写下的动作名（留着它，读审计的人会去找根本没发生过的删除）。
+  //
+  // ⚠️ 「启用」与「停用」分开记，与客服账号 / 运营内容同一个理由：这两件事的后果不同
+  // （停用会让**已经领到券的用户**也无法再核销，见 §5），审计里必须一眼看得出是哪一种。
+  //
+  // ⚠️ 与 P1-4 的**发放**（`grantCouponToUser`）不是一回事，因此**没有动作名重叠**：
+  // 那一次产生的是 `CouponClaim`（用户的资产，没有对应的审计动作——它是业务记录，
+  // 不是后台对配置的改动）；本组四个改的是 `Coupon` 模板本身。
+  | "coupon.create"
+  | "coupon.update"
+  | "coupon.enable"
+  | "coupon.disable"
+  // ————— 评价审核（P1-8）—————
+  // 四个动作，正好是评价状态机上「由管理员触发的每一步」：
+  // approve（待审 → 公开）、reject（待审 → 驳回）、hide（公开 → 隐藏）、
+  // unhide（隐藏 → 公开）。第四个不是第三个的反向简写——「谁在什么时候把一条
+  // 已经隐藏的评价放回公开列表」是一个必须能独立回答的问题，
+  // 合并成「又 hide 了一次」会让这句问话无从查起。
+  //
+  // ⚠️ **没有 `review.update`**：管理员改不了星级与正文（D12），
+  // 因此不存在「编辑评价」这个动作，词表里也就不该留一个永远写不下的名字。
+  //
+  // ⚠️ **没有 `review.resubmit`**：重新提交是**用户**的动作（D9），
+  // 审计记的是平台侧做过什么；用户改自己的内容不在审计范围内
+  // （与「撤销退款」不进审计是同一条理由）。
+  | "review.approve"
+  | "review.reject"
+  | "review.hide"
+  | "review.unhide";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
 export type AdminAuditTargetType =
@@ -88,7 +164,48 @@ export type AdminAuditTargetType =
   | "refund"
   | "complaint"
   /** 客服账号（P8D-1）。`targetId` 是 `StaffAccount.id`，不是用户名 */
-  | "staff";
+  | "staff"
+  // ————— 运营内容与协议（P8E-1）—————
+  /** 图片公告。`targetId` 是 `ContentAnnouncementRecord.id` */
+  | "announcement"
+  /** 活动 Banner。`targetId` 是 `ContentBannerRecord.id` */
+  | "banner"
+  /** 首页快捷入口。`targetId` 是 `QuickEntryRecord.id` */
+  | "quickEntry"
+  /** 协议。`targetId` 是 `Agreement.id`（不是 `type`：类型将来若允许一型多条，id 仍然唯一） */
+  | "agreement"
+  // ————— 平台参数（P0-1）—————
+  /**
+   * 平台参数。**只有一条记录**，因此 `targetId` 是一个固定常量
+   * （`PLATFORM_CONFIG_ID`），不是某个 id。
+   *
+   * ⚠️ 不要因为「反正只有一条」就把 `targetId` 写成空串或 `null`：
+   * 审计查询按 `(targetType, targetId)` 取，空串会让「查平台参数的历史」
+   * 与「查一条 id 为空的记录」变成同一件事。
+   */
+  | "platformConfig"
+  // ————— 优惠券模板（P1-6）—————
+  /**
+   * 券模板（`Coupon`）。`targetId` 是 `Coupon.id`。
+   *
+   * ⚠️ **不是 `CouponClaim`**：领到手的券是用户的资产，后台改不了它（P1-4 §六
+   * 明文「不要建立复杂营销 Ledger」）。审计这一侧只盯**模板**的改动，
+   * 而模板的改动对已发出去的券**不追溯**——这在 before/after 里看得见：
+   * 两次快照记的都是模板字段，与任何一张 Claim 无关。
+   */
+  | "coupon"
+  // ————— 评价审核（P1-8）—————
+  /**
+   * 订单评价（`OrderReview`）。`targetId` 是 `OrderReview.id`。
+   *
+   * ⚠️ **不是 `Order`**：评价的审核状态与订单状态是两条互不干涉的线
+   * （D7 / D20：订单全额退款不会让已公开的评价消失）。用订单 id 当审计目标，
+   * 事后就会把「这一单的评价被隐藏过」与「这一单本身发生过什么」混在一条时间线上。
+   *
+   * ⚠️ 隐藏与恢复公开记的是**同一个 `targetId`**：这正是 `D11` 要求可逆的落点——
+   * 一条评价的完整审核历史，是同一目标上按时间排列的若干条审计。
+   */
+  | "review";
 
 /**
  * 精简快照。

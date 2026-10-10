@@ -161,6 +161,11 @@ export function toProductDetail(record: CatalogProductRecord): ProductDetail {
     monthlySales: record.monthlySales,
     gameTag: record.gameTag,
     status: record.status,
+    // 分账比例随详情一起给出：结算页要在**下单那一刻**把它冻结进支付请求与订单快照，
+    // 而支付成功后的建单是同步的（`buildOrderFromRequest` 在原子区段里跑，不能再取商品）。
+    // 与价格来自同一次读取，因此不可能出现「按这一次读到的价格收款、
+    // 按另一次读到的比例分账」
+    companionRateBp: record.companionRateBp,
     specs: listEffectiveSpecs(record).map((spec) => ({
       id: spec.id,
       name: spec.name,

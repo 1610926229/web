@@ -46,16 +46,27 @@ export const ADMIN_APPLICATION_EMPTY_MESSAGE = "当前筛选下没有入驻申�
 // ——————————————————————————— 状态筛选 ———————————————————————————
 
 /**
- * 状态筛选。`all` 表示不限。
+ * 状态筛选。`all` 表示不限，`open` 表示「未终态」。
  *
  * `withdrawn` 可以筛、但不进概览的统计卡片——撤销是用户自己的动作，
  * 不是平台待处理的工作量；列表里却必须能看到它，否则「这个人为什么没通过」
  * 会变成一个查不到答案的问题。
+ *
+ * ## `open` 是**查询层虚拟值**
+ *
+ * ⚠️ `open` **不是领域状态**：它不写进 store、不进状态机、不出现在
+ * `CompanionApplicationStatus` 里，只是「把 `OPEN_APPLICATION_STATUSES` 那几个
+ * 真实状态一次筛出来」的地址栏写法。因此 `open` 永远不会出现在数据层——
+ * 服务层在调用仓储前就把它解析成真实状态集合（`applicationStatusesForFilter`）。
+ *
+ * ⚠️ 它存在的唯一理由：管理后台首页的待办卡数的是**未终态的全集**，
+ * 而单值筛选表达不了集合。没有它，卡上的数字与点进去列表的条数必然对不上。
  */
-export type AdminApplicationStatusFilter = CompanionApplicationStatus | "all";
+export type AdminApplicationStatusFilter = CompanionApplicationStatus | "all" | "open";
 
 export const ADMIN_APPLICATION_STATUS_FILTERS: readonly AdminApplicationStatusFilter[] = [
   "all",
+  "open",
   "pending",
   "reviewing",
   "approved",
@@ -66,8 +77,82 @@ export const ADMIN_APPLICATION_STATUS_FILTERS: readonly AdminApplicationStatusFi
 export const ADMIN_APPLICATION_STATUS_FILTER_LABELS: Record<AdminApplicationStatusFilter, string> =
   {
     all: "全部",
+    // 「待处理」而不是「未终态」：筛选栏是给管理员看的，不是给状态机看的。
+    open: "待处理",
     ...COMPANION_APPLICATION_STATUS_LABELS,
   };
+
+/**
+ * **未终态**的入驻申请状态——`status=open` 的口径，也是管理后台首页待办卡的计数口径。
+ *
+ * ⚠️ **这是这组状态的唯一定义处。** 列表的 `status=open` 与首页的待办计数
+ * 都走 `applicationStatusesForFilter()`，因此「卡上的数字 == 点进去的条数」不是巧合，
+ * 而是两者用了同一个集合、同一条查询。
+ *
+ * 与状态机的关系（`ADMIN_APPLICATION_TRANSITIONS`）：这三个之外的
+ * `approved` / `rejected` / `withdrawn` 出度为 0，即终态。
+ * 本数组用 `satisfies` 钉住元素类型，将来新增状态时这里会编译报错，
+ * 而不是悄悄把它漏出「待处理」。
+ */
+export const OPEN_APPLICATION_STATUSES = [
+  "pending",
+  "reviewing",
+] as const satisfies readonly CompanionApplicationStatus[];
+
+/**
+ * 这条申请**还需要管理员处理**吗（即落在 `OPEN_APPLICATION_STATUSES` 里）。
+ *
+ * ⚠️ 存在理由是**收掉第三份拷贝**：列表行的操作文案一度写作
+ * `status === "pending" || status === "reviewing"`（`AdminApplicationTable`），
+ * 于是「未处理」在同一个项目里有了第二种写法。今天它与集合取值相同，
+ * 所以不会出错；但这个文案是**操作员决定要不要点进去**的依据——
+ * 一旦产品把新状态并入待处理，卡片与 `status=open` 列表都会算上它，
+ * 而这行仍显示「查看详情」，操作员就跳过了那一条。
+ *
+ * 写法对齐 `lib/constants/refunds.ts` 的 `isActiveRefundStatus()`：
+ * 判据只从集合来，不在这里再写一遍字面量。
+ */
+export function isOpenApplicationStatus(status: CompanionApplicationStatus): boolean {
+  return (OPEN_APPLICATION_STATUSES as readonly CompanionApplicationStatus[]).includes(status);
+}
+
+/**
+ * 筛选值 → **真实领域状态集合**（`null` 表示不限）。
+ *
+ * ⚠️ 列表服务与首页 Dashboard **都调这一个函数**：任何一处自己写
+ * `status === "all" ? null : status`，都会让 `open` 在那一处退化成「按字面量筛 `open`」
+ * ——那会筛出 0 条，而且不报错。
+ */
+export function applicationStatusesForFilter(
+  filter: AdminApplicationStatusFilter,
+): readonly CompanionApplicationStatus[] | null {
+  if (filter === "all") return null;
+  if (filter === "open") return OPEN_APPLICATION_STATUSES;
+  return [filter];
+}
+
+/**
+ * 筛选栏角标：某一个筛选值下共有多少条。`null` 表示「这个值不给角标」。
+ *
+ * ⚠️ 复用 `applicationStatusesForFilter()`，**不在这里再写一遍状态集合**：
+ * 筛选栏上「待处理（2）」的 2 与首页卡片上的 2 必须是同一个数。
+ * 若这里写 `counts[item]`，`open` 会去查一个不存在的键（读数 `undefined`），
+ * 界面显示成「待处理（）」——一个不会报错、只会安静少一个数的错。
+ *
+ * ⚠️ `counts` 是**按状态的全量计数**（与关键词 / 游戏筛选无关，既有语义），
+ * 因此这里只做「把若干状态加起来」，不做任何额外的过滤。
+ */
+export function applicationCountForFilter(
+  counts: Record<CompanionApplicationStatus, number>,
+  filter: AdminApplicationStatusFilter,
+): number | null {
+  const statuses = applicationStatusesForFilter(filter);
+  if (statuses === null) return null;
+
+  let total = 0;
+  for (const status of statuses) total += counts[status] ?? 0;
+  return total;
+}
 
 /**
  * 默认筛选：**待查看**。
@@ -79,7 +164,7 @@ export const ADMIN_APPLICATION_STATUS_FILTER_LABELS: Record<AdminApplicationStat
 export const DEFAULT_ADMIN_APPLICATION_STATUS_FILTER: AdminApplicationStatusFilter = "pending";
 
 export const ADMIN_APPLICATION_STATUS_INVALID_MESSAGE =
-  "筛选条件 status 只能是 all / pending / reviewing / approved / rejected / withdrawn";
+  "筛选条件 status 只能是 all / open / pending / reviewing / approved / rejected / withdrawn";
 
 export function isAdminApplicationStatusFilter(value: string): value is AdminApplicationStatusFilter {
   return (ADMIN_APPLICATION_STATUS_FILTERS as readonly string[]).includes(value);
@@ -220,7 +305,7 @@ export function normalizeAdminReviewNote(raw: string): FieldResult<string> {
  * 做成参数只会让人以为可以按别的字段排，而「按状态排」在分页下几乎总是错的用法。
  */
 export type AdminApplicationListQuery = {
-  /** `all` 表示不限状态 */
+  /** `all` 表示不限状态，`open` 表示未终态（见 `AdminApplicationStatusFilter`） */
   status: AdminApplicationStatusFilter;
   /** 空串表示不搜索 */
   keyword: string;

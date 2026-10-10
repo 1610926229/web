@@ -10,8 +10,13 @@ import { mockComplaintRepository } from "./mockComplaintRepository";
  * 而不是「编号在仓储筛、昵称在服务层筛」这种读到一半才发现的分工。
  */
 export type AdminComplaintQueryFilter = {
-  /** null 表示「全部」 */
-  status: ComplaintStatus | null;
+  /**
+   * 命中的**真实领域状态集合**；`null` 表示「全部」。
+   *
+   * ⚠️ 只接受 `ComplaintStatus`：地址栏上的虚拟筛选值 `all` / `open` **不得**
+   * 出现在数据层，服务层调用前已用 `complaintStatusesForFilter()` 解析完毕。
+   */
+  statuses: readonly ComplaintStatus[] | null;
   /** null 表示「全部类型」 */
   type: ComplaintTypeKey | null;
 };
@@ -63,6 +68,15 @@ export type ComplaintRepository = {
 
   /** 某一笔订单的投诉统计（订单详情页用，避免为了一个角标把整页投诉都取回来）。 */
   summarizeComplaintsByOrder(orderId: string): Promise<ComplaintOrderStats>;
+
+  /**
+   * 某一笔订单的**全部**投诉（跨状态，按提交时间倒序）。
+   *
+   * 供「判断有没有未完结投诉」这类需要看**全部状态**的场景用：`summarizeComplaintsByOrder`
+   * 只给最新一条，而「有没有还停在 pending / processing 的」必须逐条看（同一订单允许多条
+   * 投诉，最新一条已 resolved 不代表没有更早的未完结投诉）。
+   */
+  listComplaintsByOrderId(orderId: string): Promise<Complaint[]>;
 
   /**
    * 管理端的**全量投诉**查询（P8C）：跨用户、按状态与类型筛选，按提交时间倒序返回全部命中记录。

@@ -15,6 +15,9 @@
  * `lib/services/orders.ts` 负责。
  */
 
+import type { CompanionReleaseRecord } from "./companionRelease";
+import type { CompanionCompletionInfo } from "./completion";
+import type { CouponFormKey } from "./coupon";
 import type { OrderComplaintSummary } from "./complaint";
 import type { ConversationStats } from "./message";
 import type { RefundSummary } from "./refund";
@@ -24,7 +27,7 @@ import type { AdminUserSummary } from "./user";
 /**
  * 用户端订单状态。
  *
- * - `paid`      已付款（下单即此状态；此时允许还没有陪玩）
+ * - `paid`      已付款（下单即此状态；此时允许还没有打手）
  * - `accepted`  已接单（必须有陪玩）
  * - `serving`   护航中（必须有陪玩）
  * - `completed` 已完成（必须有陪玩）
@@ -50,6 +53,38 @@ export type OrderCompanionSnapshot = {
 };
 
 /**
+ * 订单上的**券快照**（P1-4）。没使用优惠券时整项为 null。
+ *
+ * 冻结的字段是产品裁定 §9 要求的那一组（`claimId` 是本实现多加的一个，
+ * 用于回答「这张券被哪一单用掉了」）。冻结之后后台改券**不影响**这一单：
+ * 金额读 `couponDiscountAmount`（已经在金额域里），展示读这里，
+ * 两处都不会跟着券模板变。
+ *
+ * ⚠️ 金额字段是**整数分且可计算**，与 `valueLabel` 那种展示文案严格分开：
+ * 页面上要显示「满 100 减 10」就拼 `valueLabel`，要算钱就读 `discountAmount`。
+ *
+ * ⚠️ `discountAmount` 是**名义面额**，这一单实际抵掉的是金额域里的
+ * `couponDiscountAmount`（可能是被夹到原价后的更小值）。
+ * 两者刻意都留着：只留名义面额会算错钱，只留抵扣额则说不清「这张券本来值多少」。
+ */
+export type OrderCouponSnapshot = {
+  /** 被核销的那张领取记录 id */
+  claimId: string;
+  /** 券模板 id */
+  couponId: string;
+  name: string;
+  formKey: CouponFormKey;
+  /** 门槛（分）。满减券以外的形态为 null */
+  thresholdAmount: number | null;
+  /** 名义面额（分）。满减券以外的形态为 null */
+  discountAmount: number | null;
+  /** 券面值展示文案，如「满 100 减 10」 */
+  valueLabel: string;
+  /** 使用条件展示文案 */
+  conditionLabel: string;
+};
+
+/**
  * 订单（仓储内部类型）。
  *
  * 页面与接口**不直接返回本类型**：对外一律使用下面的两个 DTO，
@@ -70,6 +105,43 @@ export type Order = {
   completedAt: string | null;
   refundedAt: string | null;
 
+  /**
+   * **这一单历史上第一次被承接的时刻**（P1-4 验收整改轮）。
+   *
+   * ⚠️ **它只写一次，而且任何路径都不清空**——这正是它与 `acceptedAt` 的区别：
+   *
+   * | 字段 | 回答的问题 | 回到 `paid` 时 |
+   * |---|---|---|
+   * | `acceptedAt` | 这一单**此刻**是哪次接单的 | **清成 `null`**（否则用户端时间轴会把 `paid` 单渲染成「已接单」） |
+   * | `everAcceptedAt` | 这一单**有没有人接过** | **原样保留** |
+   *
+   * ## 它为什么必须存在
+   *
+   * 优惠券返还的判据是产品裁定的一句话：**「订单历史上是否曾经被承接」**
+   * （`01-prompt.md` 验收整改轮 §一）。而这条信息在别处**一条都查不到**：
+   *
+   * | 候选 | 为什么不行 |
+   * |---|---|
+   * | `acceptedAt` | 回公共池 / 打手取消即被清空 |
+   * | `Dispatch.acceptedByCompanionId` / `acceptedVia` | 回公共池即被清空 |
+   * | `CompanionAcceptEvent` | 客服直接指定**不写**它（P1-5 §九-F 裁定），且裁定明令不得复用 |
+   * | `CompanionReleaseRecord` | 只在**退出履约**时写：当前处于 `accepted` / `serving` / `completed` 的单一条都没有 |
+   *
+   * 于是「曾经被承接」必须有它自己的落点。台账里那条 `accepted → 客服取消/回池 → paid →
+   * 用户退款` 的路径，只有本字段能回答「不返券」。
+   *
+   * ## 谁写它
+   *
+   * **只有 `applyOrderAccepted()`**——即「订单进入 `accepted`」的唯一写入器。
+   * 它同时服务两条来路（打手自己接单、客服直接指定 / 换人），而**两条都算被承接**：
+   * 客服指定之后订单已经产生真实服务承诺，券因此不返还
+   * （裁定 §一.3：**不得**复用接单榜的 `acceptedVia === "companion"` 来判断返券）。
+   *
+   * ⚠️ 写入用 `order.everAcceptedAt ?? at`：第二个打手接手同一单时**不刷新**它。
+   * 它回答的是「第一次」。
+   */
+  everAcceptedAt: string | null;
+
   // —— 下单内容快照 ——
   productId: string;
   productTitle: string;
@@ -87,21 +159,129 @@ export type Order = {
   remark: string;
   addons: OrderAddonSnapshot[];
 
-  // —— 金额（服务端计算，单位：分）——
+  // —— 下单内容金额（服务端计算，单位：分）——
   /** 单价 × 数量 */
   itemsAmount: number;
   /** 增值服务合计（按单计费，不随数量变化） */
   addonsAmount: number;
+  /**
+   * 商品金额 + 增值服务金额 = **优惠前的应付总额**。
+   *
+   * ⚠️ 它**不是**渠道实收。渠道实际收的钱是金额域的 `actualPaidAmount`：
+   * 用了满减券之后 `totalAmount > actualPaidAmount`（P1-4 起会真的发生）。
+   * 退款也按 `actualPaidAmount` 算，不按它。
+   *
+   * 两个字段的定义不同，不能互相替代：这一个说的是「这一单买了多少钱」，
+   * 那一个说的是「用户实际付了多少」。
+   */
   totalAmount: number;
 
+  // —— 金额域（P0-3，服务端计算，单位：分）——
+  // 这一组回答「这一单的钱怎么分、退过多少」，与上面三个（卖了什么、收了多少）分开表达。
+  // 用了满减券时 originalAmount === totalAmount 仍然成立（两者都是优惠前金额），
+  // 但 actualPaidAmount 会更小。
   /**
-   * 陪玩快照；未绑定时为 null。
+   * **用户这一单优惠前的原始应付总金额** = 商品金额 + 全部增值服务金额。
    *
-   * 「未绑定」只允许出现在 `paid`：已接单 / 护航中 / 已完成必须有陪玩，
+   * ⚠️ 它**不表达「哪些钱参与分账」**——那是 `resolveCompanionRevenueBase()` 的事。
+   * 当前两者数值相同（R3 已确认：由打手实际履约提供的增值服务参与分账），
+   * 但这个等式是**规则的结果**，不是 `originalAmount` 的定义；
+   * 将来出现平台自己履约的收费项时，它会进原价而不进分账基数。
+   *
+   * 下单那一刻算好并**存进订单**：读取时不得用今日的规则或今日的商品价格重算——
+   * 商品改价不影响历史订单。
+   */
+  originalAmount: number;
+  /**
+   * 这一单**实际**抵扣掉的券金额（P1-4 起可能非 0）。
+   *
+   * ⚠️ 它与 `coupon?.discountAmount`（券的名义面额）**可能不相等**：
+   * 满 10 减 100 的券在 50 元的单上，名义面额是 100 元，实际只抵掉 50 元。
+   * 算钱一律读这个字段，读券面看 `coupon`。
+   */
+  couponDiscountAmount: number;
+  /** 用户实付 = originalAmount − couponDiscountAmount。**分账的起点** */
+  actualPaidAmount: number;
+  /** 分账比例快照（基点，8000 = 80%），下单时从商品冻结 */
+  companionRateSnapshot: number;
+  /** 护航收益 = floor(分账基数 × 比例 / 10000)。唯一的取整处 */
+  companionBaseIncome: number;
+  /** 平台净收入 = actualPaidAmount − companionBaseIncome。**允许为负**（券由平台承担时） */
+  clubNetIncome: number;
+  /** 累计已退。全额退款后等于 actualPaidAmount（P1 接入退款金额公式时维护） */
+  refundedAmount: number;
+
+  /**
+   * 这一单用掉的券快照（P1-4）。没用券时为 null。
+   *
+   * ⚠️ **退款不改动它，一个字都不改**——`coupon` / `couponDiscountAmount` /
+   * `actualPaidAmount` 在退款之后**原样保留**。它们记录的是「这一单当初发生了什么」，
+   * 不是「现在还能不能用」。
+   *
+   * ⚠️ 但「**券的使用资格**会不会被退还」是**另一件事**（P1-4 验收整改轮 §一 / §二）：
+   * 从未被任何打手承接的订单退款后，`CouponClaim` 会 `used → unused`。
+   * 于是会出现「订单快照说用过这张券、而这张券现在又是 `unused`」——
+   * **这是正确的**，不是矛盾：订单历史仍然说明「当时用过」，
+   * 而使用资格因为「从未被承接 + 退款成功」被还回去了。
+   *
+   * `claimId` 同时也是返券的**唯一入口**：退款时靠它找回当初那张 Claim
+   * （`lib/data/couponRedemptionTransaction.ts` 的 `restoreCouponClaimForOrder`）。
+   */
+  coupon: OrderCouponSnapshot | null;
+
+  /**
+   * **实际接到这单**的打手 id；还没有人接时为 null（P0-5 改名，原名 `companionId`）。
+   *
+   * ⚠️ 它回答的是「**谁在履约**」，不是「用户想要谁」。两件事现在是两个字段：
+   *
+   * | 问题 | 字段 | 写入时机 |
+   * |---|---|---|
+   * | 用户**指定**过谁 | `Dispatch.exclusiveCompanionId` | 下单那一刻（结算页选的人） |
+   * | 实际**接到**的是谁 | 本字段 | 接单那一刻 |
+   *
+   * 一条真实路径：用户指定 A → A 在独占期内没接 → 自动进公共池 → B 接单。
+   * 此时 `Dispatch.exclusiveCompanionId` 是 A、本字段是 B，两个事实都留得住。
+   *
+   * 旧名字同时表达这两件事，是 P0-5 之前「下单即绑定」那套模型的遗留：那时
+   * 「选的人」与「接的人」必然是同一个。现在它们可以是两个人，一个字段就再也
+   * 表达不了——这也正是改名的理由。
+   *
+   * ⚠️ 它**只由接单事务写**（`lib/data/companionDispatchTransaction.ts`），
+   * 而且与 `Dispatch.acceptedByCompanionId` 在同一段无 `await` 的代码里一起写：
+   * 两处永远一致，结构上不可能只写一边。
+   *
+   * 「还没有人接」只允许出现在 `paid`：已接单 / 护航中 / 已完成必须有打手，
    * 否则页面会显示成「等待接单」，与真实进度矛盾。
    */
-  companionId: string | null;
+  actualCompanionId: string | null;
+  /** 实际接单打手的公开信息快照；还没有人接时为 null */
   companion: OrderCompanionSnapshot | null;
+
+  // —— 投诉窗口快照（P0-9）——
+  /**
+   * **进入 `completed` 那一刻**冻结的投诉窗口时长（分钟）。
+   *
+   * 取的是当时的 `PlatformConfig.complaintWindowMinutes`；未 completed 时为 null。
+   * 冻结之后**永不重算**：后台之后改配置，已经 completed 的历史订单的窗口不变
+   * （EX-CONFIG-06「改配置不追溯」）。这与 `companionRateSnapshot` /
+   * `publicTimeoutMinutesSnapshot` 是同一条快照语义。
+   *
+   * ⚠️ 与 `Dispatch.publicTimeoutMinutesSnapshot` 的一处差别：这里**允许为 null**，
+   * 而 P0-9 之前就已经 completed 的历史订单**不会被回溯补写**（补写要么凭空编一个
+   * 窗口、要么拿今天的配置去套一张旧订单，后者正是被禁止的追溯）。因此 null 的含义是
+   * 「这一单不是在投诉窗口规则下完成的」——那时它的普通投诉入口按原有规则处理。
+   */
+  complaintWindowMinutesSnapshot: number | null;
+  /**
+   * 普通投诉入口的截止时刻 = `completedAt + complaintWindowMinutesSnapshot`（P0-9）。
+   *
+   * 两件事都由它回答，且**必须是同一个时刻**：
+   * - 用户在这一单上还能不能发起**普通投诉**（`deadline <= now` 之后入口关闭）；
+   * - 打手这一单的收益什么时候能解冻（`Earning.availableAt` 就等于它）。
+   *
+   * 未 completed 时为 null。
+   */
+  complaintDeadlineAt: string | null;
 };
 
 /**
@@ -120,9 +300,42 @@ export type OrderListItem = {
   productCoverUrl: string;
   specName: string;
   quantity: number;
-  totalAmount: number;
+  /**
+   * 单位：分。**用户实付** = 原价 − 券抵扣（P1-4 补）。
+   *
+   * ⚠️ 列表上**只有这一个金额**，而且它就是卡片上那句「实付」。（P1-4 之前这里叫
+   * `totalAmount`，含义是**优惠前**应付总额；接了满减券之后它比用户真正付掉的钱大，
+   * 再拿它渲染「实付」就是直接告诉用户他多花了钱。）优惠前的原价在详情页上叫
+   * `originalAmount`——全仓库对「原价」只有这一个名字，列表刻意不再带第二个金额。
+   */
+  actualPaidAmount: number;
   /** 未绑定时为 null，页面显示「等待接单」 */
   companion: OrderCompanionSnapshot | null;
+};
+
+/**
+ * 派单进度摘要（P0-5）：这一单现在在哪个池子里等人接、等到什么时候。
+ *
+ * ⚠️ 只有**还在等人接**的订单有这一项（`paid` 且未被人接走），其余为 null：
+ * 已接单 / 已退款时订单自己的状态已经说明了一切，再显示一行池子进度只会和状态栏打架。
+ *
+ * ⚠️ 这里**不说「用户当初指定了谁」**。那是用户自己做的选择，但把他人的昵称与头像
+ * 搬进订单详情属于另一件事（谁有权看到某位护航的资料），本批次不做。
+ * 「指定」与「实际」两个事实的对照在**管理端**订单详情上（见 `AdminOrderDetail`）。
+ */
+export type OrderDispatchProgress = {
+  /** 当前所在的池 */
+  pool: "exclusive" | "public";
+  /** 池子的显示名（文案集中在 `lib/constants/dispatch.ts`） */
+  poolLabel: string;
+  /** 当前池子的截止时间 */
+  deadlineAt: string;
+  /**
+   * 服务端算好的剩余秒数。**只用于显示**，不参与任何判定——
+   * 能不能接、要不要退款一律由服务端的 `deadline <= now` 决定，
+   * 客户端算出来的时间不可信。
+   */
+  remainingSeconds: number;
 };
 
 /** 详情页的状态时间轴节点：只包含**已经发生**的节点。 */
@@ -141,14 +354,51 @@ export type OrderTimelineEntry = {
  */
 export type OrderAllowedActions = {
   canRequestRefund: boolean;
+  /**
+   * 能不能**直接退款**（P0-12）：`paid` / `accepted` 这两档「尚未开始服务」的订单，
+   * 由订单本人一点即退，**不需要客服或管理员审批**。
+   *
+   * 与 `canRequestRefund` **互斥**，而且必须互斥：两者同时为真就意味着同一档订单
+   * 有两条退款路径（一条当场退钱、一条等审核）。
+   *
+   * ⚠️ **这条路退的是「剩余可退额」，不再是恒定的实付全额**（P0-13 整改）：
+   * 部分退款**不改订单状态**，因此一张被部分退款过的订单可以经 P0-11 回池
+   * 回到 `paid`，此时它仍是 `paid`、仍然该有直退入口，但可退的只剩差额。
+   * 金额由 `directRefundAmountCents` / `alreadyRefundedAmountCents` 给出。
+   */
+  canDirectRefund: boolean;
+  /**
+   * 直接退款**这一次会退回多少**（分）。`canDirectRefund` 为假时是 `null`。
+   *
+   * 服务端算好（`实付 − 累计已退`）再给页面：客户端**不做金额算术**
+   * （`architecture-rules.md` §三）。按钮的文案必须说这个数，
+   * 而不是说订单实付——否则在「已部分退过」的单上会报一个到不了账的金额。
+   */
+  directRefundAmountCents: number | null;
+  /**
+   * 这一单在此**之前**已经退回过多少（分）。`canDirectRefund` 为假时是 `null`。
+   *
+   * 为 `0` 表示这是第一次退款，文案不必提「已退过」。
+   * 单独给出来是为了让确认区能解释「为什么不是实付全额」——
+   * 而不是让页面拿 `实付 − 本次可退` 自己减一遍。
+   */
+  alreadyRefundedAmountCents: number | null;
   canCancelRefund: boolean;
   canOpenConversation: boolean;
   canSubmitComplaint: boolean;
   /**
    * 能不能评价这一单。
    *
-   * 与退款同理，**不是只看订单状态**：还要看这一单有没有评价、有没有进行中 / 已通过的退款
-   * （见 `lib/constants/reviews.ts` 的 `canReviewOrder`）。前端只按这个值显示入口。
+   * ⚠️ 判据是**这一单有没有完成过服务**（`completedAt`）＋**有没有评价过**，
+   * 见 `lib/constants/reviews.ts` 的 `canReviewOrder`。
+   *
+   * ⚠️ **退款不参与这个判断**（P1-8 `D18` / `D19`）：已经完成过的订单，
+   * 哪怕后来部分或全额退款，照样可以评价。因此这里**不能**用订单当前状态
+   * （`status === "completed"`）来判断——一张全额退款的订单状态是 `refunded`，
+   * 但它仍然可评；反过来，`paid → refunded` 那种**没完成就退款**的订单一律不可评，
+   * 而它的状态同样不是 `completed`。两个方向的差异都只有 `completedAt` 分得清。
+   *
+   * 前端只按这个值显示入口，不自己推断。
    */
   canReview: boolean;
 };
@@ -172,8 +422,37 @@ export type OrderDetail = OrderListItem & {
   itemsAmount: number;
   addonsAmount: number;
   addons: OrderAddonSnapshot[];
+
+  /**
+   * 金额域（P0-3）：详情页用它显示「原价 / 实付 / 护航收益」三行。
+   *
+   * ⚠️ **不含 `clubNetIncome`**：平台净收入是平台自己的账，用户端没有任何展示位置，
+   * 放进 DTO 只会让它顺着接口响应流到浏览器。管理端的订单详情另有 DTO。
+   */
+  originalAmount: number;
+  couponDiscountAmount: number;
+  actualPaidAmount: number;
+  companionRateSnapshot: number;
+  /** 护航收益：这一单分给打手的钱（用户可见，用于「护航收益 ¥40」这一行） */
+  companionBaseIncome: number;
+  refundedAmount: number;
+  /**
+   * 用掉的券（P1-4）；没用券为 null。
+   *
+   * 详情页据此显示「优惠券 −¥10 满100减10」这一行。⚠️ 与 `couponDiscountAmount`
+   * 的分工：金额读那个，券名与券面文案读这里。
+   */
+  coupon: OrderCouponSnapshot | null;
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
+
+  /**
+   * 派单进度：还在等人接时给出当前池与截止时间，其余为 null（P0-5）。
+   *
+   * 它回答的是「我的单现在在哪等人接」，与「等的是谁」是两件事：
+   * 用户当初指定的人记在派单上，被谁接走则体现在 `companion` 与订单状态里。
+   */
+  dispatchProgress: OrderDispatchProgress | null;
 
   /** 这一单的退款申请摘要；没有申请过为 null */
   refundSummary: RefundSummary | null;
@@ -185,6 +464,415 @@ export type OrderDetail = OrderListItem & {
   reviewSummary: ReviewSummary | null;
   allowedActions: OrderAllowedActions;
 };
+
+/* ───────────────────────── 打手端订单 DTO（P0-6） ───────────────────────── */
+
+/**
+ * 打手「我的订单」列表项。
+ *
+ * ## 归属只按 `actualCompanionId`
+ *
+ * 列表与服务端详情的归属判定都是**同一件事**：
+ * `Order.actualCompanionId === 当前 companionId`。
+ * `exclusiveCompanionId === 当前 companionId` **绝不等于**订单归本人——
+ * 那是「用户当初选了谁」的历史事实，与「现在谁在履约」是两个字段
+ * （见 `Order.actualCompanionId` 与 `Dispatch.exclusiveCompanionId`）。
+ *
+ * ## 刻意不含的东西
+ *
+ * ⚠️ **平台金额域一个都没有**：`clubNetIncome` / `companionBaseIncome` /
+ * `companionRateSnapshot` / `refundedAmount` 全部不在本 DTO 上。
+ * 打手要完成这一单所需的信息里没有一分钱是必须的，而「护航收益」属于收益域、
+ * 「平台净收入」属于平台自己的账——把它们带进打手端响应，只是让内部账目
+ * 顺着接口流到浏览器。
+ *
+ * ⚠️ **P0-15 起有唯一一个例外：`netIncomeAmount`**——它是**打手自己的钱**，
+ * 不是平台的账。加它的理由不是「顺便显示一下」，而是产品规则要求：
+ * 一单被退款之后打手**必须立刻看到「本单收益 ¥0」**，否则他会继续
+ * 按「这一单还能挣到钱」来安排时间。它不是平台金额域的第二份副本：
+ * 与「我的收益」页上的 `netAmount` 同源同义，只是换了个落点。
+ *
+ * ⚠️ **也不含**：`userId`（下单人是另一个人，给 id 没有用途）、
+ * 管理员备注（内部信息）、售后 / 投诉 / 退款摘要（那属于用户与客服的页面）、
+ * `exclusiveCompanionId`（那是用户的选择，服务端据此收窄归属，
+ * 但「用户当初想要谁」不该反过来告诉接单的人），以及任何内部审计记录。
+ *
+ * ⚠️ 本类型与其它的订单 DTO 一样是**显式挑字段**的：给 `Order` 新增字段
+ * 不会自动出现在打手端响应里。
+ */
+export type CompanionOrderListItem = {
+  id: string;
+  orderNo: string;
+  status: OrderStatus;
+  /** 状态中文名（`ORDER_STATUS_LABELS`）。服务端给，页面不自己维护一份文案 */
+  statusLabel: string;
+  /**
+   * 打手侧的**展示状态**（P0-15）——与 `status` 是两条线。
+   *
+   * 一单被部分退款（比如 10%）之后，订单的真实生命周期照走（`serving` / `completed`），
+   * 但打手这一单的钱已经全部取消，因此他看到的应当是「已退款」。
+   * 全额退款时两者恰好相同（都是 `refunded`）。
+   *
+   * ⚠️ **由服务端算好**（`resolveCompanionDisplayStatus`）：页面不得自己写
+   * `refundedAmount > 0 ? … : …`——那会把同一条口径复制到每一个渲染点上。
+   *
+   * ⚠️ **它不参与任何可写性判断**：聊天的可写性看的是真实订单状态
+   * （`isOrderChatClosed`），不是它。拿展示状态去锁沟通，会让部分退款的
+   * 售后沟通在最需要的时候断掉。
+   */
+  displayStatus: OrderStatus;
+  /** 展示状态的中文名。服务端给，与 `statusLabel` 同一个来源（`ORDER_STATUS_LABELS`） */
+  displayStatusLabel: string;
+  /**
+   * **本单收益**净额（分）——打手自己在这一单上最终拿到多少。
+   *
+   * | 情形 | 值 |
+   * |---|---|
+   * | 有收益记录（订单已结算） | `incomeAmount − reversedAmount` |
+   * | 没有收益记录，但订单已退款 | `0`（规则：退款把这一单收益取消） |
+   * | 没有收益记录，也未退款 | `null`（这笔账还没产生） |
+   *
+   * ⚠️ **`null` 与 `0` 是两件事**，页面必须分开渲染：`null` 是「还没结算」，
+   * `0` 是「结算过、但一分不剩」。合并成一句「¥0」会让尚未完成的订单
+   * 看起来像已经被退款了。
+   *
+   * ⚠️ **第二行那条 0 是规则给的，不是从收益记录读的**：订单在完成之前根本没有
+   * Earning（`settleOrderCompletion` 只在 `serving → completed` 时建它），
+   * 而「完成前被退款」恰恰是最常见的一类退款。若这里回 `null`，
+   * 打手就会看到一行「本单收益 —」，而事实是他这一单挣了 0 元。
+   *
+   * ⚠️ **服务端算好给**，页面不做减法——金额算术只有一处
+   * （与 `CompanionEarningItem.netAmount` 同一条约定）。
+   */
+  netIncomeAmount: number | null;
+  /** 下单（支付成功）时间 */
+  paidAt: string;
+  /** 接单时间；本列表里都是他接过的单，因此正常有值，历史数据缺失时为 null */
+  acceptedAt: string | null;
+  productTitle: string;
+  productCoverUrl: string;
+  specName: string;
+  quantity: number;
+  gameName: string;
+  region: string;
+  /**
+   * 此刻能不能主动取消接单。
+   *
+   * ⚠️ **由服务端算好**（就是 `status === "accepted"`）：前端不得自己用状态推断。
+   * 状态与规则各写一份，分叉的那一天页面上会出现一个点下去必然失败的按钮。
+   * 这里只是**诚实性**提示，真正的保护在 `cancelAcceptedOrder` 的原子区段里。
+   */
+  canCancel: boolean;
+  /**
+   * 此刻能不能开始服务（P0-7）。
+   *
+   * ⚠️ **与 `canCancel` 同一条契约**：**由服务端算好**（就是 `status === "accepted"`），
+   * 前端不得自己用状态推断。两个旗标成对存在，是因为它们回答的是同一件事的
+   * 两个方向——「这一单此刻允许我做什么」；把它们拆到两个类型上，第一次有人
+   * 只改一处时就会分叉，而分叉的那一天页面上会出现一个点下去必然失败的按钮。
+   *
+   * ⚠️ 列表卡片不渲染它（与 `canCancel` 一样，按钮长在详情页上），但仍然放在这个
+   * **共享**项上：详情就是「列表项 + 若干字段」，动作旗标属于两者共同的那一层。
+   *
+   * 它只是**诚实性**提示，真正的保护在 `startCompanionOrder` 的原子区段里
+   * （同一段代码里再判一次归属与状态）。
+   */
+  canStart: boolean;
+};
+
+/**
+ * 打手订单详情：在列表项之上补齐履约必需的字段。
+ *
+ * ⚠️ `gameAccountId` 与 `remark` **只在这里出现**（与公共池 DTO 刻意相反）：
+ * 接单**之前**打手没有任何理由看到别人的游戏账号；接单**之后**他要照账号进游戏
+ * 才能完成这一单，不给就等于让他做不了活。这条界线是「履约所需」，
+ * 不是「打手能看的都给他」——因此详情里仍然没有联系方式、平台展示 ID、头像、
+ * 金额域与售后摘要。
+ *
+ * ⚠️ `Order` 上**没有**「服务要求」这个字段：需求里提到过它，但它从未落到订单模型上
+ * （用户提交的就是 `remark`）。这里不为了凑一个字段名去虚构它——
+ * 那会让页面读到一个永远为空的字段，而真正有内容的 `remark` 反而没人看。
+ */
+export type CompanionOrderDetail = CompanionOrderListItem & {
+  /**
+   * 开始服务的时刻（P0-7）；还没开始为 null。
+   *
+   * ⚠️ 它是**展示**字段，因此**只进详情、不进列表项**：列表卡片只显示下单与接单
+   * 两个节点，`serving` 那一单在列表里已经由状态名「护航中」说清楚了
+   * （与 `gameAccountId` / `remark` 同一条 DTO 最小化取舍）。
+   *
+   * 与 `acceptedAt` 一样是**历史事实**：进入 `serving` 不会抹掉接单时间，
+   * 页面把两个节点都显示出来——打手要能回答「我是几点接的、几点开始的」。
+   */
+  servingAt: string | null;
+  gameAccountId: string;
+  remark: string;
+  addons: OrderAddonSnapshot[];
+  /** 增值服务合计（分） */
+  addonsAmount: number;
+  /** 单价（分） */
+  unitPrice: number;
+  /** 单价 × 数量（分） */
+  itemsAmount: number;
+  /** 商品 + 增值服务合计（分）。**不含**平台分账信息 */
+  totalAmount: number;
+  /**
+   * 下单用户的**必要**信息：只够在页面上称呼对方。
+   *
+   * ⚠️ 刻意**只有昵称**：没有联系方式、没有 `displayId`、没有头像。
+   * 打手与用户的联系发生在聊天里（后续批次），不需要靠订单详情带出身份信息。
+   * 用户记录查不到时给空串，而不是让整页报错——订单本身是有效的。
+   */
+  customerNickname: string;
+  /**
+   * 这一单的完成材料摘要（P0-8）。
+   *
+   * 只回答「提交过没有、此刻能不能提交、待审核到什么时候、被驳回了什么」，
+   * **由服务端算好**（`buildCompanionCompletionInfo`）：页面不得自己用订单状态
+   * 推断能不能提交——那会把「serving 但已有 pending」这类情况算错。
+   */
+  completion: CompanionCompletionInfo;
+};
+
+/** 打手「我的订单」一次要显示的全部内容。 */
+export type CompanionOrderListData = {
+  items: CompanionOrderListItem[];
+};
+
+/**
+ * 主动取消接单的结果（事务层）。
+ *
+ * 失败情形**逐个分开**，与 `DispatchAcceptResult` 同一取舍：它们对打手要说的话
+ * 不一样，页面上的处置也不一样。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的取消了 | 200 |
+ * | `replayed` | 同一个幂等键第二次到达（连点两次、网络重试） | 200，`changed: false` |
+ * | `not-found` | 订单不存在，**或**不是本人实际履约 | 404（不泄露存在性） |
+ * | `not-accepted` | 是本人的单，但状态已不是 `accepted` | 400 |
+ *
+ * ⚠️ 两种失败**必须用不同的状态码**：`not-found` 是「这一单与你无关」，
+ * 而 `not-accepted` 是「你点了一个此刻不该存在的按钮」——后者不是重放，
+ * 也不能按幂等成功处理（见 D5）。
+ *
+ * ⚠️ 两个成功分支的 `status` 都是**字面量** `"paid"`，含义是
+ * **「这次取消把订单置成了什么状态」**——即本次操作的结果，而**不是**「订单此刻的状态」。
+ * 它会一直是 `"paid"`，因为在同一条原子区段里订单刚被写成 `paid`。
+ *
+ * 这解释了一个看似反直觉的场景：打手 A 用键 K 取消成功 → 订单回到 `paid` →
+ * 打手 B 接走（订单变 `accepted`）→ A 用**同一个键 K** 重放，接口仍然回答 `status: "paid"`。
+ * 这不是 bug：**重放必须返回与第一次完全相同的响应**（`api-contract.md` §2.8），
+ * 去读实时状态反而会让同一个请求在两次到达时给出不同答案，那才是幂等被破坏。
+ * 所以消费方**不要**把这个字段当作订单现状，要看现状请查详情接口。
+ *
+ * 唯一例外是 `not-accepted`：它带的是**当前**状态 `OrderStatus`，因为那正是
+ * 「你点了一个此刻不该存在的按钮」这句话要回答的东西。
+ */
+export type CompanionCancelOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      status: "paid";
+      /** 本次写入的退出历史 id */
+      releaseRecordId: string;
+      cancelledAt: string;
+      changed: true;
+    }
+  | {
+      kind: "replayed";
+      orderId: string;
+      orderNo: string;
+      status: "paid";
+      /** **第一次**写入的那条退出历史 id（重放不产生第二条） */
+      releaseRecordId: string;
+      /** **第一次**取消的时刻（重放不刷新它） */
+      cancelledAt: string;
+      changed: false;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-accepted"; status: OrderStatus }
+  /**
+   * 这一单当前那份 `pending` 完成材料的索引与记录对不上（P0-11 起这条路径也会作废材料）。
+   *
+   * **不可能状态**：存储已经被写坏。它是唯一一处「解除履约」可能失败的地方，
+   * 而且发生在任何写入之前，因此这时**什么也没写**——如实报 500，
+   * 不编一个「已取消」的结果出来（文案见 `cancelCompanionOrder`）。
+   */
+  | { kind: "inconsistent"; orderId: string };
+
+/**
+ * 开始服务的结果（事务层，P0-7）。
+ *
+ * 与 `CompanionCancelOutcome` **刻意有一处不对称**：这里**没有幂等键**，
+ * 因此也没有「键命中」这种失败路径——幂等的判据是**状态本身**
+ * （已经是 `serving` 且是我的单就是重放），理由见 `startCompanionOrder` 的头部。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的开始服务了 | 200 |
+ * | `replayed` | 这一单**已经是** `serving` 且归本人（重复点击、网络重试） | 200，`changed: false` |
+ * | `not-found` | 订单不存在，**或**不是本人实际履约 | 404（不泄露存在性） |
+ * | `not-startable` | 是本人的单，但状态不是 `accepted` | 400 |
+ *
+ * ⚠️ 两种失败**必须用不同的状态码**，与取消同一条理由：`not-found` 是
+ * 「这一单与你无关」，`not-startable` 是「你点了一个此刻不该存在的按钮」——
+ * 后者不是重放（`paid` / `completed` / `refunded` 都不该被拉进 `serving`），
+ * 因此必须失败而不是幂等成功。
+ *
+ * ⚠️ 两个成功分支的 `status` 都是字面量 `"serving"`，含义是
+ * **「这次开始服务把订单置成了什么状态」**，而**不是**「订单此刻的状态」。
+ * 与取消的 `"paid"` 同一条约定：重放返回与第一次完全相同的响应
+ * （`api-contract.md` §2.8），去读实时状态反而会让同一个请求两次到达给出不同答案。
+ *
+ * `servingAt` 在两个成功分支里都是**第一次写入的那一刻**（重放不刷新它）——
+ * 这正是「重复点击不改变开始时间」这句话对调用方的表达。
+ *
+ * ⚠️ 它**允许为 null**，与 `Order.servingAt` 一致，但 null 只可能出现在重放分支上：
+ * 一张状态已经是 `serving`、而 `servingAt` 从未写下的历史记录（种子数据 / 迁移遗留）。
+ * 那时如实给出 null，而不是**编一个开始时间**——「这一单是几点开始的」如果不知道，
+ * 说不知道才是对的。正常路径（本次真的推进）写入器一定把它写下来，因此不会是 null。
+ */
+export type CompanionStartOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      status: "serving";
+      /** 本次写入的开始服务时刻 */
+      servingAt: string | null;
+      changed: true;
+    }
+  | {
+      kind: "replayed";
+      orderId: string;
+      orderNo: string;
+      status: "serving";
+      /** **第一次**开始服务的时刻（重放不刷新它）；见上面关于 null 的说明 */
+      servingAt: string | null;
+      changed: false;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-startable"; status: OrderStatus };
+
+/* ───────────────── 解除当前履约：客服换人 / 封禁回池（P0-11） ───────────────── */
+
+/**
+ * 客服「退回公共池」的结果（事务层，P0-11）。
+ *
+ * 与打手主动取消（`CompanionCancelOutcome`）是**同一件事的另一个触发者**：
+ * 两者都写退出历史、都清履约绑定、都把派单送回公共池、都通知用户。
+ * 因此这里是**独立的类型**而不是复用：打手那条带幂等键（连点两次要能重放），
+ * 客服这条没有键——幂等的判据是**状态本身**（订单已经不在履约中就是重复点击），
+ * 与 `StaffCompletionApproveOutcome` 同一口径。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的解除了 | 200 |
+ * | `not-found` | 订单不存在 | 404 |
+ * | `not-releasable` | 订单存在，但当前没有打手在履约 | 400 |
+ * | `dispatch-missing` | 订单说有人在履约、派单记录却不见了 | 500（数据不自洽） |
+ * | `inconsistent` | 完成材料的 pending 索引与记录对不上 | 500（不可能状态，见下） |
+ *
+ * ⚠️ **没有 `replayed` 分支**：客服点第二次时订单已经不在履约中，走到的是
+ * `not-releasable`。那里给出的当前状态正好回答了「你点了一个此刻不该存在的按钮」，
+ * 比一个假装成功的重放更诚实——与打手取消的 `not-accepted` 同一条裁决（D5）。
+ *
+ * ⚠️ 两个 500 分支都是**不可能状态**（同一段无 `await` 的代码里既读到订单绑着人、
+ * 又发现派单 / 完成材料对不上）。它们存在是为了**宁可整件事失败**，
+ * 而不是把订单写回 `paid` 却留下一个没回池的派单、或一份回池后还会被自动通过的完成材料。
+ */
+export type StaffOrderReleaseOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      /** 解除**之前**这一单处于哪个状态。两个状态都会被退回公共池 */
+      previousStatus: "accepted" | "serving";
+      /** 本次写入的退出历史 id */
+      releaseRecordId: string;
+      releasedAt: string;
+      changed: true;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-releasable"; status: OrderStatus }
+  | { kind: "dispatch-missing" }
+  | { kind: "inconsistent"; orderId: string };
+
+/**
+ * 客服**直接指定新打手**接替这一单的结果（事务层，P0-11）。
+ *
+ * 与原单状态无关的那部分动作与「退回公共池」完全一样（同一段原子区段、
+ * 同一个写入器），差别只有两处：**派单不回公共池**（直接改绑给新打手）、
+ * 订单在同一段同步代码里 `serving → paid → accepted`。
+ *
+ * | 结果 | 含义 | 接口 |
+ * |---|---|---|
+ * | `ok` | 本次真的换人了 | 200 |
+ * | `not-found` | 订单不存在 | 404 |
+ * | `not-replaceable` | 订单存在，但当前没有打手在履约 | 400 |
+ * | `companion-not-found` | 要指定的打手不存在 | 400 |
+ * | `companion-unavailable` | 要指定的打手此刻不能接单 | 400 |
+ * | `self-order` | 要指定的人就是下单用户本人 | 400 |
+ * | `same-companion` | 要指定的人就是此刻正在履约的那位 | 400 |
+ * | `dispatch-missing` / `inconsistent` | 数据不自洽 | 500 |
+ *
+ * ⚠️ **`ok` 分支只代表「换人这件事写完了」**：新打手此刻处于 `accepted`，
+ * 与他自己点「接单」拿到的状态完全一样（`acceptedAt` = 本次时刻）。他不被跳过任何步骤——
+ * 「开始服务」仍然要他本人点，完成材料仍然要他本人交。
+ *
+ * ⚠️ **没有 `replayed` 分支**：换人的幂等判据是 `same-companion`
+ * （已经换成他了，再点一次就是在做同一件事）——它按 400 回答而不是假装成功，
+ * 与「退回公共池」的 `not-releasable` 同一条理由。
+ */
+export type StaffOrderReplaceOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      /** 解除**之前**这一单处于哪个状态 */
+      previousStatus: "accepted" | "serving";
+      /** 被解除的那位打手（退出历史里的那位） */
+      previousCompanionId: string;
+      /** 新指定的打手 */
+      newCompanionId: string;
+      /** 本次写入的退出历史 id */
+      releaseRecordId: string;
+      replacedAt: string;
+      changed: true;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-replaceable"; status: OrderStatus }
+  | { kind: "companion-not-found" }
+  | { kind: "companion-unavailable" }
+  | { kind: "self-order" }
+  | { kind: "same-companion" }
+  | { kind: "dispatch-missing" }
+  | { kind: "inconsistent"; orderId: string };
+
+/**
+ * 打手被下架（`enabled = false`）时，把他**手上所有还在履约的订单**退回公共池的结果
+ * （事务层，P0-11，**同步**）。
+ *
+ * ⚠️ 它**不是一个接口**，没有对外入口：唯一调用方是
+ * `adminCompanionTransaction.ts` 的 `setCompanionFlags()`，且必须在那一段
+ * 无 `await` 的原子区段里被调用（「资格下架」与「手上的单被解除」一旦分开，
+ * 就会出现「他已经被停用、订单却还挂在他名下」的中间状态——
+ * 而那正是 EX-COMP-01 要禁止的那一瞬）。
+ *
+ * ⚠️ `ok` 的 `releasedOrderIds` **允许为空**：绝大多数的停用都没有在履约的订单，
+ * 那不是错误，也不该写任何一条退出历史。
+ *
+ * ⚠️ 两个失败分支都是**不可能状态**：调用方已经在同一段同步代码里确认过这位打手
+ * 存在且未移除，而订单与派单 / 完成材料在同一段代码里不会各自变化。
+ * 出现时**整件事失败**（连同那次停用一起不写）——留下「人已停用、单还在他名下」
+ * 比让管理员重试一次坏得多。
+ */
+export type CompanionOrdersReleaseOutcome =
+  | { kind: "ok"; companionId: string; releasedOrderIds: string[] }
+  | { kind: "dispatch-missing"; orderId: string }
+  | { kind: "inconsistent"; orderId: string };
 
 /* ───────────────────────── 管理端订单 DTO（P8C） ───────────────────────── */
 
@@ -210,8 +898,16 @@ export type AdminOrderListItem = {
   productTitle: string;
   specName: string;
   quantity: number;
-  /** 单位：分。订单实付金额快照 */
-  totalAmount: number;
+  /**
+   * 单位：分。**订单实付金额**快照 = `actualPaidAmount`。
+   *
+   * ⚠️ **P1-4 换掉了这里的字段**（原为 `order.totalAmount`）。那个数是
+   * **优惠前**的应付总额，而列表这一列的表头一直写着「实付金额」——用了券之后
+   * 两者不再相等，继续读 `totalAmount` 就是让后台把「原价」当成「用户付了多少」。
+   * 列表只保留一个金额，因此这里给的是**用户真的付掉的那个数**；
+   * 原价、券抵扣与分账明细在详情页里（`AdminOrderDetail`）。
+   */
+  actualPaidAmount: number;
   user: AdminUserSummary;
 };
 
@@ -236,9 +932,62 @@ export type AdminOrderDetail = AdminOrderListItem & {
   itemsAmount: number;
   addonsAmount: number;
   addons: OrderAddonSnapshot[];
+
+  /**
+   * 单位：分。**优惠前**应付 = `itemsAmount + addonsAmount`（P1-4 补）。
+   *
+   * ⚠️ 这里是**订单的金额域**，不是 `Order.totalAmount` 的同名搬用——虽然两者
+   * 当前恒等。既有 DTO 里「原价」一律叫 `originalAmount`（用户端 `OrderDetail`、
+   * `StaffOrderDetail`、`AdminRefundDetail` 都是），后台订单详情跟着叫这个名字，
+   * 三处展示才是同一套说法（`cmd_p1-4.md` 测试第 17 条）。
+   */
+  originalAmount: number;
+  /** 单位：分。优惠券实际抵扣（P1-4）。没用券时为 0 */
+  couponDiscountAmount: number;
+  /**
+   * 单位：分。这一单用的券快照（P1-4）。没用券时为 null。
+   *
+   * 与用户端 `OrderDetail.coupon` 是同一个形状、同一份数据：后台看到的券面
+   * 必须与用户看到的一致，因此不另做一份「后台版」。它冻结在订单上，
+   * 之后改券模板不影响这里（裁定 §9）。
+   */
+  coupon: OrderCouponSnapshot | null;
   /** 已发生的状态节点，按时间先后排列 */
   timeline: OrderTimelineEntry[];
-  companion: OrderCompanionSnapshot | null;
+
+  /**
+   * 用户**指定**的护航；没指定为 null（P0-5，原字段名 `companion`）。
+   *
+   * 来自派单的 `exclusiveCompanionId`，**不是**订单上的字段：订单只记得「谁在履约」。
+   * 它与实际接单的人可以**同时有值且不相同**——用户指定 A、A 在独占期内没接、
+   * B 从公共池接走，这一单在后台就该显示成「指定：A / 实际：B」。
+   * 只给一个字段的话，「用户要的人没接」这件事在后台完全不可见，
+   * 客服也就回答不了「我明明指定了 A，怎么是 B 在打」。
+   */
+  exclusiveCompanion: OrderCompanionSnapshot | null;
+  /** **实际接到**这一单的护航；还没有人接为 null（来自 `Order.companion`） */
+  actualCompanion: OrderCompanionSnapshot | null;
+
+  /**
+   * 这一单的最小履约退出历史（打手主动取消等）；**从没有人退出过为空数组**（P0-6）。
+   *
+   * 退出之后订单上的 `actualCompanionId` / `companion` 已经清空（订单要能重新进公共池），
+   * 「谁曾经接过、为什么退出、何时退出」因此不再有任何现成字段回答得了——
+   * 而客服恰恰要回答「我明明看到有人接过，怎么又回到等待接单了」。
+   *
+   * ⚠️ 空数组而不是 `null`：没有退出过是**正常情况**，不是「查不到」。
+   * 用 `null` 会让页面多出一条「要不要显示这个区块」的空值分支。
+   *
+   * ⚠️ 本 DTO 是给管理端订单详情用的。退出历史**也出现在三个客服 DTO 上**
+   * （`StaffOrderSummary` / `StaffComplaintOrderSummary` / `StaffRefundDetail`），
+   * 因为管理端与客服工作台是**两套账号**——`canEnterAdminConsole(role)` 只对 `admin`
+   * 为真，`customer_service` 进不了 `/admin`（`lib/constants/admin.ts`）。
+   * 两边各自渲染，**不是**「进同一个后台」。
+   *
+   * ⚠️ 但用户端订单详情、打手端订单 DTO、公共池 DTO **都不带它**：
+   * 普通打手与下单用户没有理由看到「上一位打手为什么走」。
+   */
+  releaseHistory: CompanionReleaseRecord[];
 
   /** 这一单的退款申请摘要；没有申请过为 null。完整内容要去退款详情看 */
   refundSummary: RefundSummary | null;

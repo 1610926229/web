@@ -16,20 +16,25 @@ import {
   toAdminOrderListItem,
   type AdminOrderListQuery,
 } from "@/lib/constants/adminOrders";
+import { sweepExpiredDispatches } from "@/lib/data/companionDispatchTransaction";
+import { sweepCompletionAutoApprovals } from "@/lib/data/completionTransaction";
+import { getDispatchRepository } from "@/lib/data/dispatchRepository";
+import { toOrderCompanionSnapshot } from "@/lib/constants/companions";
 import { getMessageRepository } from "@/lib/data/messageRepository";
 import {
   ADMIN_ORDER_UNFILTERED_QUERY,
   getPaymentRepository,
 } from "@/lib/data/paymentRepository";
+import { getCompanionRepository } from "@/lib/data/companionRepository";
+import { getCompanionReleaseRepository } from "@/lib/data/companionReleaseRepository";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getRefundRepository } from "@/lib/data/refundRepository";
 import { getReviewRepository } from "@/lib/data/reviewRepository";
-import { getUserRepository } from "@/lib/data/userRepository";
 import { mockEmptyApplies, withMockDebug, type MockSurface } from "@/lib/mocks/debug";
-import type { AdminOrderDetail, AdminOrderListData } from "@/lib/types/order";
-import type { AdminUserSummary } from "@/lib/types/user";
+import type { AdminOrderDetail, AdminOrderListData, OrderCompanionSnapshot } from "@/lib/types/order";
+import { adminUserIndex, missingUser } from "./adminIndex";
 import { toOrderComplaintSummary } from "./complaints";
-import { buildConversationStats } from "./conversations";
+import { buildOrderConversationStats } from "./conversations";
 import { buildOrderTimeline } from "./orders";
 import { toRefundSummary } from "./refunds";
 import { toReviewSummary } from "./reviews";
@@ -64,29 +69,39 @@ async function allOrdersForAdmin() {
   return getPaymentRepository().queryOrdersForAdmin(ADMIN_ORDER_UNFILTERED_QUERY);
 }
 
-/**
- * userId → 用户摘要。
- *
- * 用户仓储（而不是 `getDataSource()`）：数据源是只读契约，只暴露 `findUserById`，
- * 而列表要按 keyword 过滤就得**一次拿到全部用户**，逐条 `findUserById` 会变成 N+1。
- */
-async function adminUserIndex(): Promise<Map<string, AdminUserSummary>> {
-  const users = await getUserRepository().listUsers();
-  return new Map(
-    users.map((user) => [user.id, { id: user.id, displayId: user.displayId, nickname: user.nickname }]),
-  );
-}
+// `adminUserIndex` / `missingUser` 的定义在 `./adminIndex`（P1-3 抽出：订单 / 退款 /
+// 投诉 / 售后四个管理列表此前各有一份**逐字节相同**的副本，四份之间没有任何机制保证
+// 它们继续相同）。本文件只是使用者。
 
 /**
- * 用户记录缺失时的占位摘要。
+ * 用户**指定**的那位护航（P0-5）——后台订单详情里「指定」那一行。
  *
- * 不返回 null、也不抛错：订单本身是有效的，少一条用户记录不该让整张列表打不开
- * （预置订单里就有刻意不指向任何用户的条目）。页面看到的是一行空昵称，
- * 而不是一整页错误。
+ * 三件事都与「实际接单的人」不同：
+ *
+ * 1. 来源不同：它取自**派单记录**的 `exclusiveCompanionId`，不在订单上；
+ * 2. 可能为空：用户没指定时订单直接进公共池，这里就是 null，
+ *    而实际接单的人可能已经有一位；
+ * 3. **它不会因为别人接单而改变**：用户指定 A、A 没接、B 从公共池接走，
+ *    这里仍然是 A，实际接单那一行是 B。两个事实都要留得住——
+ *    只留一个，「我明明指定了 A，怎么是 B 在打」在后台就查不出来。
+ *
+ * ⚠️ **软移除的护航照样显示**。用户当初指定的是他，这件事不因为他后来被下架而没发生过；
+ * 这里用 `findCompanionById` 而不是任何「有效护航」口径的查询。
+ *
+ * 查不到记录（订单已退款、管理员手动退款、护航记录被彻底删除）时返回 null：
+ * 不编造一个名字，也不让整页报错。
  */
-function missingUser(userId: string): AdminUserSummary {
-  return { id: userId, nickname: "", displayId: "" };
+async function resolveExclusiveCompanion(orderId: string): Promise<OrderCompanionSnapshot | null> {
+  const dispatch = await getDispatchRepository().findDispatchByOrderId(orderId);
+  if (!dispatch?.exclusiveCompanionId) return null;
+
+  const companion = await getCompanionRepository().findCompanionById(dispatch.exclusiveCompanionId);
+  return companion ? toOrderCompanionSnapshot(companion) : null;
 }
+
+// `missingUser` 见 `./adminIndex`。⚠️ 本文件的用法是「订单本身有效，少一条用户记录
+// 不该让整张列表打不开」（预置订单里就有刻意不指向任何用户的条目），
+// 而退款列表对**订单**缺失的处理相反——所以共用的是那个函数，不是那条规则。
 
 /**
  * 解析列表查询条件。与其它管理列表同一套约定：
@@ -144,6 +159,12 @@ export async function queryAdminOrderList(
   params: URLSearchParams | undefined,
   surface: MockSurface,
 ): Promise<AdminOrderListData> {
+  // 超时事实的惰性物化（幂等）：后台列表里的状态必须与业务事实一致，
+  // 否则客服会对着一条「等待接单」的单去催一个已经不存在的接单
+  sweepExpiredDispatches(new Date().toISOString());
+  // 完成材料到期自动通过的事实也一样（P0-8）
+  sweepCompletionAutoApprovals(new Date().toISOString());
+
   return withMockDebug(params, surface, async () => {
     const games = orderGameNames(await allOrdersForAdmin());
 
@@ -216,21 +237,33 @@ export async function getAdminOrderDetail(
 ): Promise<AdminOrderDetail | null> {
   if (!id) return null;
 
+  // 超时事实的惰性物化（幂等）：后台看到的订单状态必须与业务事实一致——
+  // 一张在公共池里等到超时的单不该在后台还显示成「等待接单」
+  sweepExpiredDispatches(new Date().toISOString());
+  // 完成材料到期自动通过的事实也一样（P0-8）
+  sweepCompletionAutoApprovals(new Date().toISOString());
+
   return withMockDebug(params, surface, async () => {
     const order = await getPaymentRepository().findOrderById(id);
     if (!order) return null;
 
-    const [users, refund, complaintStats, conversation] = await Promise.all([
-      adminUserIndex(),
-      getRefundRepository().findRefundByOrderId(order.id),
-      getComplaintRepository().summarizeComplaintsByOrder(order.id),
-      getMessageRepository().findConversation(order.userId, order.id),
-    ]);
+    const [users, refund, complaintStats, conversations, exclusiveCompanion, releaseHistory] =
+      await Promise.all([
+        adminUserIndex(),
+        getRefundRepository().findRefundByOrderId(order.id),
+        getComplaintRepository().summarizeComplaintsByOrder(order.id),
+        getMessageRepository().listConversationsByOrder(order.userId, order.id),
+        resolveExclusiveCompanion(order.id),
+        // 履约退出历史（P0-6）：打手主动取消之后订单上的人已经清空，而客服恰恰要回答
+        // 「刚才那个人为什么走了」。没有退出过就是空数组，不是「查不到」
+        getCompanionReleaseRepository().listReleasesByOrderId(order.id),
+      ]);
 
-    // 未读数与用户端同一个口径；会话不存在时摘要为 null
-    const conversationSummary = conversation
-      ? buildConversationStats(
-          conversation,
+    // 未读数与用户端同一个口径；会话不存在时摘要为 null。
+    // ⚠️ P0-14 起一张订单可以有多段会话，未读是**全部段落**的合计
+    const conversationSummary = conversations.length
+      ? buildOrderConversationStats(
+          conversations,
           await getMessageRepository().listMessages(order.userId, order.id),
         )
       : null;
@@ -240,6 +273,8 @@ export async function getAdminOrderDetail(
 
     return toAdminOrderDetail(order, users.get(order.userId) ?? missingUser(order.userId), {
       timeline: buildOrderTimeline(order),
+      exclusiveCompanion,
+      releaseHistory,
       refundSummary: refund ? toRefundSummary(refund) : null,
       complaintSummary: toOrderComplaintSummary(complaintStats),
       conversationSummary,

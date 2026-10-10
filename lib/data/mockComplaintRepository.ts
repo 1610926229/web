@@ -112,9 +112,16 @@ export const mockComplaintRepository: ComplaintRepository = {
     return { count: related.length, latest: related[0] ?? null };
   },
 
-  async queryComplaintsForAdmin(filter: AdminComplaintQueryFilter) {
+  async listComplaintsByOrderId(orderId) {
     return [...store().complaints.values()]
-      .filter((complaint) => filter.status === null || complaint.status === filter.status)
+      .filter((complaint) => complaint.orderId === orderId)
+      .sort(compareComplaintsNewestFirst);
+  },
+
+  async queryComplaintsForAdmin(filter: AdminComplaintQueryFilter) {
+    const { statuses } = filter;
+    return [...store().complaints.values()]
+      .filter((complaint) => statuses === null || statuses.includes(complaint.status))
       .filter((complaint) => filter.type === null || complaint.typeKey === filter.type)
       .sort(compareComplaintsForAdmin);
   },

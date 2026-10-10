@@ -13,9 +13,11 @@ import {
 import { createPaymentRequest, previewCheckout } from "@/lib/services/checkoutHttp";
 import { formatYuan } from "@/lib/utils/format";
 import CompanionSheet from "./CompanionSheet";
+import CouponSheet from "./CouponSheet";
 import QuantityStepper from "./QuantityStepper";
 import type { Addon } from "@/lib/types/catalog";
 import type { Companion } from "@/lib/types/companion";
+import type { CheckoutCouponOption } from "@/lib/types/coupon";
 import type { CheckoutPreview, CheckoutSelection } from "@/lib/types/payment";
 import type { ProductSpec } from "@/lib/types/product";
 
@@ -75,6 +77,15 @@ export default function CheckoutForm({
   const [remark, setRemark] = useState("");
   const [companion, setCompanion] = useState<Companion | null>(null);
   const [companionOpen, setCompanionOpen] = useState(false);
+  /**
+   * 选中的券（领取记录 id）。`null` = 不用券。
+   *
+   * ⚠️ 存 id 而不是整个对象：券的**判定会随金额变**（用户改数量之后原来能用的券
+   * 可能就不够门槛了），存对象就意味着界面上挂着一份过期结论。
+   * 每次试算返回的 `preview.coupon` 才是当前这一刻的结论。
+   */
+  const [couponClaimId, setCouponClaimId] = useState<string | null>(null);
+  const [couponOpen, setCouponOpen] = useState(false);
 
   const [preview, setPreview] = useState<CheckoutPreview | null>(initialPreview);
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>(
@@ -143,6 +154,7 @@ export default function CheckoutForm({
       gameAccountId: gameAccountId.trim(),
       remark: remark.trim(),
       companionId: companion ? companion.id : null,
+      couponClaimId,
       ...overrides,
     };
   }
@@ -188,6 +200,19 @@ export default function CheckoutForm({
     void refreshPreview({ addonIds: next });
   }
 
+  /**
+   * 选券 / 取消选券。
+   *
+   * 选中之后必须**重新试算**：券的抵扣会改变实付，而底部那一栏显示的是服务端算出来的
+   * 实付金额——不重算就会把一个「还没减券」的金额继续摆在用户面前。
+   * 同理，取消选券也要重算（原价回来）。
+   */
+  function selectCoupon(next: CheckoutCouponOption | null) {
+    setCouponClaimId(next ? next.claimId : null);
+    setCouponOpen(false);
+    void refreshPreview({ couponClaimId: next ? next.claimId : null });
+  }
+
   async function submit() {
     if (submittingRef.current) return;
 
@@ -203,6 +228,15 @@ export default function CheckoutForm({
       const message = "金额试算未完成，暂时无法支付，请先重试试算";
       setFormError(message);
       showToast(message);
+      return;
+    }
+
+    // 选了券但券没生效：**必须拦住**。放过去就等于让用户在以为有优惠的情况下、
+    // 按一个他以为已经减过的价格付款——那比直接报错糟得多。
+    // 服务端在建单时会独立再判一次（裁定 §2），这里只是把话说在前面
+    if (couponReason) {
+      setFormError(couponReason);
+      showToast(couponReason);
       return;
     }
 
@@ -231,12 +265,26 @@ export default function CheckoutForm({
     }
   }
 
+  /** 服务端对「当前选中的券」的判定；没选券时为 null。 */
+  const selectedCoupon = preview?.coupon ?? null;
+  /** 这一单开始时可选的券（由试算一并返回，判定已按当前金额做过）。 */
+  const availableCoupons = preview?.availableCoupons ?? [];
+  /** 这一单**此刻真的能选**的券有几张。服务端已经把「能不能用」判好了，这里只数数。 */
+  const applicableCount = availableCoupons.filter((item) => item.applicable).length;
+  /**
+   * 选了券但**没有生效**的原因（未达门槛、券取不到……）；券已生效或没选券时为空串。
+   *
+   * ⚠️ `preview` 与 `couponClaimId` 一定同源：试算的过期响应被 `previewTicketRef`
+   * 丢弃，因此手上这份 `preview` 永远对应最后一次请求的那组选择。
+   */
+  const couponReason = preview?.couponReason ?? "";
+
   /**
    * 按钮禁用**只**由这几件事决定，与游戏 ID 是否填写无关：
-   * 正在提交、试算中、试算失败。游戏 ID 的问题在点击时以表单校验的形式反馈，
-   * 不能靠一个点不动的按钮让用户猜原因。
+   * 正在提交、试算中、试算失败、**选了券但券没生效**。
+   * 游戏 ID 的问题在点击时以表单校验的形式反馈，不能靠一个点不动的按钮让用户猜原因。
    */
-  const payDisabled = submitting || previewStatus !== "ready";
+  const payDisabled = submitting || previewStatus !== "ready" || couponReason !== "";
 
   const disabledReason = submitting
     ? "正在提交，请稍候…"
@@ -244,7 +292,11 @@ export default function CheckoutForm({
       ? "正在按当前选择试算金额，试算完成后即可支付"
       : previewStatus === "error"
         ? "金额试算失败，暂时无法支付，请先点上方「重试」"
-        : null;
+        : couponReason
+          ? // 券的问题不是「等一等就好」，所以要说清是换一张还是不用券——
+            // 只说「不可用」用户会以为重试一下就能好
+            `${couponReason}，请换一张或选择不使用优惠券`
+          : null;
 
   return (
     <>
@@ -395,6 +447,47 @@ export default function CheckoutForm({
         </p>
       </section>
 
+      {/* —— 优惠券 —— */}
+      <section className="mt-2 bg-surface px-4 py-4">
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={() => setCouponOpen(true)}
+          className="flex w-full items-center gap-3 rounded-[10px] bg-[#fff5f5] px-3 py-3 text-left"
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white text-[15px]">
+            🎟️
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[14px] font-medium text-ink">优惠券</span>
+            <span className="block truncate text-[12px] text-ink-3">
+              {/* 券没生效时这里显示**原因**而不是「已选择这减 X 元」——
+                  一行字说两种事实（选了 / 生效了）会让用户以为已经减了 */}
+              {couponReason
+                ? couponReason
+                : selectedCoupon
+                  ? `${selectedCoupon.valueLabel} · 已减 ¥${formatYuan(preview?.couponDiscountAmount ?? 0)}`
+                  : /* ⚠️ 三种情形必须分开说（P1-4 验收整改轮 §十）：
+                       「一张能用的都没有」与「有券但这一单不够门槛」是**完全不同**的两件事。
+                       合成一句「0 张可用于这一单」会让持有券的用户以为券没了——
+                       而他只要再加一件商品就能用上。后者必须说出来。 */
+                    applicableCount > 0
+                    ? `${applicableCount} 张可用于这一单`
+                    : availableCoupons.length > 0
+                      ? `${availableCoupons.length} 张券未达使用门槛`
+                      : "暂无可用优惠券"}
+            </span>
+          </span>
+          <span className="shrink-0 text-[13px] text-ink-3">
+            {selectedCoupon ? "更换" : "去选择"} ›
+          </span>
+        </button>
+
+        <p className="mt-2 text-[11px] leading-4 text-ink-3">
+          一单最多使用一张券，券与券之间不可叠加。不使用也可以直接支付。
+        </p>
+      </section>
+
       {/* —— 备注 —— */}
       <section className="mt-2 bg-surface px-4 py-4">
         <div className="flex items-baseline justify-between">
@@ -434,9 +527,30 @@ export default function CheckoutForm({
           </span>
         </Row>
 
-        <Row label="应付金额">
+        {/* 优惠行只在**真的减了钱**时出现：券恒不减时渲染一行「−¥0.00」
+            既没有信息量，也会让人以为券生效了 */}
+        {preview && preview.couponDiscountAmount > 0 ? (
+          <Row label="优惠券">
+            <span className="text-[14px] text-brand-red">
+              −¥{formatYuan(preview.couponDiscountAmount)}
+              {selectedCoupon ? (
+                <span className="ml-1 text-[12px] text-ink-3">{selectedCoupon.valueLabel}</span>
+              ) : null}
+            </span>
+          </Row>
+        ) : null}
+
+        {/*
+          ⚠️ 这一行**不能叫「应付金额」**（P1-4 改正）：它显示的是
+          `originalAmount`，也就是**优惠前**的合计。用了券之后用户真正要付的
+          是下面那条栏里的 `actualPaidAmount`，两者不相等——把优惠前的数叫
+          「应付」，就是在结算页顶部和底部各写一个不同的「你要付多少」。
+          改叫「原价」还有一个理由：订单详情页同一行用的就是这个词，
+          两个页面必须是同一个说法（cmd_p1-4 测试第 17 条：展示口径一致）
+        */}
+        <Row label="原价">
           {preview ? (
-            <PriceText cents={preview.totalAmount} className="text-[17px] text-brand-red" />
+            <PriceText cents={preview.originalAmount} className="text-[17px] text-brand-red" />
           ) : (
             <span className="text-[17px] font-semibold text-ink-3">—</span>
           )}
@@ -485,8 +599,13 @@ export default function CheckoutForm({
         <div className="flex items-center gap-3">
           <div className="flex min-w-0 flex-1 items-baseline">
             <span className="text-[12px] text-ink-3">实付金额</span>
+            {/* 底部这一栏必须是**实付**（`actualPaidAmount`），不是原价：
+                它是用户点下去真正会被扣的钱 */}
             {preview ? (
-              <PriceText cents={preview.totalAmount} className="ml-2 text-[20px] text-brand-red" />
+              <PriceText
+                cents={preview.actualPaidAmount}
+                className="ml-2 text-[20px] text-brand-red"
+              />
             ) : (
               <span className="ml-2 text-[20px] font-semibold text-ink-3">—</span>
             )}
@@ -522,6 +641,14 @@ export default function CheckoutForm({
           setCompanionOpen(false);
         }}
         onClose={() => setCompanionOpen(false)}
+      />
+
+      <CouponSheet
+        open={couponOpen}
+        coupons={availableCoupons}
+        selectedClaimId={couponClaimId}
+        onSelect={selectCoupon}
+        onClose={() => setCouponOpen(false)}
       />
     </>
   );

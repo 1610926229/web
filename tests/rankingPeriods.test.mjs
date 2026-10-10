@@ -52,9 +52,31 @@ function beijingWeekday(iso) {
   return new Date(Date.parse(iso) + BEIJING_OFFSET_MS).getUTCDay();
 }
 
-/** 最小订单对象：聚合与周期过滤只读这几个字段。 */
-function order({ id, userId = "u-test", completedAt, status = "completed", totalAmount = 1000 }) {
-  return { id, userId, completedAt, status, totalAmount };
+/**
+ * 最小订单对象：聚合与周期过滤只读这几个字段。
+ *
+ * ⚠️ `actualPaidAmount` 必须给（P1-4）：`sumEffectiveSpend` 读的是**实付**，
+ * 不是 `totalAmount`。夹具漏写它不会报错，金额会静默变成 0，而失败信息只会说
+ * 「期望 500、得到 0」——看不出是夹具缺字段。两个数默认相等（无券订单）；
+ * 要验证「接券后按实付计入」用 `couponDiscountAmount`，别改 `totalAmount` 的语义。
+ */
+function order({
+  id,
+  userId = "u-test",
+  completedAt,
+  status = "completed",
+  totalAmount = 1000,
+  couponDiscountAmount = 0,
+}) {
+  return {
+    id,
+    userId,
+    completedAt,
+    status,
+    totalAmount,
+    couponDiscountAmount,
+    actualPaidAmount: totalAmount - couponDiscountAmount,
+  };
 }
 
 const USERS = [{ id: "u-test", nickname: "测试（占位）", avatarUrl: "/mock/avatar-1.svg", bio: "" }];

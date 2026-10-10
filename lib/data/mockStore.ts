@@ -36,6 +36,12 @@ export type MockStoreName =
   | "agreement"
   | "companionApplication"
   /**
+   * 派单记录（订单在哪个池里等谁、等到什么时候）。P0-5 起这份记录**可写**：
+   * 订单支付成功会建一条、专属池到点会转公共池、被打手接走会关掉它。
+   * 见 `lib/data/mockDispatchRepository.ts`。
+   */
+  | "dispatch"
+  /**
    * 护航（陪玩）名单。P8A 起这份名单**可写**（审核通过会往里加记录、后台会改资料），
    * 因此它从「只读种子」变成了一个真正的仓储——但名单仍然只有这一份。
    */
@@ -57,7 +63,55 @@ export type MockStoreName =
    * 启用、停用与软删除客服账号，因此它是一个真正的仓储。
    * 见 `lib/data/mockStaffRepository.ts`。
    */
-  | "staff";
+  | "staff"
+  /**
+   * 首页运营内容（图片公告 / 活动 Banner / 快捷入口）。P8E-1 起这份内容**可写**：
+   * 管理后台会新增、编辑、启用、停用与软移除它们，因此它是一个真正的仓储——
+   * 但全站仍然只有这一份，首页读的与管理后台改的是同一批记录。
+   * 见 `lib/data/mockContentRepository.ts`。
+   */
+  | "content"
+  /**
+   * 平台级参数（公共池超时等）。P0-1 起这份配置**可写**：后台能改，
+   * 而订单进入需要计时的环节时会把自己那一刻的参数值冻结成快照，
+   * 因此「改配置」不会动到已经生成的订单。
+   * 见 `lib/data/mockPlatformConfigRepository.ts`。
+   */
+  | "platformConfig"
+  /**
+   * 完成材料（打手宣布护航完成、客服审核、到期自动通过）。P0-8 起由打手提交写入，
+   * **只增不改**（驳回后重提是新建一条）、没有预置数据。
+   * 见 `lib/data/mockCompletionRepository.ts`。
+   */
+  | "completion"
+  /**
+   * 履约退出历史（谁曾经接过、为什么退出、何时退出）。P0-6 起由打手主动取消写入，
+   * **只增不改**、没有预置数据。见 `lib/data/mockCompanionReleaseRepository.ts`。
+   */
+  | "companionRelease"
+  /**
+   * 接单事件（成功的 `acceptDispatch` 留下的**只增不改**历史）。P1-5 起由接单事务写入、
+   * **没有预置数据**。它存在的唯一理由是「换人会覆盖派单记录上的接单人」——
+   * 先后有几个人接过这一单，只能由这张表回答。
+   * 见 `lib/data/mockCompanionAcceptRepository.ts`。
+   */
+  | "companionAccept"
+  /**
+   * 服务事件（**真实进入 `serving`** 留下的只增不改历史）。P1-7 起由进入服务的事务写入、
+   * **没有预置数据、不 backfill**。它存在的唯一理由是「`Order.servingAt` 只表达
+   * **当前这位**打手，换人时会被清空」——先后有几位打手真实服务过这一单，
+   * 只能由这张表回答（产品裁定 `D10` 附加要求）。
+   * 见 `lib/data/mockCompanionServiceRepository.ts`。
+   */
+  | "companionService"
+  /**
+   * 打手收益（订单完成后生成、随投诉窗口冻结、到期释放）。P0-9 起由完成事务写入，
+   * 之后只被 `sweepMaturedEarnings` 改状态，**没有预置数据**
+   * （P0-9 之前就已经 completed 的历史订单不回溯补收益，见 `lib/types/order.ts`
+   * 的 `complaintWindowMinutesSnapshot` 注释）。
+   * 见 `lib/data/mockEarningRepository.ts`。
+   */
+  | "earning";
 
 const PREFIX = "__youmuMockStore__";
 
@@ -93,7 +147,41 @@ export function getMockStore<T>(name: MockStoreName, create: () => T): T {
  *
  * **只给自动化测试用**：测试需要从一份干净的数据出发（例如「这一单还没有退款申请」），
  * 而各仓储的预置数据恰好就是这个起点。业务代码不要调用它——那等于清空用户数据。
+ *
+ * ⚠️ 它作用在**调用进程自己的** `globalThis` 上。HTTP 用例跑的是**另一个进程**
+ * （`next start` 起的服务），因此在测试进程里调它**够不着服务端的存储**——
+ * 那种场合要用 `resetAllMockStores()` + `POST /api/debug/reset`，见下。
  */
 export function resetMockStore(name: MockStoreName): void {
   delete holder()[storeKey(name)];
+}
+
+/**
+ * 丢弃**全部**仓储的 store，下次取用时逐个按预置数据重新建仓。
+ *
+ * **只给自动化测试用**，与 `resetMockStore` 同一条纪律：业务代码不要调用它。
+ *
+ * 与 `resetMockStore(name)` 的差别有两处：
+ *
+ * 1. **范围**：这个把整族 store 一起丢掉，用来把「一个跑久了的进程」恢复成刚启动的样子；
+ * 2. **列举方式**：它按**前缀**扫 `globalThis`，而不是遍历 `MockStoreName` 联合类型。
+ *    这是刻意的——联合类型是一个需要**人工维护**的清单，新增一个仓储时如果忘了往里加，
+ *    `resetMockStore` 侧不会有任何提示，测试只会**静默地**少重置一份存储，
+ *    表现为「偶发」而不是「报错」。按前缀扫则天然覆盖将来新增的每一个仓储。
+ *
+ * ⚠️ 前缀是 `__youmuMockStore__`，与 `storeKey()` 同源；前缀之外挂在 `globalThis`
+ * 上的东西一律不动（这是刻意划的界：本函数只该动 Mock 存储）。
+ *
+ * 返回被丢弃的 store 名，供调用方回显（例如调试接口的响应体）。
+ */
+export function resetAllMockStores(): string[] {
+  const target = holder();
+  const dropped: string[] = [];
+  for (const key of Object.keys(target)) {
+    if (key.startsWith(PREFIX)) {
+      delete target[key];
+      dropped.push(key.slice(PREFIX.length));
+    }
+  }
+  return dropped;
 }

@@ -4,13 +4,15 @@
    不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
 
 import { useState, type ReactNode } from "react";
+import ReviewAggregatePanel from "@/components/reviews/ReviewAggregatePanel";
 import {
   COMPANION_DETAIL_DISABLED_NOTICE,
   COMPANION_DETAIL_DISABLED_TITLE,
   COMPANION_SELECTION_NOTICE,
 } from "@/lib/constants/companions";
+import { formatAverageRating } from "@/lib/constants/reviews";
 import type { CompanionDetail } from "@/lib/types/companion";
-import { abbreviateNumber, formatDateTime } from "@/lib/utils/format";
+import { abbreviateNumber } from "@/lib/utils/format";
 
 /**
  * 陪玩详情（游客可见）。
@@ -69,9 +71,9 @@ export default function CompanionDetailView({ companion }: { companion: Companio
                 <span className="text-brand-yellow" aria-hidden>
                   ★
                 </span>{" "}
-                {/* 没有评价时显示「暂无评分」，不用 0 分冒充 */}
-                {companion.rating === null ? "暂无评分" : companion.rating.toFixed(1)}
-                <span className="ml-1 text-ink-3">({companion.reviewCount} 条评价)</span>
+                {/* 没有评价时显示「暂无评分」，不用 0 分冒充。口径与商品页共用
+                    `formatAverageRating`（R3）；条数在下方评价区按「项」呈现 */}
+                {formatAverageRating(companion.rating)}
               </span>
               <span className="text-ink-3">
                 {abbreviateNumber(companion.completedOrderCount)} 单
@@ -138,38 +140,22 @@ export default function CompanionDetailView({ companion }: { companion: Companio
         </Section>
       ) : null}
 
-      {/* 评价摘要：只有公开的昵称 / 星级 / 正文 / 时间 */}
-      <Section title={`评价${companion.reviewCount > 0 ? `（${companion.reviewCount}）` : ""}`}>
-        {companion.reviews.length === 0 ? (
-          <p className="text-[13px] text-ink-3">这位陪玩还没有公开评价。</p>
-        ) : (
-          <>
-            <ul className="flex flex-col gap-3">
-              {companion.reviews.map((review) => (
-                <li key={review.id} className="border-b border-line pb-3 last:border-b-0 last:pb-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] text-ink-2">{review.nickname}</span>
-                    <span className="text-[12px] text-brand-yellow" aria-label={`${review.rating} 星`}>
-                      {"★".repeat(review.rating)}
-                      <span className="text-line" aria-hidden>
-                        {"★".repeat(Math.max(0, 5 - review.rating))}
-                      </span>
-                    </span>
-                    <span className="ml-auto text-[11px] text-ink-3">
-                      {formatDateTime(review.createdAt)}
-                    </span>
-                  </div>
-                  <p className="mt-1 break-words text-[13px] leading-5 text-ink-2">
-                    {review.content}
-                  </p>
-                </li>
-              ))}
-            </ul>
-            {companion.reviewsTruncated ? (
-              <p className="mt-2 text-[12px] text-ink-3">仅展示最近的部分评价。</p>
-            ) : null}
-          </>
-        )}
+      {/*
+        评价摘要：只有公开的脱敏昵称 / 星级 / 正文 / 时间。
+        与商品详情页**共用 `ReviewAggregatePanel`**（`R3`）——平均分口径、空态说法、
+        截断提示因此不可能在两侧漂移。`rating` / `reviewCount` 与三个 `reviews*` 字段
+        在 `CompanionDetail` 上是分开的，这里拼成同一个 `ReviewAggregate` 形状传进去。
+      */}
+      <Section title="评价">
+        <ReviewAggregatePanel
+          aggregate={{
+            averageRating: companion.rating,
+            reviewCount: companion.reviewCount,
+            reviews: companion.reviews,
+            reviewsTruncated: companion.reviewsTruncated,
+          }}
+          emptyText="这位陪玩还没有公开评价。"
+        />
       </Section>
 
       {/* ——————————————— 选择区域 ——————————————— */}

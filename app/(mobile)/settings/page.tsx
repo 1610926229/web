@@ -3,6 +3,7 @@ import Link from "next/link";
 import EmptyState from "@/components/common/EmptyState";
 import NavBar from "@/components/common/NavBar";
 import LogoutButton from "@/components/settings/LogoutButton";
+import MockUserSwitchButton from "@/components/settings/MockUserSwitchButton";
 import RequireAuth from "@/lib/auth/RequireAuth";
 import { isMockAuthEnabled } from "@/lib/config/env";
 import { PLATFORM_NAME } from "@/lib/constants/site";
@@ -18,6 +19,10 @@ import { getUserProfile } from "@/lib/services/profile";
  * 退出登录入口从「我的」主页移到这里（原先是 P2 验证登录态用的临时控件）。
  * 关闭模拟登录时**整段退出入口都不渲染**：那种部署形态下没有可退的登录态，
  * 界面上也不应出现任何「模拟」措辞或模拟账号切换能力。
+ *
+ * ⚠️ P0-5 手工验收补进来的「切换 Mock 用户」放在**同一个受开关控制的区块里**，
+ * 与退出登录是同一件事的两种说法：切换 = 退出后停在原页，让统一登录界面
+ * 接着问「换成谁」。它不引入第二套身份与会话，开关关闭时整块一起消失。
  *
  * 关于平台一栏只显示集中配置里的平台名称占位（`lib/constants/site.ts`），
  * 公司主体、备案号、客服联系方式**一律不编造**，如实说明待确认。
@@ -93,8 +98,9 @@ async function SettingsBody({
       </section>
 
       {mockAuthEnabled ? (
-        <section className="mt-3 bg-surface px-4 py-4">
+        <section className="mt-3 flex flex-col gap-3 bg-surface px-4 py-4">
           <LogoutButton />
+          <MockUserSwitchButton />
         </section>
       ) : null}
     </div>

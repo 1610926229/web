@@ -1,8 +1,11 @@
 import type { AdminCategoryStatusKey } from "@/lib/constants/adminCategories";
+import type { AdminCouponTemplateStatusKey } from "@/lib/constants/adminCoupons";
+import type { AdminContentStatusKey } from "@/lib/constants/adminContent";
 import type { AdminCompanionStatusKey } from "@/lib/constants/adminCompanions";
 import type { AdminProductStatusKey } from "@/lib/constants/adminProducts";
 import type { ComplaintStatus } from "@/lib/types/complaint";
 import type { CompanionApplicationStatus } from "@/lib/types/companionApplication";
+import type { CompletionSubmissionStatus } from "@/lib/types/completion";
 import type { OrderStatus } from "@/lib/types/order";
 import type { RefundStatus } from "@/lib/types/refund";
 import type { AdminStaffState } from "@/lib/types/staff";
@@ -46,6 +49,20 @@ export const CATEGORY_STATUS_TONE: Record<AdminCategoryStatusKey, AdminStatusTon
   removed: "muted",
   disabled: "danger",
   enabled: "success",
+};
+
+/**
+ * 券模板：已停用用 `pending`（橙）而不是 `danger`（红）。
+ *
+ * 与商品「已下架」同一个理由：停用一张券是**正常的运营动作**（活动结束、
+ * 面额要重算、先把券关掉再改），而且一条命令就能启用回来。
+ * 标成红色会让列表上出现「一屏待处理的事故」，真正需要抬头看的东西反而被淹没。
+ *
+ * ⚠️ 券模板**没有终态**：§6 不提供硬删除，因此这里不存在 `muted` 那一档。
+ */
+export const COUPON_TEMPLATE_STATUS_TONE: Record<AdminCouponTemplateStatusKey, AdminStatusTone> = {
+  enabled: "success",
+  disabled: "pending",
 };
 
 /**
@@ -104,6 +121,19 @@ export const COMPLAINT_STATUS_TONE: Record<ComplaintStatus, AdminStatusTone> = {
 };
 
 /**
+ * 完成材料（P0-8）：待审核是「在等」的进行中状态（橙），已通过是结论（绿），
+ * 已驳回需要被看见（红），已失效是「这一条不再参与审核」的终态（灰）。
+ *
+ * 状态文字始终由 `COMPLETION_STATUS_LABELS` 给出，这里只给语气。
+ */
+export const COMPLETION_STATUS_TONE: Record<CompletionSubmissionStatus, AdminStatusTone> = {
+  pending: "pending",
+  approved: "success",
+  rejected: "danger",
+  invalidated: "muted",
+};
+
+/**
  * 客服账号：已移除是灰的终态，已停用是红的（**停用是有后果的**——
  * 该账号当场失去工作台权限，已有会话 Cookie 也失效），启用中才是绿的。
  *
@@ -111,6 +141,20 @@ export const COMPLAINT_STATUS_TONE: Record<ComplaintStatus, AdminStatusTone> = {
  * 因此用 `danger` 而不是 `pending`。用 `pending` 会让人以为它在等什么。
  */
 export const STAFF_STATE_TONE: Record<AdminStaffState, AdminStatusTone> = {
+  removed: "muted",
+  disabled: "danger",
+  enabled: "success",
+};
+
+/**
+ * 运营内容（图片公告 / 活动 Banner / 快捷入口）：与类目、客服账号**同一套口径**。
+ *
+ * ⚠️ 这里没有复用 `CATEGORY_STATUS_TONE` 的常量名，但三个取值与语气完全一致——
+ * 两处都来自「已移除是终态（灰）、已停用是现在用不了（红）、已启用才是正常的（绿）」，
+ * 运营在侧栏里切换模块时看到的颜色不该变。协议与版本介绍只有启用 / 停用两档
+ * （协议没有软删除），用的是同一张表里的两个键。
+ */
+export const CONTENT_STATUS_TONE: Record<AdminContentStatusKey, AdminStatusTone> = {
   removed: "muted",
   disabled: "danger",
   enabled: "success",

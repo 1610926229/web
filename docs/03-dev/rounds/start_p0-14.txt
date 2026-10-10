@@ -1,0 +1,48 @@
+正式启动下一轮：
+
+`P0-14｜打手订单聊天 + 换人后的聊天隔离`
+
+完整读取：
+
+`docs/03-dev/rounds/cmd_p0-14.md`
+
+并严格按该文档执行。
+
+本轮核心目标：
+
+- 当前实际打手加入订单聊天；
+- 每次新的履约 assignment 使用独立 conversation；
+- 换人 / 回池 / 封禁后旧打手立即失去当前履约聊天权限；
+- 新打手绝不能看到旧打手聊天；
+- 用户仍能看到自己订单下完整聊天历史；
+- Staff 可为售后调查查看全部 assignment 历史；
+- 已读状态按 conversation/assignment 隔离。
+
+特别注意：
+
+1. 当前 `OrderConversationRecord` 只有 orderId 维度，无法承载该需求；允许做最小 assignment conversation 模型升级。
+2. 禁止为了聊天建立完整 Assignment 聚合。
+3. 必须复用 P0-11 的 `releaseCurrentAssignment` 等既有履约事实。
+4. 聊天 retention / 物理删除规则仍有产品 TBD，本轮明确 DEFER，不得自行决定。
+5. 不实现图片、附件、WebSocket、实时推送。
+6. 不开始 P0-15。
+7. 禁止任何 Git 写操作。
+
+流程：
+
+Requirement Check
+→ READY
+→ IN_PROGRESS
+→ 开发
+→ targeted tests
+→ pnpm test
+→ typecheck
+→ lint
+→ build
+→ production APP_BASE_URL 全量测试
+→ reviewer-agent
+→ 修全部 BLOCKER / MAJOR
+→ 最终完整复跑
+→ AWAITING_ACCEPTANCE
+
+完成后输出完整 P0-14 交付报告并停止。

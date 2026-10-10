@@ -1,10 +1,15 @@
 import { ApiError } from "@/lib/api/ApiError";
 import { clampPage, clampPageSize, mergePageResult } from "@/lib/constants/pagination";
-import { NOTIFICATION_MAX_PAGE_SIZE, NOTIFICATION_PAGE_SIZE } from "@/lib/constants/service";
+import {
+  NOTIFICATION_MAX_PAGE_SIZE,
+  NOTIFICATION_PAGE_SIZE,
+  parseNotificationInput,
+} from "@/lib/constants/service";
 import { getNotificationRepository } from "@/lib/data/notificationRepository";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type {
   Notification,
+  NotificationInput,
   NotificationListItem,
   NotificationPage,
 } from "@/lib/types/notification";
@@ -106,4 +111,30 @@ export async function markNotificationReadForUser(
   if (!updated) throw new ApiError("NOT_FOUND", "通知不存在");
 
   return toNotificationListItem(updated);
+}
+
+/**
+ * 写入一条通知（P0-2）——**通知的唯一写入口**。
+ *
+ * 谁调用它：平台侧的业务事件（订单退回公共池、公共池超时自动退款……）。
+ * **用户端没有任何入口**：用户不会自己给自己发通知，因此这里没有「当前登录用户」
+ * 这个概念，收件人由调用方**在服务端算出来**传进来。
+ *
+ * ⚠️ **不要在这里判断「这条通知该不该发」**。发不发的规则属于业务本身
+ * （超时退款必须通知老板、接单必须通知老板），放在这里会让两处规则迟早分叉；
+ * 本函数只负责「内容合法就写下去」。内容边界（空字段、站内地址）由
+ * `parseNotificationInput` 统一判定，非法值一律 400，**绝不静默补默认值**——
+ * 一条标题为空的通知在列表里就是一个空白条目。
+ *
+ * ⚠️ 需要与业务写入**同段完成**的调用方不要走这里：本函数是异步的，在原子区段里
+ * 调用它会把区段切开。那种场景用 `appendNotification`（同步）。
+ */
+export async function createNotificationForUser(
+  input: NotificationInput,
+): Promise<NotificationListItem> {
+  const parsed = parseNotificationInput(input);
+  if (!parsed.ok) throw new ApiError("BAD_REQUEST", parsed.message);
+
+  const created = await getNotificationRepository().createNotification(parsed.value);
+  return toNotificationListItem(created);
 }
