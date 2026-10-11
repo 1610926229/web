@@ -276,7 +276,7 @@ test("专属池 5：到点自动进公共池，并**按进入那一刻**的平�
   await setPublicTimeoutMinutes(9);
 
   const deadline = dispatch.exclusiveDeadlineAt;
-  const swept = sweepExpiredDispatches(deadline);
+  const swept = await sweepExpiredDispatches(deadline);
   assert.ok(swept.movedToPublicDispatchIds.includes(dispatch.id));
 
   const moved = await dispatchOf(order.id);
@@ -300,7 +300,7 @@ test("专属池 6：转公共池不覆盖 exclusiveCompanionId，它是历史事
   const user = uniqueUser();
   const { order } = await placeOrder(user, { companionId: COMPANION_A });
   const dispatch = await dispatchOf(order.id);
-  sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
+  await sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
 
   const moved = await dispatchOf(order.id);
   assert.equal(moved.exclusiveCompanionId, COMPANION_A, "用户当初指定的是 A，这件事发生过");
@@ -479,7 +479,7 @@ test("专属池 1c：配置改大之后，旧单仍在**自己的** deadline 上
   await setExclusiveTimeoutMinutes(20);
 
   // 走到 A **自己**的截止时刻：这一单必须转池
-  const swept = sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
+  const swept = await sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
   assert.ok(swept.movedToPublicDispatchIds.includes(dispatch.id), "旧单在自己的 deadline 上就该转池");
 
   const moved = await dispatchOf(order.id);
@@ -493,7 +493,7 @@ test("专属池 1c：配置改大之后，旧单仍在**自己的** deadline 上
   const { order: order2 } = await placeOrder(user2, { companionId: COMPANION_A });
   const dispatch2 = await dispatchOf(order2.id);
   const before = plusMinutes(dispatch2.exclusiveDeadlineAt, -1);
-  const swept2 = sweepExpiredDispatches(before);
+  const swept2 = await sweepExpiredDispatches(before);
   assert.equal(
     swept2.movedToPublicDispatchIds.includes(dispatch2.id),
     false,
@@ -629,7 +629,7 @@ test("公共池 13：指定 A 超时转公共后 B 抢到 → 指定 A、实际 
 
   // 专属池到点 → 公共池
   const exclusiveDeadline = dispatch.exclusiveDeadlineAt;
-  sweepExpiredDispatches(exclusiveDeadline);
+  await sweepExpiredDispatches(exclusiveDeadline);
 
   // 公共池里没有「指定」这回事，谁先来谁接——A 这十分钟没接，就轮到 B 了
   const byB = await acceptDispatch(dispatch.id, {
@@ -671,7 +671,7 @@ test("公共池 14：公共池到点后任何人都抢不到——事实由 dead
   assert.equal((await dispatchOf(order.id)).state, "public", "清扫前状态确实还没变");
 
   // 清扫之后连「过期」都不再是正确答案：这一单已经关闭
-  sweepExpiredDispatches(deadline);
+  await sweepExpiredDispatches(deadline);
   const afterSweep = await acceptDispatch(dispatch.id, {
     companionId: COMPANION_B,
     at: plusMinutes(deadline, 1),
@@ -691,7 +691,7 @@ test("自动退款 15：公共池超时 → 自动全额退款，不需要任何
   const dispatch = await dispatchOf(order.id);
   const paid = order.actualPaidAmount;
 
-  const swept = sweepExpiredDispatches(dispatch.publicDeadlineAt);
+  const swept = await sweepExpiredDispatches(dispatch.publicDeadlineAt);
   assert.ok(swept.refundedOrderIds.includes(order.id));
 
   const refunded = await orderOf(order.id);
@@ -717,12 +717,12 @@ test("自动退款 16：清扫跑 20 次也不重复退款、不重复改时间"
   const dispatch = await dispatchOf(order.id);
   const at = plusMinutes(dispatch.publicDeadlineAt, 1);
 
-  const first = sweepExpiredDispatches(at);
+  const first = await sweepExpiredDispatches(at);
   assert.ok(first.refundedOrderIds.includes(order.id));
   const afterFirst = await orderOf(order.id);
 
   for (let round = 0; round < 19; round += 1) {
-    const again = sweepExpiredDispatches(at);
+    const again = await sweepExpiredDispatches(at);
     assert.equal(
       again.refundedOrderIds.includes(order.id),
       false,
@@ -743,7 +743,7 @@ test("自动退款 17：超时退款不创建售后单，也不产生退款申�
   const user = uniqueUser();
   const { order } = await placeOrder(user);
   const dispatch = await dispatchOf(order.id);
-  sweepExpiredDispatches(dispatch.publicDeadlineAt);
+  await sweepExpiredDispatches(dispatch.publicDeadlineAt);
 
   assert.equal(
     await getRefundRepository().findRefundByOrderId(order.id),
@@ -762,7 +762,7 @@ test("自动退款 18：自动退款之后订单不可再次被接单", async ()
   const user = uniqueUser();
   const { order } = await placeOrder(user);
   const dispatch = await dispatchOf(order.id);
-  sweepExpiredDispatches(plusMinutes(dispatch.publicDeadlineAt, 1));
+  await sweepExpiredDispatches(plusMinutes(dispatch.publicDeadlineAt, 1));
 
   const attempt = await acceptDispatch(dispatch.id, {
     companionId: COMPANION_A,
@@ -784,7 +784,7 @@ test("通知 19：专属池超时转公共池，通知只发一条（清扫 20 �
   const dispatch = await dispatchOf(order.id);
   const deadline = dispatch.exclusiveDeadlineAt;
 
-  for (let round = 0; round < 20; round += 1) sweepExpiredDispatches(deadline);
+  for (let round = 0; round < 20; round += 1) await sweepExpiredDispatches(deadline);
 
   const mine = await notificationsOf(user);
   const matched = mine.filter((item) => item.title === "指定护航未接单");
@@ -803,7 +803,7 @@ test("通知 20：公共池超时自动退款，通知只发一条", async () =>
   const dispatch = await dispatchOf(order.id);
   const at = plusMinutes(dispatch.publicDeadlineAt, 1);
 
-  for (let round = 0; round < 20; round += 1) sweepExpiredDispatches(at);
+  for (let round = 0; round < 20; round += 1) await sweepExpiredDispatches(at);
 
   const matched = (await notificationsOf(user)).filter((item) => item.title === "订单已自动退款");
   assert.equal(matched.length, 1, "重复清扫不得重复产生同一业务事件的通知");
@@ -841,7 +841,7 @@ test("通知 22：通知只发给下单用户，不会串给别人", async () =>
   const dispatch = await dispatchOf(order.id);
   const at = plusMinutes(dispatch.publicDeadlineAt, 1);
 
-  sweepExpiredDispatches(at);
+  await sweepExpiredDispatches(at);
 
   assert.equal((await notificationsOf(owner)).length, 1, "下单用户收到超时退款通知");
   assert.deepEqual(await notificationsOf(bystander), [], "别的用户收件箱必须为空");
@@ -868,12 +868,12 @@ test("通知：三条派单通知的正文里都不带游戏账号与备注", as
   // 专属池到点转公共池
   const movedUser = uniqueUser();
   const moved = await placeOrder(movedUser, { companionId: COMPANION_A, gameAccountId: account, remark });
-  sweepExpiredDispatches((await dispatchOf(moved.order.id)).exclusiveDeadlineAt);
+  await sweepExpiredDispatches((await dispatchOf(moved.order.id)).exclusiveDeadlineAt);
 
   // 公共池到点自动退款
   const refundedUser = uniqueUser();
   const refunded = await placeOrder(refundedUser, { gameAccountId: account, remark });
-  sweepExpiredDispatches((await dispatchOf(refunded.order.id)).publicDeadlineAt);
+  await sweepExpiredDispatches((await dispatchOf(refunded.order.id)).publicDeadlineAt);
 
   for (const [event, user] of [
     ["订单已被接单", acceptedUser],
@@ -955,7 +955,7 @@ test("兼容 24：P0-3 的金额域不回归——整数分、口径不变、全
   assert.equal(order.refundedAmount, 0, "还没退款时累计已退是 0");
 
   const dispatch = await dispatchOf(order.id);
-  sweepExpiredDispatches(dispatch.publicDeadlineAt);
+  await sweepExpiredDispatches(dispatch.publicDeadlineAt);
 
   const refunded = await orderOf(order.id);
   const paid = order.actualPaidAmount;

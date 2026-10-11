@@ -1,5 +1,7 @@
 import type { CompanionReleaseRecord } from "@/lib/types/companionRelease";
 import { mockCompanionReleaseRepository } from "./mockCompanionReleaseRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCompanionReleaseRepository } from "./pg/companionReleaseRepository";
 
 /**
  * 履约退出历史（`CompanionReleaseRecord`）的可替换仓储（P0-6）。
@@ -39,6 +41,16 @@ export type CompanionReleaseRepository = {
   listReleasesByOrderId(orderId: string): Promise<CompanionReleaseRecord[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const companionReleaseRepositoryBacking: RepositoryBacking<CompanionReleaseRepository> = {
+  name: "companionRelease",
+  mock: mockCompanionReleaseRepository,
+  pg: pgCompanionReleaseRepository,
+};
+
 export function getCompanionReleaseRepository(): CompanionReleaseRepository {
-  return mockCompanionReleaseRepository;
+  return pickRepository(companionReleaseRepositoryBacking);
 }

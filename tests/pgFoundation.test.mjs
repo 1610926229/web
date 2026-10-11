@@ -12,16 +12,26 @@ import { dropDatabaseObjects, resetDatabase } from "../lib/data/pg/reset.ts";
 import { seedDatabase } from "../lib/data/pg/seed.ts";
 import { createFavoriteRepository, pgFavoriteRepository } from "../lib/data/pg/favoriteRepository.ts";
 import { createSuggestionRepository, pgSuggestionRepository } from "../lib/data/pg/suggestionRepository.ts";
+import { agreementSeed } from "../lib/mocks/fixtures/agreementSeed.ts";
+import { adminSeed } from "../lib/mocks/fixtures/adminSeed.ts";
+import { categorySeed, gameSeed, productSeed } from "../lib/mocks/fixtures/catalogSeed.ts";
+import { companionApplicationSeed } from "../lib/mocks/fixtures/companionApplicationSeed.ts";
+import { announcementSeed, bannerSeed, quickEntrySeed } from "../lib/mocks/fixtures/contentSeed.ts";
 import { favoriteSeed } from "../lib/mocks/fixtures/favoriteSeed.ts";
 import { suggestionSeed } from "../lib/mocks/fixtures/suggestionSeed.ts";
 import { buildDispatchSeed } from "../lib/mocks/fixtures/dispatchSeed.ts";
+import { levelSeed } from "../lib/mocks/fixtures/levelSeed.ts";
+import { conversationSeed, messageSeed, staffReadSeed } from "../lib/mocks/fixtures/messageSeed.ts";
 import { getMockSeedNow } from "../lib/mocks/fixtures/mockClock.ts";
 import { buildRankingPeriodOrders, orderSeed } from "../lib/mocks/fixtures/orderSeed.ts";
 import { couponClaimSeed, couponSeed } from "../lib/mocks/fixtures/couponSeed.ts";
 import { complaintSeed } from "../lib/mocks/fixtures/complaintSeed.ts";
 import { notificationSeed } from "../lib/mocks/fixtures/notificationSeed.ts";
 import { refundSeed } from "../lib/mocks/fixtures/refundSeed.ts";
-import { companionSeed } from "../lib/mocks/fixtures/seed.ts";
+import { reviewSeed } from "../lib/mocks/fixtures/reviewSeed.ts";
+import { companionSeed, userSeed } from "../lib/mocks/fixtures/seed.ts";
+import { staffSeed } from "../lib/mocks/fixtures/staffSeed.ts";
+import { tipSeed } from "../lib/mocks/fixtures/tipSeed.ts";
 
 /**
  * PROD-1A · PostgreSQL 基础层与竖切片的**集成**用例（打真库）。
@@ -78,6 +88,15 @@ const ALL_VERSIONS = [
   // PROD-1C：管理审计落库的那一张表。它排在最后，是**续号**的结果——
   // 已执行过的迁移一个字都不许改（PROD-1C Phase 2）。
   "0009",
+  // PROD-1E Wave A：身份与账号 / 商品目录 / 运营内容 / 打手入驻 / 会员权益 / 评价 / 会话，
+  // 七张域迁移（续号，不改旧迁移）。
+  "0010",
+  "0011",
+  "0012",
+  "0013",
+  "0014",
+  "0015",
+  "0016",
 ];
 
 /**
@@ -87,27 +106,46 @@ const ALL_VERSIONS = [
  * 后者接不住「某条迁移多建了一张没人知道的表」——而那正是记账表要防的事。
  */
 const ALL_TABLES = [
+  "admin_accounts",
   "admin_audit_entries",
+  "agreements",
+  "announcements",
+  "banners",
+  "categories",
   "companion_accept_events",
+  "companion_applications",
   "companion_release_records",
   "companion_service_events",
   "companions",
-  "completion_submissions",
   "complaints",
+  "completion_submissions",
+  "consumption_levels",
+  "conversations",
   "coupon_claims",
   "coupon_templates",
   "dispatch_records",
   "earning_adjustments",
   "earnings",
   "favorites",
+  "games",
+  "messages",
   "notifications",
+  "order_reviews",
   "orders",
   "payment_requests",
   "payments",
   "platform_config",
+  "product_specs",
+  "products",
+  "quick_entries",
   "refund_requests",
   MIGRATION_TABLE,
+  "staff_accounts",
+  "staff_reads",
   "suggestions",
+  "tip_records",
+  "user_qualifications",
+  "users",
 ];
 
 /**
@@ -126,17 +164,42 @@ function byCodeUnit(a, b) {
 }
 
 /**
- * W1（订单写闭包）里**真的有预置数据**的表，以及各有多少行。
+ * 有预置数据的表，以及各有多少行——**按表名**（与 `expected` 的按域名是同一份事实的两种视图）。
  *
  * ⚠️ 订单集合必须与 `seedDatabase` 的取法**逐字一致**：`orderSeed` 加上
  * `buildRankingPeriodOrders`。少算那一批，「种子条数与预置数据一致」这条断言
  * 会以「少了几条」的形式失败——这正是它该有的表现。
+ *
+ * ⚠️ 这张表是**直查 SQL 的那一半**：`expected` 让 seed 自己报数，这里回到库里
+ * `count(*)` 一次。只信前者的话，一个「报 23 条、实际插 0 条」的实现照样能过。
+ * PROD-1E 把 19 张新表一并纳入，覆盖面从 9 张扩到 30 张。
  */
 const SEED_NOW = getMockSeedNow();
 const SEED_ORDERS = [...orderSeed, ...buildRankingPeriodOrders(SEED_NOW)];
 const SEED_DISPATCHES = buildDispatchSeed(SEED_ORDERS, SEED_NOW);
 
 const SEEDED_HUB_TABLES = {
+  // —— PROD-1E：身份 / 目录 / 运营内容 / 入驻 / 权益 / 评价 / 会话 ——
+  users: userSeed.length,
+  admin_accounts: adminSeed.length,
+  staff_accounts: staffSeed.length,
+  games: gameSeed.length,
+  categories: categorySeed.length,
+  products: productSeed.length,
+  // 摊平：一行的商品在库里对应多行规格（见 `expected` 里同一处的说明）
+  product_specs: productSeed.flatMap((product) => product.specs).length,
+  announcements: announcementSeed.length,
+  banners: bannerSeed.length,
+  quick_entries: quickEntrySeed.length,
+  agreements: agreementSeed.length,
+  companion_applications: companionApplicationSeed.length,
+  consumption_levels: levelSeed.length,
+  tip_records: tipSeed.length,
+  order_reviews: reviewSeed.length,
+  conversations: conversationSeed.length,
+  messages: messageSeed.length,
+  staff_reads: staffReadSeed.length,
+  // —— PROD-1B · W1 订单写闭包 ——
   companions: companionSeed.length,
   orders: SEED_ORDERS.length,
   dispatch_records: SEED_DISPATCHES.length,
@@ -161,6 +224,11 @@ const EMPTY_HUB_TABLES = [
   // 预置数据里没有任何一次「管理员做过什么」，给 Pg 编一份会凭空造出一段
   // 从未发生过的管理动作历史（与下面几张历史事件表同一条理由）。
   "admin_audit_entries",
+  // PROD-1E：资格是**审计历史**而不是运行时判据，Mock 的资格 store 建仓即为空
+  // （`mockQualificationRepository.createStore()`）。Pg 侧保留这一次「空写」调用，
+  // 正是为了让「两边都空」有一条会红的断言守着——给它编一份预置资格，
+  // 等于凭空造出一段从未发生过的审核历史。
+  "user_qualifications",
   "payment_requests",
   "payments",
   "completion_submissions",
@@ -674,9 +742,37 @@ test("预置反馈没有幂等键，用任何键都查不到——与 Mock 的�
 test("seed 写进去的条数与预置数据一致；重复执行全部跳过，不产生第二份", { skip: SKIP }, async () => {
   const counts = (total, inserted) =>
     inserted ? { inserted: total, skipped: 0 } : { inserted: 0, skipped: total };
+  // 与 `lib/data/pg/seed.ts` 的 `SeedResult` **逐域一一对应**（30 个域）。
+  // 条数一律从**同一份 fixture** 推导（不是抄一份字面量）：seed 与这里读的是
+  // 「Mock 当初装了哪几个」，抄数字就会在 fixture 增删时一边改一边忘。
   const expected = (inserted) => ({
     favorites: counts(favoriteSeed.length, inserted),
     suggestions: counts(suggestionSeed.length, inserted),
+    // —— PROD-1E：身份 / 目录 / 运营内容 / 入驻 / 权益 / 评价 / 会话。
+    //    ⚠️ `productSpecs` 是**摊平**的（规格在实体上挂在商品下，在库里是独立一张表），
+    //    因此它的条数是各商品 `specs` 之和，与 `seed.ts` 里 `flatMap` 的写法同源。
+    users: counts(userSeed.length, inserted),
+    adminAccounts: counts(adminSeed.length, inserted),
+    staffAccounts: counts(staffSeed.length, inserted),
+    games: counts(gameSeed.length, inserted),
+    categories: counts(categorySeed.length, inserted),
+    products: counts(productSeed.length, inserted),
+    productSpecs: counts(
+      productSeed.flatMap((product) => product.specs).length,
+      inserted,
+    ),
+    announcements: counts(announcementSeed.length, inserted),
+    banners: counts(bannerSeed.length, inserted),
+    quickEntries: counts(quickEntrySeed.length, inserted),
+    agreements: counts(agreementSeed.length, inserted),
+    companionApplications: counts(companionApplicationSeed.length, inserted),
+    // ⚠️ 刻意是 0：Mock 的资格 store 建仓即为空，Pg 侧也必须一条都不写。
+    //    写成 `0` 而不是「不列这个域」，是为了让「两边都空」这条 parity 有一个
+    //    显式的落点——不列就等于没人守它，将来多出一份预置数据不会有任何信号。
+    userQualifications: counts(0, inserted),
+    consumptionLevels: counts(levelSeed.length, inserted),
+    tipRecords: counts(tipSeed.length, inserted),
+    // —— PROD-1B · W1 订单写闭包（这 11 个域在 PROD-1E 之前就有） ——
     companions: counts(companionSeed.length, inserted),
     orders: counts(SEED_ORDERS.length, inserted),
     dispatchRecords: counts(SEED_DISPATCHES.length, inserted),
@@ -686,6 +782,11 @@ test("seed 写进去的条数与预置数据一致；重复执行全部跳过，
     complaints: counts(complaintSeed.length, inserted),
     refundRequests: counts(refundSeed.length, inserted),
     platformConfig: counts(1, inserted),
+    // —— PROD-1E 续 ——
+    orderReviews: counts(reviewSeed.length, inserted),
+    conversations: counts(conversationSeed.length, inserted),
+    messages: counts(messageSeed.length, inserted),
+    staffReads: counts(staffReadSeed.length, inserted),
   });
 
   const first = await seedDatabase(executor());

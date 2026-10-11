@@ -1,5 +1,7 @@
 import type { CompletionSubmission, CompletionSubmissionStatus } from "@/lib/types/completion";
 import { mockCompletionRepository } from "./mockCompletionRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCompletionRepository } from "./pg/completionRepository";
 
 /**
  * 完成材料的可替换仓储（P0-8）。
@@ -41,6 +43,16 @@ export type CompletionRepository = {
   }): Promise<CompletionSubmission[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const completionRepositoryBacking: RepositoryBacking<CompletionRepository> = {
+  name: "completion",
+  mock: mockCompletionRepository,
+  pg: pgCompletionRepository,
+};
+
 export function getCompletionRepository(): CompletionRepository {
-  return mockCompletionRepository;
+  return pickRepository(completionRepositoryBacking);
 }

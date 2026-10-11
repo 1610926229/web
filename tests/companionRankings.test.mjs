@@ -1724,7 +1724,7 @@ test("端到端：有已批准退款的订单不进完成榜（即使它已经 c
   assert.ok(earning, "订单完成必须产生一条收益");
   const window = Date.parse(earning.availableAt);
   assert.deepEqual(
-    sweepMaturedEarnings(new Date(window + 60 * 1000).toISOString()).releasedEarningIds,
+    (await sweepMaturedEarnings(new Date(window + 60 * 1000).toISOString())).releasedEarningIds,
     [earning.id],
     "前置条件：这一笔必须先成熟，收入榜才看得见它",
   );

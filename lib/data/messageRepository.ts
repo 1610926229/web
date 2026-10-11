@@ -1,5 +1,7 @@
 import type { OrderConversationRecord, OrderMessage, StaffReadRecord } from "@/lib/types/message";
 import { mockMessageRepository } from "./mockMessageRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgMessageRepository } from "./pg/messageRepository";
 
 /**
  * 订单沟通（会话 + 消息）的可替换仓储。
@@ -198,6 +200,16 @@ export type MessageRepository = {
   ): Promise<StaffReadRecord | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const messageRepositoryBacking: RepositoryBacking<MessageRepository> = {
+  name: "message",
+  mock: mockMessageRepository,
+  pg: pgMessageRepository,
+};
+
 export function getMessageRepository(): MessageRepository {
-  return mockMessageRepository;
+  return pickRepository(messageRepositoryBacking);
 }

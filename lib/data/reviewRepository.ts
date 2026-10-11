@@ -6,6 +6,8 @@ import type {
   ReviewStatus,
 } from "@/lib/types/review";
 import { mockReviewRepository } from "./mockReviewRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgReviewRepository } from "./pg/reviewRepository";
 
 /**
  * 评价的可替换仓储。
@@ -183,6 +185,16 @@ export type ReviewRepository = {
   ): Promise<ResubmitReviewOutcome>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const reviewRepositoryBacking: RepositoryBacking<ReviewRepository> = {
+  name: "review",
+  mock: mockReviewRepository,
+  pg: pgReviewRepository,
+};
+
 export function getReviewRepository(): ReviewRepository {
-  return mockReviewRepository;
+  return pickRepository(reviewRepositoryBacking);
 }

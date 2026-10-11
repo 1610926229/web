@@ -119,7 +119,7 @@ test("管理端：指定 A、实际 B 时，两个字段同时给出且分别指
   assert.equal(dispatch.state, "exclusive");
 
   // A 十分钟没接：专属池到点转公共池，指定事实原样保留
-  const moved = sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
+  const moved = await sweepExpiredDispatches(dispatch.exclusiveDeadlineAt);
   assert.ok(moved.movedToPublicDispatchIds.includes(dispatch.id));
 
   // B 从公共池接走

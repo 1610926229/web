@@ -157,10 +157,12 @@ export async function queryOrdersForUser(
 
   // 惰性物化超时事实（幂等）：一张在公共池里等到超时的订单，用户点开订单列表
   // 就该看到它已经退款，而不是「等待接单」——那会让人以为还有希望。
-  // 放在查询**之前**，而且是不带 await 的同步调用（见全局约束 13）
-  materializeDispatchTimeouts();
+  // 放在查询**之前**，而且必须 `await`（PROD-1E Phase 7 起清扫入口返回 Promise）：
+  // 漏掉 `await` 不是编译错误，而是让下面这次查询读到清扫**之前**的状态——
+  // 「单据早就到点了、列表里却还显示等待接单」正是这一处要挡的错。
+  await materializeDispatchTimeouts();
   // 完成材料到期自动通过的事实也一样（P0-8）：用户订单详情要显示得出「已完成」
-  materializeCompletionAutoApprovals();
+  await materializeCompletionAutoApprovals();
 
   const page = await withMockDebug(params, surface, () =>
     getPaymentRepository().queryOrders({ ...parsed.query, userId }),
@@ -180,8 +182,8 @@ export async function queryOrdersForUser(
  * ⚠️ 用 `new Date()` 而不是进程基准时间：超时是**真实时间**的事，
  * 与「Mock 种子基准时间」无关（后者只用于让预置数据看起来新鲜）。
  */
-function materializeDispatchTimeouts(): void {
-  sweepExpiredDispatches(new Date().toISOString());
+async function materializeDispatchTimeouts(): Promise<void> {
+  await sweepExpiredDispatches(new Date().toISOString());
 }
 
 /**
@@ -193,8 +195,8 @@ function materializeDispatchTimeouts(): void {
  * 不重复完成、不刷新 `completedAt`。真实调度器上线后调用**同一个**
  * `sweepCompletionAutoApprovals()`，**不是**另写一套。
  */
-function materializeCompletionAutoApprovals(): void {
-  sweepCompletionAutoApprovals(new Date().toISOString());
+async function materializeCompletionAutoApprovals(): Promise<void> {
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 }
 
 /**
@@ -215,8 +217,8 @@ export async function getOrderDetailForUser(
 ): Promise<OrderDetail | null> {
   if (!orderId) return null;
 
-  materializeDispatchTimeouts();
-  materializeCompletionAutoApprovals();
+  await materializeDispatchTimeouts();
+  await materializeCompletionAutoApprovals();
 
   const order = await withMockDebug(params, surface, () =>
     getPaymentRepository().findOrderById(orderId),

@@ -1,7 +1,7 @@
 import type { PageResult } from "@/lib/types/common";
 import type { Suggestion } from "@/lib/types/suggestion";
+import { pickRepository, type RepositoryBacking } from "./datasource";
 import { mockSuggestionRepository } from "./mockSuggestionRepository";
-import { isPostgresDataSourceEnabled } from "./pg/config";
 import { pgSuggestionRepository } from "./pg/suggestionRepository";
 
 /**
@@ -56,12 +56,25 @@ export type SuggestionRepository = {
 };
 
 /**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const suggestionRepositoryBacking: RepositoryBacking<SuggestionRepository> = {
+  name: "suggestion",
+  mock: mockSuggestionRepository,
+  pg: pgSuggestionRepository,
+};
+
+/**
  * 取当前生效的反馈仓储。
  *
  * PROD-1A 起有**两个实现**，由 `DATA_SOURCE` 显式选择（见 `lib/data/pg/config.ts`）。
  * 默认走 Mock，理由与 `getFavoriteRepository` 完全相同：迁移策略要求
  * 「active datasource 的切换必须满足事务闭包完整」，没迁完的仓储绝不能悄悄切。
+ *
+ * ⚠️ PROD-1E 起选择逻辑**收敛到 `pickRepository`**（`lib/data/datasource.ts`），
+ * 理由与写法见 `favoriteRepository.ts` 的同名注释。
  */
 export function getSuggestionRepository(): SuggestionRepository {
-  return isPostgresDataSourceEnabled() ? pgSuggestionRepository : mockSuggestionRepository;
+  return pickRepository(suggestionRepositoryBacking);
 }

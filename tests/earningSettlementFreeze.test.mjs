@@ -62,6 +62,15 @@ import { collectFiles, readSource, stripComments } from "./source-text.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+/** 取某个导出函数的函数体（到下一个导出声明的开头为止）。 */
+function functionBody(code, name) {
+  const start = new RegExp(`export\\s+(?:async\\s+)?function\\s+${name}\\b`).exec(code);
+  assert.ok(start, `找不到 ${name}：结构约束无法判定`);
+  const rest = code.slice(start.index + 1);
+  const next = rest.search(/export\s+(?:async\s+)?(?:function|const|let|var|type)\s/);
+  return next === -1 ? code.slice(start.index) : code.slice(start.index, start.index + 1 + next);
+}
+
 /** 目录里真实存在的可购买商品：机密400万 / 2990 分。 */
 const PRODUCT = { productId: "p-400w", specId: "s-400w", region: "手游" };
 const COMPANION_A = "cp-1";
@@ -355,7 +364,7 @@ test("冻结 4：截止时刻之前 Earning 恒为 frozen——即使 sweep 被�
   );
 
   for (const at of [completedAt, plusMinutes(deadline, -1)]) {
-    const swept = sweepMaturedEarnings(at);
+    const swept = await sweepMaturedEarnings(at);
     assert.deepEqual(swept.releasedEarningIds, [], `at=${at} 还没到点：一条都不许释放`);
   }
 
@@ -378,7 +387,7 @@ test("阻塞 5：截止已过、但存在有效退款申请 → 仍然 frozen", 
     "刚提交的申请是 pending——它本身就是「有效退款」，足以挡住结算",
   );
 
-  const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
+  const swept = await sweepMaturedEarnings(plusMinutes(deadline, 1));
   assert.deepEqual(swept.releasedEarningIds, [], "有进行中的退款就必须挡住放款");
   assert.equal(
     earningsOfOrder(orderId)[0].status,
@@ -411,7 +420,7 @@ test("阻塞 6：截止已过、但存在投诉 → 仍然 frozen", async () => 
     "新投诉是 pending——未完结，算阻塞",
   );
 
-  const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
+  const swept = await sweepMaturedEarnings(plusMinutes(deadline, 1));
   assert.deepEqual(swept.releasedEarningIds, [], "有未完结投诉就必须挡住放款");
   assert.equal(earningsOfOrder(orderId)[0].status, "frozen", "投诉未完结期间收益必须继续冻结");
 });
@@ -426,7 +435,7 @@ test("释放 7：截止已过、且没有任何阻塞 → 变成 available", asy
     "这一条要有意义，前置必须是**真的**没有任何阻塞",
   );
 
-  const swept = sweepMaturedEarnings(deadline);
+  const swept = await sweepMaturedEarnings(deadline);
   assert.equal(swept.releasedEarningIds.length, 1, "截止已到（含边界）且无阻塞：必须释放");
   assert.equal(swept.releasedEarningIds[0], earningsOfOrder(orderId)[0].id);
 
@@ -524,7 +533,7 @@ test("退款 10：退款批准之后收益不得再被释放——时间推过�
   );
 
   for (const at of [deadline, plusMinutes(deadline, 600)]) {
-    const swept = sweepMaturedEarnings(at);
+    const swept = await sweepMaturedEarnings(at);
     assert.deepEqual(swept.releasedEarningIds, [], `at=${at}：已冲光的收益永远不得被释放`);
   }
 
@@ -675,7 +684,7 @@ test("并发 11：退款与到期释放争同一张单——收益不会与进�
     // 这就是「退款流程一旦成立，收益就永不可能同时被释放」的落点——
     // 释放事务在写下去之前重新读了一次阻塞事实，因此它读到的必然是这个 pending 申请。
     for (const at of [deadline, plusMinutes(deadline, 1), plusMinutes(deadline, 600)]) {
-      const swept = sweepMaturedEarnings(at);
+      const swept = await sweepMaturedEarnings(at);
       assert.deepEqual(
         swept.releasedEarningIds,
         [],
@@ -720,7 +729,7 @@ test("并发 11：退款与到期释放争同一张单——收益不会与进�
 
     // 此刻不存在任何退款，释放可以发生——但它成立的那一刻，退款已经**不可能**再成立。
     // 这正是「释放与退款不可能同时发生」的另一半：两者的时间窗是同一条边界。
-    const swept = sweepMaturedEarnings(now());
+    const swept = await sweepMaturedEarnings(now());
     assert.equal(swept.releasedEarningIds.length, 1, "无阻塞且已到期：释放成立");
     assert.equal(earningsOfOrder(orderId)[0].status, "available");
     assert.equal(
@@ -733,14 +742,28 @@ test("并发 11：退款与到期释放争同一张单——收益不会与进�
   /* ── C. 结构：释放的「重读阻塞」与「写入」在同一个无 await 的原子区段，且释放只有一个出口 ── */
   {
     const tx = stripComments(readSource(path.join(ROOT, "lib", "data", "earningTransaction.ts")));
-    assert.equal(/\bawait\b/.test(tx), false, "收益伪事务里出现 await，原子性立刻消失");
+
+    // 仍在原子区段内被同步调用的结算原语与清扫的 Mock 半边：各自体内都没有 await。
+    // （整文件级「无 await」不再成立——`sweepMaturedEarnings` 门面允许 async，见下。）
+    const settleBody = functionBody(tx, "settleOrderCompletion");
+    const sweepMockBody = functionBody(tx, "sweepMaturedEarningsMock");
+    assert.equal(/\bawait\b/.test(settleBody), false, "结算原语里出现 await，原子性立刻消失");
+    assert.equal(/\bawait\b/.test(sweepMockBody), false, "清扫的 Mock 半边出现 await，原子性立刻消失");
     assert.equal(
-      /export\s+async\s+function/.test(tx),
+      /export\s+async\s+function\s+settleOrderCompletion\b/.test(tx),
       false,
-      "sweepMaturedEarnings 必须是同步函数（要能在原子区段里被调用）",
+      "settleOrderCompletion 必须是同步函数（要能在原子区段里被调用）",
+    );
+    assert.equal(
+      /export\s+async\s+function\s+sweepMaturedEarningsMock\b/.test(tx),
+      false,
+      "sweepMaturedEarningsMock 必须是同步函数（要能在原子区段里被调用）",
     );
 
-    const sweepBody = tx.slice(tx.indexOf("export function sweepMaturedEarnings"));
+    // ⚠️ 精确定位到 Mock 半边（带词边界）：旧的 `tx.indexOf("export function sweepMaturedEarnings")`
+    // 靠前缀命中「恰好」落对，是巧合；门面 `sweepMaturedEarnings` 现在是 async 路由，
+    // 真正的「重读阻塞 → 释放写入」顺序必须钉在 `sweepMaturedEarningsMock` 身上。
+    const sweepBody = functionBody(tx, "sweepMaturedEarningsMock");
     const readAt = sweepBody.indexOf("readOrderBlockingFacts(");
     const writeAt = sweepBody.indexOf("applyEarningRelease(");
     assert.ok(readAt !== -1, "释放事务必须在写下去之前**重新读一次**阻塞事实");

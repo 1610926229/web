@@ -15,6 +15,13 @@ import {
   findStaffWithUsername,
   staffStore,
 } from "./mockStaffRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import {
+  createStaffAccountPg,
+  removeStaffAccountPg,
+  setStaffEnabledPg,
+  updateStaffProfilePg,
+} from "./pg/staffTransactions";
 
 /**
  * 客服账号管理写操作的**伪事务** —— 后台新增 / 编辑 / 启用 / 停用 / 移除的唯一写入入口。
@@ -43,7 +50,8 @@ import {
  * 实现）：各写一份的话，「同一个幂等键第二次到达会怎样」迟早会有两种答案，
  * 而这类差异只在并发或重试时才会暴露。
  *
- * 接入真实数据库后，本文件整体替换为一个事务（`BEGIN … COMMIT` + 唯一索引兜底），
+ * 接入真实数据库后，同一组入口由 `pg/staffTransactions.ts` 的等价事务承接：
+ * 本文件下方的 4 个公开函数按 `DATA_SOURCE` 在 `xxxMock`（上面）与 `xxxPg` 之间路由，
  * 上层的 service 与接口一行都不用改。
  */
 
@@ -116,7 +124,7 @@ function unchanged(account: StaffAccount, replayed: boolean): AdminStaffWriteRes
  *    真要收回权限，停用与移除是两个明确的动作，各自写自己的审计。
  * 4. **不产生密码**：记录里没有密码字段，也没有「初始密码」。本阶段是 Mock 认证。
  */
-export async function createStaffAccount(
+async function createStaffAccountMock(
   input: AdminStaffProfileInput,
   ctx: AdminWriteContext,
 ): Promise<AdminStaffWriteResult> {
@@ -178,7 +186,7 @@ export async function createStaffAccount(
  * - 幂等重放（同一个幂等键第二次到达）；
  * - 三个字段与当前值完全一致（用另一个键再保存一次）。
  */
-export async function updateStaffProfile(
+async function updateStaffProfileMock(
   id: string,
   input: AdminStaffProfileInput,
   ctx: AdminWriteContext,
@@ -240,7 +248,7 @@ export async function updateStaffProfile(
  * 要让一位已移除的客服重新上岗，请新建一个账号——这也让审计里
  * 「谁在什么时候被移除、谁在什么时候被新增」保持是两件独立的事。
  */
-export async function setStaffEnabled(
+async function setStaffEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -298,7 +306,7 @@ export async function setStaffEnabled(
  *
  * 已经移除过：不刷新时间戳、不写第二条审计。重复移除是幂等的，不是错误。
  */
-export async function removeStaffAccount(
+async function removeStaffAccountMock(
   id: string,
   ctx: AdminWriteContext,
 ): Promise<AdminStaffWriteResult> {
@@ -332,4 +340,62 @@ export async function removeStaffAccount(
   // —— 原子区段结束 ——
 
   return { kind: "ok", value: { ...written.updated }, changed: true, replayed: false };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 4 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/staffTransactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：客服账号写入被
+ * `adminStaff.ts` 等多个调用点引用，逐个改调用点意味着将来新增一个调用点就会漏改一处，
+ * 而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务——事务提交了，
+ * 进程内的账本却把「管理员改过这个账号」记了下来。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 新增客服账号。 */
+export async function createStaffAccount(
+  input: AdminStaffProfileInput,
+  ctx: AdminWriteContext,
+): Promise<AdminStaffWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? createStaffAccountPg(input, ctx)
+    : createStaffAccountMock(input, ctx);
+}
+
+/** 编辑客服账号资料（登录名 / 名称 / 头像）。 */
+export async function updateStaffProfile(
+  id: string,
+  input: AdminStaffProfileInput,
+  ctx: AdminWriteContext,
+): Promise<AdminStaffWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? updateStaffProfilePg(id, input, ctx)
+    : updateStaffProfileMock(id, input, ctx);
+}
+
+/** 启用 / 停用客服账号（窄写入）。 */
+export async function setStaffEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminStaffWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? setStaffEnabledPg(id, enabled, ctx)
+    : setStaffEnabledMock(id, enabled, ctx);
+}
+
+/** 移除客服账号（软删除）。 */
+export async function removeStaffAccount(
+  id: string,
+  ctx: AdminWriteContext,
+): Promise<AdminStaffWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? removeStaffAccountPg(id, ctx)
+    : removeStaffAccountMock(id, ctx);
 }

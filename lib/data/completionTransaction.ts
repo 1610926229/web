@@ -23,6 +23,13 @@ import {
 } from "./mockCompletionRepository";
 import { paymentStore } from "./mockPaymentRepository";
 import { readOrderBlockingFacts } from "./orderBlocking";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import {
+  approveCompletionPg,
+  rejectCompletionPg,
+  submitCompletionPg,
+  sweepCompletionAutoApprovalsPg,
+} from "./pg/w1Transactions";
 
 /**
  * 完成材料域的伪事务（P0-8）—— 四个入口：提交、人工通过、人工驳回、到期自动通过。
@@ -31,9 +38,14 @@ import { readOrderBlockingFacts } from "./orderBlocking";
  *
  * 与 `lib/data/companionOrderTransaction.ts` / `companionDispatchTransaction.ts` 同一条依据：
  * Node 是单线程的，「读—判断—写」之间只要不让出执行权，别的请求就插不进来。
- * 提交 / 通过 / 驳回三个函数都是 `async` 只为签名与其它伪事务一致，**函数体里没有
- * 一个 `await`**；`sweepCompletionAutoApprovals` 干脆就是同步函数。因此在标注的边界之后
- * 加一个 `await` 就是 bug。
+ * Mock 半边的四个 `*Mock` 函数就是这件事的落点：提交 / 通过 / 驳回三个是 `async`
+ * 只为签名与其它伪事务一致，**函数体里没有一个 `await`**；`sweepCompletionAutoApprovalsMock`
+ * 干脆就是同步函数。因此在标注的边界之后加一个 `await` 就是 bug。
+ *
+ * ⚠️ PROD-1E Phase 7 起，本文件对外的四个名字是**路由门面**：`DATA_SOURCE=postgres` 时
+ * 它们改走 `pg/w1Transactions.ts` 的真事务（那里由 `BEGIN…COMMIT` 与行锁保证同一件事）。
+ * 上面那句话说的是 **Mock 半边**，不是门面——门面有 `async` 外壳，但体内没有 `await`，
+ * 它只做「按 `DATA_SOURCE` 二选一」这一件事。
  *
  * ## 为什么不用 `adminWriteSupport` 的 `operationId`
  *
@@ -193,7 +205,7 @@ export function invalidatePendingCompletionForOrder(input: {
  *
  * ⚠️ `companionId` **只允许**来自 `requireCompanion()` 返回的会话身份。
  */
-export async function submitCompletion(input: {
+export async function submitCompletionMock(input: {
   companionId: string;
   orderId: string;
   summary: string;
@@ -284,7 +296,7 @@ export async function submitCompletion(input: {
  * - **第 6～8 步在写入前、同一段同步代码里**：判完到写之间让出执行权，
  *   就可能出现「判的是 serving、写的时候已被 refunded」。
  */
-export async function approveCompletion(input: {
+export async function approveCompletionMock(input: {
   submissionId: string;
   staffId: string;
   staffName: string;
@@ -388,7 +400,7 @@ export async function approveCompletion(input: {
  * ⚠️ **不改订单**：订单继续 `serving`，打手可重新提交并重新计时。驳回原因必填
  * （服务层已用 `normalizeAdminReviewNote` 校验），审核人三个字段写在这条记录上。
  */
-export async function rejectCompletion(input: {
+export async function rejectCompletionMock(input: {
   submissionId: string;
   staffId: string;
   staffName: string;
@@ -456,7 +468,7 @@ export async function rejectCompletion(input: {
  * 在结构上产生不出来；即便真发生，`applyCompletionReview` 也只会原样重写一遍
  * `approved`（不刷新时间），而订单的 `completedAt` 由 `?? at` 保证不被刷新。
  */
-export function sweepCompletionAutoApprovals(at: string): {
+export function sweepCompletionAutoApprovalsMock(at: string): {
   autoApprovedSubmissionIds: string[];
 } {
   const completions = completionStore();
@@ -499,4 +511,75 @@ export function sweepCompletionAutoApprovals(at: string): {
   }
 
   return { autoApprovedSubmissionIds: plan.map((item) => item.submissionId) };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 4 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/w1Transactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**（同一套判定顺序、同一套幂等判据）。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：提交 / 通过 / 驳回 / 自动通过
+ * 被 `staffCompletions.ts` 等调用点引用，逐个改调用点意味着将来新增一个调用点就会漏改一处，
+ * 而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务（Phase 7 明令禁止）。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ *
+ * ⚠️ `canInvalidatePendingCompletionForOrder` / `invalidatePendingCompletionForOrder`
+ * 刻意**不路由**：它们是 Mock 侧「作废 pending 完成材料」的判定与同步写入原语，被
+ * `companionOrderTransaction.ts` 的 Mock 释放路径在原子区段内调用；Pg 侧没有等价的
+ * 独立导出——同一件事已内嵌在 `releaseCurrentAssignmentTx`（`w1Transactions.ts`）里。
+ *
+ * ⚠️ `sweepCompletionAutoApprovals` 原先是同步函数（挂在读取路径上），Pg 版是异步事务；
+ * 路由后它返回 Promise，读取路径上的调用方必须 `await`，否则「先 sweep 再读」会读到
+ * sweep 之前的状态。
+ */
+
+/** 打手提交完成材料（`serving` → pending submission）。 */
+export async function submitCompletion(input: {
+  companionId: string;
+  orderId: string;
+  summary: string;
+  evidence: SupportEvidence[];
+  at: string;
+}): Promise<CompanionCompletionSubmitOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? submitCompletionPg(input)
+    : submitCompletionMock(input);
+}
+
+/** 客服人工通过（`pending submission + serving order → approved + completed`）。 */
+export async function approveCompletion(input: {
+  submissionId: string;
+  staffId: string;
+  staffName: string;
+  at: string;
+}): Promise<StaffCompletionApproveOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? approveCompletionPg(input)
+    : approveCompletionMock(input);
+}
+
+/** 客服人工驳回（`pending submission → rejected`，订单不动）。 */
+export async function rejectCompletion(input: {
+  submissionId: string;
+  staffId: string;
+  staffName: string;
+  rejectReason: string;
+  at: string;
+}): Promise<StaffCompletionRejectOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? rejectCompletionPg(input)
+    : rejectCompletionMock(input);
+}
+
+/** 到期自动通过（幂等；Pg 侧返回 Promise，Mock 侧为同步实现）。 */
+export async function sweepCompletionAutoApprovals(at: string): Promise<{
+  autoApprovedSubmissionIds: string[];
+}> {
+  return isPostgresDataSourceEnabled()
+    ? sweepCompletionAutoApprovalsPg(at)
+    : sweepCompletionAutoApprovalsMock(at);
 }

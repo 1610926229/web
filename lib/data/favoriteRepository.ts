@@ -1,7 +1,7 @@
 import type { PageResult } from "@/lib/types/common";
 import type { Favorite } from "@/lib/types/favorite";
+import { pickRepository, type RepositoryBacking } from "./datasource";
 import { mockFavoriteRepository } from "./mockFavoriteRepository";
-import { isPostgresDataSourceEnabled } from "./pg/config";
 import { pgFavoriteRepository } from "./pg/favoriteRepository";
 
 /**
@@ -56,19 +56,33 @@ export type FavoriteRepository = {
 };
 
 /**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const favoriteRepositoryBacking: RepositoryBacking<FavoriteRepository> = {
+  name: "favorite",
+  mock: mockFavoriteRepository,
+  pg: pgFavoriteRepository,
+};
+
+/**
  * 取当前生效的收藏仓储。
  *
- * PROD-1A 起有**两个实现**，由 `DATA_SOURCE` 显式选择（见 `lib/data/pg/config.ts`）：
- *
- * - 默认（未设置）→ `mockFavoriteRepository`，进程内 Mock 存储；
- * - `DATA_SOURCE=postgres` → `pgFavoriteRepository`，PostgreSQL。
+ * 两个实现由 `DATA_SOURCE` 显式选择（见 `lib/data/pg/config.ts`）：默认（未设置）走
+ * `mockFavoriteRepository`（进程内 Mock 存储），`DATA_SOURCE=postgres` 走
+ * `pgFavoriteRepository`（PostgreSQL）。
  *
  * ⚠️ 默认值是 Mock 而不是「配了 `DATABASE_URL` 就用数据库」，这是**迁移策略的要求**：
  * 「开发可以分波次，active datasource 的切换必须满足事务闭包完整」。
  * 收藏不在任何跨域事务里，因此它是少数可以先切的两个实体之一（另一个是反馈）；
  * 其余 20 多个仓储仍然只有 Mock 实现——**没迁完的绝不能悄悄切**，
  * 否则同一个业务事务会一半写 PostgreSQL、一半写 globalThis。
+ *
+ * ⚠️ PROD-1E 起选择逻辑**收敛到 `pickRepository`**（`lib/data/datasource.ts`）：
+ * 本函数不再自己写三元表达式，而是把自己的 backing 交出去。这样「本域有没有 Pg 实现」
+ * 是一份**可枚举的数据**（`pg: null` 就是没有），能被 `assertAllRepositoriesWired`
+ * 在启用 PostgreSQL 时一次性全部检查——而不是每个访问器各自记得写对。
  */
 export function getFavoriteRepository(): FavoriteRepository {
-  return isPostgresDataSourceEnabled() ? pgFavoriteRepository : mockFavoriteRepository;
+  return pickRepository(favoriteRepositoryBacking);
 }

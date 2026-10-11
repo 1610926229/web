@@ -16,6 +16,12 @@ import {
   couponStore,
   createCouponRecord,
 } from "./mockCouponRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import {
+  createCouponTemplatePg,
+  setCouponTemplateEnabledPg,
+  updateCouponTemplatePg,
+} from "./pg/couponTemplateTransactions";
 
 /**
  * 券模板写入的**伪事务** —— 本阶段新建 / 编辑 / 启停一张券模板的唯一写入入口（P1-6）。
@@ -116,7 +122,7 @@ export type AdminCouponTemplateWriteOutcome =
  * 输入被静默改成另一个数字写进去，调用方拿到「成功」而生效的是另一个值。
  * 校验在服务层（`lib/services/adminCouponTemplates.ts`）。
  */
-export async function createCouponTemplate(
+async function createCouponTemplateMock(
   draft: CouponTemplateDraft,
   ctx: AdminWriteContext,
 ): Promise<AdminCouponTemplateWriteOutcome> {
@@ -195,7 +201,7 @@ export async function createCouponTemplate(
  * 这不是「顺手更新一下」，而是「文案与金额是同一份数据的两种呈现」（§3）——
  * 改了金额却留着旧文案，就会在用户端显示「满 100 减 10」而实际抵扣别的数。
  */
-export async function updateCouponTemplate(
+async function updateCouponTemplateMock(
   id: string,
   draft: CouponTemplateDraft,
   ctx: AdminWriteContext,
@@ -281,7 +287,7 @@ export async function updateCouponTemplate(
  * 那里的动作名要在读完记录后才算得出来，这里的动作名在调用前就定死了，
  * 因此**不需要**再收一轴——入参没变就一定是同一个意图。
  */
-export async function setCouponTemplateEnabled(
+async function setCouponTemplateEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -322,4 +328,51 @@ export async function setCouponTemplateEnabled(
   // —— 原子区段结束 ——
 
   return { kind: "ok", value: written, changed: true, replayed: false };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 3 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/couponTemplateTransactions.ts`
+ * 的 `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：券模板写入被
+ * `adminCouponTemplates.ts` 调用，逐个改调用点意味着将来新增一个调用点就会漏改一处，
+ * 而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 新建券模板（只可能是满减券）。 */
+export async function createCouponTemplate(
+  draft: CouponTemplateDraft,
+  ctx: AdminWriteContext,
+): Promise<AdminCouponTemplateWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? createCouponTemplatePg(draft, ctx)
+    : createCouponTemplateMock(draft, ctx);
+}
+
+/** 编辑券模板（非满减券一律拒绝）。 */
+export async function updateCouponTemplate(
+  id: string,
+  draft: CouponTemplateDraft,
+  ctx: AdminWriteContext,
+): Promise<AdminCouponTemplateWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? updateCouponTemplatePg(id, draft, ctx)
+    : updateCouponTemplateMock(id, draft, ctx);
+}
+
+/** 启用 / 停用券模板（窄写入）。 */
+export async function setCouponTemplateEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminCouponTemplateWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? setCouponTemplateEnabledPg(id, enabled, ctx)
+    : setCouponTemplateEnabledMock(id, enabled, ctx);
 }

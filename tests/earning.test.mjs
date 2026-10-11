@@ -69,6 +69,15 @@ import { readSource, stripComments } from "./source-text.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+/** 取某个导出函数的函数体（到下一个导出声明的开头为止）。 */
+function functionBody(code, name) {
+  const start = new RegExp(`export\\s+(?:async\\s+)?function\\s+${name}\\b`).exec(code);
+  assert.ok(start, `找不到 ${name}：结构约束无法判定`);
+  const rest = code.slice(start.index + 1);
+  const next = rest.search(/export\s+(?:async\s+)?(?:function|const|let|var|type)\s/);
+  return next === -1 ? code.slice(start.index) : code.slice(start.index, start.index + 1 + next);
+}
+
 /** 目录里真实存在的可购买商品：机密400万 / 2990 分。 */
 const PRODUCT = { productId: "p-400w", specId: "s-400w", region: "手游" };
 
@@ -207,7 +216,7 @@ async function completedOrder({
     });
     assert.equal(approved.kind, "ok", "这条用例需要一次成功的客服通过");
   } else {
-    const swept = sweepCompletionAutoApprovals(completedAt);
+    const swept = await sweepCompletionAutoApprovals(completedAt);
     assert.deepEqual(
       swept.autoApprovedSubmissionIds,
       [submitted.submissionId],
@@ -393,7 +402,7 @@ test("幂等 6：同一订单最多一条收益——重复 approve / 重复 swe
   assert.equal(replayed.changed, false);
 
   // (b) 重复清扫（用户端 / 打手端读取路径都会跑它）
-  const sweptAgain = sweepCompletionAutoApprovals(plusMinutes(completedAt, 60));
+  const sweptAgain = await sweepCompletionAutoApprovals(plusMinutes(completedAt, 60));
   assert.deepEqual(sweptAgain.autoApprovedSubmissionIds, []);
 
   // (c) 直接重复结算（幂等判据是订单状态本身，不是幂等键）
@@ -564,7 +573,7 @@ test("解冻 12：deadline 未到 → 不释放，收益仍 frozen", async () =>
   const earning = earningsOfOrder(orderId)[0];
   const deadline = availableAtOf(earning);
 
-  const swept = sweepMaturedEarnings(plusMinutes(deadline, -1));
+  const swept = await sweepMaturedEarnings(plusMinutes(deadline, -1));
   assert.deepEqual(swept.releasedEarningIds, [], "还差一分钟就不是到期");
   assert.equal(earningsOfOrder(orderId)[0].status, "frozen");
 });
@@ -576,7 +585,7 @@ test("解冻 13：deadline 到且无阻塞 → 释放为 available", async () =>
   });
   const deadline = availableAtOf(earningsOfOrder(orderId)[0]);
 
-  const swept = sweepMaturedEarnings(deadline);
+  const swept = await sweepMaturedEarnings(deadline);
   assert.equal(swept.releasedEarningIds.length, 1, "到点即事实（含边界）");
   assert.equal(earningsOfOrder(orderId)[0].status, "available");
   // 仓储读回来的是同一份事实
@@ -598,7 +607,7 @@ test("解冻 14：有进行中的退款 / 未完结的投诉 → 仍 frozen（�
     // （已终结的不再挡，进行中的才挡），因此这里维护的是一个列表
     rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
-    const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
+    const swept = await sweepMaturedEarnings(plusMinutes(deadline, 1));
     assert.deepEqual(swept.releasedEarningIds, [], "进行中的退款必须挡住放款");
     assert.equal(earningsOfOrder(orderId)[0].status, "frozen");
   }
@@ -614,7 +623,7 @@ test("解冻 14：有进行中的退款 / 未完结的投诉 → 仍 frozen（�
     const complaintId = unique("cmp");
     cs.complaints.set(complaintId, { id: complaintId, orderId, status: complaintStatus });
 
-    const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
+    const swept = await sweepMaturedEarnings(plusMinutes(deadline, 1));
     assert.deepEqual(swept.releasedEarningIds, [], `${complaintStatus} 投诉必须挡住放款`);
     assert.equal(earningsOfOrder(orderId)[0].status, "frozen");
   }
@@ -630,7 +639,7 @@ test("解冻 14：有进行中的退款 / 未完结的投诉 → 仍 frozen（�
     const complaintId = unique("cmp");
     cs.complaints.set(complaintId, { id: complaintId, orderId, status: complaintStatus });
 
-    const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
+    const swept = await sweepMaturedEarnings(plusMinutes(deadline, 1));
     assert.equal(swept.releasedEarningIds.length, 1, `${complaintStatus} 投诉不阻塞`);
   }
 });
@@ -646,11 +655,11 @@ test("解冻 15：阻塞解除后，下一次 sweep 把它释放（冻结不是�
   const cs = complaintStore();
   const complaintId = unique("cmp");
   cs.complaints.set(complaintId, { id: complaintId, orderId, status: "processing" });
-  assert.deepEqual(sweepMaturedEarnings(plusMinutes(deadline, 1)).releasedEarningIds, []);
+  assert.deepEqual((await sweepMaturedEarnings(plusMinutes(deadline, 1))).releasedEarningIds, []);
 
   // 客服把它处理完 → 阻塞解除，同一个时刻重扫即可释放
   cs.complaints.set(complaintId, { ...cs.complaints.get(complaintId), status: "resolved" });
-  const swept = sweepMaturedEarnings(plusMinutes(deadline, 1));
+  const swept = await sweepMaturedEarnings(plusMinutes(deadline, 1));
   assert.equal(swept.releasedEarningIds.length, 1);
   assert.equal(earningsOfOrder(orderId)[0].status, "available");
 });
@@ -662,11 +671,11 @@ test("解冻 16：重复 sweep 幂等——只有第一次返回非空，状态�
   });
   const deadline = availableAtOf(earningsOfOrder(orderId)[0]);
 
-  const first = sweepMaturedEarnings(deadline);
+  const first = await sweepMaturedEarnings(deadline);
   assert.equal(first.releasedEarningIds.length, 1);
   const afterFirst = earningsOfOrder(orderId)[0];
 
-  const second = sweepMaturedEarnings(plusMinutes(deadline, 600));
+  const second = await sweepMaturedEarnings(plusMinutes(deadline, 600));
   assert.deepEqual(second.releasedEarningIds, [], "第二次清扫不得再释放同一条");
   assert.deepEqual(earningsOfOrder(orderId)[0], afterFirst, "重复清扫一个字节都不许改");
 });
@@ -977,18 +986,30 @@ test("平台参数 22b：空 PATCH 仍被拒；只改投诉窗口能成功且审
 
 // ——————————————————————————— 七、结构门禁 ———————————————————————————
 
-test("门禁：收益伪事务整段同步——没有 await，也没有任何 async 函数", () => {
+test("门禁：收益伪事务的原子区段无 await，清扫门面只做路由", () => {
   const code = stripComments(readSource(path.join(ROOT, "lib", "data", "earningTransaction.ts")));
 
-  // 本文件的两个入口都是同步函数（没有 async 外壳），因此「读—判断—写」之间
-  // **不可能**让出执行权——这不是靠注释约束，是类型上的事实。
-  // 一旦有人加上 await / async，上面的幂等与「认到点即事实」会静默失去保护力
-  assert.equal(/\bawait\b/.test(code), false, "收益伪事务里出现 await 就是 bug");
+  // 仍在原子区段内被同步调用的唯一入口：结算原语。它不是 async、体内没有 await。
+  const settleBody = functionBody(code, "settleOrderCompletion");
+  assert.ok(settleBody.length > 0, "settleOrderCompletion 必须存在且仍是同步导出");
+  assert.equal(/\bawait\b/.test(settleBody), false, "结算原语里出现 await 就是 bug");
   assert.equal(
-    /export\s+async\s+function/.test(code),
+    /export\s+async\s+function\s+settleOrderCompletion\b/.test(code),
     false,
-    "settleOrderCompletion / sweepMaturedEarnings 必须是同步函数（要能在原子区段里被调用）",
+    "settleOrderCompletion 必须是同步函数（要能在原子区段里被调用）",
   );
+
+  // 清扫的 Mock 半边同样整段同步
+  const sweepMockBody = functionBody(code, "sweepMaturedEarningsMock");
+  assert.ok(sweepMockBody.length > 0, "sweepMaturedEarningsMock 必须存在");
+  assert.equal(/\bawait\b/.test(sweepMockBody), false, "清扫的 Mock 半边出现 await，原子性立刻消失");
+
+  // 门面允许 async（Pg 分支是异步事务），但它只能是路由
+  const facade = functionBody(code, "sweepMaturedEarnings");
+  assert.ok(facade.includes("isPostgresDataSourceEnabled()"), "门面必须按 DATA_SOURCE 选择后端");
+  assert.ok(facade.includes("sweepMaturedEarningsPg("), "门面的 postgres 分支必须落到 Pg 实现");
+  assert.ok(facade.includes("sweepMaturedEarningsMock("), "门面的另一支必须落到 Mock 实现");
+  assert.equal(/\bawait\b/.test(facade), false, "门面只做选择");
 
   // 状态取值只此一份：不另造平行模型
   assert.deepEqual([...EARNING_STATUSES], ["frozen", "available", "withdrawn", "reversed"]);

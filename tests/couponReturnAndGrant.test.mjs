@@ -306,7 +306,7 @@ test("§一.1 公共池无人接单系统退款 → 券同样恢复 unused", asy
   // 未指定打手 ⇒ 直接进公共池。用它的截止时刻触发清扫，走的是真实超时路径
   assert.equal(dispatch.state, "public", "前置：这是公共池里的等待单");
 
-  const swept = sweepExpiredDispatches(dispatch.publicDeadlineAt);
+  const swept = await sweepExpiredDispatches(dispatch.publicDeadlineAt);
   assert.ok(swept.refundedOrderIds.includes(order.id), "前置：这一单必须被系统退款");
 
   const refunded = await getPaymentRepository().findOrderById(order.id);

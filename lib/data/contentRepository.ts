@@ -7,6 +7,8 @@ import type {
   QuickEntryRecord,
 } from "@/lib/types/content";
 import { mockContentRepository } from "./mockContentRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgContentRepository } from "./pg/contentRepository";
 
 /**
  * 首页运营内容（图片公告 / 活动 Banner / 快捷入口）的**可替换仓储**（读写）。
@@ -144,6 +146,16 @@ export type ContentRepository = {
   ): Promise<ContentWriteResult<QuickEntryRecord> | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const contentRepositoryBacking: RepositoryBacking<ContentRepository> = {
+  name: "content",
+  mock: mockContentRepository,
+  pg: pgContentRepository,
+};
+
 export function getContentRepository(): ContentRepository {
-  return mockContentRepository;
+  return pickRepository(contentRepositoryBacking);
 }

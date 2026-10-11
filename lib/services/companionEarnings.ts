@@ -48,8 +48,8 @@ import type {
  * 解冻不是被定时触发的，而是「`availableAt` 到点且无阻塞就已经成立」，
  * 读取路径只是恰好把它写下来。真实调度器上线后调用**同一个** `sweepMaturedEarnings()`。
  */
-function materializeEarningReleases(): void {
-  sweepMaturedEarnings(new Date().toISOString());
+async function materializeEarningReleases(): Promise<void> {
+  await sweepMaturedEarnings(new Date().toISOString());
 }
 
 /**
@@ -60,8 +60,8 @@ function materializeEarningReleases(): void {
  * 打手会看到一个空页面，而他的单其实早就完成了——「先有完成、才有收益」
  * 这条因果顺序在读取路径上也必须成立。
  */
-function materializeCompletionAutoApprovals(): void {
-  sweepCompletionAutoApprovals(new Date().toISOString());
+async function materializeCompletionAutoApprovals(): Promise<void> {
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 }
 
 /**
@@ -102,8 +102,8 @@ function toCompanionEarningItem(earning: Earning, orderNo: string): CompanionEar
  * 而逐条查询在收益变多之后会退化成 N 次查询。
  */
 export async function listCompanionEarnings(companionId: string): Promise<CompanionEarningListData> {
-  materializeCompletionAutoApprovals();
-  materializeEarningReleases();
+  await materializeCompletionAutoApprovals();
+  await materializeEarningReleases();
 
   const [earnings, orders] = await Promise.all([
     getEarningRepository().listEarningsForCompanion(companionId),

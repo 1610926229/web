@@ -26,6 +26,21 @@ import {
   type AdminWriteCommonFailure,
   type AdminWriteContext,
 } from "./adminWriteSupport";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import {
+  createAnnouncementPg,
+  createBannerPg,
+  createQuickEntryPg,
+  removeAnnouncementPg,
+  removeBannerPg,
+  removeQuickEntryPg,
+  setAnnouncementEnabledPg,
+  setBannerEnabledPg,
+  setQuickEntryEnabledPg,
+  updateAnnouncementPg,
+  updateBannerPg,
+  updateQuickEntryPg,
+} from "./pg/contentTransactions";
 
 /**
  * 首页运营内容写操作的**伪事务** —— 本阶段所有图片公告、活动 Banner 与快捷入口
@@ -49,8 +64,10 @@ import {
  * ⚠️ store 句柄**每次调用现取，绝不缓存**：测试里 `resetMockStore()` 会换掉整份存储，
  * 缓存下来的 Map 会变成孤儿，写入看不见、读到的还是旧数据。
  *
- * 接入真实数据库后，本文件整体替换为一个事务（`BEGIN … COMMIT` + 唯一索引），
- * 上层的 service 与接口一行都不用改。
+ * 接入真实数据库后，**本文件的下半部分不再被整体替换**：Mock 实现体原样保留为
+ * 同文件内的 `*Mock`，Pg 侧写在 `lib/data/pg/contentTransactions.ts`（一个真事务：
+ * `BEGIN … COMMIT` + 唯一索引），两者由文件末尾的**运行期路由**按 `DATA_SOURCE` 选择
+ * （D3「同文件内路由」）。上层的 service 与接口一行都不用改。
  */
 
 // ——————————————————————————— 类型 ———————————————————————————
@@ -450,16 +467,33 @@ async function removeContent<K extends ContentKind>(
 
 // ——————————————————————————— 公开入口 ———————————————————————————
 
-/** 新建图片公告。 */
-export function createAnnouncement(
+/*
+ * ⚠️ 每个公开入口有两份实现，由**同文件内的薄路由**在运行期选择（D3 裁定）：
+ *
+ *     DATA_SOURCE=postgres → 走 `lib/data/pg/contentTransactions.ts` 里的 Pg 事务
+ *     否则                 → 走下面同文件内的 `*Mock` 伪事务
+ *
+ * 「Mock 实现体原样保留、改名为同文件内的 `*Mock`」是本仓既有的选择方式
+ * （`favoriteRepository.ts` / `suggestionRepository.ts` 的 accessor 就是干这个的），
+ * 事务模块照搬它是**一致**，不是发明。为什么必须在**这里**路由、而不是只改服务层：
+ * 服务层有多处调用同一事务函数，逐个改调用点是成倍的改动面，且将来新增调用点会**忘记**；
+ * 路由放在函数里，调用方无感，且**保证「Repository 走 Pg、Transaction 走 Mock」这种
+ * 半事务写不出来**（Phase 7 明令禁止）。
+ *
+ * ⚠️ 下面 12 个 `*Mock` 是**导出**的：测试可以在不设 `DATA_SOURCE` 的前提下直接、
+ * 显式地锁定 Mock 行为（迁移的语义基线），而不必依赖「路由器恰好选了 Mock」。
+ */
+
+/** 新建图片公告（Mock 伪事务）。 */
+export function createAnnouncementMock(
   draft: AdminAnnouncementProfilePatch,
   ctx: AdminWriteContext,
 ): Promise<AdminContentWriteOutcome<ContentAnnouncementRecord>> {
   return createContent("announcement", draft, ctx);
 }
 
-/** 编辑图片公告（标题 / 图片 / 说明 / 排序 / 启用状态一起提交）。 */
-export function updateAnnouncement(
+/** 编辑图片公告（Mock 伪事务）。 */
+export function updateAnnouncementMock(
   id: string,
   draft: AdminAnnouncementProfilePatch,
   ctx: AdminWriteContext,
@@ -467,8 +501,8 @@ export function updateAnnouncement(
   return updateContent("announcement", id, draft, ctx);
 }
 
-/** 启用 / 停用图片公告。 */
-export function setAnnouncementEnabled(
+/** 启用 / 停用图片公告（Mock 伪事务）。 */
+export function setAnnouncementEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -476,24 +510,24 @@ export function setAnnouncementEnabled(
   return setContentEnabled("announcement", id, enabled, ctx);
 }
 
-/** 软移除图片公告。 */
-export function removeAnnouncement(
+/** 软移除图片公告（Mock 伪事务）。 */
+export function removeAnnouncementMock(
   id: string,
   ctx: AdminWriteContext,
 ): Promise<AdminContentWriteOutcome<ContentAnnouncementRecord>> {
   return removeContent("announcement", id, ctx);
 }
 
-/** 新建活动 Banner。 */
-export function createBanner(
+/** 新建活动 Banner（Mock 伪事务）。 */
+export function createBannerMock(
   draft: AdminBannerProfilePatch,
   ctx: AdminWriteContext,
 ): Promise<AdminContentWriteOutcome<ContentBannerRecord>> {
   return createContent("banner", draft, ctx);
 }
 
-/** 编辑活动 Banner。 */
-export function updateBanner(
+/** 编辑活动 Banner（Mock 伪事务）。 */
+export function updateBannerMock(
   id: string,
   draft: AdminBannerProfilePatch,
   ctx: AdminWriteContext,
@@ -501,8 +535,8 @@ export function updateBanner(
   return updateContent("banner", id, draft, ctx);
 }
 
-/** 启用 / 停用活动 Banner。 */
-export function setBannerEnabled(
+/** 启用 / 停用活动 Banner（Mock 伪事务）。 */
+export function setBannerEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -510,24 +544,24 @@ export function setBannerEnabled(
   return setContentEnabled("banner", id, enabled, ctx);
 }
 
-/** 软移除活动 Banner。 */
-export function removeBanner(
+/** 软移除活动 Banner（Mock 伪事务）。 */
+export function removeBannerMock(
   id: string,
   ctx: AdminWriteContext,
 ): Promise<AdminContentWriteOutcome<ContentBannerRecord>> {
   return removeContent("banner", id, ctx);
 }
 
-/** 新建快捷入口。目标地址在区段内会被再校验一次。 */
-export function createQuickEntry(
+/** 新建快捷入口。目标地址在区段内会被再校验一次（Mock 伪事务）。 */
+export function createQuickEntryMock(
   draft: AdminQuickEntryProfilePatch,
   ctx: AdminWriteContext,
 ): Promise<AdminContentWriteOutcome<QuickEntryRecord>> {
   return createContent("quickEntry", draft, ctx);
 }
 
-/** 编辑快捷入口。目标地址在区段内会被再校验一次。 */
-export function updateQuickEntry(
+/** 编辑快捷入口。目标地址在区段内会被再校验一次（Mock 伪事务）。 */
+export function updateQuickEntryMock(
   id: string,
   draft: AdminQuickEntryProfilePatch,
   ctx: AdminWriteContext,
@@ -535,8 +569,8 @@ export function updateQuickEntry(
   return updateContent("quickEntry", id, draft, ctx);
 }
 
-/** 启用 / 停用快捷入口。 */
-export function setQuickEntryEnabled(
+/** 启用 / 停用快捷入口（Mock 伪事务）。 */
+export function setQuickEntryEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -544,10 +578,144 @@ export function setQuickEntryEnabled(
   return setContentEnabled("quickEntry", id, enabled, ctx);
 }
 
-/** 软移除快捷入口。 */
-export function removeQuickEntry(
+/** 软移除快捷入口（Mock 伪事务）。 */
+export function removeQuickEntryMock(
   id: string,
   ctx: AdminWriteContext,
 ): Promise<AdminContentWriteOutcome<QuickEntryRecord>> {
   return removeContent("quickEntry", id, ctx);
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 12 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * `isPostgresDataSourceEnabled()` 的判据是**显式的环境变量**（见 `pg/config.ts`），
+ * 不是「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 新建图片公告。 */
+export async function createAnnouncement(
+  draft: AdminAnnouncementProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentAnnouncementRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? createAnnouncementPg(draft, ctx)
+    : createAnnouncementMock(draft, ctx);
+}
+
+/** 编辑图片公告（标题 / 图片 / 说明 / 排序 / 启用状态一起提交）。 */
+export async function updateAnnouncement(
+  id: string,
+  draft: AdminAnnouncementProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentAnnouncementRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? updateAnnouncementPg(id, draft, ctx)
+    : updateAnnouncementMock(id, draft, ctx);
+}
+
+/** 启用 / 停用图片公告。 */
+export async function setAnnouncementEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentAnnouncementRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? setAnnouncementEnabledPg(id, enabled, ctx)
+    : setAnnouncementEnabledMock(id, enabled, ctx);
+}
+
+/** 软移除图片公告。 */
+export async function removeAnnouncement(
+  id: string,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentAnnouncementRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? removeAnnouncementPg(id, ctx)
+    : removeAnnouncementMock(id, ctx);
+}
+
+/** 新建活动 Banner。 */
+export async function createBanner(
+  draft: AdminBannerProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentBannerRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? createBannerPg(draft, ctx)
+    : createBannerMock(draft, ctx);
+}
+
+/** 编辑活动 Banner。 */
+export async function updateBanner(
+  id: string,
+  draft: AdminBannerProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentBannerRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? updateBannerPg(id, draft, ctx)
+    : updateBannerMock(id, draft, ctx);
+}
+
+/** 启用 / 停用活动 Banner。 */
+export async function setBannerEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentBannerRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? setBannerEnabledPg(id, enabled, ctx)
+    : setBannerEnabledMock(id, enabled, ctx);
+}
+
+/** 软移除活动 Banner。 */
+export async function removeBanner(
+  id: string,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<ContentBannerRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? removeBannerPg(id, ctx)
+    : removeBannerMock(id, ctx);
+}
+
+/** 新建快捷入口。目标地址在区段内会被再校验一次。 */
+export async function createQuickEntry(
+  draft: AdminQuickEntryProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<QuickEntryRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? createQuickEntryPg(draft, ctx)
+    : createQuickEntryMock(draft, ctx);
+}
+
+/** 编辑快捷入口。目标地址在区段内会被再校验一次。 */
+export async function updateQuickEntry(
+  id: string,
+  draft: AdminQuickEntryProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<QuickEntryRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? updateQuickEntryPg(id, draft, ctx)
+    : updateQuickEntryMock(id, draft, ctx);
+}
+
+/** 启用 / 停用快捷入口。 */
+export async function setQuickEntryEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<QuickEntryRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? setQuickEntryEnabledPg(id, enabled, ctx)
+    : setQuickEntryEnabledMock(id, enabled, ctx);
+}
+
+/** 软移除快捷入口。 */
+export async function removeQuickEntry(
+  id: string,
+  ctx: AdminWriteContext,
+): Promise<AdminContentWriteOutcome<QuickEntryRecord>> {
+  return isPostgresDataSourceEnabled()
+    ? removeQuickEntryPg(id, ctx)
+    : removeQuickEntryMock(id, ctx);
 }

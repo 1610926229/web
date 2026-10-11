@@ -1,5 +1,7 @@
 import type { Earning, EarningAdjustment } from "@/lib/types/earning";
 import { mockEarningRepository } from "./mockEarningRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgEarningRepository } from "./pg/earningRepository";
 
 /**
  * 打手收益的读取契约（P0-9）。
@@ -71,6 +73,16 @@ export type EarningRepository = {
   listAdjustmentsForEarning(earningId: string): Promise<EarningAdjustment[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const earningRepositoryBacking: RepositoryBacking<EarningRepository> = {
+  name: "earning",
+  mock: mockEarningRepository,
+  pg: pgEarningRepository,
+};
+
 export function getEarningRepository(): EarningRepository {
-  return mockEarningRepository;
+  return pickRepository(earningRepositoryBacking);
 }

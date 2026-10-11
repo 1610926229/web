@@ -209,7 +209,7 @@ test("并发：接单与专属池超时同时发生——到点那一刻两个�
   assert.equal((await orderOf(order.id)).status, "paid");
 
   // 清扫把事实物化之后，公共池重新开始计时，谁先来谁接
-  const moved = sweepExpiredDispatches(deadline);
+  const moved = await sweepExpiredDispatches(deadline);
   assert.ok(moved.movedToPublicDispatchIds.includes(dispatch.id));
 
   const byBAfterMove = await acceptDispatch(dispatch.id, {
@@ -252,7 +252,7 @@ test("并发：接单与公共池超时同时发生——两种到达顺序最�
     at: atSecond,
   });
   assert.equal(early.kind, "expired", "接单先跑：到点就拒，不等清扫");
-  sweepExpiredDispatches(plusMinutes(atSecond, 1));
+  await sweepExpiredDispatches(plusMinutes(atSecond, 1));
 
   // 两种顺序的最终状态必须完全一样：钱退回去了、没有人接走、关闭时刻都是到点那一刻
   for (const [order, dispatch] of [
@@ -289,7 +289,7 @@ test("并发：连续清扫与接单交错，清扫不会把已被接走的单�
 
   // 之后再反复清扫：已接单的记录不是「当前池」，一次都不该被它扫到
   for (let round = 0; round < 10; round += 1) {
-    const swept = sweepExpiredDispatches(plusMinutes(deadline, round + 1));
+    const swept = await sweepExpiredDispatches(plusMinutes(deadline, round + 1));
     assert.equal(
       swept.refundedOrderIds.includes(order.id),
       false,

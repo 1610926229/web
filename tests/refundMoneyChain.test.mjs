@@ -1150,7 +1150,7 @@ test("并发防线：退款申请在途时，到点清扫不得把该订单的�
   assert.equal((await refundOf(refundId)).status, "pending");
 
   // 越过计划解冻时刻清扫一次：判据里有 `hasActiveRefund`，因此它不该被释放
-  const swept = sweepMaturedEarnings(plusMinutes(earning.availableAt, 1));
+  const swept = await sweepMaturedEarnings(plusMinutes(earning.availableAt, 1));
   assert.equal(
     swept.releasedEarningIds.includes(earning.id),
     false,
@@ -1177,7 +1177,7 @@ test("并发防线：退款申请在途时，到点清扫不得把该订单的�
     "前置：净额确实已经归零——否则下面「没被释放」的原因就说不清了",
   );
 
-  const sweptAgain = sweepMaturedEarnings(plusMinutes(earning.availableAt, 1));
+  const sweptAgain = await sweepMaturedEarnings(plusMinutes(earning.availableAt, 1));
   assert.equal(
     sweptAgain.releasedEarningIds.includes(earning.id),
     false,
@@ -1191,7 +1191,7 @@ test("并发防线（正向对照）：没有在途退款时，同一时刻的�
   // 构造本身就释放不了（时刻算错、状态不对、订单不是 completed……），
   // 那样断言就永远成立，也就永远证明不了「退款挡住了释放」这件事。
   const { orderId, earning } = await completedOrder();
-  const swept = sweepMaturedEarnings(plusMinutes(earning.availableAt, 1));
+  const swept = await sweepMaturedEarnings(plusMinutes(earning.availableAt, 1));
 
   assert.ok(
     swept.releasedEarningIds.includes(earning.id),

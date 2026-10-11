@@ -22,6 +22,8 @@ import {
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
 import { applyOrderAccepted, applyOrderRefund, paymentStore } from "./mockPaymentRepository";
 import { readPlatformConfig } from "./mockPlatformConfigRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { acceptDispatchPg, sweepExpiredDispatchesPg } from "./pg/w1Transactions";
 
 /**
  * 派单域的伪事务（P0-5）—— **唯一**能改派单与订单归属的地方。
@@ -213,7 +215,7 @@ function planNotification(input: {
  * 对打手是完全不同的三件事：第一种不用再等，第二种是手慢了，第三种是他本来就不该在这。
  * 合成一句「接单失败」会让人反复重试一张永远不会属于他的单。
  */
-export async function acceptDispatch(
+export async function acceptDispatchMock(
   dispatchId: string,
   ctx: CompanionWriteContext,
 ): Promise<DispatchAcceptResult> {
@@ -380,7 +382,7 @@ export type DispatchSweepResult = {
  * 并回到公共池）在计划阶段就被判为「只关池、不出款」，
  * 而不是放它走到写入段再被静默拒掉。
  */
-export function sweepExpiredDispatches(at: string): DispatchSweepResult {
+export function sweepExpiredDispatchesMock(at: string): DispatchSweepResult {
   const dispatches = dispatchStore();
   const payments = paymentStore();
   // 配置在这一次清扫里读**一次**：整段是同步的，中途不可能被改
@@ -554,4 +556,38 @@ export function toDispatchProgress(
     // 已过点时为 0：负数会让页面显示「剩余 -3 分钟」
     remainingSeconds: remaining > 0 ? Math.floor(remaining / 1000) : 0,
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这两个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * `isPostgresDataSourceEnabled()` 的判据是**显式的环境变量**（见 `pg/config.ts`），
+ * 不是「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ *
+ * ⚠️ `createDispatchForOrder` 不路由：它是 Mock 结账事务（`checkoutCommitTransaction.ts`）
+ * 的**同步内部原语**，跑在 `mockPaymentRepository` 的无 `await` 原子区段里；
+ * Pg 侧的建派单在 `pg/paymentRepository.ts` 的同一个 `BEGIN … COMMIT` 里完成，
+ * 不经过这里。`toDispatchProgress` 是纯函数，同样不路由。
+ *
+ * ⚠️ `sweepExpiredDispatches` 原本是**同步**导出，而 Pg 实现是 `async`。路由因此
+ * 必须是 `async`——调用方必须 `await` 它，否则「先 sweep 再读订单」的读路径
+ * 会读到 sweep 之前的旧状态（这些 sweep 是懒执行的，正确性依赖它先跑完）。
+ */
+
+/** 接单。 */
+export async function acceptDispatch(
+  dispatchId: string,
+  ctx: CompanionWriteContext,
+): Promise<DispatchAcceptResult> {
+  return isPostgresDataSourceEnabled()
+    ? acceptDispatchPg(dispatchId, ctx)
+    : acceptDispatchMock(dispatchId, ctx);
+}
+
+/** 把已经到点的派单物化成事实（专属转公共 / 公共超时退款）。 */
+export async function sweepExpiredDispatches(at: string): Promise<DispatchSweepResult> {
+  return isPostgresDataSourceEnabled()
+    ? sweepExpiredDispatchesPg(at)
+    : sweepExpiredDispatchesMock(at);
 }

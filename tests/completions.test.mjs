@@ -517,13 +517,13 @@ test("快照 9：改配置不追溯已在途的 pending——它仍按提交那�
   // 提交之后把配置改成 1 分钟：这一份在途 pending 的 deadline 已经冻结，不随之变短
   setCompletionConfig(1);
 
-  const early = sweepCompletionAutoApprovals(plusMinutes(submittedAt, 2));
+  const early = await sweepCompletionAutoApprovals(plusMinutes(submittedAt, 2));
   assert.equal(early.autoApprovedSubmissionIds.length, 0, "改配置不得把在途 pending 的 deadline 提前");
   assert.equal(submissionById(out.submissionId).status, "pending");
   assert.equal((await orderOf(order.id)).status, "serving");
 
   // 到它自己的 deadline（+10）才自动通过
-  const atDeadline = sweepCompletionAutoApprovals(plusMinutes(submittedAt, 11));
+  const atDeadline = await sweepCompletionAutoApprovals(plusMinutes(submittedAt, 11));
   assert.deepEqual(atDeadline.autoApprovedSubmissionIds, [out.submissionId]);
   assert.equal(submissionById(out.submissionId).status, "approved");
   assert.equal((await orderOf(order.id)).status, "completed");
@@ -612,7 +612,7 @@ test("驳回 12：驳回原因必填——空 / 纯空白 / 超长都 400，且�
 test("自动 13：System 自动通过时 reviewedByStaffId / reviewedByName 必须为 null", async () => {
   const { orderId, submissionId, deadline } = await pendingSubmission();
 
-  const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+  const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
 
   assert.deepEqual(swept.autoApprovedSubmissionIds, [submissionId]);
 
@@ -630,7 +630,7 @@ test("自动 13：System 自动通过时 reviewedByStaffId / reviewedByName 必�
 test("自动 14：deadline 未到不自动通过——材料仍 pending、订单仍 serving", async () => {
   const { orderId, submissionId, deadline } = await pendingSubmission();
 
-  const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, -1));
+  const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, -1));
 
   assert.equal(swept.autoApprovedSubmissionIds.length, 0);
   assert.equal(submissionById(submissionId).status, "pending");
@@ -641,7 +641,7 @@ test("自动 15：deadline 到达且无阻塞 → 自动通过，订单 complete
   const { orderId, submissionId, deadline } = await pendingSubmission();
   const at = plusMinutes(deadline, 3);
 
-  const swept = sweepCompletionAutoApprovals(at);
+  const swept = await sweepCompletionAutoApprovals(at);
 
   assert.deepEqual(swept.autoApprovedSubmissionIds, [submissionId]);
   assert.equal(submissionById(submissionId).status, "approved");
@@ -664,14 +664,14 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     // 已终结的不再挡、进行中的才挡，因此这里维护的是一个列表
     rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
-    const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(swept.autoApprovedSubmissionIds.length, 0, "进行中的退款必须挡住");
     assert.equal(submissionById(submissionId).status, "pending");
     assert.equal((await orderOf(orderId)).status, "serving");
 
     // 退款终结后重扫 → 通过（阻塞解除，不是「永不自动通过」）
     rs.refunds.get(refundId).status = "approved";
-    const reSwept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const reSwept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.deepEqual(reSwept.autoApprovedSubmissionIds, [submissionId]);
   }
 
@@ -685,7 +685,7 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     // 已终结的不再挡、进行中的才挡，因此这里维护的是一个列表
     rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
-    const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(swept.autoApprovedSubmissionIds.length, 0, "审核中的退款同样阻塞");
   }
 
@@ -696,7 +696,7 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     const complaintId = unique("cmp");
     cs.complaints.set(complaintId, { id: complaintId, orderId, status: complaintStatus });
 
-    const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(swept.autoApprovedSubmissionIds.length, 0, `${complaintStatus} 投诉必须阻塞`);
   }
 
@@ -707,7 +707,7 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     const complaintId = unique("cmp");
     cs.complaints.set(complaintId, { id: complaintId, orderId, status: complaintStatus });
 
-    const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.deepEqual(swept.autoApprovedSubmissionIds, [submissionId], `${complaintStatus} 投诉不阻塞`);
   }
 
@@ -721,7 +721,7 @@ test("自动 16：进行中退款 / 未完结投诉阻塞自动通过，已终�
     // 已终结的不再挡、进行中的才挡，因此这里维护的是一个列表
     rs.refundIdsByOrder.set(orderId, [...(rs.refundIdsByOrder.get(orderId) ?? []), refundId]);
 
-    const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.deepEqual(swept.autoApprovedSubmissionIds, [submissionId], `${refundStatus} 退款不阻塞`);
   }
 });
@@ -730,7 +730,7 @@ test("自动 17：重复清扫幂等——只有第一次返回非空，complete
   const { orderId, submissionId, deadline } = await pendingSubmission();
   const at = plusMinutes(deadline, 1);
 
-  const first = sweepCompletionAutoApprovals(at);
+  const first = await sweepCompletionAutoApprovals(at);
   assert.deepEqual(first.autoApprovedSubmissionIds, [submissionId]);
 
   const completedAtAfterFirst = (await orderOf(orderId)).completedAt;
@@ -739,7 +739,7 @@ test("自动 17：重复清扫幂等——只有第一次返回非空，complete
   assert.equal(reviewedAtAfterFirst, at);
 
   const later = plusMinutes(at, 60);
-  const second = sweepCompletionAutoApprovals(later);
+  const second = await sweepCompletionAutoApprovals(later);
   assert.equal(second.autoApprovedSubmissionIds.length, 0, "第二次清扫不该再自动通过同一份");
 
   assert.equal((await orderOf(orderId)).completedAt, completedAtAfterFirst, "completedAt 不得被刷新");
@@ -785,7 +785,7 @@ test("竞态 18：客服通过与自动通过只有一个完成事实——先�
     const approved = await approveCompletion({ submissionId, staffId: "staff-1", staffName: "客服小雨", at: staffAt });
     assert.equal(approved.kind, "ok");
 
-    const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(swept.autoApprovedSubmissionIds.length, 0);
 
     const order = await orderOf(orderId);
@@ -798,7 +798,7 @@ test("竞态 18：客服通过与自动通过只有一个完成事实——先�
   {
     const { orderId, submissionId, deadline } = await pendingSubmission();
     const at = plusMinutes(deadline, 1);
-    const swept = sweepCompletionAutoApprovals(at);
+    const swept = await sweepCompletionAutoApprovals(at);
     assert.deepEqual(swept.autoApprovedSubmissionIds, [submissionId]);
 
     const later = plusMinutes(at, 5);
@@ -852,7 +852,7 @@ test("失效 23：换人后旧材料失效——approve 拿到 stale-submission�
   });
   assert.equal(approved.kind, "stale-submission");
 
-  const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+  const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
   assert.equal(swept.autoApprovedSubmissionIds.length, 0, "清扫同样不得通过已失效的材料");
 
   assert.equal(submissionById(submissionId).status, "pending", "旧材料不被任何人审核，也不被自动通过");
@@ -866,7 +866,7 @@ test("失效 24：invalidated 永不自动通过——即使 deadline 已过也�
   const current = submissionById(submissionId);
   completionStore().submissions.set(submissionId, { ...current, status: "invalidated" });
 
-  const swept = sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+  const swept = await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
   assert.equal(swept.autoApprovedSubmissionIds.length, 0);
   assert.equal(submissionById(submissionId).status, "invalidated", "invalidated 不被自动通过");
   assert.equal((await orderOf(orderId)).status, "serving");
@@ -884,7 +884,7 @@ test("一致 22：approved 与 completed 同生共死——不存在「approved 
   }
   {
     const { orderId, submissionId, deadline } = await pendingSubmission();
-    sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
+    await sweepCompletionAutoApprovals(plusMinutes(deadline, 1));
     assert.equal(submissionById(submissionId).status, "approved");
     assert.equal((await orderOf(orderId)).status, "completed");
   }
@@ -915,26 +915,30 @@ test("门禁 19：`completion_review` 不进入 OrderStatus——状态集合与
   }
 });
 
-test("门禁 21：提交 / 通过 / 驳回的原子区段内没有 await，清扫是同步函数", () => {
+test("门禁 21：Mock 半边的原子区段仍无 await，清扫门面只做路由不做事", () => {
   const txCode = stripComments(readSource(path.join(ROOT, "lib", "data", "completionTransaction.ts")));
 
-  for (const name of ["submitCompletion", "approveCompletion", "rejectCompletion"]) {
+  // (1) Mock 半边：改名之后一个字节没动，区段内仍然不可能让出执行权
+  for (const name of ["submitCompletionMock", "approveCompletionMock", "rejectCompletionMock"]) {
     const body = functionBody(txCode, name);
+    assert.ok(body.length > 0, `${name} 必须存在——Mock 实现是业务基线，改名不等于可以删`);
     assert.equal(/\bawait\b/.test(body), false, `${name} 的原子区段里出现 await 就是 bug——它会把读-判断-写拆到两个 tick 上`);
   }
-
-  const sweepBody = functionBody(txCode, "sweepCompletionAutoApprovals");
-  assert.equal(/\bawait\b/.test(sweepBody), false, "清扫必须整段同步");
-  assert.equal(
-    /export\s+async\s+function\s+sweepCompletionAutoApprovals\b/.test(txCode),
-    false,
-    "sweepCompletionAutoApprovals 必须是同步函数（挂在读取路径上、可在原子区段里调用）",
-  );
+  // (2) 清扫的 Mock 半边同样整段同步
+  const sweepMockBody = functionBody(txCode, "sweepCompletionAutoApprovalsMock");
+  assert.ok(sweepMockBody.length > 0, "sweepCompletionAutoApprovalsMock 必须存在");
+  assert.equal(/\bawait\b/.test(sweepMockBody), false, "清扫的 Mock 半边必须整段同步");
+  // (3) 门面只是路由：按 DATA_SOURCE 二选一，自己不做事
+  const facade = functionBody(txCode, "sweepCompletionAutoApprovals");
+  assert.ok(facade.includes("isPostgresDataSourceEnabled()"), "门面必须按 DATA_SOURCE 选择后端");
+  assert.ok(facade.includes("sweepCompletionAutoApprovalsPg("), "门面的 postgres 分支必须落到 Pg 实现");
+  assert.ok(facade.includes("sweepCompletionAutoApprovalsMock("), "门面的另一支必须落到 Mock 实现");
+  assert.equal(/\bawait\b/.test(facade), false, "门面只做选择，不该出现 await");
 });
 
 test("门禁 22：approveCompletion 的 serving→completed 必须走中央状态机，且结构校验在领域 Guard 之前", () => {
   const txCode = stripComments(readSource(path.join(ROOT, "lib", "data", "completionTransaction.ts")));
-  const approveBody = functionBody(txCode, "approveCompletion");
+  const approveBody = functionBody(txCode, "approveCompletionMock");
 
   // (1) 中央状态机是唯一真值源：canTransitionOrder 只能从 @/lib/constants/orders 导入，
   //     而不是在本文件另写一份判断——「这条边存不存在」的答案只能有一份

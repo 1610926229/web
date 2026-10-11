@@ -1,6 +1,8 @@
 import type { PageResult } from "@/lib/types/common";
 import type { Coupon, CouponClaim } from "@/lib/types/coupon";
 import { mockCouponRepository } from "./mockCouponRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCouponRepository } from "./pg/couponRepository";
 
 /**
  * 优惠券的可替换仓储（读写）。
@@ -116,6 +118,16 @@ export type CouponRepository = {
   countClaimsByCoupon(couponId: string): Promise<number>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const couponRepositoryBacking: RepositoryBacking<CouponRepository> = {
+  name: "coupon",
+  mock: mockCouponRepository,
+  pg: pgCouponRepository,
+};
+
 export function getCouponRepository(): CouponRepository {
-  return mockCouponRepository;
+  return pickRepository(couponRepositoryBacking);
 }

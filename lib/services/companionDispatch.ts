@@ -69,7 +69,9 @@ import type { Order } from "@/lib/types/order";
  *
  * ⚠️ **先清扫，再读取**，顺序不能反。反过来的话，一张三分钟前就到点的专属单
  * 会以「还能接」的样子出现在页面上——打手点下去必然被拒，而页面上没有任何
- * 解释（那张单其实早就转进公共池了）。清扫是**同步**的，在第一个 `await` 之前完成。
+ * 解释（那张单其实早就转进公共池了）。因此清扫必须**先 `await` 完成**再开始读取：
+ * PROD-1E Phase 7 起清扫入口返回 Promise（`lib/data/companionDispatchTransaction.ts`），
+ * 漏掉 `await` 不会报错，只会让这次读取拿到清扫之前的状态。
  *
  * ⚠️ `at` 由调用方传入而**不是在这里取 `new Date()`**：一次读取里
  * 「清扫用什么时刻」与「剩余时间按什么时刻算」必须是同一个时刻，
@@ -88,7 +90,7 @@ export async function listCompanionPools(
   at: string,
 ): Promise<CompanionPoolData> {
   // 把已经到点的派单写成事实（幂等，重复调用与调用一次结果相同）
-  sweepExpiredDispatches(at);
+  await sweepExpiredDispatches(at);
 
   // 这位打手此刻能不能接新的单（`available`）。**读一次，整段用这一份结果**：
   // 列表里的 `canAccept` 与页面上那个按钮必须出自同一次判定

@@ -23,6 +23,15 @@ import type {
 } from "@/lib/types/companionApplication";
 import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import { releaseOrdersForCompanion } from "./companionOrderTransaction";
+import { setCompanionFlagsPg } from "./pg/adminAuditTransactions";
+import {
+  approveCompanionApplicationPg,
+  rejectCompanionApplicationPg,
+  removeCompanionPg,
+  startReviewCompanionApplicationPg,
+  updateCompanionProfilePg,
+} from "./pg/companionReviewTransactions";
+import { isPostgresDataSourceEnabled } from "./pg/config";
 import {
   applyApplicationReview,
   companionApplicationStore,
@@ -161,7 +170,7 @@ function applicationSnapshots(
  * ⚠️ **只改状态**。开始审核不等于通过：不产生护航资料、不发资格、不写审核时间
  * （那两者是「结果」，这一步还没有结果）。
  */
-export async function startReviewCompanionApplication(
+export async function startReviewCompanionApplicationMock(
   applicationId: string,
   ctx: AdminWriteContext,
 ): Promise<AdminApplicationWriteResult<CompanionApplication>> {
@@ -211,7 +220,7 @@ export async function startReviewCompanionApplication(
  * 审核意见由调用方校验为非空之后传进来（规则在
  * `lib/constants/adminApplications.ts` 的 `normalizeAdminReviewNote()`）。
  */
-export async function rejectCompanionApplication(
+export async function rejectCompanionApplicationMock(
   applicationId: string,
   reviewNote: string,
   ctx: AdminWriteContext,
@@ -273,8 +282,15 @@ function nextCompanionId(companions: Map<string, Companion>): string {
   throw new Error("无法生成不冲突的护航 id");
 }
 
-/** 由被通过的申请构造一条新护航资料。字段来源见 §七：昵称 / 游戏 / 大区 / 标签 / 介绍全部来自申请。 */
-function buildCompanionFromApplication(input: {
+/**
+ * 由被通过的申请构造一条新护航资料。字段来源见 §七：昵称 / 游戏 / 大区 / 标签 / 介绍全部来自申请。
+ *
+ * ⚠️ **导出是为了共用，不是复制**：PostgreSQL 侧的审核通过
+ * （`lib/data/pg/companionReviewTransactions.ts`）也调它。两处各写一份的话，
+ * 「新护航该有哪些字段」迟早会分叉——而分叉的表现是新护航缺一个字段、
+ * 且只在一条存储路径上出现。
+ */
+export function buildCompanionFromApplication(input: {
   application: CompanionApplication;
   id: string;
   sortOrder: number;
@@ -327,7 +343,7 @@ function buildCompanionFromApplication(input: {
  * 即使绕过状态机，第 3 步的索引也只会让它复用同一条记录，
  * 第 2 步的 `(userId, role)` 键同样只会发一次。**三条数据都只有一份。**
  */
-export async function approveCompanionApplication(
+export async function approveCompanionApplicationMock(
   applicationId: string,
   ctx: AdminWriteContext,
 ): Promise<AdminApplicationWriteResult<ApproveApplicationOutcome>> {
@@ -460,7 +476,7 @@ function nextSortOrder(companions: Map<string, Companion>): number {
  * - 本来就是这个状态（用另一个键再停用一次）。
  * 这条规则让「每项写操作有且只有一条审计」多按几次之后依然成立。
  */
-export async function updateCompanionProfile(
+export async function updateCompanionProfileMock(
   companionId: string,
   patch: AdminCompanionProfilePatch,
   ctx: AdminWriteContext,
@@ -517,7 +533,7 @@ export async function updateCompanionProfile(
  * - **启用**：`enabled: true`，**不动**可接单状态（回到名单不等于马上能接单）；
  * - **停用**：`enabled: false` 并强制 `available: false`（下架的记录不可能正在接单）。
  */
-export async function setCompanionFlags(
+export async function setCompanionFlagsMock(
   companionId: string,
   intent: CompanionFlagIntent,
   input: { unavailableReason: string },
@@ -597,7 +613,7 @@ export type { CompanionFlagIntent };
  * ⚠️ **不删除记录**：只写 `removedAt`。历史订单、评价与鸡腿记录都要继续指得到它，
  * 硬删除会让「这位护航以前做过什么」永久消失，而管理后台正是要回答这个问题。
  */
-export async function removeCompanion(
+export async function removeCompanionMock(
   companionId: string,
   ctx: AdminWriteContext,
 ): Promise<AdminCompanionWriteResult> {
@@ -639,4 +655,80 @@ export async function removeCompanion(
     changed: true,
     replayed: false,
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 6 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * `isPostgresDataSourceEnabled()` 的判据是**显式的环境变量**（见 `pg/config.ts`），
+ * 不是「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ *
+ * ⚠️ `setCompanionFlags` 有**既有的** Pg 实现（`setCompanionFlagsPg`，
+ * 住在 `pg/adminAuditTransactions.ts`），这里只把名字转发过去，**不再实现一遍**。
+ */
+
+/** 开始审核：`pending → reviewing`。 */
+export async function startReviewCompanionApplication(
+  applicationId: string,
+  ctx: AdminWriteContext,
+): Promise<AdminApplicationWriteResult<CompanionApplication>> {
+  return isPostgresDataSourceEnabled()
+    ? startReviewCompanionApplicationPg(applicationId, ctx)
+    : startReviewCompanionApplicationMock(applicationId, ctx);
+}
+
+/** 拒绝：`pending | reviewing → rejected`（不产生护航、不发资格）。 */
+export async function rejectCompanionApplication(
+  applicationId: string,
+  reviewNote: string,
+  ctx: AdminWriteContext,
+): Promise<AdminApplicationWriteResult<CompanionApplication>> {
+  return isPostgresDataSourceEnabled()
+    ? rejectCompanionApplicationPg(applicationId, reviewNote, ctx)
+    : rejectCompanionApplicationMock(applicationId, reviewNote, ctx);
+}
+
+/** 通过：改状态 + 发资格 + 建（或关联）护航 + 写审计，四件事同生共死。 */
+export async function approveCompanionApplication(
+  applicationId: string,
+  ctx: AdminWriteContext,
+): Promise<AdminApplicationWriteResult<ApproveApplicationOutcome>> {
+  return isPostgresDataSourceEnabled()
+    ? approveCompanionApplicationPg(applicationId, ctx)
+    : approveCompanionApplicationMock(applicationId, ctx);
+}
+
+/** 编辑护航资料（含启用 / 停用 / 暂停 / 恢复）。 */
+export async function updateCompanionProfile(
+  companionId: string,
+  patch: AdminCompanionProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminCompanionWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? updateCompanionProfilePg(companionId, patch, ctx)
+    : updateCompanionProfileMock(companionId, patch, ctx);
+}
+
+/** 只改「能不能接单」的四个动作：暂停 / 恢复 / 启用 / 停用。 */
+export async function setCompanionFlags(
+  companionId: string,
+  intent: CompanionFlagIntent,
+  input: { unavailableReason: string },
+  ctx: AdminWriteContext,
+): Promise<AdminCompanionWriteResult> {
+  // Pg 实现早已存在（PROD-1C 的 T8），这里只是把路由接上，**不重复实现**
+  return isPostgresDataSourceEnabled()
+    ? setCompanionFlagsPg(companionId, intent, input, ctx)
+    : setCompanionFlagsMock(companionId, intent, input, ctx);
+}
+
+/** 移除护航（软删除，只写 `removedAt`）。 */
+export async function removeCompanion(
+  companionId: string,
+  ctx: AdminWriteContext,
+): Promise<AdminCompanionWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? removeCompanionPg(companionId, ctx)
+    : removeCompanionMock(companionId, ctx);
 }

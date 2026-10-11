@@ -146,6 +146,62 @@ async function clearWriteLog() {
   await executor().query(`DELETE FROM w1_write_log`);
 }
 
+/**
+ * 让连接池里先有 `size` 条**空闲**连接。
+ *
+ * ⚠️ 并发用例的**判别力**前提：池子里只有一条空闲连接时，先发的请求会立刻拿走它跑完
+ * 整段事务，后发的还在握手——两个请求**根本没重叠**，被守护的那把行锁即使删掉也照样绿。
+ * 这是 PROD-1D 实测到过的假绿，`tests/pgCheckoutTransactions.test.mjs` 与
+ * `tests/pgComplaintTransactions.test.mjs` 都各有一段同款说明。
+ *
+ * ⚠️ 预热只把重叠概率**显著**提高，本身**不是**确定性的；真正把窗口钉死的是下面
+ * `withWideLockWindow()` 挂的 `pg_sleep` 触发器。本文件三条并发用例都已套上它，
+ * 与另两个文件同款——最初它们只做了预热，判别力弱于它们，是一处已被修正的不对称。
+ */
+async function warmPool(size) {
+  await Promise.all(Array.from({ length: size }, () => executor().query("SELECT 1")));
+}
+
+/**
+ * 在 `orders` 上**临时**挂一个 `BEFORE UPDATE` 的 `pg_sleep` 触发器，把赢家持有
+ * 行锁的窗口**确定性**撑开，然后执行 `fn`，无论如何都在 `finally` 里摘掉触发器。
+ *
+ * ## 为什么是本文件必须的
+ *
+ * 本文件三条并发用例守护的都是**订单行锁**：`acceptDispatchPg` 与 `directRefundOrderPg`
+ * 都以 `lockOrder` 为第一把锁，`sweepExpiredDispatchesPg` 的第一条语句就是对 `orders`
+ * 的 `SELECT … ORDER BY id FOR UPDATE`（见 `lib/data/pg/w1Transactions.ts` 文件头的锁序约定）。
+ * 两个请求若不重叠，先发的会**跑完整段**才轮到后发的，后发的自然读到新状态——
+ * 此时把 `FOR UPDATE` 整条删掉，用例**照样绿**，它测到的其实是「顺序执行」。
+ * 挂上 `pg_sleep` 后，赢家在**持有订单行锁**期间被拖住，输家的 `lockOrder` 必然阻塞到
+ * 赢家提交之后，「删掉锁 ⇒ 两个都成功」这一 mutation 才会如实变红。
+ *
+ * ⚠️ 挂在 `orders` 上而不挂 `dispatch_records` 上：三条用例的第一把锁都在 `orders`，
+ * 挂在第一把锁上才能让**输家**在赢家持锁期间就阻塞住（挂后面的表，输家可能先拿到
+ * 订单锁再撞上，重叠窗口反而晚了一拍）。
+ *
+ * ⚠️ 触发器是**测试专用**的，只在三条并发用例内存在，用完即摘；它不进 `db/migrations/`。
+ */
+async function withWideLockWindow(fn) {
+  await executor().query(
+    `CREATE OR REPLACE FUNCTION w1_sleep_probe() RETURNS trigger LANGUAGE plpgsql AS $$
+     BEGIN
+       PERFORM pg_sleep(0.3);
+       RETURN NEW;
+     END
+     $$`,
+  );
+  await executor().query(
+    `CREATE TRIGGER w1_sleep_trg BEFORE UPDATE ON orders
+       FOR EACH ROW EXECUTE FUNCTION w1_sleep_probe()`,
+  );
+  try {
+    return await fn();
+  } finally {
+    await executor().query(`DROP TRIGGER IF EXISTS w1_sleep_trg ON orders`);
+  }
+}
+
 /* ─────────────────────────── 夹具选取 ─────────────────────────── */
 
 /** 公共池里的待接单：`paid` 订单 + `state='public'` 派单。 */
@@ -479,10 +535,15 @@ test("T2 并发接单：两个护航同时抢，恰好一个赢，另一个走 n
   const companions = await findAcceptingCompanions({ excludeUserId: target.user_id, limit: 2 });
   assert.equal(companions.length, 2, "并发用例需要两位不同的护航");
 
-  const [a, b] = await Promise.all([
-    acceptDispatchPg(target.dispatch_id, { companionId: companions[0].id, at: AT }),
-    acceptDispatchPg(target.dispatch_id, { companionId: companions[1].id, at: AT }),
-  ]);
+  // ⚠️ 预热 + 撑开锁窗口：两条都是必须的，否则这两个请求可能根本不重叠，
+  //    删掉 `lockOrder` 也照样绿（理由见 `withWideLockWindow` 的注释）
+  await warmPool(2);
+  const [a, b] = await withWideLockWindow(() =>
+    Promise.all([
+      acceptDispatchPg(target.dispatch_id, { companionId: companions[0].id, at: AT }),
+      acceptDispatchPg(target.dispatch_id, { companionId: companions[1].id, at: AT }),
+    ]),
+  );
 
   const winners = [a, b].filter((result) => result.kind === "ok");
   const losers = [a, b].filter((result) => result.kind !== "ok");
@@ -1097,10 +1158,14 @@ test("T12 重复退款：已经是终态，一个字节都不写", { skip: SKIP 
 test("T12 并发退款：两个请求只出一次款", { skip: SKIP }, async () => {
   const target = await findRefundableOrder();
 
-  const [a, b] = await Promise.all([
-    directRefundOrderPg(target.order_id, AT),
-    directRefundOrderPg(target.order_id, AT),
-  ]);
+  // 同 T2：预热 + 撑开订单行锁窗口，否则「只出一次款」可能只是顺序执行的假象
+  await warmPool(2);
+  const [a, b] = await withWideLockWindow(() =>
+    Promise.all([
+      directRefundOrderPg(target.order_id, AT),
+      directRefundOrderPg(target.order_id, AT),
+    ]),
+  );
   const succeeded = [a, b].filter((result) => result.kind === "ok");
   assert.equal(succeeded.length, 1, "恰好一个真正执行了退款");
   assert.equal([a, b].filter((r) => r.kind === "already-refunded").length, 1);
@@ -1371,6 +1436,104 @@ test("T3 中途失败 → 派单关闭与退款全部回滚", { skip: SKIP }, as
   assert.equal(order.status, "paid");
   assert.equal(order.refunded_amount, 0);
   assert.equal(order.refunded_at, null);
+});
+
+test("T3 连续清扫不会把已被接走的单退掉", { skip: SKIP }, async () => {
+  // 与 Mock 半边 `dispatchConcurrency.test.mjs` 的「连续清扫与接单交错」同一条判据：
+  // 「当前池」是一个状态谓词，不是一张冻结的名单。接了单的记录在库里已经
+  // `state='accepted'`，清扫就不该再看见它——重复扫多少遍都一样。
+  const target = await findPublicDispatch();
+  assert.ok(target, "预置数据里应当有一张公共池待接单");
+  const [companion] = await findAcceptingCompanions({ excludeUserId: target.user_id });
+  assert.ok(companion, "预置数据里应当有能接单的护航");
+
+  const dispatch = await readDispatch(target.dispatch_id);
+  const deadline = dispatch.public_deadline_at;
+
+  const accepted = await acceptDispatchPg(target.dispatch_id, {
+    companionId: companion.id,
+    at: AT,
+  });
+  assert.equal(accepted.kind, "ok");
+  assert.ok(
+    new Date(accepted.dispatch.acceptedAt).getTime() < new Date(deadline).getTime(),
+    "接单时刻严格在到点之前——否则下面的「反复清扫不退」就不是在测状态谓词了",
+  );
+
+  for (let round = 0; round < 10; round += 1) {
+    const swept = await sweepExpiredDispatchesPg(plusMinutes(deadline, round + 1));
+    assert.equal(
+      swept.refundedOrderIds.includes(target.order_id),
+      false,
+      `第 ${round + 1} 次清扫不该退这一单`,
+    );
+    assert.equal(
+      swept.movedToPublicDispatchIds.includes(target.dispatch_id),
+      false,
+      "已接单的记录不该被转池",
+    );
+  }
+
+  const order = await readOrder(target.order_id);
+  assert.equal(order.status, "accepted", "接单成功后不因超时而退款");
+  assert.equal(order.refunded_amount, 0);
+  assert.equal(
+    await countRows("companion_accept_events", "WHERE dispatch_id = $1", [target.dispatch_id]),
+    1,
+    "反复清扫不产生第二条接单历史",
+  );
+});
+
+test("T3 并发 · 清扫与接单同时到达：要么接单成功、要么退款关闭，二者必居其一", { skip: SKIP }, async () => {
+  // 这是 Mock 半边那条「清扫与接单交错」用例的 Pg 版**强化**：Mock 里两种顺序由
+  // 单线程决定先后，这里让两个事务**真的同时在跑**，由行锁决定谁赢。
+  // 无论谁赢，最终状态必须是那两个之一——不允许出现「既退了款又有人接单」，
+  // 也不允许「退款出两笔」或「接单历史两条」。
+  //
+  // 到点设在 AT 之后：`at = AT` 的接单请求在**时间判据**上是通过的，
+  // 只有「池子已经关了」能挡住它。这样两条路径才真的会撞在一起。
+  const deadlineAt = plusMinutes(AT, 5);
+  const target = await makeExpiredPublicDispatch({ deadlineAt });
+  const [companion] = await findAcceptingCompanions({ excludeUserId: target.user_id });
+  assert.ok(companion, "并发用例需要一位能接单的护航");
+
+  // ⚠️ 预热 + 撑开订单行锁窗口。**不这么做这条用例就是假绿的**：两条事务若被连接建立
+  //    串行化，先发的跑完整段才轮到后发的，后发的自然读到新状态，于是「删掉 FOR UPDATE
+  //    也照样绿」——它测到的其实是顺序执行。两条路径都以 `orders` 为第一把锁
+  //    （accept 先 `lockOrder`，sweep 第一条语句就是 `SELECT … ORDER BY id FOR UPDATE`），
+  //    因此挂 `pg_sleep` 在 `orders` 上能确定性地让二者重叠、且不构成死锁环。
+  await warmPool(2);
+  const [swept, accepted] = await withWideLockWindow(() =>
+    Promise.all([
+      sweepExpiredDispatchesPg(plusMinutes(deadlineAt, 5)),
+      acceptDispatchPg(target.dispatch_id, { companionId: companion.id, at: AT }),
+    ]),
+  );
+
+  const refunded = swept.refundedOrderIds.includes(target.order_id);
+  const order = await readOrder(target.order_id);
+
+  if (accepted.kind === "ok") {
+    assert.equal(refunded, false, "接单赢了：这一单不该同时被退款");
+    assert.equal(order.status, "accepted");
+    assert.equal(order.refunded_amount, 0);
+    assert.equal(order.actual_companion_id, companion.id);
+    assert.equal((await readDispatch(target.dispatch_id)).state, "accepted");
+  } else {
+    // 清扫赢了：接单请求必须看见「池子已关」，而不是别的什么含糊结果
+    assert.equal(accepted.kind, "not-open");
+    assert.equal(refunded, true, "清扫赢了：这一单必须被退款关闭");
+    assert.equal(order.status, "refunded");
+    assert.equal(order.refunded_amount, order.actual_paid_amount, "全额退，且只有一笔");
+    assert.equal(order.refunded_at, deadlineAt, "退款时刻取到点那一刻");
+    assert.equal((await readDispatch(target.dispatch_id)).state, "timed_out");
+    assert.equal(order.actual_companion_id, null, "没有实际打手");
+    assert.equal(
+      await countRows("companion_accept_events", "WHERE dispatch_id = $1", [target.dispatch_id]),
+      0,
+      "输了的那条路径一个字节都没写",
+    );
+  }
 });
 
 /* ═══════════ T4 · 护航主动取消接单（cancelAcceptedOrderPg） ═══════════ */

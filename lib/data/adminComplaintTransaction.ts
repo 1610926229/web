@@ -3,6 +3,8 @@ import { canTransitionComplaint } from "@/lib/constants/adminComplaints";
 import type { Complaint, ComplaintStatus } from "@/lib/types/complaint";
 import { takeReplayForAction, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import { applyComplaintStatus, complaintStore } from "./mockComplaintRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { applyAdminComplaintIntentPg } from "./pg/complaintTransactions";
 
 /**
  * 管理端投诉处理的**伪事务** —— 三个处理动作的唯一写入入口。
@@ -90,7 +92,7 @@ export const INTENT_TO_STATUS: Record<
  *   把提交上来的文本写进去会变成一条「处理中但已经有结果」的记录；
  * - 另外两个动作的文本由服务层按各自的必填规则校验过。
  */
-export async function applyAdminComplaintIntent(
+async function applyAdminComplaintIntentMock(
   complaintId: string,
   intent: AdminComplaintIntent,
   result: string,
@@ -163,4 +165,31 @@ export function auditActionOf(
     default:
       return "complaint.close";
   }
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 1 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/complaintTransactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：投诉处理写入被
+ * `adminComplaints.ts` / `staffComplaints.ts` 调用，逐个改调用点意味着将来新增一个
+ * 调用点就会漏改一处，而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 三个投诉处理动作（开始处理 / 解决 / 关闭）的唯一写入入口。 */
+export async function applyAdminComplaintIntent(
+  complaintId: string,
+  intent: AdminComplaintIntent,
+  result: string,
+  ctx: AdminWriteContext,
+): Promise<AdminComplaintWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? applyAdminComplaintIntentPg(complaintId, intent, result, ctx)
+    : applyAdminComplaintIntentMock(complaintId, intent, result, ctx);
 }

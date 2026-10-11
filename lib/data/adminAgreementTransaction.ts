@@ -12,6 +12,8 @@ import {
   writeAudit,
   type AdminWriteContext,
 } from "./adminWriteSupport";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { setAgreementEnabledPg, updateAgreementPg } from "./pg/agreementTransactions";
 
 /**
  * 协议写操作的**伪事务** —— 本阶段所有协议正文与启用状态改动的唯一写入入口。
@@ -37,8 +39,9 @@ import {
  * ⚠️ store 句柄**每次调用现取，绝不缓存**：测试里 `resetMockStore()` 会换掉整份存储，
  * 缓存下来的 Map 会变成孤儿，写入看不见、读到的还是旧数据。
  *
- * 接入真实数据库后，本文件整体替换为一个事务（`BEGIN … COMMIT` + `operation_id`
- * 唯一索引），上层的 service 与接口一行都不用改。
+ * 接入真实数据库后，同一组入口由 `pg/agreementTransactions.ts` 的等价事务承接：
+ * 本文件下方的 2 个公开函数按 `DATA_SOURCE` 在 `xxxMock`（上面）与 `xxxPg` 之间路由，
+ * 上层的 service 与接口一行都不用改。
  *
  * ## 与运营内容那份伪事务的三处不同
  *
@@ -110,7 +113,7 @@ export type AdminAgreementWriteOutcome =
  * 记的是 `agreement.disable`——它回答的是「这份协议为什么从用户端消失了」，
  * 而那正是这次操作最要紧的后果。
  */
-export async function updateAgreement(
+async function updateAgreementMock(
   id: string,
   draft: AdminAgreementProfilePatch,
   ctx: AdminWriteContext,
@@ -198,7 +201,7 @@ export async function updateAgreement(
  * 「点了一次已经启用的启用按钮」不该在记录上留下一次改动痕迹——那会让后台看到
  * 「最后修改时间刚刚变过」，也会让审计里多出一条什么都没改变的记录。
  */
-export async function setAgreementEnabled(
+async function setAgreementEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -247,4 +250,41 @@ export async function setAgreementEnabled(
     changed: true,
     replayed: false,
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 2 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/agreementTransactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：协议写入被
+ * `adminAgreements.ts` 等调用点引用，逐个改调用点意味着将来新增一个调用点就会漏改一处，
+ * 而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 编辑一份协议（标题 / 正文 / 启用状态一起提交，正文变了才递增版本号）。 */
+export async function updateAgreement(
+  id: string,
+  draft: AdminAgreementProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminAgreementWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? updateAgreementPg(id, draft, ctx)
+    : updateAgreementMock(id, draft, ctx);
+}
+
+/** 启用 / 停用协议（窄写入，不动版本号）。 */
+export async function setAgreementEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminAgreementWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? setAgreementEnabledPg(id, enabled, ctx)
+    : setAgreementEnabledMock(id, enabled, ctx);
 }

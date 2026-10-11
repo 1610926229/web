@@ -1,5 +1,7 @@
 import type { RefundRequest, RefundStatus } from "@/lib/types/refund";
 import { mockRefundRepository } from "./mockRefundRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgRefundRepository } from "./pg/refundRepository";
 
 /**
  * 管理端退款查询条件。
@@ -126,6 +128,16 @@ export type RefundRepository = {
   queryRefundsForAdmin(filter: AdminRefundQueryFilter): Promise<RefundRequest[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const refundRepositoryBacking: RepositoryBacking<RefundRepository> = {
+  name: "refund",
+  mock: mockRefundRepository,
+  pg: pgRefundRepository,
+};
+
 export function getRefundRepository(): RefundRepository {
-  return mockRefundRepository;
+  return pickRepository(refundRepositoryBacking);
 }

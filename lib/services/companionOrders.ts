@@ -160,8 +160,8 @@ function toCompanionOrderListItem(order: Order, earning: Earning | null): Compan
  * 不重复完成、不刷新 `completedAt`。真实调度器上线后调用**同一个**
  * `sweepCompletionAutoApprovals()`，**不是**另写一套。
  */
-function materializeCompletionAutoApprovals(): void {
-  sweepCompletionAutoApprovals(new Date().toISOString());
+async function materializeCompletionAutoApprovals(): Promise<void> {
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 }
 
 /**
@@ -190,7 +190,7 @@ async function companionEarningIndex(companionId: string): Promise<Map<string, E
  */
 export async function listCompanionOrders(companionId: string): Promise<CompanionOrderListData> {
   // 惰性物化自动通过事实（幂等）：列表同样展示订单状态，只挂详情会让列表停在 serving
-  materializeCompletionAutoApprovals();
+  await materializeCompletionAutoApprovals();
 
   const [orders, earnings] = await Promise.all([
     getPaymentRepository().queryOrdersByCompanion(companionId),
@@ -230,7 +230,7 @@ export async function getCompanionOrderDetail(
 
   // 惰性物化自动通过事实（幂等）：详情要显示得出「已完成」，而不是停在「护航中 + 已过期的
   // 自动审核截止时刻」（见 materializeCompletionAutoApprovals 的注释）
-  materializeCompletionAutoApprovals();
+  await materializeCompletionAutoApprovals();
 
   const order = await getPaymentRepository().findOrderById(orderId);
   if (!order || order.actualCompanionId !== companionId) return null;

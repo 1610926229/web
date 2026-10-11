@@ -44,6 +44,13 @@ import {
   canInvalidatePendingCompletionForOrder,
   invalidatePendingCompletionForOrder,
 } from "./completionTransaction";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import {
+  cancelAcceptedOrderPg,
+  releaseOrderByStaffPg,
+  replaceOrderCompanionByStaffPg,
+  startCompanionOrderPg,
+} from "./pg/w1Transactions";
 
 /**
  * 订单**履约绑定**域的伪事务（P0-6 / P0-7 / P0-11）。
@@ -338,7 +345,7 @@ function releaseCurrentAssignment(input: {
  * 本函数把它原样存进退出历史。事务层不重复一遍校验：同一条规则有两个出处时，
  * 两处对同一个请求给出不同答案，就没有人说得清哪一处才是规则。
  */
-export async function cancelAcceptedOrder(
+export async function cancelAcceptedOrderMock(
   ctx: CompanionWriteContext & { orderId: string; reason: string; idempotencyKey: string },
 ): Promise<CompanionCancelOutcome> {
   // 句柄在写之前取好。测试里的 resetMockStore() 会换掉整份存储，因此每次都现取
@@ -475,7 +482,7 @@ export async function cancelAcceptedOrder(
  * ⚠️ `ctx.companionId` **只允许**来自 `requireCompanion()` 返回的会话身份，
  * 事务层不认识请求体、不认识 Cookie，因此「我是哪位打手」在结构上不可能由调用方声明。
  */
-export async function startCompanionOrder(
+export async function startCompanionOrderMock(
   ctx: CompanionWriteContext & { orderId: string },
 ): Promise<CompanionStartOutcome> {
   // 句柄在写之前取好。测试里的 resetMockStore() 会换掉整份存储，因此每次都现取
@@ -594,7 +601,7 @@ export async function startCompanionOrder(
  * ⚠️ `input.staffId` **只允许**来自 `requireStaff()` 返回的会话身份，
  * 事务层不认识请求体、不认识 Cookie。
  */
-export async function releaseOrderByStaff(input: {
+export async function releaseOrderByStaffMock(input: {
   orderId: string;
   staffId: string;
   reason: string;
@@ -704,7 +711,7 @@ export async function releaseOrderByStaff(input: {
  * ⚠️ 换人对**新打手**而言不是「跳过接单」：他拿到的状态与他自己点接单完全一样
  * （`accepted`），「开始服务」与完成材料仍然由他本人做。
  */
-export async function replaceOrderCompanionByStaff(input: {
+export async function replaceOrderCompanionByStaffMock(input: {
   orderId: string;
   newCompanionId: string;
   staffId: string;
@@ -905,4 +912,60 @@ export function releaseOrdersForCompanion(input: {
   }
 
   return { kind: "ok", companionId: input.companionId, releasedOrderIds };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这四个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * `isPostgresDataSourceEnabled()` 的判据是**显式的环境变量**（见 `pg/config.ts`），
+ * 不是「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ *
+ * ⚠️ `releaseOrdersForCompanion` **不路由**（GAP）：它是 `setCompanionFlags` 的
+ * 原子区段**同步调用**的入口，其 Pg 对应物是 `pg/adminAuditTransactions.ts` 里的
+ * `releaseOrdersForCompanionTx`（由 `adminCompanionTransaction.ts` 在管理端事务内调用），
+ * 不在本文件的 Pg 落点范围里。这里**不用 Mock 兜底**——那会重新造出
+ * 「Repository→Pg + Transaction→Mock」的半事务。
+ */
+
+/** 当前实际履约的打手主动取消接单。 */
+export async function cancelAcceptedOrder(
+  ctx: CompanionWriteContext & { orderId: string; reason: string; idempotencyKey: string },
+): Promise<CompanionCancelOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? cancelAcceptedOrderPg(ctx)
+    : cancelAcceptedOrderMock(ctx);
+}
+
+/** 当前实际履约的打手开始服务（`accepted → serving`）。 */
+export async function startCompanionOrder(
+  ctx: CompanionWriteContext & { orderId: string },
+): Promise<CompanionStartOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? startCompanionOrderPg(ctx)
+    : startCompanionOrderMock(ctx);
+}
+
+/** 客服把这一单退回公共池。 */
+export async function releaseOrderByStaff(input: {
+  orderId: string;
+  staffId: string;
+  reason: string;
+  at: string;
+}): Promise<StaffOrderReleaseOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? releaseOrderByStaffPg(input)
+    : releaseOrderByStaffMock(input);
+}
+
+/** 客服直接指定新打手接替这一单。 */
+export async function replaceOrderCompanionByStaff(input: {
+  orderId: string;
+  newCompanionId: string;
+  staffId: string;
+  at: string;
+}): Promise<StaffOrderReplaceOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? replaceOrderCompanionByStaffPg(input)
+    : replaceOrderCompanionByStaffMock(input);
 }

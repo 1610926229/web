@@ -1228,15 +1228,21 @@ test("兼容：P0-5 的派单规则不回归——自己不能接自己下的单
  * 所以边界改成认 **任意** `export`：这不改变 `cancelAcceptedOrder` /
  * `startCompanionOrder` 两个既有切片的范围（它们后面的邻居都是 async 导出），
  * 但把新来的同步函数关在自己的范围里。
+ *
+ * ⚠️ PROD-1E 把事务门面改成「Mock 实现改名 + 同文件内薄门面」之后，定位必须带
+ * **词边界**：无词边界的 `indexOf("export async function " + name)` 会让
+ * `startCompanionOrder` 前缀命中 `startCompanionOrderMock`（恰好落在 Mock 体上，
+ * 纯属巧合——Mock 体恰好也写着同样的 Guard）。现在用 `\b` 精确匹配，
+ * `startCompanionOrder` 解析到 3 行门面、`startCompanionOrderMock` 解析到实现，
+ * 两者各归各位，不再依赖「Mock 与门面恰好有同一条 Guard」这种运气。
  */
 function functionBody(code, name) {
-  const start = code.indexOf(`export function ${name}`);
-  const asyncStart = code.indexOf(`export async function ${name}`);
-  const from = start === -1 ? asyncStart : asyncStart === -1 ? start : Math.min(start, asyncStart);
-  assert.notEqual(from, -1, `找不到 ${name}：结构约束无法判定`);
+  const start = new RegExp(`export\\s+(?:async\\s+)?function\\s+${name}\\b`).exec(code);
+  assert.ok(start, `找不到 ${name}：结构约束无法判定`);
 
-  const next = code.indexOf("\nexport ", from + 1);
-  return next === -1 ? code.slice(from) : code.slice(from, next);
+  const rest = code.slice(start.index + 1);
+  const next = rest.search(/export\s+(?:async\s+)?(?:function|const|let|var|type)\s/);
+  return next === -1 ? code.slice(start.index) : code.slice(start.index, start.index + 1 + next);
 }
 
 /** 领域 Guard 的**字面**判据：动作必须自己看订单此刻的状态，而不是只问状态机表。 */
@@ -1276,14 +1282,14 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
   //      （「表允许」不等于「这一单此刻能这么做」——状态机不是权限）；
   //   2. 结构校验必须排在领域 Guard **之前**，两道门都真的在跑；
   //   3. 取消路径**不得**引用状态机（把原来那条全文件级禁令收窄后的那一半补回来）。
-  for (const name of ["cancelAcceptedOrder", "startCompanionOrder"]) {
+  for (const name of ["cancelAcceptedOrderMock", "startCompanionOrderMock"]) {
     assert.ok(
       functionBody(code, name).includes(STATUS_GUARD),
       `${name} 缺少直接看 ${STATUS_GUARD} 的领域 Guard：表允许不等于这一单此刻能这么做`,
     );
   }
 
-  const startBody = functionBody(code, "startCompanionOrder");
+  const startBody = functionBody(code, "startCompanionOrderMock");
   assert.ok(
     startBody.includes("canTransitionOrder("),
     "开始服务必须用中央状态机（canTransitionOrder）做一道结构校验：这条边存不存在由状态表回答",
@@ -1296,7 +1302,7 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
   // `if (!canTransitionOrder(...)) return not-accepted` 不会变红——
   // 权限仍然是对的，但 P0-6「状态表只出现在真正需要它的动作路径上」这个判断就没人守了。
   assert.equal(
-    functionBody(code, "cancelAcceptedOrder").includes("canTransitionOrder("),
+    functionBody(code, "cancelAcceptedOrderMock").includes("canTransitionOrder("),
     false,
     "取消接单不需要结构校验：它有直接看状态的领域 Guard，引用状态机属于多余的判断",
   );
@@ -1314,21 +1320,63 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
   //
   // 五个入口：打手侧两个（取消接单 / 开始服务）+ 客服侧两个（退回公共池 / 指定换人）
   // + 封禁回池一个（同步）。逐条列出而不是只数数量——多一个就要先回答「它的 Guard 是什么」。
+  //
+  // ⚠️ PROD-1E 把四个路由入口的实现改名成 `*Mock`，并在同文件里加了四个同名的薄门面。
+  // 「对外只有五个入口」因此变成两条独立的断言：滤掉 `*Mock` 之后**恰好**还是那五个名字
+  // （门面不是新的对外入口，只是同一入口的内部转发），并且四个 `*Mock` 实现**必须还在**——
+  // 旧写法下这条由「恰好等于五个」隐含覆盖，拆开之后必须显式补上，否则「Mock 实现被整个删掉」
+  // 会变绿（门面还在、名字还「恰好」是五个）。
   const exported = [...code.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)]
     .map((match) => match[1])
     .sort();
-  assert.deepEqual(exported, [
+  const nonMockExports = exported.filter((name) => !name.endsWith("Mock"));
+  assert.deepEqual(nonMockExports, [
     "cancelAcceptedOrder",
     "releaseOrderByStaff",
     "releaseOrdersForCompanion",
     "replaceOrderCompanionByStaff",
     "startCompanionOrder",
   ]);
+  for (const mockName of [
+    "cancelAcceptedOrderMock",
+    "releaseOrderByStaffMock",
+    "replaceOrderCompanionByStaffMock",
+    "startCompanionOrderMock",
+  ]) {
+    assert.ok(exported.includes(mockName), `${mockName} 必须存在：它是 Mock 实现，被整个删掉会让门面静默回落`);
+  }
+
+  // 四个**路由门面**必须是纯选择：函数体里既有 `isPostgresDataSourceEnabled()` 判据，
+  // 也有对应的 `*Pg(` 调用——门面是路由，不是实现（实现已经搬到 `*Mock` 名下）。
+  // ⚠️ 第五个入口 `releaseOrdersForCompanion` **不是**门面：它刻意不路由（是
+  // `setCompanionFlags` 原子区段同步调用的原语），因此路由断言只覆盖这四个，
+  // 而它自己的「不路由」性质由下面的同步断言 + tests/pgRoutingGates.test.mjs (B) 一起守。
+  for (const name of [
+    "cancelAcceptedOrder",
+    "startCompanionOrder",
+    "releaseOrderByStaff",
+    "replaceOrderCompanionByStaff",
+  ]) {
+    const facadeBody = functionBody(code, name);
+    assert.ok(
+      facadeBody.includes("isPostgresDataSourceEnabled()"),
+      `${name} 门面必须按 DATA_SOURCE 选择后端：不写判据就是「看似门面、实则写死一支」`,
+    );
+    assert.ok(
+      new RegExp(`\\b${name}Pg\\(`).test(facadeBody),
+      `${name} 门面必须落到 ${name}Pg：没有 Pg 分支等于把 postgres 分支悄悄删掉`,
+    );
+  }
+  assert.equal(
+    functionBody(code, "releaseOrdersForCompanion").includes("isPostgresDataSourceEnabled()"),
+    false,
+    "封禁回池不路由：它是同步原语，接上线会造出「Repository 走 Pg、Transaction 走 Mock」的半事务",
+  );
 
   // 客服的两个入口：**自己**直接看 `order.status`（与打手侧同一条领域 Guard）。
   // 「订单不在履约中」既不该被退回公共池，也不该被换人——状态机表管不了这件事，
   // 因为客服退回走的是 `accepted → paid` 这个表里本来就有的边。
-  for (const name of ["releaseOrderByStaff", "replaceOrderCompanionByStaff"]) {
+  for (const name of ["releaseOrderByStaffMock", "replaceOrderCompanionByStaffMock"]) {
     assert.ok(
       functionBody(code, name).includes(STATUS_GUARD),
       `${name} 缺少直接看 ${STATUS_GUARD} 的领域 Guard：客服也不该照着一张表就把单退回或换人`,

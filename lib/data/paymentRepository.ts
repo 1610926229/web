@@ -3,6 +3,8 @@ import type { PageResult } from "@/lib/types/common";
 import type { Order, OrderStatus } from "@/lib/types/order";
 import type { MockPaymentResult, PaymentRequest } from "@/lib/types/payment";
 import { mockPaymentRepository } from "./mockPaymentRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgPaymentRepository } from "./pg/paymentRepository";
 
 /**
  * 管理端订单查询条件。
@@ -174,6 +176,16 @@ export type PaymentRepository = {
   queryOrdersForAdmin(filter: AdminOrderQueryFilter): Promise<Order[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const paymentRepositoryBacking: RepositoryBacking<PaymentRepository> = {
+  name: "payment",
+  mock: mockPaymentRepository,
+  pg: pgPaymentRepository,
+};
+
 export function getPaymentRepository(): PaymentRepository {
-  return mockPaymentRepository;
+  return pickRepository(paymentRepositoryBacking);
 }

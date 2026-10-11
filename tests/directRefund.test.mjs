@@ -404,7 +404,7 @@ test("用户先退 → 超时清扫不得重复退款、不得重复通知", asy
   const notificationsAfterRefund = await refundNotificationsFor(USER_A, PAID_ORDER);
 
   // 跑到公共池截止之后：这一单的派单已经关闭，清扫**根本不该再看它**
-  const swept = sweepExpiredDispatches(plusMinutes(getMockSeedNow(), 61));
+  const swept = await sweepExpiredDispatches(plusMinutes(getMockSeedNow(), 61));
 
   assert.equal(swept.refundedOrderIds.includes(PAID_ORDER), false, "清扫不得重复退款");
   assert.deepEqual(await orderOf(PAID_ORDER), afterRefund, "退款事实与退款时刻都不能被改写");
@@ -419,7 +419,7 @@ test("超时清扫先退 → 用户再点只得「已全额退款」，且退款
   const dispatch = await dispatchOf(PAID_ORDER);
   assert.equal(dispatch.state, "public", "这一条需要一张在公共池里等到期的单");
 
-  const swept = sweepExpiredDispatches(plusMinutes(getMockSeedNow(), 61));
+  const swept = await sweepExpiredDispatches(plusMinutes(getMockSeedNow(), 61));
   assert.equal(swept.refundedOrderIds.includes(PAID_ORDER), true, "清扫必须真的退掉这一单");
   const afterSweep = await orderOf(PAID_ORDER);
   assert.equal(afterSweep.status, "refunded");

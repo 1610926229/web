@@ -126,7 +126,7 @@ export async function listStaffCompletions(
   surface: MockSurface,
 ): Promise<StaffCompletionListData> {
   // 惰性物化自动通过事实（幂等）：到期且无阻塞的 pending 材料在读取时被写成 approved
-  sweepCompletionAutoApprovals(new Date().toISOString());
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 
   return withMockDebug(params, surface, async () => {
     const [rows, orders, users] = await Promise.all([
@@ -188,7 +188,7 @@ export async function getStaffCompletionDetail(
 ): Promise<StaffCompletionDetail | null> {
   if (!id) return null;
 
-  sweepCompletionAutoApprovals(new Date().toISOString());
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 
   return withMockDebug(params, surface, async () => {
     const submission = await getCompletionRepository().findCompletionById(id);

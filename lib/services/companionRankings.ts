@@ -74,8 +74,8 @@ import type { CompanionRankingPage } from "@/lib/types/companionRanking";
  * ⚠️ 用注入的 `now` 而不是 `new Date()`：周期范围也是按 `now` 算的，
  * 两处用不同的时刻会出现「范围说这一天、清扫按另一天」——测试也无法复现。
  */
-function materializeEarningReleases(at: Date): void {
-  sweepMaturedEarnings(at.toISOString());
+async function materializeEarningReleases(at: Date): Promise<void> {
+  await sweepMaturedEarnings(at.toISOString());
 }
 
 export async function getCompanionRanking(
@@ -110,7 +110,7 @@ export async function getCompanionRanking(
 
   return withMockDebug(params, surface, async () => {
     // 必须在读收益**之前**：收益榜读的是清扫后的状态
-    materializeEarningReleases(now);
+    await materializeEarningReleases(now);
 
     const acceptRepository = getCompanionAcceptRepository();
     const [events, legacy, orders, earnings, companions] = await Promise.all([

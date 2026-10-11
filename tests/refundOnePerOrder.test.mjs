@@ -514,7 +514,7 @@ test("规则1（执行侧 2/3）：部分退款 → 回池 → 公共池到点�
   const deadline = dispatch.publicDeadlineAt;
   assert.ok(deadline, "前置：进过公共池的派单必须有截止时间");
 
-  const swept = sweepExpiredDispatches(deadline);
+  const swept = await sweepExpiredDispatches(deadline);
   assert.equal(
     swept.refundedOrderIds.includes(order.id),
     false,
@@ -549,7 +549,7 @@ test("规则1（执行侧 2/3）：部分退款 → 回池 → 公共池到点�
     acceptedVia: null,
   });
 
-  const sweptClean = sweepExpiredDispatches(deadline);
+  const sweptClean = await sweepExpiredDispatches(deadline);
   assert.ok(sweptClean.refundedOrderIds.includes(clean.id), "正例：未出过款的单到点必须照旧被自动退款");
   assert.equal(orderNow(clean.id).refundedAmount, cleanPaidAmount, "正例：自动退款仍是全额");
   assert.equal(orderNow(clean.id).status, "refunded");
@@ -612,7 +612,7 @@ test("规则1（执行侧 3/3）：三个出款入口都走同一个判据，没
  * （券抵被强制为 0、种子单价为正）。要钉的恰恰是「计划层不把正确性押在
  * 一条上游不变式上」——所以用例自己造出那个状态，而不是等它自然出现。
  */
-test("规则1（执行侧 4/4）：实付为 0 的单子不出款、不通知，但池子照样收掉", () => {
+test("规则1（执行侧 4/4）：实付为 0 的单子不出款、不通知，但池子照样收掉", async () => {
   const order = seedServingOrder({ unitPrice: 0 });
   assert.equal(order.actualPaidAmount, 0, "前置：这张单子没有钱可退");
 
@@ -631,7 +631,7 @@ test("规则1（执行侧 4/4）：实付为 0 的单子不出款、不通知，
   }).id;
   const notificationsBefore = countNotificationsFor(order.id);
 
-  const swept = sweepExpiredDispatches(deadline);
+  const swept = await sweepExpiredDispatches(deadline);
 
   assert.equal(
     swept.refundedOrderIds.includes(order.id),

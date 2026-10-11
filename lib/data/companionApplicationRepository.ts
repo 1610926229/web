@@ -3,6 +3,8 @@ import type {
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
 import { mockCompanionApplicationRepository } from "./mockCompanionApplicationRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCompanionApplicationRepository } from "./pg/companionApplicationRepository";
 
 /**
  * 护航入驻申请的可替换仓储（读写）。
@@ -107,6 +109,16 @@ export type CompanionApplicationRepository = {
   ): Promise<{ application: CompanionApplication; withdrawn: boolean } | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const companionApplicationRepositoryBacking: RepositoryBacking<CompanionApplicationRepository> = {
+  name: "companionApplication",
+  mock: mockCompanionApplicationRepository,
+  pg: pgCompanionApplicationRepository,
+};
+
 export function getCompanionApplicationRepository(): CompanionApplicationRepository {
-  return mockCompanionApplicationRepository;
+  return pickRepository(companionApplicationRepositoryBacking);
 }

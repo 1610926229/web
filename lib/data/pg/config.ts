@@ -54,7 +54,22 @@ export class PgConfigError extends Error {
  * 若拿它的存在当开关，那么任何人 clone 下来跑 `pnpm dev` 都会**悄无声息地**
  * 从 Mock 切到数据库——而按迁移策略，只有事务闭包完整的业务链才允许切。
  *
- * 目前只有 `favorite` 与 `suggestion` 两个仓储读这个开关（PROD-1A 竖切片）。
+ * ## 谁在读它（PROD-1E 后的现状）
+ *
+ * 三类调用方，各自的用法**不一样**，不要混为一谈：
+ *
+ * 1. **仓储访问器**（28 个，PROD-1A 只有 `favorite` / `suggestion` 两个直读，现全部改走
+ *    `lib/data/datasource.ts` 的 `pickRepository`）：它们**不再直接读**这个开关，
+ *    而是把自己那份 `RepositoryBacking` 交给 `pickRepository`——开关只在那里被读一次，
+ *    于是「有没有 Pg 实现」这件事从隐式分支变成可枚举的数据（见 `datasource.ts` 文件头）；
+ * 2. **伪事务门面**（`lib/data/*Transaction.ts`）：每个门面在**调用时**读它来二选一，
+ *    `DATA_SOURCE=postgres` 时走 `*Pg` 实现。⚠️ **必须在调用时读，不能在模块顶层
+ *    算成一个常量**——后者会把「构建时没配、运行时配了」这种情况固化成 Mock 分支；
+ * 3. **`lib/data/runtime.ts` 的启动自检**：`assertAllRepositoriesWired` 在它不是
+ *    `postgres` 时**直接返回**，因此 Mock 模式下这份检查一次都不跑。
+ *
+ * ⚠️ 这也是它与 `DATABASE_URL` 的分工：`DATABASE_URL` 在本地 `.env` 里**恒有值**，
+ * 而开关必须是显式的——否则任何人 clone 下来跑 `pnpm dev` 都会无声切库。
  */
 export function isPostgresDataSourceEnabled(): boolean {
   return process.env["DATA_SOURCE"] === "postgres";

@@ -3,6 +3,8 @@ import type {
   DerivedAcceptEvent,
 } from "@/lib/types/companionAccept";
 import { mockCompanionAcceptRepository } from "./mockCompanionAcceptRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCompanionAcceptRepository } from "./pg/companionAcceptRepository";
 
 /**
  * 接单事件（`CompanionAcceptEvent`）的可替换仓储（P1-5）。
@@ -49,6 +51,16 @@ export type CompanionAcceptRepository = {
   listLegacyAcceptEvents(): Promise<DerivedAcceptEvent[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const companionAcceptRepositoryBacking: RepositoryBacking<CompanionAcceptRepository> = {
+  name: "companionAccept",
+  mock: mockCompanionAcceptRepository,
+  pg: pgCompanionAcceptRepository,
+};
+
 export function getCompanionAcceptRepository(): CompanionAcceptRepository {
-  return mockCompanionAcceptRepository;
+  return pickRepository(companionAcceptRepositoryBacking);
 }

@@ -15,6 +15,8 @@ import {
 import { applyOrderCompletion, paymentStore } from "./mockPaymentRepository";
 import { listRefundsForOrderSync } from "./mockRefundRepository";
 import { readOrderBlockingFacts } from "./orderBlocking";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { sweepMaturedEarningsPg } from "./pg/w1Transactions";
 
 /**
  * 收益域的伪事务（P0-9）—— 两个入口：**结算一次完成**、**清扫到期解冻**。
@@ -39,9 +41,13 @@ import { readOrderBlockingFacts } from "./orderBlocking";
  * ## 原子性
  *
  * 与同目录其它伪事务同一条依据：Node 是单线程的，「读—判断—写」之间只要不让出执行权，
- * 别的请求就插不进来。本文件的两个函数**都是同步函数**（没有 `async` 外壳，
- * 因为没有任何调用方需要 `await` 它），因此原子区段内**不可能**出现 `await`——
+ * 别的请求就插不进来。落点仍然是**同步函数**：`settleOrderCompletion`（完成结算的唯一入口）
+ * 与 `sweepMaturedEarningsMock` 都没有 `async` 外壳，因此原子区段内**不可能**出现 `await`——
  * 这不是靠注释约束，是类型上的事实。
+ *
+ * ⚠️ PROD-1E Phase 7 起，`sweepMaturedEarnings` 这个名字是**路由门面**（`async`，返回 Promise）：
+ * `DATA_SOURCE=postgres` 时走 `pg/w1Transactions.ts` 的真事务。它**不**参与上面那段原子性论证——
+ * 论证的对象是 Mock 半边与 `settleOrderCompletion`。门面体内没有 `await`，只有一次二选一。
  *
  * ## 幂等：判据是状态本身，不是幂等键
  *
@@ -313,7 +319,7 @@ function backfillRefundReversals(input: {
  * 这是 §六 要求的「不得只依赖之前页面 / service 层读取到的旧状态」——
  * 计划与提交之间没有 `await`，因此这三条一经判成立，在写入前不可能被推翻。
  */
-export function sweepMaturedEarnings(at: string): { releasedEarningIds: string[] } {
+export function sweepMaturedEarningsMock(at: string): { releasedEarningIds: string[] } {
   const earnings = earningStore();
 
   const plan: string[] = [];
@@ -335,4 +341,32 @@ export function sweepMaturedEarnings(at: string): { releasedEarningIds: string[]
   }
 
   return { releasedEarningIds: plan };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是 `sweepMaturedEarnings`，`DATA_SOURCE` 一变，解冻路径随之切换。
+ * 上面的 `sweepMaturedEarningsMock` 是原实现（`globalThis` 伪事务），
+ * `pg/w1Transactions.ts` 的 `sweepMaturedEarningsPg` 是它的**等价 PostgreSQL 事务**
+ * （三条释放判据——到期 / 无阻塞 / 净额还在——逐条一致）。
+ *
+ * ⚠️ `settleOrderCompletion` 刻意**不路由**：它是 Mock 半边的同步组成部分，被
+ * `completionTransaction.ts` 的 Mock 完成路径（客服人工通过 / 到期自动通过）在原子区段内
+ * 调用。Pg 侧的结算 `settleOrderCompletionTx` 已**内嵌**在 `approveCompletionPg` /
+ * `sweepCompletionAutoApprovalsPg` 里，不是独立入口——在这里再造一个结算出口，就会出现
+ * 「完成材料的写入走了 Pg、收益的写入走了 Mock」的半事务。
+ *
+ * ⚠️ `sweepMaturedEarnings` 原先是同步函数（挂在读取路径上），Pg 版是异步事务；
+ * 路由后它返回 Promise，读取路径上的调用方必须 `await`，否则「先 sweep 再读」会读到
+ * sweep 之前的状态。
+ */
+
+/** 收益到期解冻（幂等；Pg 侧返回 Promise，Mock 侧为同步实现）。 */
+export async function sweepMaturedEarnings(at: string): Promise<{
+  releasedEarningIds: string[];
+}> {
+  return isPostgresDataSourceEnabled()
+    ? sweepMaturedEarningsPg(at)
+    : sweepMaturedEarningsMock(at);
 }

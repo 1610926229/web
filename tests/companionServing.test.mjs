@@ -971,7 +971,7 @@ test("开始 10：身份只可能来自会话——服务层没有 body，事务
   const txCode = stripComments(
     readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")),
   );
-  const txBody = functionBody(txCode, "startCompanionOrder");
+  const txBody = functionBody(txCode, "startCompanionOrderMock");
   assert.equal(
     startCompanionOrderTransaction.length,
     1,
@@ -1032,7 +1032,7 @@ test("开始 12：start 路径上不引用任何通知常量；通知常量集�
   const txCode = stripComments(
     readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")),
   );
-  const txBody = functionBody(txCode, "startCompanionOrder");
+  const txBody = functionBody(txCode, "startCompanionOrderMock");
 
   // (1) 事务层的 start 路径上不得出现任何通知写入或通知常量。
   //     只在整个文件的源码串上 `includes` 是不够的：那会让取消路径上的通知调用

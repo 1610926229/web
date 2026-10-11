@@ -28,6 +28,8 @@ import {
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
 import { applyOrderRefund, paymentStore } from "./mockPaymentRepository";
 import { applyRefundReview, refundStore } from "./mockRefundRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { approveRefundPg, rejectRefundPg, startReviewRefundPg } from "./pg/adminAuditTransactions";
 
 /**
  * 管理端退款审核的**伪事务** —— 三个审核动作的唯一写入入口。
@@ -191,7 +193,7 @@ function refundSnapshots(
  * ⚠️ **只改退款申请**。开始审核不等于通过：订单状态不变、金额不变、用户的消费统计不变，
  * 也**不写审核人与审核意见**（那两样是「结果」，这一步还没有结果）。
  */
-export async function startReviewRefund(
+async function startReviewRefundMock(
   refundId: string,
   ctx: AdminWriteContext,
 ): Promise<RefundReviewWriteResult> {
@@ -393,7 +395,7 @@ function planCompanionRefundNotification(input: {
  * 都排在**任何写入之前**，因此不存在「退款已通过但订单未退款」这类半完成状态；
  * 反过来也不可能——订单的写入排在退款写入之后，而它不会失败。
  */
-export async function approveRefund(
+async function approveRefundMock(
   refundId: string,
   reviewNote: string,
   decisionInput: RefundDecisionInput,
@@ -651,7 +653,7 @@ export async function approveRefund(
  * ⚠️ **必须填写审核意见**，规则在 `lib/constants/adminApplications.ts` 的
  * `normalizeAdminReviewNote()`（与入驻审核共用一份），服务层校验通过后才传进来。
  */
-export async function rejectRefund(
+async function rejectRefundMock(
   refundId: string,
   reviewNote: string,
   ctx: AdminWriteContext,
@@ -707,4 +709,52 @@ export async function rejectRefund(
     changed: true,
     replayed: false,
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 3 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/adminAuditTransactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：退款审核写入被
+ * `adminRefunds.ts` / `staffRefunds.ts` 调用，逐个改调用点意味着将来新增一个调用点
+ * 就会漏改一处，而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 开始审核退款申请：`pending → reviewing`（只改退款申请）。 */
+export async function startReviewRefund(
+  refundId: string,
+  ctx: AdminWriteContext,
+): Promise<RefundReviewWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? startReviewRefundPg(refundId, ctx)
+    : startReviewRefundMock(refundId, ctx);
+}
+
+/** 审核通过退款申请（累计退满才改订单状态）。 */
+export async function approveRefund(
+  refundId: string,
+  reviewNote: string,
+  decisionInput: RefundDecisionInput,
+  ctx: AdminWriteContext,
+): Promise<AdminRefundWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? approveRefundPg(refundId, reviewNote, decisionInput, ctx)
+    : approveRefundMock(refundId, reviewNote, decisionInput, ctx);
+}
+
+/** 拒绝退款申请：`pending | reviewing → rejected`（只改退款申请）。 */
+export async function rejectRefund(
+  refundId: string,
+  reviewNote: string,
+  ctx: AdminWriteContext,
+): Promise<RefundReviewWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? rejectRefundPg(refundId, reviewNote, ctx)
+    : rejectRefundMock(refundId, reviewNote, ctx);
 }

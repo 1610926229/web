@@ -1,5 +1,7 @@
 import type { Agreement, AgreementSection } from "@/lib/types/agreement";
 import { mockAgreementRepository } from "./mockAgreementRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgAgreementRepository } from "./pg/agreementRepository";
 
 /**
  * 协议与版本介绍的可替换仓储。
@@ -108,6 +110,16 @@ export type AgreementPatch = {
   at: string;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const agreementRepositoryBacking: RepositoryBacking<AgreementRepository> = {
+  name: "agreement",
+  mock: mockAgreementRepository,
+  pg: pgAgreementRepository,
+};
+
 export function getAgreementRepository(): AgreementRepository {
-  return mockAgreementRepository;
+  return pickRepository(agreementRepositoryBacking);
 }

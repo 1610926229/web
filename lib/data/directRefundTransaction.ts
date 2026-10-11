@@ -9,6 +9,8 @@ import { readCompanionRecord } from "./mockCompanionRepository";
 import { applyDispatchTimedOut, dispatchStore } from "./mockDispatchRepository";
 import { appendNotification, newNotificationId } from "./mockNotificationRepository";
 import { applyOrderRefund, paymentStore } from "./mockPaymentRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { directRefundOrderPg } from "./pg/w1Transactions";
 
 /**
  * 用户**直接全额退款**的伪事务（P0-12）—— 「`paid` / `accepted` → `refunded`」的**唯一**写入入口。
@@ -188,7 +190,7 @@ function planCompanionRefundNotification(input: {
  *
  * @param at 退款时刻。**只有第一次**会被写进 `Order.refundedAt`（由 `applyOrderRefund` 保证）
  */
-export async function directRefundOrder(
+export async function directRefundOrderMock(
   orderId: string,
   at: string,
 ): Promise<DirectRefundOutcome> {
@@ -309,4 +311,23 @@ export async function directRefundOrder(
     dispatchClosed: dispatchExists,
     notifiedCompanionUserId: notification ? notification.userId : null,
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是 `directRefundOrder`，`DATA_SOURCE` 一变，直接退款路径随之切换。
+ * `directRefundOrderMock` 是原实现（`globalThis` 伪事务），`pg/w1Transactions.ts` 的
+ * `directRefundOrderPg` 是它的**等价 PostgreSQL 事务**（判定顺序与幂等判据逐条一致，
+ * 金额口径见各自函数头）。
+ */
+
+/** 直接全额退掉这一单：`paid → refunded` 或 `accepted → refunded`（P0-12）。 */
+export async function directRefundOrder(
+  orderId: string,
+  at: string,
+): Promise<DirectRefundOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? directRefundOrderPg(orderId, at)
+    : directRefundOrderMock(orderId, at);
 }

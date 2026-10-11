@@ -280,9 +280,9 @@ export async function listOrdersForStaff(
   // 「否则**客服**会对着一条『等待接单』的单去催一个已经不存在的接单」。
   // 悬挂点不是可选项：漏挂产生的是一条只在"没人在别处访问"时才出现的错误状态，
   // 那是最难被发现、也最难被复现的一类不一致。
-  sweepExpiredDispatches(new Date().toISOString());
+  await sweepExpiredDispatches(new Date().toISOString());
   // 同理，完成材料到期自动通过（P0-8）：`completion.statusLabel` 也在这张列表的详情里显示
-  sweepCompletionAutoApprovals(new Date().toISOString());
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 
   return withMockDebug(params, surface, async () => {
     // 游戏筛选项先算好：它取自**全部订单**，与当前筛选无关（筛了游戏之后就只剩一个选项了）
@@ -378,8 +378,8 @@ export async function getStaffOrderDetail(
 
   // 与列表同一处、同一理由的两个惰性物化（幂等）。详情比列表更必须挂：
   // 客服往往是**直接按订单号打开这一页**，列表可能根本没被访问过。
-  sweepExpiredDispatches(new Date().toISOString());
-  sweepCompletionAutoApprovals(new Date().toISOString());
+  await sweepExpiredDispatches(new Date().toISOString());
+  await sweepCompletionAutoApprovals(new Date().toISOString());
 
   return withMockDebug(params, surface, async () => {
     const order: Order | null = await getPaymentRepository().findOrderById(orderId);

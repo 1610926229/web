@@ -8,6 +8,8 @@ import {
   readPlatformConfig,
   writePlatformConfig,
 } from "./mockPlatformConfigRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { updatePlatformConfigPg } from "./pg/platformConfigTransactions";
 
 /**
  * 平台参数写入的**伪事务** —— 本阶段修改平台参数的唯一写入入口。
@@ -129,7 +131,7 @@ export const PATCHABLE_FIELDS: Record<keyof PlatformConfigInput, true> = {
  * 操作者的身份**只从 `ctx` 来**，而 `ctx` 由服务层按 `requireAdmin()` 返回的会话拼装——
  * 请求体里的任何 actor 字段在这里没有进入路径。
  */
-export async function updatePlatformConfig(
+async function updatePlatformConfigMock(
   input: PlatformConfigInput,
   ctx: AdminWriteContext,
 ): Promise<AdminPlatformConfigWriteOutcome> {
@@ -211,4 +213,29 @@ export async function updatePlatformConfig(
  */
 export function currentPlatformConfig(): PlatformConfig {
   return readPlatformConfig();
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 1 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/platformConfigTransactions.ts`
+ * 的 `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：平台参数写入被
+ * `adminPlatformConfig.ts` 调用，逐个改调用点意味着将来新增一个调用点就会漏改一处，
+ * 而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 修改平台参数（PATCH 合并：没带的字段保持现状）。 */
+export async function updatePlatformConfig(
+  input: PlatformConfigInput,
+  ctx: AdminWriteContext,
+): Promise<AdminPlatformConfigWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? updatePlatformConfigPg(input, ctx)
+    : updatePlatformConfigMock(input, ctx);
 }

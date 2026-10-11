@@ -10,6 +10,8 @@ import type { OrderReview, ReviewStatus } from "@/lib/types/review";
 import type { AdminWriteContext } from "./adminWriteSupport";
 import { takeReplayForAction, writeAudit } from "./adminWriteSupport";
 import { reviewStore } from "./mockReviewRepository";
+import { moderateReviewPg } from "./pg/adminReviewTransactions";
+import { isPostgresDataSourceEnabled } from "./pg/config";
 
 /**
  * 评价审核写入的**伪事务** —— 管理端通过 / 驳回 / 隐藏 / 恢复公开的唯一写入入口（P1-8）。
@@ -108,7 +110,7 @@ export type AdminReviewWriteOutcome =
  * 而是这个函数的输出形状本身就保证的事。原因**是否必填**已在服务层按
  * `REVIEW_MODERATION_REQUIRES_REASON` 校验过，本函数只负责收纳。
  */
-export async function moderateReview(
+export async function moderateReviewMock(
   reviewId: string,
   action: ReviewModerationAction,
   reason: string | null,
@@ -214,4 +216,24 @@ function applyStatusSync(
   store.reviews.set(reviewId, updated);
 
   return { previous, updated };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是 `moderateReview` 这个名字，`DATA_SOURCE` 一变，
+ * 整条写入路径随之切换。`isPostgresDataSourceEnabled()` 的判据是**显式的环境变量**
+ * （见 `pg/config.ts`），不是「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 审核一条评价（通过 / 驳回 / 隐藏 / 恢复公开）。 */
+export async function moderateReview(
+  reviewId: string,
+  action: ReviewModerationAction,
+  reason: string | null,
+  ctx: AdminWriteContext,
+): Promise<AdminReviewWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? moderateReviewPg(reviewId, action, reason, ctx)
+    : moderateReviewMock(reviewId, action, reason, ctx);
 }

@@ -1156,7 +1156,7 @@ test("作废 4：自动通过**永远**不得通过一份作废材料（即使�
     "前置条件：deadline 必须已经过去，否则这条用例测的是「还没到点」",
   );
 
-  const swept = sweepCompletionAutoApprovals(sweepAt);
+  const swept = await sweepCompletionAutoApprovals(sweepAt);
   assert.equal(
     swept.autoApprovedSubmissionIds.includes(submitted.submissionId),
     false,
@@ -1176,7 +1176,7 @@ test("作废 4：自动通过**永远**不得通过一份作废材料（即使�
     evidence: [],
     at: plusMinutes(new Date().toISOString(), -120),
   });
-  const secondSweep = sweepCompletionAutoApprovals(new Date().toISOString());
+  const secondSweep = await sweepCompletionAutoApprovals(new Date().toISOString());
   assert.equal(
     secondSweep.autoApprovedSubmissionIds.includes(controlSubmission.submissionId),
     true,

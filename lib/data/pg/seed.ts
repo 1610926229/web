@@ -1,6 +1,13 @@
+import { agreementSeed } from "@/lib/mocks/fixtures/agreementSeed";
+import { adminSeed } from "@/lib/mocks/fixtures/adminSeed";
+import { categorySeed, gameSeed, productSeed } from "@/lib/mocks/fixtures/catalogSeed";
+import { companionApplicationSeed } from "@/lib/mocks/fixtures/companionApplicationSeed";
+import { announcementSeed, bannerSeed, quickEntrySeed } from "@/lib/mocks/fixtures/contentSeed";
 import { favoriteSeed } from "@/lib/mocks/fixtures/favoriteSeed";
 import { suggestionSeed } from "@/lib/mocks/fixtures/suggestionSeed";
 import { buildDispatchSeed } from "@/lib/mocks/fixtures/dispatchSeed";
+import { levelSeed } from "@/lib/mocks/fixtures/levelSeed";
+import { conversationSeed, messageSeed, staffReadSeed } from "@/lib/mocks/fixtures/messageSeed";
 import { getMockSeedNow } from "@/lib/mocks/fixtures/mockClock";
 import { complaintSeed } from "@/lib/mocks/fixtures/complaintSeed";
 import { couponClaimSeed, couponSeed } from "@/lib/mocks/fixtures/couponSeed";
@@ -8,7 +15,10 @@ import { notificationSeed } from "@/lib/mocks/fixtures/notificationSeed";
 import { buildRankingPeriodOrders, orderSeed } from "@/lib/mocks/fixtures/orderSeed";
 import { platformConfigSeed } from "@/lib/mocks/fixtures/platformConfigSeed";
 import { refundSeed } from "@/lib/mocks/fixtures/refundSeed";
-import { companionSeed } from "@/lib/mocks/fixtures/seed";
+import { reviewSeed } from "@/lib/mocks/fixtures/reviewSeed";
+import { companionSeed, userSeed } from "@/lib/mocks/fixtures/seed";
+import { staffSeed } from "@/lib/mocks/fixtures/staffSeed";
+import { tipSeed } from "@/lib/mocks/fixtures/tipSeed";
 import { assertSeedAllowed } from "./config";
 import type { PgExecutor, PgQueryable } from "./executor";
 
@@ -49,6 +59,30 @@ export type SeedResult = {
   complaints: SeedCounts;
   refundRequests: SeedCounts;
   platformConfig: SeedCounts;
+
+  // —— PROD-1E · 剩余业务域的预置数据。
+  //    与 W1 同一原则：Mock 建仓时装了什么，这里就写什么（含「两边都空」）。
+  //    新增表全部落在 `0010`–`0016` 七个迁移里。——
+  users: SeedCounts;
+  adminAccounts: SeedCounts;
+  staffAccounts: SeedCounts;
+  games: SeedCounts;
+  categories: SeedCounts;
+  products: SeedCounts;
+  productSpecs: SeedCounts;
+  announcements: SeedCounts;
+  banners: SeedCounts;
+  quickEntries: SeedCounts;
+  agreements: SeedCounts;
+  companionApplications: SeedCounts;
+  /** ⚠️ 与 Mock 一样是**空的**（`mockQualificationRepository.createStore()`）——理由见该文件头。 */
+  userQualifications: SeedCounts;
+  consumptionLevels: SeedCounts;
+  tipRecords: SeedCounts;
+  orderReviews: SeedCounts;
+  conversations: SeedCounts;
+  messages: SeedCounts;
+  staffReads: SeedCounts;
 };
 
 /**
@@ -169,6 +203,98 @@ function assertOrderHubFixtures(): void {
   assertNoDuplicateKey(refundSeed, (refund) => refund.id, "预置退款数据 id ");
   assertNoDuplicateKey(refundSeed, (refund) => refund.refundNo, "预置退款数据 refundNo ");
   assertNoDuplicateKey(refundSeed, (refund) => refund.orderId, "预置退款数据「一单一退」");
+}
+
+/**
+ * PROD-1E 新增域的**唯一性**预检。
+ *
+ * 判据与 `assertOrderHubFixtures` 完全一致——只查「会被 `ON CONFLICT DO NOTHING`
+ * 吞掉」的那一类错误（即唯一约束冲突），不重实现 CHECK / FK：那些本来就会抛错，
+ * 再在 JS 里写一遍等于给同一条规则建第二个真值源。
+ *
+ * ⚠️ 这里的每一项都能在 Mock 侧找到对应的**静默**行为，因此查的是两边共有的数据缺陷，
+ * 而不是 Pg 额外强加的要求：
+ *
+ * - `admin_accounts` / `staff_accounts` 的 `lower(btrim(username))`：Mock 的
+ *   `findStaffWithUsername` 也是这么比的，两条同名账号会让登录命中哪一条取决于插入顺序；
+ * - `companion_applications.user_id`：Mock 是一个以 `userId` 为键的 Map，重复即**后者覆盖**；
+ * - `order_reviews (user_id, order_id)`：Mock 建仓时**会抛**（`mockReviewRepository`
+ *   的 `createStore`），这里保持同一口径，让 Pg 侧在写库之前就报出同一条错误。
+ */
+function assertPlatformFixtures(): void {
+  assertNoDuplicateKey(userSeed, (user) => user.id, "预置用户数据 id ");
+  assertNoDuplicateKey(adminSeed, (admin) => admin.id, "预置管理员数据 id ");
+  assertNoDuplicateKey(
+    adminSeed,
+    (admin) => admin.username.trim().toLowerCase(),
+    "预置管理员数据「登录名（忽略大小写与首尾空白）」",
+  );
+  assertNoDuplicateKey(staffSeed, (staff) => staff.id, "预置客服数据 id ");
+  assertNoDuplicateKey(
+    staffSeed,
+    (staff) => staff.username.trim().toLowerCase(),
+    "预置客服数据「登录名（忽略大小写与首尾空白）」",
+  );
+
+  assertNoDuplicateKey(gameSeed, (game) => game.id, "预置游戏数据 id ");
+  assertNoDuplicateKey(categorySeed, (category) => category.id, "预置类目数据 id ");
+  assertNoDuplicateKey(
+    categorySeed.filter((category) => category.removedAt === null),
+    (category) => `${category.gameId}:${category.name.trim()}`,
+    "预置类目数据「同游戏内未移除类目重名」",
+  );
+  assertNoDuplicateKey(productSeed, (product) => product.id, "预置商品数据 id ");
+  assertNoDuplicateKey(
+    productSeed.flatMap((product) => product.specs),
+    (spec) => spec.id,
+    "预置商品规格数据 id ",
+  );
+
+  assertNoDuplicateKey(announcementSeed, (item) => item.id, "预置公告数据 id ");
+  assertNoDuplicateKey(bannerSeed, (item) => item.id, "预置活动图数据 id ");
+  assertNoDuplicateKey(quickEntrySeed, (item) => item.id, "预置快捷入口数据 id ");
+
+  assertNoDuplicateKey(agreementSeed, (item) => item.id, "预置协议数据 id ");
+  assertNoDuplicateKey(
+    agreementSeed,
+    (item) => `${item.type}:${item.version}`,
+    "预置协议数据「同类型同版本」",
+  );
+
+  assertNoDuplicateKey(companionApplicationSeed, (item) => item.id, "预置入驻申请数据 id ");
+  assertNoDuplicateKey(
+    companionApplicationSeed,
+    (item) => item.userId,
+    "预置入驻申请数据「一人一申请」",
+  );
+
+  assertNoDuplicateKey(levelSeed, (level) => level.id, "预置消费等级数据 id ");
+  assertNoDuplicateKey(tipSeed, (tip) => tip.id, "预置鸡腿记录数据 id ");
+
+  assertNoDuplicateKey(reviewSeed, (review) => review.id, "预置评价数据 id ");
+  assertNoDuplicateKey(
+    reviewSeed,
+    (review) => `${review.userId}:${review.orderId}`,
+    "预置评价数据「一单一评」",
+  );
+
+  assertNoDuplicateKey(conversationSeed, (item) => item.id, "预置会话数据 id ");
+  assertNoDuplicateKey(
+    conversationSeed.filter((item) => item.kind === "service"),
+    (item) => item.orderId,
+    "预置会话数据「一单一条客服会话」",
+  );
+  assertNoDuplicateKey(
+    conversationSeed.filter((item) => item.kind === "assignment"),
+    (item) => `${item.orderId}:${item.assignmentKey ?? ""}`,
+    "预置会话数据「同订单同履约段唯一」",
+  );
+  assertNoDuplicateKey(messageSeed, (message) => message.id, "预置消息数据 id ");
+  assertNoDuplicateKey(
+    staffReadSeed,
+    (record) => `${record.orderId}:${record.staffId}`,
+    "预置客服已读数据「订单 + 客服唯一」",
+  );
 }
 
 /**
@@ -479,6 +605,245 @@ const PLATFORM_CONFIG_COLUMNS: SeedColumn[] = [
   { name: "updated_by_admin_id" },
 ];
 
+// ————————————————— PROD-1E · 剩余业务域（0010–0016） —————————————————
+
+const USER_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "display_id" },
+  { name: "nickname" },
+  { name: "avatar_url" },
+  { name: "bio" },
+];
+
+const ADMIN_ACCOUNT_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "username" },
+  { name: "display_name" },
+  { name: "role" },
+  { name: "enabled" },
+  { name: "last_login_at" },
+];
+
+const STAFF_ACCOUNT_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "username" },
+  { name: "display_name" },
+  { name: "avatar_url" },
+  { name: "role" },
+  { name: "enabled" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "last_login_at" },
+  { name: "removed_at" },
+];
+
+const GAME_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "name" },
+  { name: "regions", cast: "jsonb" },
+];
+
+const CATEGORY_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "game_id" },
+  { name: "name" },
+  { name: "sort_order" },
+  { name: "enabled" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "removed_at" },
+];
+
+/**
+ * ⚠️ 商品**没有价格列**：价格在规格上（`product_specs.price`）。
+ * 这里如果顺手写一个 `price`，就会出现「商品一个价、规格另一个价」的第二处真值源。
+ */
+const PRODUCT_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "title" },
+  { name: "subtitle" },
+  { name: "cover_url" },
+  { name: "game_id" },
+  { name: "category_id" },
+  { name: "tags", cast: "jsonb" },
+  { name: "detail_text" },
+  { name: "detail_images", cast: "jsonb" },
+  { name: "sort_order" },
+  { name: "recommended" },
+  { name: "status" },
+  { name: "monthly_sales" },
+  { name: "game_tag" },
+  { name: "companion_rate_bp" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "removed_at" },
+];
+
+const PRODUCT_SPEC_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "product_id" },
+  { name: "name" },
+  { name: "price" },
+  { name: "sort_order" },
+  { name: "enabled" },
+  { name: "removed_at" },
+];
+
+const ANNOUNCEMENT_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "title" },
+  { name: "image_url" },
+  { name: "alt" },
+  { name: "enabled" },
+  { name: "sort_order" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "removed_at" },
+];
+
+/** 活动图与公告同形（`ContentBannerRecord` 的注释：两者都是「一张图 + 一个后台标题」）。 */
+const BANNER_COLUMNS: SeedColumn[] = ANNOUNCEMENT_COLUMNS;
+
+const QUICK_ENTRY_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "label" },
+  { name: "icon" },
+  { name: "path" },
+  { name: "enabled" },
+  { name: "sort_order" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "removed_at" },
+];
+
+/** ⚠️ 协议**没有 `created_at`**：实体里只有 `updatedAt`（`Agreement`），表与它同形。 */
+const AGREEMENT_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "type" },
+  { name: "title" },
+  { name: "sections", cast: "jsonb" },
+  { name: "version" },
+  { name: "updated_at" },
+  { name: "enabled" },
+];
+
+const COMPANION_APPLICATION_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "application_no" },
+  { name: "user_id" },
+  { name: "display_name" },
+  { name: "game_ids", cast: "jsonb" },
+  { name: "regions", cast: "jsonb" },
+  { name: "service_tags", cast: "jsonb" },
+  { name: "experience" },
+  { name: "introduction" },
+  { name: "contact_note" },
+  { name: "evidence", cast: "jsonb" },
+  { name: "status" },
+  { name: "submitted_at" },
+  { name: "updated_at" },
+  { name: "reviewed_at" },
+  { name: "review_note" },
+  { name: "idempotency_key" },
+];
+
+/**
+ * ⚠️ `user_qualifications` **没有单列 id**：自然键 `(user_id, role)` 就是主键
+ * （`0013_companion_onboarding.sql`），因此这里也不出现 `id`。
+ */
+const QUALIFICATION_COLUMNS: SeedColumn[] = [
+  { name: "user_id" },
+  { name: "role" },
+  { name: "companion_id" },
+  { name: "application_id" },
+  { name: "granted_at" },
+  { name: "granted_by_admin_id" },
+];
+
+const CONSUMPTION_LEVEL_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "name" },
+  { name: "threshold_amount" },
+  { name: "privileges", cast: "jsonb" },
+  { name: "sort_order" },
+  { name: "enabled" },
+  { name: "created_at" },
+  { name: "updated_at" },
+];
+
+const TIP_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "user_id" },
+  { name: "order_id" },
+  { name: "order_no" },
+  { name: "product_title" },
+  { name: "product_cover_url" },
+  { name: "companion", cast: "jsonb" },
+  { name: "quantity" },
+  { name: "payment_status" },
+  { name: "created_at" },
+];
+
+const ORDER_REVIEW_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "user_id" },
+  { name: "order_id" },
+  { name: "order_no" },
+  { name: "product_id" },
+  { name: "spec_id" },
+  { name: "product_review", cast: "jsonb" },
+  { name: "companion_review", cast: "jsonb" },
+  { name: "evidence", cast: "jsonb" },
+  { name: "status" },
+  { name: "reject_reason" },
+  { name: "hide_reason" },
+  { name: "reviewed_by" },
+  { name: "reviewed_by_name" },
+  { name: "reviewed_at" },
+  { name: "created_at" },
+  { name: "updated_at" },
+  { name: "product_title" },
+  { name: "product_cover_url" },
+  { name: "spec_name" },
+  { name: "quantity" },
+  { name: "completed_at" },
+  { name: "companion", cast: "jsonb" },
+  { name: "idempotency_key" },
+];
+
+const CONVERSATION_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "order_id" },
+  { name: "user_id" },
+  { name: "kind" },
+  { name: "assignment_key" },
+  { name: "assignment_seq" },
+  { name: "companion_id" },
+  { name: "created_at" },
+  { name: "user_last_read_at" },
+  { name: "companion_last_read_at" },
+];
+
+const MESSAGE_COLUMNS: SeedColumn[] = [
+  { name: "id" },
+  { name: "conversation_id" },
+  { name: "order_id" },
+  { name: "user_id" },
+  { name: "sender_id" },
+  { name: "sender_role" },
+  { name: "sender_name" },
+  { name: "sender_avatar_url" },
+  { name: "body" },
+  { name: "created_at" },
+  { name: "idempotency_key" },
+];
+
+const STAFF_READ_COLUMNS: SeedColumn[] = [
+  { name: "order_id" },
+  { name: "staff_id" },
+  { name: "last_read_at" },
+];
+
 /**
  * ⚠️ 订单集合**不能只用 `orderSeed`**：`mockPaymentRepository.createStore()` 装的是
  * `[...orderSeed, ...buildRankingPeriodOrders(seedNow)]`，`mockDispatchRepository` 也是。
@@ -501,12 +866,23 @@ const PLATFORM_CONFIG_COLUMNS: SeedColumn[] = [
  * companions → orders → dispatch_records →（coupon_templates → coupon_claims）→
  * notifications / complaints / refund_requests → platform_config。
  *
+ * PROD-1E 加入的两组按各自的依赖插进去：
+ *
+ * - **不依赖订单**的一组（users / admin_accounts / staff_accounts / games /
+ *   categories / products / product_specs / announcements / banners / quick_entries /
+ *   agreements / companion_applications / user_qualifications /
+ *   consumption_levels / tip_records）排在 `companions` 之前，
+ *   其中只有目录内部一条链 `games → categories → products → product_specs` 有先后要求；
+ * - **依赖订单**的一组（order_reviews / conversations / messages / staff_reads）
+ *   排在 `orders` 之后（它们都有指向 `orders` 的外键）。
+ *
  * ⚠️ 生产环境直接抛错（`assertSeedAllowed`）。
  */
 export async function seedDatabase(executor: PgExecutor): Promise<SeedResult> {
   assertSeedAllowed();
   assertSeedFixtures();
   assertOrderHubFixtures();
+  assertPlatformFixtures();
 
   const seedNow = getMockSeedNow();
   const orders = [...orderSeed, ...buildRankingPeriodOrders(seedNow)];
@@ -515,6 +891,202 @@ export async function seedDatabase(executor: PgExecutor): Promise<SeedResult> {
   return executor.withTransaction(async (tx) => ({
     favorites: await seedFavorites(tx),
     suggestions: await seedSuggestions(tx),
+    // —— PROD-1E：身份 / 目录 / 运营内容 / 入驻 / 权益。这几张表**互不依赖**订单，
+    //    因此排在 orders 之前；它们对外键的依赖只有目录内部的
+    //    games → categories → products → product_specs 这一条链。——
+    users: await seedRows(tx, "users", USER_COLUMNS, userSeed, (user) => [
+      user.id,
+      user.displayId,
+      user.nickname,
+      user.avatarUrl,
+      user.bio,
+    ]),
+    adminAccounts: await seedRows(tx, "admin_accounts", ADMIN_ACCOUNT_COLUMNS, adminSeed, (admin) => [
+      admin.id,
+      admin.username,
+      admin.displayName,
+      admin.role,
+      admin.enabled,
+      admin.lastLoginAt,
+    ]),
+    staffAccounts: await seedRows(tx, "staff_accounts", STAFF_ACCOUNT_COLUMNS, staffSeed, (staff) => [
+      staff.id,
+      staff.username,
+      staff.displayName,
+      staff.avatarUrl,
+      staff.role,
+      staff.enabled,
+      staff.createdAt,
+      staff.updatedAt,
+      staff.lastLoginAt,
+      staff.removedAt,
+    ]),
+    games: await seedRows(tx, "games", GAME_COLUMNS, gameSeed, (game) => [
+      game.id,
+      game.name,
+      jsonbParam(game.regions),
+    ]),
+    categories: await seedRows(tx, "categories", CATEGORY_COLUMNS, categorySeed, (category) => [
+      category.id,
+      category.gameId,
+      category.name,
+      category.sortOrder,
+      category.enabled,
+      category.createdAt,
+      category.updatedAt,
+      category.removedAt,
+    ]),
+    products: await seedRows(tx, "products", PRODUCT_COLUMNS, productSeed, (product) => [
+      product.id,
+      product.title,
+      product.subtitle,
+      product.coverUrl,
+      product.gameId,
+      product.categoryId,
+      jsonbParam(product.tags),
+      product.detailText,
+      jsonbParam(product.detailImages),
+      product.sortOrder,
+      product.recommended,
+      product.status,
+      product.monthlySales,
+      product.gameTag,
+      product.companionRateBp,
+      product.createdAt,
+      product.updatedAt,
+      product.removedAt,
+    ]),
+    // ⚠️ 规格在实体里挂在商品上（`product.specs`），在库里是**独立一张表**，
+    //    因此要摊平：`product_specs.product_id` 是这一层摊平关系的落点。
+    productSpecs: await seedRows(
+      tx,
+      "product_specs",
+      PRODUCT_SPEC_COLUMNS,
+      productSeed.flatMap((product) => product.specs.map((spec) => ({ spec, productId: product.id }))),
+      (row) => [
+        row.spec.id,
+        row.productId,
+        row.spec.name,
+        row.spec.price,
+        row.spec.sortOrder,
+        row.spec.enabled,
+        row.spec.removedAt,
+      ],
+    ),
+    announcements: await seedRows(
+      tx,
+      "announcements",
+      ANNOUNCEMENT_COLUMNS,
+      announcementSeed,
+      (item) => [
+        item.id,
+        item.title,
+        item.imageUrl,
+        item.alt,
+        item.enabled,
+        item.sortOrder,
+        item.createdAt,
+        item.updatedAt,
+        item.removedAt,
+      ],
+    ),
+    banners: await seedRows(tx, "banners", BANNER_COLUMNS, bannerSeed, (item) => [
+      item.id,
+      item.title,
+      item.imageUrl,
+      item.alt,
+      item.enabled,
+      item.sortOrder,
+      item.createdAt,
+      item.updatedAt,
+      item.removedAt,
+    ]),
+    quickEntries: await seedRows(
+      tx,
+      "quick_entries",
+      QUICK_ENTRY_COLUMNS,
+      quickEntrySeed,
+      (item) => [
+        item.id,
+        item.label,
+        item.icon,
+        item.path,
+        item.enabled,
+        item.sortOrder,
+        item.createdAt,
+        item.updatedAt,
+        item.removedAt,
+      ],
+    ),
+    agreements: await seedRows(tx, "agreements", AGREEMENT_COLUMNS, agreementSeed, (item) => [
+      item.id,
+      item.type,
+      item.title,
+      jsonbParam(item.sections),
+      item.version,
+      item.updatedAt,
+      item.enabled,
+    ]),
+    companionApplications: await seedRows(
+      tx,
+      "companion_applications",
+      COMPANION_APPLICATION_COLUMNS,
+      companionApplicationSeed,
+      (item) => [
+        item.id,
+        item.applicationNo,
+        item.userId,
+        item.displayName,
+        jsonbParam(item.gameIds),
+        jsonbParam(item.regions),
+        jsonbParam(item.serviceTags),
+        item.experience,
+        item.introduction,
+        item.contactNote,
+        jsonbParam(item.evidence),
+        item.status,
+        item.submittedAt,
+        item.updatedAt,
+        item.reviewedAt,
+        item.reviewNote,
+        // 幂等键写 NULL：`mockCompanionApplicationRepository.createStore()` 的
+        // `applicationIdByKey` 是**空的**——预置申请按幂等键查不到。理由同优惠券。
+        null,
+      ],
+    ),
+    // ⚠️ **刻意空写**：Mock 的资格 store 建仓即为空（理由见
+    //    `mockQualificationRepository.ts`：资格是审计历史，不是运行时判据）。
+    //    这里保留这一次调用，是为了让「两边都空」这句 parity 有一个显式的落点——
+    //    不然将来有人加了资格预置数据，Pg 侧会安静地少一份。
+    userQualifications: await seedRows(tx, "user_qualifications", QUALIFICATION_COLUMNS, [], () => []),
+    consumptionLevels: await seedRows(
+      tx,
+      "consumption_levels",
+      CONSUMPTION_LEVEL_COLUMNS,
+      levelSeed,
+      (level) => [
+        level.id,
+        level.name,
+        level.thresholdAmount,
+        jsonbParam(level.privileges),
+        level.sortOrder,
+        level.enabled,
+        level.createdAt,
+        level.updatedAt,
+      ],
+    ),
+    tipRecords: await seedRows(tx, "tip_records", TIP_COLUMNS, tipSeed, (tip) => [
+      tip.id,
+      tip.userId,
+      tip.orderId,
+      tip.orderNo,
+      tip.productTitle,
+      tip.productCoverUrl,
+      jsonbParam(tip.companion),
+      tip.quantity,
+      tip.paymentStatus,
+      tip.createdAt,
+    ]),
     companions: await seedRows(tx, "companions", COMPANION_COLUMNS, companionSeed, (companion) => [
       companion.id,
       companion.userId,
@@ -707,5 +1279,76 @@ export async function seedDatabase(executor: PgExecutor): Promise<SeedResult> {
         config.updatedByAdminId,
       ],
     ),
+    // —— PROD-1E：依赖 `orders` 的几张表，必须排在 `orders` **之后** ——
+    orderReviews: await seedRows(
+      tx,
+      "order_reviews",
+      ORDER_REVIEW_COLUMNS,
+      reviewSeed,
+      (review) => [
+        review.id,
+        review.userId,
+        review.orderId,
+        review.orderNo,
+        review.productId,
+        review.specId,
+        jsonbParam(review.productReview),
+        jsonbParam(review.companionReview),
+        jsonbParam(review.evidence),
+        review.status,
+        review.rejectReason,
+        review.hideReason,
+        review.reviewedBy,
+        review.reviewedByName,
+        review.reviewedAt,
+        review.createdAt,
+        review.updatedAt,
+        review.productTitle,
+        review.productCoverUrl,
+        review.specName,
+        review.quantity,
+        review.completedAt,
+        jsonbParam(review.companion),
+        // 同上：`mockReviewRepository.createStore()` 的 `reviewIdByKey` 是空的
+        null,
+      ],
+    ),
+    conversations: await seedRows(
+      tx,
+      "conversations",
+      CONVERSATION_COLUMNS,
+      conversationSeed,
+      (conversation) => [
+        conversation.id,
+        conversation.orderId,
+        conversation.userId,
+        conversation.kind,
+        conversation.assignmentKey,
+        conversation.assignmentSeq,
+        conversation.companionId,
+        conversation.createdAt,
+        conversation.userLastReadAt,
+        conversation.companionLastReadAt,
+      ],
+    ),
+    messages: await seedRows(tx, "messages", MESSAGE_COLUMNS, messageSeed, (message) => [
+      message.id,
+      message.conversationId,
+      message.orderId,
+      message.userId,
+      message.senderId,
+      message.senderRole,
+      message.senderName,
+      message.senderAvatarUrl,
+      message.body,
+      message.createdAt,
+      // 同上：`mockMessageRepository.createStore()` 的 `messageIdByKey` 是空的
+      null,
+    ]),
+    staffReads: await seedRows(tx, "staff_reads", STAFF_READ_COLUMNS, staffReadSeed, (record) => [
+      record.orderId,
+      record.staffId,
+      record.lastReadAt,
+    ]),
   }));
 }

@@ -1,5 +1,7 @@
 import type { PlatformConfig } from "@/lib/types/platformConfig";
 import { mockPlatformConfigRepository } from "./mockPlatformConfigRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgPlatformConfigRepository } from "./pg/platformConfigRepository";
 
 /**
  * 平台级参数的可替换仓储（P0-1）。
@@ -34,8 +36,18 @@ export type PlatformConfigRepository = {
 };
 
 /** 一次平台参数写入的返回：改动前后的配置（与本仓其它模块的写入结果同形）。 */
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const platformConfigRepositoryBacking: RepositoryBacking<PlatformConfigRepository> = {
+  name: "platformConfig",
+  mock: mockPlatformConfigRepository,
+  pg: pgPlatformConfigRepository,
+};
+
 export type PlatformConfigWriteResult = { previous: PlatformConfig; updated: PlatformConfig };
 
 export function getPlatformConfigRepository(): PlatformConfigRepository {
-  return mockPlatformConfigRepository;
+  return pickRepository(platformConfigRepositoryBacking);
 }

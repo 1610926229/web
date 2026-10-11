@@ -1,5 +1,7 @@
 import type { ConsumptionLevel } from "@/lib/types/level";
 import { mockLevelRepository } from "./mockLevelRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgLevelRepository } from "./pg/levelRepository";
 
 /**
  * 消费等级配置的可替换仓储 —— **只读**。
@@ -17,6 +19,16 @@ export type LevelRepository = {
   listLevels(): Promise<ConsumptionLevel[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const levelRepositoryBacking: RepositoryBacking<LevelRepository> = {
+  name: "level",
+  mock: mockLevelRepository,
+  pg: pgLevelRepository,
+};
+
 export function getLevelRepository(): LevelRepository {
-  return mockLevelRepository;
+  return pickRepository(levelRepositoryBacking);
 }
