@@ -20,7 +20,7 @@
 
 | 命令 | 结果 |
 |---|---|
-| `pnpm test` | 2298 tests · 1883 pass · 0 fail · 415 skipped（HTTP 用例需要 `APP_BASE_URL`） |
+| `pnpm test` | 2299 tests · 1884 pass · 0 fail · 415 skipped（HTTP 用例需要 `APP_BASE_URL`） |
 | `pnpm typecheck` | 通过 |
 | `pnpm lint` | 通过 |
 | `tests/publicPreview.test.mjs` | 21/21 通过 |
