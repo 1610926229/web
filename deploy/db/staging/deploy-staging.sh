@@ -4,7 +4,7 @@
 #
 #     deploy/db/staging/deploy-staging.sh <阶段> [选项]
 #
-# 六个阶段，按顺序执行：
+# 阶段（前六个按顺序执行）：
 #
 #     check      只读预检：连通性、角色、PUBLIC 收紧、迁移进度、最小数据
 #     create     创建独立数据库 chaoge_staging（属主 postgres）
@@ -12,6 +12,11 @@
 #     migrate    以 staging 迁移角色执行 pnpm db:migrate，然后重跑 05 授权
 #     bootstrap  以 staging 应用角色写入最小测试数据（06）
 #     verify     只读验收 99-verify.sql，输出 PASS / FAIL
+#
+# 还有一个**不在常规部署链上**的显式阶段：
+#
+#     demo-data  以 staging 应用角色写入首页演示数据（07，只插入，可重复）。
+#                正式 deploy 不会调用它——演示内容不应混进最小初始化流程。
 #
 # ## 本脚本与生产 `deploy/db/deploy.sh` 的关系
 #
@@ -102,6 +107,8 @@ usage() {
   migrate    以 chaoge_staging_migrator 执行迁移，随后重跑 05 授权。
   bootstrap  以 chaoge_staging_app 写入最小测试数据（06，只插入，可重复）。
   verify     只读验收 99-verify.sql，输出 PASS / FAIL。
+  demo-data  以 chaoge_staging_app 写入首页演示数据（07，只插入，可重复）。
+             独立于 bootstrap 与正式 deploy，只在需要演示首页时显式执行。
 
 选项:
   --database NAME     目标库（默认 chaoge_staging；只允许 chaoge_staging*）
@@ -138,9 +145,9 @@ USAGE
 [[ $# -eq 0 ]] && { usage; exit 2; }
 
 case "$1" in
-  check|create|init|migrate|bootstrap|verify) PHASE="$1"; shift ;;
+  check|create|init|migrate|bootstrap|verify|demo-data) PHASE="$1"; shift ;;
   -h|--help|help) usage; exit 0 ;;
-  *) die "未知阶段「$1」（可用：check / create / init / migrate / bootstrap / verify）" ;;
+  *) die "未知阶段「$1」（可用：check / create / init / migrate / bootstrap / verify / demo-data）" ;;
 esac
 
 while [[ $# -gt 0 ]]; do
@@ -719,6 +726,52 @@ phase_bootstrap() {
   info "  $0 verify --database $DB_NAME"
 }
 
+# ── 阶段：demo-data ──────────────────────────────────────────────────────────
+#
+# 与 bootstrap 刻意分开：06 是最小可运行集合，每次正式 deploy 都会重复执行；
+# 07 是首页演示内容，只在需要把 staging 首页对齐到本地 Mock 时显式执行。
+# 两个阶段用同一套库名守卫、身份守卫与事务包装。
+
+phase_demo_data() {
+  [[ -r "$SCRIPT_DIR/07-home-demo-data.sql" ]] || die "缺少 $SCRIPT_DIR/07-home-demo-data.sql"
+
+  step "将要对「$DB_NAME」写入的首页演示数据"
+  info "  公告: a1 / a2 · Banner: b1 · 快捷入口: service / benefits / join / complaint"
+  info "  类目: c-loss / c-opening · 商品: p-400w / p-200w / p-jm200w / p-sh300w"
+  info "                            p-600w / p-500w / p-800w / p-1000w（含 14 个规格）"
+  info "  只 INSERT ... ON CONFLICT DO NOTHING；不 UPDATE、不 DELETE、不 TRUNCATE。"
+  info "  已存在的记录（包括管理员改过的）原样保留。"
+  info "  以 chaoge_staging_app 身份执行（SET ROLE），顺便验证 04/05 的 DML 授权。"
+
+  local stream
+  stream="$(
+    printf 'BEGIN;\n'
+    printf "SET chaoge.expected_database = '%s';\n" "$DB_NAME"
+    printf 'SET ROLE chaoge_staging_app;\n'
+    cat "$SCRIPT_DIR/07-home-demo-data.sql"
+    printf 'RESET ROLE;\nCOMMIT;\n'
+  )"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    step "--dry-run：以下是将要送入 psql 的全部内容（未执行）"
+    printf '%s\n' "$stream"
+    return 0
+  fi
+
+  require_database
+  assert_interactive
+  require_psql
+  require_confirmation "即将写入 staging 首页演示数据：$DB_NAME"
+
+  local rc=0
+  printf '%s\n' "$stream" | psql_admin -d "$DB_NAME" -q -f - || rc=$?
+  (( rc == 0 )) || die "demo-data 失败（psql 退出码 $rc）。事务已回滚，未写入任何数据。"
+  ok "首页演示数据已就位（可重复执行）"
+
+  step "下一步"
+  info "  curl -s http://127.0.0.1:3000/api/home  # 由服务器本机验证首页数据"
+}
+
 # ── 阶段：verify ──────────────────────────────────────────────────────────────
 
 phase_verify() {
@@ -762,5 +815,6 @@ case "$PHASE" in
   init)      phase_init ;;
   migrate)   phase_migrate ;;
   bootstrap) phase_bootstrap ;;
+  demo-data) phase_demo_data ;;
   verify)    phase_verify ;;
 esac

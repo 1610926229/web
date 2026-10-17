@@ -3,8 +3,9 @@
 > **正常部署不需要手工执行本文件的命令。** 一次性运行
 > `deploy/entry/install.sh` 后，`check/create/init/migrate/bootstrap/verify`
 > 都由受控入口 `/usr/local/sbin/chaoge-deploy deploy` 以 root 调度、以 `deploy`
-> 身份执行迁移。本文件保留给 root 排查与本地隔离测试；其中的 `sudo ...`
-> 示例是 root 手工路径，`deploy` 用户没有这些 sudo 权限。
+> 身份执行迁移。`demo-data` 是唯一需要显式触发的补充阶段（`chaoge-deploy
+> demo-data`），正式 `deploy` 不会调用它。本文件保留给 root 排查与本地隔离
+> 测试；其中的 `sudo ...` 示例是 root 手工路径，`deploy` 用户没有这些 sudo 权限。
 
 Staging 使用**独立的** `chaoge_staging` 数据库与**独立的**两个角色，
 与 `chaoge_prod` 共享同一个 PostgreSQL 18 实例，但权限、默认权限、表属主完全隔离。
@@ -14,7 +15,7 @@ Staging 使用**独立的** `chaoge_staging` 数据库与**独立的**两个角�
 
 ---
 
-## 0. 一个入口，六个阶段
+## 0. 一个入口，六个常规阶段 + 一个演示阶段
 
 所有动作都走 `deploy/db/staging/deploy-staging.sh`：
 
@@ -25,7 +26,14 @@ sudo deploy/db/staging/deploy-staging.sh init       # 01→05 权限，单事务
 sudo deploy/db/staging/deploy-staging.sh migrate    # 迁移 + 重跑 05 授权（需确认）
 sudo deploy/db/staging/deploy-staging.sh bootstrap  # 最小测试数据（需确认；只插入）
 sudo deploy/db/staging/deploy-staging.sh verify     # 只读验收，输出 PASS / FAIL
+
+# 可选：把首页对齐到本地 Mock 演示内容（需确认；只插入、可重复）
+sudo deploy/db/staging/deploy-staging.sh demo-data
 ```
+
+`demo-data` 刻意不在常规部署链上：`06` 是最小可运行集合，每次正式 deploy
+都会重复执行；`07` 是演示内容，只在需要展示完整首页时显式写入。受控入口的
+对应命令是 `sudo -n /usr/local/sbin/chaoge-deploy demo-data`。
 
 与生产入口的关键区别：
 
@@ -56,13 +64,14 @@ sudo deploy/db/staging/deploy-staging.sh verify     # 只读验收，输出 PASS
 | `04-default-privileges.sql` | **`chaoge_staging_migrator`** | 为**将来**迁移建的表/序列预置授权 | ✅ |
 | `05-table-grants.sql` | **`chaoge_staging_migrator`** | 为**已存在**的表/序列授权、逐表自检 | ✅ |
 | `06-bootstrap-data.sql` | **`chaoge_staging_app`** | 最小测试数据；只 `INSERT ... ON CONFLICT DO NOTHING` | ✅ |
+| `07-home-demo-data.sql` | **`chaoge_staging_app`** | 首页演示内容（公告 / Banner / 快捷入口 / 类目 / 8 商品及规格）；只 `INSERT ... ON CONFLICT DO NOTHING`，不覆盖已有记录 | ✅ |
 | `99-verify.sql` | `postgres` | **只读**隔离验收，输出 PASS / FAIL | — |
 
 ### 脚本
 
 | 文件 | 执行角色 | 作用 |
 |---|---|---|
-| `deploy-staging.sh` | `root`（内部用 `sudo -u postgres`） | 六阶段入口 |
+| `deploy-staging.sh` | `root`（内部用 `sudo -u postgres`） | 六阶段 + `demo-data` 入口 |
 
 ### 每个 SQL 文件的共同守卫
 

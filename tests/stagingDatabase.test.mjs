@@ -56,6 +56,7 @@ const SQL_FILES = [
   "04-default-privileges.sql",
   "05-table-grants.sql",
   "06-bootstrap-data.sql",
+  "07-home-demo-data.sql",
   "99-verify.sql",
 ];
 
@@ -84,7 +85,7 @@ const SKIP_NO_BASH = BASH_OK ? false : "需要 bash（Windows 上由 Git Bash �
 
 // ── 1. 文件与默认目标 ────────────────────────────────────────────────────────
 
-test("staging SQL 六件套与验收脚本齐全", () => {
+test("staging SQL 文件与验收脚本齐全", () => {
   for (const name of SQL_FILES) {
     assert.ok(existsSync(path.join(STAGING_DIR, name)), `缺少 ${name}`);
   }
@@ -115,7 +116,8 @@ test("全部 staging SQL 都有库名守卫，且无条件拒绝 chaoge_prod", (
 
 test("守卫先于任何写操作：拒绝语句出现在第一条 GRANT/INSERT 之前", () => {
   for (const name of ["01-create-roles.sql", "02-harden-public.sql", "03-grants.sql",
-                      "04-default-privileges.sql", "05-table-grants.sql", "06-bootstrap-data.sql"]) {
+                      "04-default-privileges.sql", "05-table-grants.sql", "06-bootstrap-data.sql",
+                      "07-home-demo-data.sql"]) {
     const src = sql[name];
     const rejectAt = src.indexOf("actual = 'chaoge_prod' OR expected = 'chaoge_prod'");
     const firstWrite = src.search(
@@ -135,12 +137,14 @@ test("04/05 必须以 staging 迁移角色执行", () => {
   }
 });
 
-test("06 必须以 staging 应用角色执行", () => {
-  assert.match(sql["06-bootstrap-data.sql"], /current_user IS DISTINCT FROM 'chaoge_staging_app'/);
-  assert.match(sql["06-bootstrap-data.sql"], /SET ROLE chaoge_staging_app/);
+test("06 / 07 必须以 staging 应用角色执行", () => {
+  for (const name of ["06-bootstrap-data.sql", "07-home-demo-data.sql"]) {
+    assert.match(sql[name], /current_user IS DISTINCT FROM 'chaoge_staging_app'/, `${name} 缺少身份守卫`);
+    assert.match(sql[name], /SET ROLE chaoge_staging_app/, `${name} 的提示里应给出 SET ROLE 方法`);
+  }
 });
 
-test("入口在 04/05 之前 SET ROLE 迁移角色、在 06 之前 SET ROLE 应用角色", () => {
+test("入口在 04/05 之前 SET ROLE 迁移角色、在 06 / 07 之前 SET ROLE 应用角色", () => {
   // 04 的记账键是 current_user；06 的 DML 检查必须按应用角色算。
   assert.match(wrapper, /SET ROLE chaoge_staging_migrator;/);
   assert.match(wrapper, /SET ROLE chaoge_staging_app;/);
@@ -154,6 +158,9 @@ test("入口在 04/05 之前 SET ROLE 迁移角色、在 06 之前 SET ROLE 应�
   const appAt = wrapper.indexOf("SET ROLE chaoge_staging_app;");
   const bootstrapAt = wrapper.indexOf('cat "$SCRIPT_DIR/06-bootstrap-data.sql"');
   assert.ok(appAt >= 0 && bootstrapAt > appAt, "06 必须在 SET ROLE 之后");
+
+  const demoAt = wrapper.indexOf('cat "$SCRIPT_DIR/07-home-demo-data.sql"');
+  assert.ok(appAt >= 0 && demoAt > appAt, "07 必须在 SET ROLE 之后");
 });
 
 // ── 4. 最小数据：只插入，绝不破坏 ────────────────────────────────────────────
@@ -192,6 +199,76 @@ test("06 在插入前断言 schema_migrations 与业务表存在", () => {
   assert.match(src, /业务表不完整/);
 });
 
+// ── 4b. 首页演示数据：独立、幂等、不覆盖人工修改 ─────────────────────────────
+
+test("07 只有 INSERT ... ON CONFLICT DO NOTHING，没有任何破坏性语句", () => {
+  const src = sql["07-home-demo-data.sql"];
+  assert.match(src, /INSERT INTO announcements/);
+  assert.match(src, /INSERT INTO banners/);
+  assert.match(src, /INSERT INTO quick_entries/);
+  assert.match(src, /INSERT INTO categories/);
+  assert.match(src, /INSERT INTO products/);
+  assert.match(src, /INSERT INTO product_specs/);
+
+  const insertCount = (src.match(/\bINSERT INTO\b/g) || []).length;
+  const conflictCount = (src.match(/\bON CONFLICT DO NOTHING\b/g) || []).length;
+  assert.ok(insertCount >= 7, `07 的 INSERT 数量异常：${insertCount}`);
+  assert.equal(conflictCount, insertCount, "每条 INSERT 都必须带 ON CONFLICT DO NOTHING");
+
+  assert.doesNotMatch(src, /\bUPDATE\s+[a-z_]/i, "07 不得 UPDATE 任何表（不覆盖管理员修改）");
+  assert.doesNotMatch(src, /\bDELETE\s+FROM\b/i, "07 不得 DELETE");
+  assert.doesNotMatch(src, /\bTRUNCATE\b/i, "07 不得 TRUNCATE");
+  assert.doesNotMatch(src, /\b(DROP|ALTER)\s+(TABLE|SCHEMA|ROLE|DATABASE)\b/i, "07 不得做 DDL");
+});
+
+test("07 覆盖首页需要的 2 条公告 / 1 条 Banner / 4 个入口 / 2 个类目 / 8 个商品 / 14 个规格", () => {
+  const src = sql["07-home-demo-data.sql"];
+  for (const id of ["a1", "a2", "b1", "service", "benefits", "join", "complaint",
+                    "c-loss", "c-opening"]) {
+    assert.ok(src.includes(`'${id}'`), `缺少 ${id}`);
+  }
+  const productIds = ["p-400w", "p-200w", "p-jm200w", "p-sh300w",
+                      "p-600w", "p-500w", "p-800w", "p-1000w"];
+  for (const id of productIds) {
+    assert.ok(src.includes(`'${id}'`), `缺少商品 ${id}`);
+  }
+  const specIds = ["s-400w", "s-400w-2", "s-400w-3", "s-200w", "s-200w-2",
+                   "s-jm200w", "s-jm300w", "s-sh300w", "s-sh500w",
+                   "s-600w", "s-600w-2", "s-500w", "s-800w", "s-1000w"];
+  for (const id of specIds) {
+    assert.ok(src.includes(`'${id}'`), `缺少规格 ${id}`);
+  }
+  // 与本地 Mock 首页一致的分组归属。
+  for (const id of productIds.slice(0, 4)) {
+    assert.match(src, new RegExp(`\\('${id}'[\\s\\S]*?'c-loss'`), `${id} 应属于 c-loss`);
+  }
+  for (const id of productIds.slice(4)) {
+    assert.match(src, new RegExp(`\\('${id}'[\\s\\S]*?'c-opening'`), `${id} 应属于 c-opening`);
+  }
+});
+
+test("07 是独立阶段：bootstrap 与正式 deploy 都不会执行它", () => {
+  const bootstrapFn = wrapper.slice(
+    wrapper.indexOf("phase_bootstrap()"),
+    wrapper.indexOf("phase_demo_data()"),
+  );
+  assert.ok(bootstrapFn.length > 0, "找不到 phase_bootstrap");
+  assert.doesNotMatch(bootstrapFn, /07-home-demo-data\.sql/, "bootstrap 不得调用 07");
+  assert.doesNotMatch(bootstrapFn, /phase_demo_data/, "bootstrap 不得调用 demo-data 阶段");
+
+  // demo-data 自己必须是完整的事务包装，并在写库前要求确认。
+  const demoFn = wrapper.slice(
+    wrapper.indexOf("phase_demo_data()"),
+    wrapper.indexOf("phase_verify()"),
+  );
+  assert.ok(demoFn.length > 0, "找不到 phase_demo_data");
+  assert.match(demoFn, /printf 'BEGIN;\\n'/, "demo-data 必须在事务中执行");
+  assert.match(demoFn, /SET ROLE chaoge_staging_app;/);
+  assert.match(demoFn, /printf 'RESET ROLE;\\nCOMMIT;\\n'/);
+  assert.match(demoFn, /require_confirmation/, "demo-data 写库前必须要求确认");
+  assert.match(demoFn, /cat "\$SCRIPT_DIR\/07-home-demo-data\.sql"/);
+});
+
 // ── 5. 99-verify 只读且给出总体判定 ──────────────────────────────────────────
 
 test("99-verify 是只读脚本，并输出 section=9 OVERALL", () => {
@@ -215,9 +292,10 @@ test("99-verify 是只读脚本，并输出 section=9 OVERALL", () => {
 
 // ── 6. 入口脚本的守卫 ────────────────────────────────────────────────────────
 
-test("入口只接受六个阶段，明确不提供 seed/reset", () => {
-  assert.match(wrapper, /check\|create\|init\|migrate\|bootstrap\|verify/);
+test("入口接受七个阶段（含独立的 demo-data），明确不提供 seed/reset", () => {
+  assert.match(wrapper, /check\|create\|init\|migrate\|bootstrap\|verify\|demo-data/);
   assert.match(wrapper, /未知阶段/);
+  assert.match(wrapper, /demo-data\) phase_demo_data/);
   assert.doesNotMatch(wrapper, /pnpm db:(seed|reset)/);
 });
 
@@ -348,6 +426,15 @@ test("入口拒绝 db:seed / db:reset 作为阶段名", { skip: SKIP_NO_BASH }, 
     assert.notEqual(r.status, 0, `${phase} 不应被接受`);
     assert.match(r.stderr, /未知阶段/, `${phase} 应以「未知阶段」拒绝`);
   }
+});
+
+test("demo-data --dry-run 只打印 07 内容，不连数据库", { skip: SKIP_NO_BASH }, () => {
+  const r = runWrapper(["demo-data", "--dry-run"]);
+  assert.equal(r.status, 0, `demo-data --dry-run 失败：\n${r.stderr}`);
+  assert.match(r.stdout, /p-1000w/);
+  assert.match(r.stdout, /SET ROLE chaoge_staging_app;/);
+  assert.match(r.stdout, /BEGIN;/);
+  assert.doesNotMatch(r.stderr, /连不上 PostgreSQL|psql 退出码/, "dry-run 不应尝试连接数据库");
 });
 
 test("入口拒绝 chaoge_prod 与任意非 staging 库（不连数据库）", { skip: SKIP_NO_BASH }, () => {

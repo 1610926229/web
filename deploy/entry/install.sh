@@ -38,7 +38,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB
 
-ENTRY_VERSION="prod2-installer-v3"
+ENTRY_VERSION="prod2-installer-v4"
 BUNDLE_DIR=""
 SOURCE_TREE="${CHAOGE_SOURCE_TREE:-/home/deploy/chaoge-deploy-src}"
 
@@ -275,6 +275,7 @@ for f in \
   deploy/db/staging/04-default-privileges.sql \
   deploy/db/staging/05-table-grants.sql \
   deploy/db/staging/06-bootstrap-data.sql \
+  deploy/db/staging/07-home-demo-data.sql \
   deploy/db/staging/99-verify.sql ; do
   [[ -f "$BUNDLE_DIR/$f" && ! -L "$BUNDLE_DIR/$f" ]] || die "bundle 缺少普通文件：$f"
 done
@@ -307,7 +308,7 @@ install_file deploy/app/README.md "$LIB_DIR/app/README.md" 0644
 install_file deploy/db/staging/deploy-staging.sh "$LIB_DIR/db/deploy-staging.sh" 0750
 for sql in 01-create-roles.sql 02-harden-public.sql 03-grants.sql \
            04-default-privileges.sql 05-table-grants.sql \
-           06-bootstrap-data.sql 99-verify.sql; do
+           06-bootstrap-data.sql 07-home-demo-data.sql 99-verify.sql; do
   install_file "deploy/db/staging/$sql" "$LIB_DIR/db/$sql" 0640
 done
 install_file deploy/app/chaoge-staging.service "$UNIT_PATH" 0644

@@ -10,7 +10,7 @@
  * 这条 sudoers 规则意味着 deploy 用户可以随时让 root 执行**这个文件**。
  * 因此安全边界不在 sudoers 的花样，而在入口本身：
  *
- *   · 只接受四个子命令与固定参数个数；
+ *   · 只接受五个子命令与固定参数个数；
  *   · 数据库名、服务名、路径、可执行文件全部写死；
  *   · 产物先复制到 root 私有目录，再校验 SHA-256 / Git SHA / 结构；
  *   · 产物代码不以 root 执行（迁移 deploy、应用 chaoge）；
@@ -107,10 +107,11 @@ test("入口把数据库、角色、服务、目录与 Node 路径全部写死",
   assert.doesNotMatch(entry, /\bchaoge_migrator\b/, "受控入口不得出现生产迁移角色");
 });
 
-test("入口只接受四个子命令，且参数个数严格匹配", () => {
+test("入口只接受五个子命令，且参数个数严格匹配", () => {
   assert.match(entry, /deploy\)\s*\n\s*\[\[ \$# -eq 4 \]\]/);
   assert.match(entry, /rollback\)\s*\n\s*\[\[ \$# -eq 1 \]\]/);
   assert.match(entry, /status\)\s*\n\s*\[\[ \$# -eq 1 \]\]/);
+  assert.match(entry, /demo-data\)\s*\n\s*\[\[ \$# -eq 1 \]\]/);
   assert.match(entry, /check-artifact\)\s*\n\s*\[\[ \$# -eq 4 \]\]/);
   assert.match(entry, /未知子命令/);
   // 不接受 --database / --service / --path 这类调用者可控目标。
@@ -130,9 +131,9 @@ test("入口不执行任意 shell，也不 source 调用者提供的文件", () 
   assert.match(entry, /bash "\$LIB_DIR\/app\/rollback\.sh"/);
 });
 
-test("deploy / rollback / status 强制 root；check-artifact 明确拒绝 root", () => {
+test("deploy / rollback / status / demo-data 强制 root；check-artifact 明确拒绝 root", () => {
   assert.match(entry, /^require_root\(\)/m);
-  for (const cmd of ["cmd_deploy", "cmd_rollback", "cmd_status"]) {
+  for (const cmd of ["cmd_deploy", "cmd_rollback", "cmd_status", "cmd_demo_data"]) {
     const body = entry.slice(entry.indexOf(`${cmd}() {`));
     assert.match(body.slice(0, 300), /require_root/, `${cmd} 必须 require_root`);
   }
@@ -184,6 +185,22 @@ test("入口校验 SHA-256、Git SHA、结构与文件名绑定", () => {
     assert.match(entry, pattern, `结构校验缺少 ${label}`);
   }
   assert.match(entry, /产物里出现了 \.env 文件/);
+});
+
+test("demo-data 走固定 staging 阶段，且不在正式 deploy 链上", () => {
+  const deployFn = entry.slice(entry.indexOf("cmd_deploy() {"), entry.indexOf("cmd_rollback() {"));
+  assert.ok(deployFn.length > 0, "找不到 cmd_deploy");
+  assert.doesNotMatch(deployFn, /demo-data/, "正式 deploy 不得写入演示数据");
+
+  const demoFn = entry.slice(entry.indexOf("cmd_demo_data() {"), entry.indexOf("main() {"));
+  assert.ok(demoFn.length > 0, "找不到 cmd_demo_data");
+  assert.match(demoFn, /require_root/);
+  assert.match(demoFn, /require_initialized/);
+  assert.match(demoFn, /deploy-staging\.sh" demo-data/);
+  assert.match(demoFn, /--database "\$DB_NAME"/);
+  assert.match(demoFn, /--non-interactive/);
+  // 目标库不接受调用者输入。
+  assert.doesNotMatch(demoFn, /--database\)|--database "\$1"/);
 });
 
 test("产物路径策略：绝对路径、上传目录、非链接、属主、大小", () => {

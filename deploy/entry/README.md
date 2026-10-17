@@ -5,7 +5,7 @@ PROD-2 的服务器侧部署只经过两个文件：
 | 文件 | 运行身份 | 作用 |
 |---|---|---|
 | `deploy/entry/install.sh` | root，**只运行一次** | 安装固定入口、固定库、凭据、数据库、systemd 与 sudoers |
-| `deploy/entry/chaoge-deploy.sh` | root（经 sudoers），日常 | `deploy` / `rollback` / `status` / `check-artifact` |
+| `deploy/entry/chaoge-deploy.sh` | root（经 sudoers），日常 | `deploy` / `rollback` / `status` / `demo-data` / `check-artifact` |
 
 安装后的布局：
 
@@ -68,6 +68,9 @@ sudo -n /usr/local/sbin/chaoge-deploy rollback
 
 # 只读状态
 sudo -n /usr/local/sbin/chaoge-deploy status
+
+# 写入 staging 首页演示数据（只插入、可重复；不在正式 deploy 链上）
+sudo -n /usr/local/sbin/chaoge-deploy demo-data
 ```
 
 入口的硬编码目标：`chaoge_staging`、`127.0.0.1:5432`、`chaoge_staging_migrator`、

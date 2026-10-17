@@ -22,6 +22,10 @@
 #   status
 #       只读状态：入口/sudoers/凭据权限、当前版本、服务与监听地址。
 #
+#   demo-data
+#       以应用角色写入 staging 首页演示数据（07，只插入、可重复）。
+#       不在正式 deploy 链上；只作用于固定的 chaoge_staging。
+#
 #   check-artifact <artifact> <sha256> <git-sha>
 #       只做产物校验，不写任何文件、不需要 root（测试与预检使用）。
 #       **拒绝以 root 身份运行**：否则 deploy 可经 sudo 让 root 对任意
@@ -48,7 +52,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB
 
-ENTRY_VERSION="prod2-entry-v3"
+ENTRY_VERSION="prod2-entry-v4"
 ENTRY_PATH="/usr/local/sbin/chaoge-deploy"
 LIB_DIR="/usr/local/lib/chaoge"
 DB_NAME="chaoge_staging"
@@ -92,13 +96,15 @@ usage() {
   chaoge-deploy deploy <artifact.tar.gz> <sha256> <git-sha>
   chaoge-deploy rollback
   chaoge-deploy status
+  chaoge-deploy demo-data
   chaoge-deploy check-artifact <artifact.tar.gz> <sha256> <git-sha>
 
 说明:
   · 只操作 chaoge_staging 与 chaoge-staging；不接受数据库名、服务名或可执行路径。
   · 产物必须位于 /home/deploy/incoming/，文件名必须是
     staging-standalone-<git-sha>.tar.gz。
-  · deploy / rollback / status 需要 root（sudoers 只允许 deploy 免密执行本入口）。
+  · deploy / rollback / status / demo-data 需要 root（sudoers 只允许 deploy 免密执行本入口）。
+  · demo-data 只写入 staging 首页演示内容；不在正式 deploy 链上，可重复执行。
   · check-artifact 只读，必须由普通用户运行；root 身份会被拒绝。
 USAGE
 }
@@ -519,6 +525,18 @@ cmd_status() {
   ss -ltnH 'sport = :3000' | sed 's/^/      /'
 }
 
+cmd_demo_data() {
+  require_root
+  setup_log
+  take_lock
+  require_initialized
+  step "写入 staging 首页演示数据（仅 $DB_NAME）"
+  env -i PATH="$PATH" LANG=C.UTF-8 CHAOGE_SUDO='runuser -u postgres --' \
+    bash "$LIB_DIR/db/deploy-staging.sh" demo-data \
+      --database "$DB_NAME" --non-interactive
+  ok "首页演示数据已写入（只插入，可重复执行）"
+}
+
 main() {
   local cmd="${1:-}"
   case "$cmd" in
@@ -534,6 +552,10 @@ main() {
       [[ $# -eq 1 ]] || { usage >&2; die "status 不接受任何参数"; }
       cmd_status
       ;;
+    demo-data)
+      [[ $# -eq 1 ]] || { usage >&2; die "demo-data 不接受任何参数"; }
+      cmd_demo_data
+      ;;
     check-artifact)
       [[ $# -eq 4 ]] || { usage >&2; die "check-artifact 需要 3 个参数：artifact、sha256、git-sha"; }
       cmd_check_artifact "$2" "$3" "$4"
@@ -544,7 +566,7 @@ main() {
       ;;
     *)
       usage >&2
-      die "未知子命令「$cmd」。只接受 deploy / rollback / status / check-artifact。"
+      die "未知子命令「$cmd」。只接受 deploy / rollback / status / demo-data / check-artifact。"
       ;;
   esac
 }
