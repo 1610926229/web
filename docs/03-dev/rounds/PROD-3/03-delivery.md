@@ -20,10 +20,10 @@
 
 | 命令 | 结果 |
 |---|---|
-| `pnpm test` | 2299 tests · 1884 pass · 0 fail · 415 skipped（HTTP 用例需要 `APP_BASE_URL`） |
+| `pnpm test` | 2302 tests · 1886 pass · 0 fail · 416 skipped（HTTP 用例需要 `APP_BASE_URL`；本机无 nginx 时真实配置测试跳过） |
 | `pnpm typecheck` | 通过 |
 | `pnpm lint` | 通过 |
-| `tests/publicPreview.test.mjs` | 21/21 通过 |
+| `tests/publicPreview.test.mjs` | 24 tests · 23 pass · 1 skipped（真实 nginx -t，本机无 nginx） |
 | `tests/stagingDeploy.test.mjs` | 58 tests · 56 pass · 0 fail · 2 skipped（POSIX 执行位） |
 
 ## 部署后实测（服务器回环）
@@ -50,7 +50,7 @@
    已上传到 `/home/deploy/chaoge-proxy/`，与本地提交的哈希一致：
 
    ```
-   4ce2f833c591adda0645f81363b5e197de12c181e4a26d9b082451f4fc492837  chaoge-public.conf
+   010c22113c6aac929bdff790f811e42d3fc35515f85aa1fd218fc9f845d9b5b4  chaoge-public.conf
    2abb7df6183d96297c5e50da4dfdaa66cebba7406c5ad98b2c8c9c22618a345a  install-public-proxy.sh
    7d8e3b8d7a8f89a58b6e306b8c7556f8bacd2aae2af2e70c68c5817cd8904b30  rollback-public-proxy.sh
    ```
@@ -76,6 +76,40 @@
 
 顺序：先第 1 步并在服务器本地验收，再第 2 步。当前公网 80 实测不可达
 （8 秒超时），符合预期。
+
+## 首次安装失败与修复（2026-10-18）
+
+**现象：** `nginx -t` 报
+`zero size shared memory zone "zone=chaoge_public_conn"`。
+安装脚本按设计移除了新配置链接并恢复默认站点，没有启用公网入口。
+
+**根因：** `limit_conn` 的语法是 `limit_conn <zone> <number>`，**没有**
+`zone=` 前缀。配置误写成 `limit_conn zone=chaoge_public_conn 20;`，Nginx 把
+`zone=chaoge_public_conn` 整个当作区名，找不到同名共享内存区，于是报
+`zero size shared memory zone "zone=..."`。带 `zone=` 的是
+`limit_conn_zone`、`limit_req_zone` 的声明和 `limit_req` 的引用。
+
+**修复：** 改为 `limit_conn chaoge_public_conn 20;`，白名单与限流策略不变。
+
+**回归测试：**
+
+- 新增 Nginx 指令 tokenizer/parser，校验 `limit_conn` 恰好两个参数、区名
+  不带 `zone=`、连接数为数字、引用的区已在 http 作用域声明；`limit_req`
+  同样校验 `zone=` 引用。故意还原旧写法可稳定复现失败（mutation check）。
+- 本机有 `nginx` 可执行文件时额外运行真实 `nginx -t`（临时配置、高位端口、
+  临时日志目录），不依赖字符串断言。
+
+**服务器验证：** 以 deploy 身份在临时 wrapper 中对修复后的配置执行真实
+`nginx -t`（nginx/1.28.3，监听临时改为 18080 以避开非 root 绑定 80）：
+
+```
+nginx: the configuration file .../nginx.conf syntax is ok
+nginx: configuration file .../nginx.conf test is successful
+```
+
+只读诊断确认：`sites-enabled` 仅恢复的 `default`；`chaoge-public.conf`
+留在 `sites-available` 未启用；Nginx active/enabled；80 在监听（腾讯云
+安全组仍阻断公网）；应用仍只在 `127.0.0.1:3000`。
 
 ## 回滚
 

@@ -536,7 +536,15 @@ test(
         mkdirSync(path.join(tmp, dir), { recursive: true });
       }
 
-      const siteConf = nginx.replaceAll("/var/log/nginx", `${tmp}/logs`);
+      // nginx -t 会尝试 bind 监听端口；非 root 绑定 80 会因权限失败（与配置
+      // 正确性无关）。临时副本改到高位端口，其余指令保持不变。
+      const siteConf = nginx
+        .replaceAll("/var/log/nginx", `${tmp}/logs`)
+        .replaceAll("listen 80 default_server;", "listen 18080 default_server;")
+        .replaceAll(
+          "listen [::]:80 default_server;",
+          "listen [::]:18080 default_server;",
+        );
       const sitePath = path.join(tmp, "site.conf");
       writeFileSync(sitePath, siteConf);
 
