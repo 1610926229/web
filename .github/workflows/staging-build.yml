@@ -1,0 +1,119 @@
+name: staging-build
+
+# PROD-2 / Step 5.8.1 · 私有 Staging 的 standalone 构建
+#
+# 只手动触发，且**必须**给出一个完整的 40 位 commit SHA。
+# 不用分支名、不用 latest：产物必须能回答「这是哪一次提交」，
+# 否则回滚时说不清回到了什么，出问题时也无法把线上的字节和代码对上。
+#
+# 这个 workflow 里**没有任何生产凭据**：
+#   · 构建不连数据库（DATA_SOURCE 在构建期未设置，运行期才读）
+#   · 不引用 secrets.*，不打印环境变量
+#   · 产物里出现任何 .env 都会被 build-standalone.sh 拒绝
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "要构建的完整 40 位 Git commit SHA（不是分支名）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同一个提交重复触发时排队而不是并行；不同提交可以并行构建。
+  group: staging-build-${{ inputs.commit_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ inputs.commit_sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 校验输入是 40 位 SHA
+        env:
+          INPUT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$INPUT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::commit_sha 必须是 40 位小写十六进制 SHA，收到：$INPUT_SHA"
+            exit 1
+          fi
+          echo "目标提交：$INPUT_SHA"
+
+      - name: 检出指定提交
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 确认检出的就是指定 SHA
+        env:
+          INPUT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL="$(git rev-parse HEAD)"
+          echo "检出 SHA：$ACTUAL"
+          if [ "$ACTUAL" != "$INPUT_SHA" ]; then
+            echo "::error::检出的提交与请求不一致（期望 $INPUT_SHA，实际 $ACTUAL）"
+            exit 1
+          fi
+
+      - name: 安装 pnpm（版本取自 packageManager 固定值）
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+          run_install: false
+
+      - name: 安装 Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖（锁定文件）
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: 单元 / 集成测试（不连数据库的门控套件）
+        run: pnpm test
+
+      - name: 构建 standalone 产物
+        env:
+          EXPECTED_SHA: ${{ inputs.commit_sha }}
+          REQUIRE_CLEAN: "1"
+        run: bash deploy/app/build-standalone.sh
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-standalone-${{ inputs.commit_sha }}
+          path: dist/staging-standalone-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 作业摘要
+        env:
+          INPUT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          {
+            echo "## Staging standalone 构建完成"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 提交 | \`$INPUT_SHA\` |"
+            echo "| 产物 | \`staging-standalone-$INPUT_SHA\` |"
+            echo "| 保留 | 14 天 |"
+            echo
+            echo "下载产物后，按 \`deploy/app/README.md\` 的「发布」一节上传到服务器。"
+          } >> "$GITHUB_STEP_SUMMARY"
