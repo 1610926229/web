@@ -92,6 +92,18 @@ bash "$TMP/root/deploy/entry/install.sh" --bundle-dir "$TMP/root"
 生成，只写入 `/etc/chaoge/staging.secrets`（root:root 0600），不输出。
 安装器也不接收、不解包任何应用产物；首版发布随后走受控入口。
 
+安装器在写入安装文件前还会做两项前置检查：
+
+1. 执行 `sudo -l -U deploy` 审计现有授权；发现本入口以外的 `NOPASSWD`
+   命令（尤其 `NOPASSWD: ALL`）立即中止。安装器不会修改其它 sudoers 规则。
+   若 root 无法自动读取，安装器会中止并要求人工执行同一条命令确认。
+2. 把 `/var/log/chaoge/bootstrap.log`、`prod2-finalize.log` 移入
+   `/var/log/chaoge/archive/<UTC>-<pid>/`（root:root 0700，文件 0600）。
+   历史日志不删除、不读取内容；deploy 之后不可读。
+
+`check-artifact` 只能由普通用户运行。它拒绝 root，避免 sudo 把入口变成
+「root 对任意路径做哈希/tar 检查」的 oracle。
+
 ## 日志与只读访问
 
 - `/var/log/chaoge/install.log`（一次性安装）

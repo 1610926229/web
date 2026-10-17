@@ -24,6 +24,9 @@
 #
 #   check-artifact <artifact> <sha256> <git-sha>
 #       只做产物校验，不写任何文件、不需要 root（测试与预检使用）。
+#       **拒绝以 root 身份运行**：否则 deploy 可经 sudo 让 root 对任意
+#       普通文件做哈希/tar 检查，形成文件读取 oracle。普通用户按自己的
+#       文件权限运行即可，不存在额外授权。
 #
 # ## 安全边界
 #
@@ -45,7 +48,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB
 
-ENTRY_VERSION="prod2-entry-v1"
+ENTRY_VERSION="prod2-entry-v2"
 ENTRY_PATH="/usr/local/sbin/chaoge-deploy"
 LIB_DIR="/usr/local/lib/chaoge"
 DB_NAME="chaoge_staging"
@@ -96,7 +99,7 @@ usage() {
   · 产物必须位于 /home/deploy/incoming/，文件名必须是
     staging-standalone-<git-sha>.tar.gz。
   · deploy / rollback / status 需要 root（sudoers 只允许 deploy 免密执行本入口）。
-  · check-artifact 只读，不需要 root。
+  · check-artifact 只读，必须由普通用户运行；root 身份会被拒绝。
 USAGE
 }
 
@@ -110,6 +113,17 @@ trap cleanup EXIT INT TERM HUP
 require_root() {
   [[ "$(id -u)" == "0" ]] \
     || die "必须以 root 运行。正常路径：sudo /usr/local/sbin/chaoge-deploy <子命令>（由受控 sudoers 规则授权）。"
+}
+
+# check-artifact 明确拒绝 root。
+#
+# sudoers 把整个入口授权给 deploy，因此 `sudo -n chaoge-deploy check-artifact
+# /任意路径 ...` 会让 root 替 deploy 读取/哈希 deploy 自己无权读取的文件。
+# 普通用户运行 check-artifact 时，读取能力完全受原有文件权限约束，不会因
+# 这个子命令增加任何权限；root 运行则没有这个约束，所以这里直接拒绝。
+require_non_root() {
+  [[ "$(id -u)" != "0" ]] \
+    || die "check-artifact 只能由普通用户运行：root 身份会形成对任意路径的文件检查 oracle。需要 root 的部署请使用 deploy / rollback / status。"
 }
 
 require_regular_file() {
@@ -331,6 +345,7 @@ validate_artifact_file() {
 
 cmd_check_artifact() {
   local scratch
+  require_non_root
   scratch="$(mktemp -d /var/tmp/chaoge-check.XXXXXXXX)" || die "无法创建临时目录。"
   chmod 0700 "$scratch"
   # shellcheck disable=SC2064

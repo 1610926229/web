@@ -45,7 +45,7 @@ deploy ALL=(root) NOPASSWD: /usr/local/sbin/chaoge-deploy
 ## 命令
 
 ```bash
-# 只读校验产物（不需要 root）
+# 只读校验产物（必须由普通用户运行；root 会被明确拒绝）
 /usr/local/sbin/chaoge-deploy check-artifact \
   /home/deploy/incoming/staging-standalone-<git-sha>.tar.gz <sha256> <git-sha>
 
@@ -63,6 +63,11 @@ sudo -n /usr/local/sbin/chaoge-deploy status
 入口的硬编码目标：`chaoge_staging`、`127.0.0.1:5432`、`chaoge_staging_migrator`、
 `chaoge_staging_app`、`chaoge-staging`、`/opt/chaoge-staging`。调用者不能传库名、
 服务名、可执行路径或版本名。
+
+`check-artifact` **拒绝 root**（`id -u == 0` 直接失败）。sudoers 给 deploy 的
+授权覆盖整个入口，如果允许 root 运行这个子命令，deploy 就能让 root 对任意
+普通文件做 SHA-256 / tar 检查，形成文件读取 oracle。普通用户运行时，读取能力
+完全受原有文件权限约束，不会获得额外权限。
 
 ## 产物校验
 
@@ -103,6 +108,21 @@ bundle `src/` 安装，而不是从 deploy 可替换的上传产物。
 - `ExecStart` 固定 `HOSTNAME=127.0.0.1 PORT=3000`，`staging.env` 不允许出现
   `HOSTNAME`/`PORT`；
 - 发布后实测 `ss -ltn`，非回环即判失败并自动回滚。
+
+## 安装前审计与旧日志归档
+
+一次性安装器在写入任何安装文件之前会：
+
+1. 以 root 执行 `sudo -l -U deploy`，打印现有授权；只要发现本入口以外的
+   `NOPASSWD` 命令（包括 `NOPASSWD: ALL`）就中止，不修改任何 sudo 规则。
+   如果无法自动读取，安装器会中止并提示人工执行同一条命令。
+2. 将 `/var/log/chaoge/bootstrap.log` 与 `/var/log/chaoge/prod2-finalize.log`
+   移入 `/var/log/chaoge/archive/<UTC 时间>-<pid>/`（`root:root 0700`，
+   文件 `root:root 0600`）。**不删除、不读取内容**；若历史路径是符号链接，
+   只移动链接本身，不跟随目标。
+
+归档完成后，`deploy` 不能读取这些历史日志；新的安装/部署日志仍在
+`/var/log/chaoge/`，由 root 控制。
 
 ## 残余风险（明确接受）
 

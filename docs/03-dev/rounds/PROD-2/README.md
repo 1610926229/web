@@ -28,6 +28,9 @@
 | 生产库隔离 | 库名白名单 + 硬拒绝 `chaoge_prod` |
 | 3000 端口 | systemd 与 `_common.sh` 双重绑定/实测回环 |
 | 旧 bootstrap/finalize 流程 | 已废弃，启动即拒绝（保留历史代码） |
+| `check-artifact` 权限边界 | 拒绝 root；普通用户按自身文件权限校验 |
+| 旧日志敏感信息 | 安装器归档到 `root:root 0700`，不删除、不读取内容 |
+| 安装前 sudo 审计 | 发现入口以外 `NOPASSWD` 即中止 |
 
 ## 文档
 

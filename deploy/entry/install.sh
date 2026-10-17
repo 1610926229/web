@@ -15,6 +15,8 @@
 #   · chaoge_staging 建库/权限/角色口令就位
 #   · /etc/chaoge/staging.env（root:root 0600）与 systemd 单元就位
 #   · 迁移代码快照与 pg 依赖放到 /usr/local/lib/chaoge/src（root:root）
+#   · 旧 bootstrap.log / prod2-finalize.log 归档到 root-only 目录（不删除）
+#   · 安装前审计 deploy 的现有 sudo 规则，发现额外 NOPASSWD 即中止
 #
 # 安装器刻意**不**接收或解包应用产物：root 的写入路径里没有 deploy 可控的
 # tar 文件。首版与后续发布统一走固定入口 chaoge-deploy deploy。
@@ -36,7 +38,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB
 
-ENTRY_VERSION="prod2-installer-v1"
+ENTRY_VERSION="prod2-installer-v2"
 BUNDLE_DIR=""
 SOURCE_TREE="${CHAOGE_SOURCE_TREE:-/home/deploy/chaoge-deploy-src}"
 
@@ -59,6 +61,8 @@ ROOT_DIR="/opt/chaoge-staging"
 INCOMING_DIR="/home/deploy/incoming"
 LOG_DIR="/var/log/chaoge"
 LOG="$LOG_DIR/install.log"
+LEGACY_LOG_ARCHIVE="$LOG_DIR/archive"
+LEGACY_LOGS=(bootstrap.log prod2-finalize.log)
 NODE_BIN="/usr/local/bin/node"
 
 die()  { printf '\033[31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -100,6 +104,97 @@ ensure_dir() {
   fi
   chown "$owner" "$dir"
   chmod "$mode" "$dir"
+}
+
+# 安装前审计 deploy 已有的 sudo 授权。
+#
+# 本安装器只负责写入自己的单命令 NOPASSWD 规则，不修改也不删除别人的规则。
+# 如果 deploy 已经拥有其它 NOPASSWD 命令（尤其 `ALL`），那么本设计的
+# 「root 只能执行固定入口」边界就不成立；此时必须在动手前停下来，交给人
+# 工处理，而不是带着未知的宽权限继续安装。
+audit_existing_sudo_rules() {
+  local out line after cmd
+  local -a parts
+  command -v sudo >/dev/null 2>&1 || die "找不到 sudo，无法审计已有授权。"
+
+  if ! out="$(LC_ALL=C sudo -n -l -U "$MIGRATE_USER" 2>&1)"; then
+    if grep -Eqi 'not allowed|may not run|is not in the sudoers' <<< "$out"; then
+      ok "$MIGRATE_USER 当前没有 sudo 授权（安装器将写入唯一一条）"
+      return 0
+    fi
+    warn "无法自动读取 $MIGRATE_USER 的 sudo 规则："
+    printf '%s\n' "$out" | sed 's/^/      /' >&2
+    die "请在安装前人工执行：sudo -l -U $MIGRATE_USER，确认没有额外 NOPASSWD 规则后重试。"
+  fi
+
+  info "现有 sudo 授权（$MIGRATE_USER）："
+  printf '%s\n' "$out" | sed 's/^/      /'
+  if printf '%s\n' "$out" | grep -qE '\(ALL[^)]*\).*NOPASSWD|NOPASSWD:[[:space:]]*ALL'; then
+    warn "检测到 deploy 的 ALL / 免密 ALL 授权，请结合上面的输出人工确认。"
+  elif printf '%s\n' "$out" | grep -qE '\(ALL[^)]*\)[[:space:]]+ALL([,[:space:]]|$)'; then
+    warn "deploy 拥有带密码的 sudo ALL 授权；这不是免密规则，但请人工确认其确有必要。"
+  fi
+
+  while IFS= read -r line; do
+    [[ "$line" == *NOPASSWD:* ]] || continue
+    after="${line#*NOPASSWD:}"
+    after="${after#"${after%%[![:space:]]*}"}"
+    IFS=',' read -r -a parts <<< "$after"
+    for cmd in "${parts[@]}"; do
+      cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+      cmd="${cmd%"${cmd##*[![:space:]]}"}"
+      [[ -z "$cmd" ]] && continue
+      [[ "$cmd" == "$ENTRY_PATH" ]] \
+        || die "发现额外的免密 sudo 授权：$line
+      本安装器只允许 $ENTRY_PATH。请先人工清理该规则后重试；安装器不会修改其它 sudoers 规则。"
+    done
+  done <<< "$out"
+  ok "sudo 预审计通过：没有 $ENTRY_PATH 以外的 NOPASSWD 命令"
+}
+
+# 旧流程的 bootstrap.log / prod2-finalize.log 可能记录了交互式输入。
+# 安装器**不删除**历史日志，只把它们移入 /var/log/chaoge/archive/ 下
+# root:root 0700 的独立目录，文件收敛为 root:root 0600，deploy 不再可读。
+# 若历史路径本身是符号链接，移动链接本身而不读取目标。
+archive_legacy_logs() {
+  local found=0 name src dest stamp
+  for name in "${LEGACY_LOGS[@]}"; do
+    src="$LOG_DIR/$name"
+    [[ -e "$src" || -L "$src" ]] && found=1
+  done
+  (( found )) || { info "没有需要归档的历史日志"; return 0; }
+
+  if [[ -e "$LEGACY_LOG_ARCHIVE" || -L "$LEGACY_LOG_ARCHIVE" ]]; then
+    [[ -d "$LEGACY_LOG_ARCHIVE" && ! -L "$LEGACY_LOG_ARCHIVE" ]] \
+      || die "$LEGACY_LOG_ARCHIVE 不是普通目录，拒绝归档。"
+  else
+    install -d -o root -g root -m 0700 "$LEGACY_LOG_ARCHIVE" \
+      || die "无法创建历史日志归档目录：$LEGACY_LOG_ARCHIVE"
+  fi
+  chown root:root "$LEGACY_LOG_ARCHIVE"
+  chmod 0700 "$LEGACY_LOG_ARCHIVE"
+
+  stamp="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  dest="$LEGACY_LOG_ARCHIVE/$stamp"
+  [[ -e "$dest" || -L "$dest" ]] && die "归档目录已存在，拒绝覆盖：$dest"
+  install -d -o root -g root -m 0700 "$dest" || die "无法创建归档批次目录：$dest"
+
+  for name in "${LEGACY_LOGS[@]}"; do
+    src="$LOG_DIR/$name"
+    [[ -e "$src" || -L "$src" ]] || continue
+    if [[ -L "$src" ]]; then
+      # 只移动链接本身，绝不跟随它读取目标。
+      mv -- "$src" "$dest/$name" || die "无法归档历史日志链接：$src"
+      chown -h root:root "$dest/$name" || die "无法收敛归档链接属主：$dest/$name"
+    elif [[ -f "$src" ]]; then
+      mv -- "$src" "$dest/$name" || die "无法归档历史日志：$src"
+      chown root:root "$dest/$name" || die "无法收敛归档文件属主：$dest/$name"
+      chmod 0600 "$dest/$name" || die "无法收敛归档文件权限：$dest/$name"
+    else
+      die "历史日志路径既不是普通文件也不是符号链接，拒绝移动：$src"
+    fi
+  done
+  ok "历史日志已归档到 $dest（root:root 0700；内容未读取、未删除）"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -149,6 +244,12 @@ info "installer: $ENTRY_VERSION"
 info "开始时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 info "bundle: $BUNDLE_DIR"
 info "日志: $LOG"
+
+# ── 0. 安装前审计与历史日志归档 ─────────────────────────────────────────────
+
+step "0/7 安装前审计：sudo 授权与历史日志"
+audit_existing_sudo_rules
+archive_legacy_logs
 
 # ── 1. bundle 完整性 ─────────────────────────────────────────────────────────
 

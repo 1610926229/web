@@ -75,6 +75,9 @@ const VAR_TMP_OK = BASH_OK && probeBash("test -d /var/tmp && test -w /var/tmp");
 const SKIP_NO_VAR_TMP = VAR_TMP_OK ? false : "需要可写的 /var/tmp（check-artifact 的私有校验目录）";
 const POSIX = process.platform !== "win32";
 const SKIP_NOT_POSIX = POSIX ? false : "符号链接语义仅在 POSIX 上可复现";
+const IS_ROOT = BASH_OK && probeBash('test "$(id -u)" = 0');
+const SKIP_ROOT = IS_ROOT ? "check-artifact 明确拒绝 root（安全边界）" : false;
+const SKIP_CHECK = SKIP_NO_VAR_TMP || SKIP_ROOT;
 
 // ── 1. 固定目标：入口只认识 chaoge_staging / chaoge-staging ─────────────────
 
@@ -127,14 +130,19 @@ test("入口不执行任意 shell，也不 source 调用者提供的文件", () 
   assert.match(entry, /bash "\$LIB_DIR\/app\/rollback\.sh"/);
 });
 
-test("deploy / rollback / status 都强制 root；check-artifact 只读且不需要 root", () => {
+test("deploy / rollback / status 强制 root；check-artifact 明确拒绝 root", () => {
   assert.match(entry, /^require_root\(\)/m);
   for (const cmd of ["cmd_deploy", "cmd_rollback", "cmd_status"]) {
     const body = entry.slice(entry.indexOf(`${cmd}() {`));
     assert.match(body.slice(0, 300), /require_root/, `${cmd} 必须 require_root`);
   }
   const check = entry.slice(entry.indexOf("cmd_check_artifact() {"));
-  assert.doesNotMatch(check.slice(0, 300), /require_root/, "check-artifact 只读，不应要求 root");
+  assert.match(check.slice(0, 400), /require_non_root/,
+    "check-artifact 必须拒绝 root，避免 sudo 形成任意文件检查 oracle");
+  assert.doesNotMatch(check.slice(0, 400), /require_root\(\)/,
+    "check-artifact 不应要求 root");
+  assert.match(entry, /\[\[ "\$\(id -u\)" != "0" \]\]/);
+  assert.match(entry, /文件检查 oracle/);
 });
 
 // ── 2. 产物校验与 TOCTOU ────────────────────────────────────────────────────
@@ -280,6 +288,37 @@ test("安装器不接收应用产物，root 不接触 deploy 可写的 tar", () 
   assert.match(installer, /ensure_dir "\$INCOMING_DIR"/);
 });
 
+test("安装器在写入前审计 deploy 的额外 NOPASSWD 授权", () => {
+  assert.match(installer, /audit_existing_sudo_rules\(\)/);
+  assert.match(installer, /sudo -n -l -U "\$MIGRATE_USER"/);
+  assert.match(installer, /NOPASSWD:\[\[:space:\]\]\*ALL/);
+  assert.match(installer, /发现额外的免密 sudo 授权/);
+  assert.match(installer, /安装器不会修改其它 sudoers 规则/);
+
+  // 审计必须发生在安装固定入口之前：发现宽权限时不能已经写入 root 文件。
+  const auditCall = installer.indexOf("audit_existing_sudo_rules\n");
+  const firstInstall = installer.indexOf("install_file deploy/entry/chaoge-deploy.sh");
+  assert.ok(auditCall >= 0, "找不到 audit_existing_sudo_rules 调用");
+  assert.ok(firstInstall > auditCall, "sudo 审计必须先于任何 install_file");
+});
+
+test("安装器归档旧日志而不是删除，归档目录 root-only", () => {
+  assert.match(installer, /LEGACY_LOG_ARCHIVE="\$LOG_DIR\/archive"/);
+  assert.match(installer, /LEGACY_LOGS=\(bootstrap\.log prod2-finalize\.log\)/);
+  assert.match(installer, /chown root:root "\$LEGACY_LOG_ARCHIVE"/);
+  assert.match(installer, /chmod 0700 "\$LEGACY_LOG_ARCHIVE"/);
+  assert.match(installer, /chmod 0600 "\$dest\/\$name"/);
+  assert.match(installer, /mv -- "\$src" "\$dest\/\$name"/);
+  assert.match(installer, /内容未读取、未删除/);
+
+  // 历史日志只能被移动/归档，不能被 rm 掉。
+  assert.doesNotMatch(
+    installer,
+    /rm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+[^\n]*(?:bootstrap|prod2-finalize)\.log/,
+    "安装器不得删除历史日志",
+  );
+});
+
 test("安装器目录创建拒绝符号链接（避免 root chown 到别处）", () => {
   assert.match(installer, /ensure_dir\(\)/);
   assert.match(installer, /\[\[ -d "\$dir" && ! -L "\$dir" \]\]/);
@@ -370,7 +409,7 @@ function check(artifact, sha = sha256(artifact), git = GIT) {
   });
 }
 
-test("check-artifact 接受结构完整的工件", { skip: SKIP_NO_VAR_TMP }, () => {
+test("check-artifact 接受结构完整的工件", { skip: SKIP_CHECK }, () => {
   const { dir, artifact, sha } = makeArtifact();
   try {
     const r = check(artifact, sha);
@@ -381,7 +420,7 @@ test("check-artifact 接受结构完整的工件", { skip: SKIP_NO_VAR_TMP }, ()
   }
 });
 
-test("check-artifact 拒绝 SHA-256 / Git SHA / 格式不匹配", { skip: SKIP_NO_VAR_TMP }, () => {
+test("check-artifact 拒绝 SHA-256 / Git SHA / 格式不匹配", { skip: SKIP_CHECK }, () => {
   const { dir, artifact, sha } = makeArtifact();
   try {
     const wrongSha = check(artifact, HEX64(0));
@@ -400,7 +439,7 @@ test("check-artifact 拒绝 SHA-256 / Git SHA / 格式不匹配", { skip: SKIP_N
   }
 });
 
-test("check-artifact 拒绝缺必需结构或含 .env", { skip: SKIP_NO_VAR_TMP }, () => {
+test("check-artifact 拒绝缺必需结构或含 .env", { skip: SKIP_CHECK }, () => {
   const missing = makeArtifact();
   try {
     rmSync(path.join(missing.dir, "tree", "public"), { recursive: true, force: true });
@@ -428,7 +467,7 @@ test("check-artifact 拒绝缺必需结构或含 .env", { skip: SKIP_NO_VAR_TMP 
   }
 });
 
-test("check-artifact 拒绝绝对路径与 .. 条目", { skip: SKIP_NO_VAR_TMP }, () => {
+test("check-artifact 拒绝绝对路径与 .. 条目", { skip: SKIP_CHECK }, () => {
   const { dir, tree } = buildTree();
   try {
     const abs = path.join(dir, "abs.tar.gz");
@@ -466,7 +505,7 @@ test("check-artifact 拒绝绝对路径与 .. 条目", { skip: SKIP_NO_VAR_TMP }
 
 test(
   "安全相对符号链接通过，绝对 / 逃逸链接被拒绝",
-  { skip: SKIP_NO_VAR_TMP ? SKIP_NO_VAR_TMP : SKIP_NOT_POSIX },
+  { skip: SKIP_CHECK ? SKIP_CHECK : SKIP_NOT_POSIX },
   () => {
     const safe = buildTree();
     try {

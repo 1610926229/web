@@ -31,6 +31,9 @@
 | 8 | 不动 prod、不暴露 3000 | 库名白名单 + `chaoge_prod` 硬拒绝；`HOSTNAME=127.0.0.1`；发布后实测 | `deploy-staging.sh`；测试 11；unit |
 | 9 | 审查旧脚本/systemd | 旧脚本硬停；env 目录/文件拒绝符号链接；unit 加固 | 测试 13/14/16 |
 | 10 | 无法参数注入/替换脚本 | 固定命令、固定参数、root 私有副本、root-owned lib | 测试 2/3/5/12/13 |
+| 11 | `check-artifact` 不成为 root 文件 oracle | 子命令显式拒绝 `id -u == 0`；普通用户按自身权限校验 | `chaoge-deploy.sh` `require_non_root`；测试 4/22 |
+| 12 | 旧日志敏感信息 | 安装器把 `bootstrap.log` / `prod2-finalize.log` 移入 `/var/log/chaoge/archive/<UTC>-<pid>/`（root:root 0700，文件 0600），不删除、不读取 | 测试 23 |
+| 13 | 安装前 sudo 授权审计 | `sudo -l -U deploy`；发现入口以外 `NOPASSWD`（含 `ALL`）即中止；不清洗其它规则 | 测试 24 |
 
 ## 3. 威胁模型
 
@@ -55,18 +58,24 @@
 | root 跟随符号链接写文件 | `ensure_dir` 拒绝链接；安装前删除目标链接；env 路径检查 |
 | 通过 env 文件改绑定地址 | 单元 ExecStart 写死；env 出现 HOSTNAME/PORT 即拒绝 |
 | 公网访问 3000 | 绑定 127.0.0.1 + 发布后 `ss` 实测 + 失败回滚 |
+| sudo 把 `check-artifact` 变成 root 文件 oracle | `check-artifact` 拒绝 root；普通用户仅按自身文件权限读取 |
+| 旧日志中的交互输入被 deploy 读取 | 安装器把旧日志移入 root-only 归档目录；不删除、不读取内容 |
+| deploy 已有未知 NOPASSWD 宽规则 | 安装器在写任何安装文件前执行 `sudo -l -U deploy`，发现额外 `NOPASSWD` 即中止 |
 
 ## 4. 测试证据（本地）
 
 ```text
 node --test tests/stagingEntry.test.mjs
-# tests 23  pass 21  fail 0  skip 2（Linux 符号链接/执行位语义）
+# tests 25  pass 23  fail 0  skip 2（Linux 符号链接/执行位语义）
 
-node --test tests/stagingDeploy.test.mjs tests/deployScripts.test.mjs tests/stagingDatabase.test.mjs
-# tests 117  pass 114  fail 0  skip 3
+node --test tests/stagingEntry.test.mjs tests/stagingDeploy.test.mjs \
+  tests/deployScripts.test.mjs tests/stagingDatabase.test.mjs
+# tests 142  pass 137  fail 0  skip 5
 
-bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/deploy-staging.sh
-# SYNTAX_OK
+pnpm lint      # PASS
+pnpm typecheck # PASS
+bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/*.sh
+# ALL_SHELL_SYNTAX_OK
 ```
 
 `stagingEntry` 的功能用例用临时 tar.gz 验证：
@@ -75,7 +84,10 @@ bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/de
 - 错误 SHA-256 / 错误 Git SHA / 非法十六进制被拒绝；
 - 缺 `server.js` / `node_modules` / `.next/static` / `public` 被拒绝；
 - `.env`、绝对路径、`..` 被拒绝；
-- 安全相对符号链接通过；绝对与 `../../../etc/passwd` 目标被拒绝（POSIX）。
+- 安全相对符号链接通过；绝对与 `../../../etc/passwd` 目标被拒绝（POSIX）；
+- `check-artifact` 以 root 运行时明确失败（普通用户功能不受影响）；
+- 安装器在 `install_file` 之前执行 sudo 审计，并把旧日志移动到 root-only
+  归档目录而不是删除。
 
 ## 5. 一次性人工授权 vs 后续自动执行
 
@@ -109,6 +121,12 @@ bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/de
 6. **旧流程代码仍在仓库。** `bootstrap.sh` / `finalize-staging.sh` 保留但启动即
    拒绝；若有人显式设置 `CHAOGE_ENABLE_LEGACY_PROD2_FLOW=1`，仍可运行旧逻辑。
    这是人为逃生门，不是默认路径。
+7. **旧日志归档不是删除。** `bootstrap.log` / `prod2-finalize.log` 会被移动到
+   `/var/log/chaoge/archive/<UTC>-<pid>/`，内容保留。若其中包含真实凭据，
+   仍应由运维在归档后按数据保留策略处理；安装器不读取、不打印内容。
+8. **sudo 审计只能查看到的规则。** 安装器用 `sudo -l -U deploy` 审计；如果
+   sudo 配置本身损坏、或 root 无法自动读取，安装器会中止并要求人工执行同一
+   命令。它不会修改其它 sudoers 规则。
 
 ## 7. 未完成事项
 
