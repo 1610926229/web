@@ -1,6 +1,6 @@
 # PROD-3 · 交付记录
 
-**Status:** 应用侧守卫已发布并验证；Nginx 已在服务器安装并通过回环全量验收；等待腾讯云放行 TCP 80
+**Status:** 应用侧守卫已发布并验证；Nginx 已在服务器安装并通过回环 + 公网全量验收；TCP 80 已可达
 **Release:** `20261017T172639Z-aa1c966`
 **App Git SHA:** `aa1c9663b0d6cc1b33add82f68a68dd35dd8ad2b`
 **Artifact SHA-256:** `b2da92ffbec258246f51774511f23d88ce83a4574e638904c5a4d138d002d741`
@@ -76,8 +76,9 @@
 
 2. **腾讯云 Lighthouse 放行 TCP 80**（控制台，来源 `0.0.0.0/0`）。
 
-第 1 步已完成，回环全量验收见后文；现在只剩第 2 步。放行前公网 80
-实测不可达（8 秒超时），符合预期。
+第 1 步已完成，回环全量验收见后文。验收时公网 80 已处于可达状态
+（见「公网侧验收」），本轮未修改防火墙；若该规则不是产品负责人放行的，
+请先确认来源与规则内容。
 
 ## 首次安装失败与修复（2026-10-18）
 
@@ -272,8 +273,35 @@ Next.js 里该路由确实存在：带标记时应用层返回 405，不带标�
 
 **当前不需要重新安装 Nginx**：生效配置没有变化，仍是 `0f85ae7f…`；
 本次只修改了安装器的验收逻辑，已上传到 `/home/deploy/chaoge-proxy/`
-（SHA-256 `2a1a2bde…`），供以后重装/审计使用。唯一剩余的人工动作是
-在腾讯云控制台放行 TCP 80。
+（SHA-256 `2a1a2bde…`），供以后重装/审计使用。
+
+## 公网侧验收（TCP 80 已可达）
+
+完成回环验收后，从开发机直接访问 `http://43.128.13.181/` 时发现公网 80
+**已经可达**：`chaoge-public.access.log` 记录了来自 `59.57.232.97`、
+`117.28.108.95`、`124.72.54.101` 等公网地址的请求。**这不是本轮开放的**；
+本轮没有修改腾讯云安全组、UFW 或 iptables。若产品负责人尚未在控制台添加
+80 规则，应确认该规则是否由其他人或既有配置放行。
+
+公网侧实测（与回环结果一致）：
+
+| 验收项 | 结果 |
+|---|---|
+| `GET /` | 200，标记头，47,527 字节，`<title>超哥电竞</title>`，无「开发工具」，无 `X-Powered-By` |
+| `GET /api/home` | 200，标记头，响应体含 `"announcements"` |
+| `GET /api/admin/dashboard` | 404 + 标记头，146 字节 |
+| `POST /api/auth/mock-login` | 404 + 标记头，146 字节 |
+| `/admin`、`/staff`、`/companion`、`/orders`、`/mine` | 全部 404 + 标记头 |
+| `/api/orders`、`/api/payments/mock-confirm`、`/api/me` | 全部 404 + 标记头 |
+| `POST /` | 405（应用守卫只允许 GET/HEAD） |
+| `POST /api/home`，70,000 字节请求体 | 413 + 标记头（`client_max_body_size 64k` 生效） |
+| CSS / JS / SVG | 200，`text/css` / `application/javascript` / `image/svg+xml` |
+| 伪造 Cookie（`mock_user_id` / `mock_admin_id` / `mock_staff_id`） | 首页 HTML 与不带 Cookie **逐字节相同**（sha256 `c161d858…`），无 Mock 面板 |
+| 安全响应头 | 8 个响应头齐全；`Server: nginx` 不带版本 |
+| 429 / limiting | 0 条；error log 仅有本次故意触发 413 的 `too large body` 一条 |
+
+**结论：公网入口已满足开放条件并通过公网验收。** 若 TCP 80 规则由产品
+负责人有意放行，无需再操作；若不是，请先确认该规则来源。
 
 ## 回滚
 
