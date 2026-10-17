@@ -1,4 +1,4 @@
-7901cba6c826913bf19d74c5a25d4756edf52124ddb3820a8fe5ab46dd69bb01  deploy/app/README.md
+f2b80f95350eba356c7804cb37153b767b9de5cfb3f05025655bc3ce87ceb89f  deploy/app/README.md
 688594afaa714d0cbe42899a48bfea7cd7a4fe2c363c688eb71114b955983479  deploy/app/_common.sh
 f8d05b1bb563a8da69f6fbf62e11c09aa8708bf33b54460eb9e80a2fb6d52410  deploy/app/build-standalone.sh
 b03bf0b951b4c62ee3cd4b02b4ef9ddd32ec6b580aa114bfdc8d34049ab31911  deploy/app/chaoge-staging.service

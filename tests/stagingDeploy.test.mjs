@@ -472,6 +472,8 @@ test("finalizer 只执行 root 信任目录里的脚本", () => {
   assert.match(code.finalize, /deploy\/trust\/migration-code\.sha256/);
   assert.match(code.finalize, /sha256sum -c --quiet deploy\/trust\/deploy-files\.sha256/);
   assert.match(code.finalize, /信任目录中仍有组\/其他用户可写的路径/);
+  // finalizer 的权限断言只检查真实文件/目录，符号链接不参与（同 bootstrap 修复）。
+  assert.match(code.finalize, /\\\( -type f -o -type d \\\)/);
   assert.match(code.finalize, /deploy_script deploy\/db\/staging\/deploy-staging\.sh/);
 
   // 不允许回落到 /home/deploy 下的脚本或 pnpm/corepack 缓存。

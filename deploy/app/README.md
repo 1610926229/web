@@ -368,7 +368,9 @@ staging 上就没有任何登录入口——这不是假设，是读代码得出
 - [ ] 从公网直接访问 `http://<server-ip>:3000/` **超时**（不得 200）
 - [ ] 产物里没有 `.env`（`tar -tzf ... | grep '\.env'` 无输出）
 - [ ] `install-release.sh` 的调用参数同时含 `--sha256 f107…` 与 `--expected-sha 8ad9…`
-- [ ] `/opt/chaoge-deploy-trust` 是 `root:root`，且 `find … -perm -0020 -o -perm -0002` 无输出
+- [ ] `/opt/chaoge-deploy-trust` 是 `root:root`，且
+      `find … ! -type l \( -perm -0020 -o -perm -0002 \)` 无输出
+      （符号链接在 Linux 上恒为 0777，必须排除，否则会误报 `node_modules/.bin`）
 - [ ] `/var/log/chaoge` 是 `root:deploy 0750`，日志文件 `0640`
 - [ ] 迁移进程以 `deploy` 身份运行（finalizer 日志「执行身份：deploy」），root 未执行迁移代码
 - [ ] GitHub Actions 日志里没有任何连接串或口令
