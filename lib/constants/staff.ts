@@ -1,16 +1,34 @@
+import {
+  CONVERSATION_SEGMENT_ASSIGNMENT_TITLE_STAFF,
+  compareConversationsWithinOrder,
+  isCurrentAssignmentConversation,
+  segmentTitle,
+} from "@/lib/constants/conversations";
+import { COMPANION_RELEASE_SOURCE_LABELS, DISPATCH_STATE_LABELS } from "@/lib/constants/dispatch";
 import { ORDER_STATUSES, ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import { PLATFORM_NAME } from "@/lib/constants/site";
 import { clampPage, clampPageSize } from "@/lib/constants/pagination";
 import { MESSAGE_MAX_LENGTH } from "@/lib/constants/service";
+import type { CompanionReleaseRecord } from "@/lib/types/companionRelease";
+import type { Companion } from "@/lib/types/companion";
 import type { Order } from "@/lib/types/order";
-import type { MessageSenderRole, OrderMessage } from "@/lib/types/message";
+import type { DispatchRecord } from "@/lib/types/dispatch";
+import type { MessageSenderRole, OrderConversationRecord, OrderMessage } from "@/lib/types/message";
 import type { OrderStatus } from "@/lib/types/order";
 import type {
+  StaffCompanionReleaseEntry,
   StaffConversationListItem,
   StaffConversationMessage,
+  StaffConversationSegment,
+  StaffOrderAllowedActions,
+  StaffOrderDispatchSummary,
+  StaffOrderListItem,
+  StaffOrderReplaceCandidate,
   StaffOrderSummary,
+  StaffOrderUserSummary,
   StaffRole,
 } from "@/lib/types/staff";
+import { readOrderFilterDate } from "./orderFilters";
 
 /**
  * 客服端（客服工作台）的角色规则、文案与 DTO 映射（服务端与浏览器共用）。
@@ -108,8 +126,14 @@ export const STAFF_UNAUTHORIZED_MESSAGE = "请先登录客服工作台";
 /**
  * 不存在的**会话**，以及「订单存在但没有会话」的提示。
  *
- * ⚠️ 与「订单不存在」是**同一句话**：客服只能访问有会话的订单，
- * 想用订单号试探「这一单存不存在」时，三种情形应当完全无法区分。
+ * ⚠️ 在**会话**这条路上，它与「订单不存在」是**同一句话**：
+ * 用订单号试探「这一单有没有会话」时，三种情形应当完全无法区分。
+ *
+ * ⚠️ **P0-10 之后不要再把这句话读成「客服不知道订单存不存在」**——
+ * 那是本轮之前的口径。客服现在有全量订单查询（`/staff/orders/[id]`），
+ * 订单存不存在是**它本来就该知道的事**（用户报一个订单号来问，客服就必须查得到）。
+ * 上面那条不可区分只约束**会话**资源：它挡的是「从会话接口反推订单」，
+ * 不是「订单不可见」。订单侧的 404 用的是 `STAFF_ORDER_NOT_FOUND_MESSAGE`。
  */
 export const STAFF_CONVERSATION_NOT_FOUND_MESSAGE = "会话不存在";
 
@@ -164,6 +188,29 @@ export const STAFF_NOT_REALTIME_NOTICE =
 export const STAFF_ORDER_READONLY_NOTICE =
   "客服只能查看订单摘要与沟通，不能修改订单状态、金额、商品；" +
   "退款与投诉在各自的页面里处理，可执行的动作以那里的按钮为准。";
+
+/**
+ * 履约退出历史区块的文案（P0-6）。
+ *
+ * ⚠️ 这些常量放在本文件的原因与其它客服端文案一致：**渲染方不拥有常量层**，
+ * 客服工作台、投诉详情、退款详情三处看到的是**同一份字符串**。
+ * 每处各写一遍「履约退出历史」这种标题，迟早有一处写成别的叫法，
+ * 而同一件事有两种叫法时，读的人只会以为它们是两件事。
+ *
+ * ⚠️ 这里**刻意没有「无退出记录」的空态文案**：客服端空数组时整段不渲染
+ * （`components/staff/StaffReleaseHistory.tsx` 的 `entries.length === 0` 分支）。
+ * 客服这三页是**作业面**，而绝大多数订单本来就不该有退出记录——占位句会出现在
+ * 每一张正常订单上，久了就被读成装饰，等人真的退出过时同样被跳过；
+ * 「出现本身就是信号」才是这里要的。
+ * ⚠️ 管理端订单详情**正好相反**（空数组显示「无退出记录」），那是**刻意的不对称**：
+ * 审计视角要的是「查过了，没有」这个明确结论，一片空白区分不了「没有」与「没查」。
+ */
+export const STAFF_RELEASE_HISTORY_TITLE = "履约退出历史（只读）";
+export const STAFF_RELEASE_HISTORY_COMPANION_LABEL = "原打手";
+export const STAFF_RELEASE_HISTORY_SOURCE_LABEL = "退出方式";
+export const STAFF_RELEASE_HISTORY_TIME_LABEL = "退出时间";
+export const STAFF_RELEASE_HISTORY_REASON_LABEL = "退出原因";
+export const STAFF_RELEASE_HISTORY_READONLY_NOTE = "仅用于核对履约经过，客服不能修改退出记录。";
 
 // ——————————————————————————— 消息 ———————————————————————————
 
@@ -359,6 +406,22 @@ export function toStaffConversationListItem(input: {
   };
 }
 
+/**
+ * 护航展示名的**唯一**回落规则：查不到名字时回落到 `companionId`。
+ *
+ * 直接调用它的是退出历史条目（`toStaffCompanionReleaseEntry`）与会话分段
+ * （`toStaffConversationSegments`）两处，但它们**共用这一份实现**——
+ * 也就是「查不到名字怎么办」在代码里只有一句。两处各写一次 `|| companionId`
+ * 的话，将来有一处被改成空串或「未知护航」，那处就会开始显示一个
+ * **看起来像另一位护航**的占位符，而另一处不会——这种分叉不会有人发现。
+ *
+ * ⚠️ 参数顺序是 `(id, name)`：名字是**可能缺失的那一个**，id 是**一定有的那一个**。
+ * 反过来的签名会让调用方以为名字才是主、id 是备选。
+ */
+export function resolveCompanionDisplayName(companionId: string, companionName: string): string {
+  return companionName || companionId;
+}
+
 // ——————————————————————————— 工作台详情 ———————————————————————————
 
 /**
@@ -367,8 +430,16 @@ export function toStaffConversationListItem(input: {
  * ⚠️ 字段表就是边界：**没有** `gameAccountId`（游戏 ID）、`remark`（备注）、
  * `userId`，也没有任何支付凭据。客服当前阶段不需要它们，
  * 而少一个字段就少一条泄漏路径。
+ *
+ * ⚠️ `releaseHistory` 与 `userNickname` 一样由调用方查好传进来，本层不做仓储读取：
+ * 它是浏览器端组件也会引用的常量模块，碰 `lib/data` 会把 Mock 存储打进前端产物。
+ * 条目本身由 `toStaffCompanionReleaseEntry()` 转换——那是唯一的转换口径。
  */
-export function toStaffOrderSummary(order: Order, userNickname: string): StaffOrderSummary {
+export function toStaffOrderSummary(
+  order: Order,
+  userNickname: string,
+  releaseHistory: StaffCompanionReleaseEntry[],
+): StaffOrderSummary {
   return {
     orderId: order.id,
     orderNo: order.orderNo,
@@ -377,10 +448,51 @@ export function toStaffOrderSummary(order: Order, userNickname: string): StaffOr
     productTitle: order.productTitle,
     specName: order.specName,
     quantity: order.quantity,
-    totalAmount: order.totalAmount,
+    // 摘要只给实付（P1-4）：页面上那一行写的是「实付金额」。
+    // 优惠前的原价不进摘要——它只在订单详情里以 `originalAmount` 出现
+    actualPaidAmount: order.actualPaidAmount,
     userNickname,
     // 护航摘要：未绑定陪玩时是一句明确的「等待接单」，不是空白
     companionSummary: order.companion ? order.companion.name : "等待接单",
+    releaseHistory,
+  };
+}
+
+/**
+ * 一条退出历史 → 客服视野里的条目（P0-6）。**三个客服 DTO 共用的唯一转换点**
+ * （会话详情、投诉详情的订单摘要、退款详情），因此「退出方式怎么显示」
+ * 「原因取哪个字段」只有这一处口径。
+ *
+ * ## 为什么名字要靠调用方解析，而不是存进记录
+ *
+ * `CompanionReleaseRecord` 上**只有 `companionId`**，没有名字快照，这是刻意的：
+ *
+ * 1. **记录只写已经发生的事实**。它是 `database-schema.md` T4 定义的 7 字段结构
+ *    （P0-6 冻结，不加字段）。往里塞一个「名字快照」等于让它承担展示职责，
+ *    而展示职责会随时间变——名字快照与护航资料一改就分叉，那时两份数据
+ *    谁对谁错没有规则可依。
+ * 2. **名字是可推导的**：`getCompanionRepository().findCompanionById()` 按 id 查得到
+ *    （它连**已移除**的记录都查得到，因此事后被下架的护航仍然显示得出名字）。
+ *    可推导的东西存第二份，就是两个真值源。
+ * 3. 本文件**不能自己去查**：它是浏览器端组件也会引用的常量模块，碰 `lib/data`
+ *    会把 Mock 存储打进前端产物。因此解名字是服务层的事，这里只做拼装。
+ *
+ * ⚠️ **回落到 `companionId`、绝不留空串**：查不到护航资料（资料被彻底删除）
+ * 时，页面上仍要看得出「退出的是哪一位」。空名字会让那一行看起来像界面坏了，
+ * 而 id 至少是可核对的。调用方查不到时传空串即可，这条规则只在这里执行一次。
+ */
+export function toStaffCompanionReleaseEntry(
+  record: CompanionReleaseRecord,
+  companionName: string,
+): StaffCompanionReleaseEntry {
+  return {
+    companionId: record.companionId,
+    companionName: resolveCompanionDisplayName(record.companionId, companionName),
+    source: record.source,
+    // 标签表复用派单域那一份（`COMPANION_RELEASE_SOURCE_LABELS`），不另写一套叫法
+    sourceLabel: COMPANION_RELEASE_SOURCE_LABELS[record.source],
+    reason: record.reason,
+    createdAt: record.createdAt,
   };
 }
 
@@ -407,3 +519,413 @@ export function toStaffConversationMessage(
     isSelf,
   };
 }
+
+// ——————————————————————————— 会话分段（P0-14） ———————————————————————————
+
+/**
+ * 发送框旁的说明。
+ *
+ * ⚠️ 这句话在 P0-14 **从「提示」变成了「必须说清的事」**：一张订单现在可以有两段
+ * 以上的会话，客服看到「护航沟通」那一段时很容易以为自己的回复会发给那位护航。
+ * 不会——客服的回复只进入客服会话。不说清楚，客服会在履约会话里追问一位
+ * **已经不在这一单上**的护航，而对方永远收不到。
+ *
+ * 说明里刻意点了「用户能同时看到客服沟通与各段护航沟通」：客服据此才敢判断
+ * 「这句话写在客服沟通里，用户照样看得到」。
+ */
+export const STAFF_MESSAGE_TARGET_NOTICE =
+  "你的回复只会进入「客服沟通」那一段；用户能看到客服沟通与各段护航沟通，但护航看不到客服沟通。";
+
+/**
+ * 订单的全部会话 → 客服视角的分段视图（P0-14）。
+ *
+ * 四条约定：
+ *
+ * 1. **含已失效的历史段**，而且照样带护航名字——`cmd_p0-14.md` §八要求
+ *    「不因换人丢失旧聊天」，被换下的那位护航做过什么正是调查的对象；
+ * 2. **排序与用户端同一套**（`compareConversationsWithinOrder`）：客服与会话页
+ *    讨论的必须是同一个「第几段」，两边各排一次迟早会错位；
+ * 3. **`isCurrent` 由订单当前的履约段现算**（`isCurrentAssignmentConversation`），
+ *    不是读会话上的历史标记——「哪一段是当前」是订单此刻的事实，会变；
+ * 4. **空段落照样出现**：一段会话存在但没有消息，本身就是一条信息
+ *    （「这两方被撮合过但没聊」），藏掉它会让人以为那一段不存在。
+ *
+ * ⚠️ `companionNames` 由调用方解析后传入（仓储读不了「展示名」这件事）。
+ * 查不到名字时**回落到 `companionId`**：与履约退出历史
+ * （`toStaffCompanionReleaseEntry`）同一个口径——客服宁可看到一个 id，
+ * 也不能看到一段占位符而以为那是一位真正的护航。
+ */
+export function toStaffConversationSegments(
+  conversations: readonly OrderConversationRecord[],
+  messages: readonly OrderMessage[],
+  currentStaffId: string,
+  currentAssignmentKey: string | null,
+  companionNames: ReadonlyMap<string, string>,
+): StaffConversationSegment[] {
+  // 消息按会话分组：分段只需要「这一段的消息」，跨段合并是另一件事（那就是 `messages`）
+  const byConversation = new Map<string, OrderMessage[]>();
+  for (const message of messages) {
+    const list = byConversation.get(message.conversationId);
+    if (list) list.push(message);
+    else byConversation.set(message.conversationId, [message]);
+  }
+
+  return [...conversations]
+    .sort(compareConversationsWithinOrder)
+    .map((conversation, index) => {
+      const isCurrent = isCurrentAssignmentConversation(conversation, currentAssignmentKey);
+      return {
+        index,
+        kind: conversation.kind,
+        // 客服端的角色称呼是「护航」（见 `..._TITLE_STAFF` 的说明）
+        title: segmentTitle(conversation, isCurrent, CONVERSATION_SEGMENT_ASSIGNMENT_TITLE_STAFF),
+        isCurrent,
+        companionId: conversation.companionId,
+        // 客服会话没有护航；履约会话即使查不到资料也要显示得出是哪一位（回落规则见
+        // `resolveCompanionDisplayName`，与退出历史条目同一份实现）
+        companionName: conversation.companionId
+          ? resolveCompanionDisplayName(conversation.companionId, companionNames.get(conversation.companionId) ?? "")
+          : null,
+        messages: (byConversation.get(conversation.id) ?? []).map((message) =>
+          toStaffConversationMessage(message, currentStaffId),
+        ),
+      };
+    });
+}
+
+// ——————————————————————————— 全量订单查询（P0-10） ———————————————————————————
+
+/**
+ * 客服工作台「订单」页的筛选规则、文案与 DTO 转换（服务端与浏览器共用）。
+ *
+ * ⚠️ 本段除类型与几个纯函数模块（`./orderFilters`、`./dispatch`、`./orders`、`./pagination`）
+ * 外没有运行时依赖：客户端组件引用它不会把服务端模块打进浏览器产物，
+ * node 也能直接加载它做纯逻辑测试。仓储读取一律在
+ * `lib/services/staffOrders.ts` 里完成，本层只做「怎么筛、怎么显示」。
+ *
+ * ⚠️ **与身份无关的那几条规则不在这里**：日期格式、北京时间的自然日、游戏筛选项的来源、
+ * 关键词匹配的四个字段、创建时间倒序——它们住在 `./orderFilters`，
+ * 由管理端与客服端**共用同一份实现**。这里只做三件带客服身份的事：
+ *
+ * 1. **字段表**：`StaffOrderListItem` / `StaffOrderDispatchSummary` 显式挑字段，
+ *    平台分账字段与游戏账号、备注不进客服响应（详见 `lib/types/staff.ts` 的注释）；
+ * 2. **文案**：每个界面拥有自己的错误文案与说明句，不跨界面共享（与
+ *    `STAFF_ORDER_STATUS_INVALID_MESSAGE` 同例）；
+ * 3. **状态筛选**：复用既有的 `StaffOrderStatusFilter`（`all` + 五种订单状态）。
+ *
+ * ⚠️ 页面的只读说明**复用 `STAFF_ORDER_READONLY_NOTICE`，不另写一句**：
+ * 那句说的正是「客服不能改订单状态 / 金额 / 商品，动作在各自的页面里」，
+ * 订单页与订单摘要面板说的是同一件事。同一件事写两句，迟早有一处被改而另一处没有，
+ * 那时两页对同一条边界给出两种说法。
+ */
+
+export const STAFF_ORDERS_PAGE_TITLE = "订单";
+export const STAFF_ORDER_DETAIL_TITLE = "订单详情";
+
+/**
+ * 列表顶部的说明：讲清楚这张列表的口径，以及它与「会话列表」的区别。
+ *
+ * ⚠️ 必须点明「**全平台订单**，不只是有沟通记录的」：客服手上同时有会话列表与订单列表
+ * 两个入口，不说明的话会以为订单页漏了那些「没聊过」的单。
+ *
+ * ⚠️ 也要点明时间筛选按**创建时间**算：排序字段与筛选字段必须是同一个，
+ * 否则「筛 9 月、排出来按 8 月的时间交错」会很难解释。
+ */
+export const STAFF_ORDER_LIST_NOTICE =
+  "这里可以查询全平台的订单（不只是有沟通记录的订单），按创建时间倒序；" +
+  "日期按北京时间（UTC+8）的自然日筛选，算的是下单（支付成功）时间。" +
+  "支付失败与取消只留下支付请求记录，它们不是订单，因此不出现在这里。";
+
+/**
+ * 列表底部的字段边界说明。
+ *
+ * ⚠️ 必须写在列表上，而不是只在代码里裁字段：看到列表的人会去找「这一单的账号和备注」，
+ * 得让他知道**客服端两处都没有**，而不是以为数据没采到。
+ *
+ * ⚠️ 与 `ADMIN_ORDER_LIST_FIELDS_NOTE` 的措辞**刻意不同**：管理端那句说
+ * 「这些内容只在详情页可见」，因为管理端详情确实带游戏账号与备注；
+ * 客服端**详情也不带**，照抄那句会写出一句假话。这是一处**刻意的不对称**。
+ */
+export const STAFF_ORDER_LIST_FIELDS_NOTE =
+  "列表不展示游戏账号、用户备注、增值服务明细与售后摘要：增值明细与售后摘要只在详情页可见，" +
+  "游戏账号与用户备注客服端两处都不展示；列表与详情都不展示分账比例与平台收入。";
+
+/**
+ * 列表为空时的提示。与 `STAFF_CONVERSATION_EMPTY_TITLE` 同例：
+ * 空态说的是「**当前筛选下**没有」，而不是「平台没有订单」——
+ * 后者会让人以为数据坏了，前者会让人去改筛选条件。
+ */
+export const STAFF_ORDER_EMPTY_TITLE = "当前筛选下没有订单";
+
+/** 目标订单不存在时的提示。与接口 404 的 message 同源。 */
+export const STAFF_ORDER_NOT_FOUND_MESSAGE = "订单不存在";
+
+/** 筛选条件不合法时的提示。**返回 400，不静默回退**。 */
+export const STAFF_ORDER_GAME_INVALID_MESSAGE = "筛选条件 game 不是订单里出现过的游戏";
+export const STAFF_ORDER_DATE_INVALID_MESSAGE = "筛选条件 from / to 必须是 YYYY-MM-DD 格式的日期";
+export const STAFF_ORDER_DATE_RANGE_INVALID_MESSAGE = "开始日期不能晚于结束日期";
+
+// ——————————————————————————— 订单列表查询 ———————————————————————————
+
+/**
+ * 客服端订单列表查询条件（已解析、已校验）。
+ *
+ * ⚠️ **排序不是参数**：默认（也是唯一）的排序是按创建时间倒序，
+ * 用的就是共享的 `compareOrdersByCreatedAt`（与时间筛选同一个字段）。
+ */
+export type StaffOrderListQuery = {
+  /** `all` 表示不限状态 */
+  status: StaffOrderStatusFilter;
+  /**
+   * 已去首尾空格；空串表示不搜索。
+   *
+   * 匹配**订单号 / 商品名 / 用户昵称 / 平台展示 ID / 内部用户标识**（共享的
+   * `orderMatchesKeyword`），这些正是客服手里能拿到的东西。备注与游戏账号不参与搜索
+   * ——那是内容不是标识，用它们搜出来的结果没人能预期。
+   *
+   * ⚠️ 平台标识有**两串**（P0-10 整改）：`displayId` 是用户资料页上那串，
+   * 内部标识是客服会话页一直给的那串。列表上两个都显示，因此两个都得能搜。
+   */
+  keyword: string;
+  /** 游戏名；空串表示全部游戏 */
+  game: string;
+  /** 起始日期 `YYYY-MM-DD`（含当天，北京时间）；空串表示不限 */
+  from: string;
+  /** 结束日期 `YYYY-MM-DD`（含当天，北京时间）；空串表示不限 */
+  to: string;
+  page: number;
+  pageSize: number;
+};
+
+/**
+ * 组装查询条件。与 `buildAdminOrderListQuery` 同一写法，分页上限用 **Staff 自己的**
+ * `STAFF_MAX_PAGE` / `STAFF_MAX_PAGE_SIZE`：工作台是手机 / 平板宽度，与管理端 PC 宽屏
+ * 一次能看的条数不是一个问题。
+ *
+ * ⚠️ 日期在这里**再解析一次**（严格模式已经在服务层校验过、非法即 400），
+ * 解析不了回落到空串表示不限——与 `buildAdminOrderListQuery` 完全一致。
+ */
+export function buildStaffOrderListQuery(input: {
+  params: URLSearchParams;
+  /** 已经解析好的状态筛选（接口用 `read*` 严格解析，页面用 `normalize*` 规范化） */
+  status: StaffOrderStatusFilter;
+  /** 已经解析好的游戏筛选；空串表示全部游戏 */
+  game: string;
+}): StaffOrderListQuery {
+  const keyword = input.params.get("keyword");
+
+  return {
+    status: input.status,
+    keyword: typeof keyword === "string" ? keyword.trim() : "",
+    game: input.game,
+    from: readOrderFilterDate(input.params.get("from")) ?? "",
+    to: readOrderFilterDate(input.params.get("to")) ?? "",
+    page: clampPage(input.params.get("page"), STAFF_MAX_PAGE),
+    pageSize: clampPageSize(input.params.get("pageSize"), STAFF_PAGE_SIZE, STAFF_MAX_PAGE_SIZE),
+  };
+}
+
+// ——————————————————————————— DTO 转换 ———————————————————————————
+
+/**
+ * 订单 + 用户摘要 → 客服端列表项。**显式挑字段**，不是 `{ ...order }` 再删几个。
+ *
+ * ⚠️ 平台分账字段（`companionRateSnapshot` / `companionBaseIncome` / `clubNetIncome`）、
+ * 游戏账号、备注与用户主键因此默认不会外流——只有写在这里的字段才会被浏览器看到。
+ * 给 `Order` 新增字段也不会自动出现在响应里，那正是「该不该给客服看」被重新判断一次的地方。
+ *
+ * 用户摘要由服务层查好传进来（订单里只有 `userId`）：昵称与两串平台标识都是搜索命中的
+ * 字段，列表上也要显示得出来，否则「搜到了但看不出来为什么搜到」。
+ */
+export function toStaffOrderListItem(
+  order: Order,
+  user: StaffOrderUserSummary,
+): StaffOrderListItem {
+  return {
+    id: order.id,
+    orderNo: order.orderNo,
+    status: order.status,
+    statusLabel: ORDER_STATUS_LABELS[order.status] ?? order.status,
+    createdAt: order.createdAt,
+    paidAt: order.paidAt,
+    gameName: order.gameName,
+    productTitle: order.productTitle,
+    specName: order.specName,
+    quantity: order.quantity,
+    // 列表那一列的表头是「实收金额」，所以给**实付**（P1-4）：
+    // 优惠前应付有券时比渠道真正收到的钱大。列表只带这一个金额，
+    // 优惠前的原价只在详情里叫 `originalAmount`
+    actualPaidAmount: order.actualPaidAmount,
+    user,
+  };
+}
+
+/**
+ * 派单记录 → 派单进度摘要。
+ *
+ * ⚠️ 只取「在哪等、等到什么时候、结果是什么」这七项：两个 `*CompanionId` 与平台参数快照
+ * （`publicTimeoutMinutesSnapshot`）都不给，理由见 `StaffOrderDispatchSummary` 的注释。
+ * `stateLabel` 用**派单域那一份** `DISPATCH_STATE_LABELS`，客服端不另起一套叫法——
+ * 同一件事两种叫法时，读的人只会以为它们是两件事。
+ */
+export function toStaffOrderDispatchSummary(record: DispatchRecord): StaffOrderDispatchSummary {
+  return {
+    state: record.state,
+    stateLabel: DISPATCH_STATE_LABELS[record.state],
+    exclusiveEnteredAt: record.exclusiveEnteredAt,
+    exclusiveDeadlineAt: record.exclusiveDeadlineAt,
+    publicPoolEnteredAt: record.publicPoolEnteredAt,
+    publicDeadlineAt: record.publicDeadlineAt,
+    acceptedAt: record.acceptedAt,
+    timedOutAt: record.timedOutAt,
+  };
+}
+
+/* ─────────────────── 订单处置：换人 / 退回公共池（P0-11） ─────────────────── */
+
+/**
+ * 这一单此刻客服能做什么。**服务端与页面用的是同一个函数**（唯一出处）。
+ *
+ * ⚠️ 判据与事务层的领域 Guard **必须一致**（`releaseOrderByStaff` /
+ * `replaceOrderCompanionByStaff` 的第 2、3 步）：
+ *
+ * 1. 状态恰好是 `accepted` 或 `serving`——订单上没有「有人正在履约」这个状态之外的
+ *    可换对象（`paid` 是等人接、`completed` / `refunded` 是终态）；
+ * 2. `actualCompanionId` 非空——「谁在履约」是**事实**字段，不是状态的函数。
+ *    历史脏数据里状态说有人在履约、字段却是空的时候，两个入口都必须拒绝。
+ *
+ * 三处（两个事务入口 + 这个展示函数）今天给出的答案完全相同，这是刻意的：
+ * 页面显示的按钮与接口接受的请求一旦分叉，客服就会遇到一个「看得见、点不动」的按钮，
+ * 而那种失败没有任何文案能解释清楚。
+ *
+ * ⚠️ 它**不看**派单记录是否还在：那是**数据自洽**问题（真出现时接口报 500），
+ * 不是「客服能不能做这件事」。把数据损坏说成一个按钮的可见性，只会让客服
+ * 反复重试同一个必然失败的请求。
+ */
+export function staffOrderAllowedActions(order: Order): StaffOrderAllowedActions {
+  const inService = order.status === "accepted" || order.status === "serving";
+  const releasable = inService && order.actualCompanionId !== null;
+  return { canRelease: releasable, canReplace: releasable };
+}
+
+/** 退回公共池的原因必填。**只有「必填」，没有长度要求**（与打手取消同一条裁决）。 */
+export const STAFF_ORDER_RELEASE_REASON_REQUIRED_MESSAGE = "请填写退回公共池的原因";
+
+/** 是这一单，但此刻没有人在履约（400）。与 404 分开：订单确实存在，只是这个按钮不该出现。 */
+export const STAFF_ORDER_NOT_RELEASABLE_MESSAGE = "当前订单状态不允许退回公共池";
+export const STAFF_ORDER_NOT_REPLACEABLE_MESSAGE = "当前订单状态不允许更换护航";
+
+/** 换人没选人 / 选了一个不存在的人（400）。两种都是「这次请求本身不完整」。 */
+export const STAFF_ORDER_REPLACE_COMPANION_REQUIRED_MESSAGE = "请选择要指定的护航";
+export const STAFF_ORDER_COMPANION_NOT_FOUND_MESSAGE = "指定的护航不存在";
+
+/**
+ * 指定的护航此刻不能接单（400，`enabled` / 未移除 / 当前可接单 三者任一不满足）。
+ *
+ * ⚠️ 三种原因**共用一句**：对客服要做的动作是同一件（换一个人），
+ * 而分开说明等于把一位护航的账号状态细节告诉客服——那是管理端的事。
+ */
+export const STAFF_ORDER_COMPANION_UNAVAILABLE_MESSAGE = "指定的护航当前不能接单";
+
+/** 指定的就是下单用户本人（400）。与用户端接单的禁止自接单是同一条规则。 */
+export const STAFF_ORDER_SELF_ORDER_MESSAGE = "不能把订单指定给下单用户本人";
+
+/** 指定的就是此刻正在履约的那位（400）。没有「换」这件事可做。 */
+export const STAFF_ORDER_SAME_COMPANION_MESSAGE = "该护航正在履约这一单，无需更换";
+
+/** 换人候选为空时的提示。空态说「没有谁可以换」，而不是「加载失败」。 */
+export const STAFF_ORDER_REPLACE_EMPTY_TITLE = "当前没有可指定的护航";
+export const STAFF_ORDER_REPLACE_EMPTY_DESCRIPTION =
+  "所有护航都处于停用、已移除或暂停接单状态，或只剩正在履约这一单的那位。";
+
+/**
+ * 候选列表顶部的一句口径说明。
+ *
+ * ⚠️ 必须点明「名单已经筛过」：客服看到的是一个短名单，不说明的话会以为平台只有这么多护航；
+ * 也点明**下单用户本人不在名单里**，否则他会去找一个平台刻意藏起来的人。
+ */
+export const STAFF_ORDER_REPLACE_CANDIDATES_NOTICE =
+  "以下护航此刻都可以接单（已排除停用、已移除、暂停接单、下单用户本人，以及正在履约这一单的那位），可以直接指定，无需管理员审批。";
+
+/** 候选列表非空时也要有一句话，说明那一列数字是什么。 */
+export const STAFF_ORDER_REPLACE_CANDIDATES_COUNT_LABEL = "在履约订单数";
+
+// ——— 处置面板的按钮与反馈 ———
+
+export const STAFF_ORDER_ACTIONS_TITLE = "订单处置";
+
+/**
+ * 面板顶部的一句说明。
+ *
+ * ⚠️ 必须点明**两个动作都会通知下单用户**，因为这对客服是操作前的知情：
+ * 「退回公共池」会让用户看到订单重新等人接，「更换护航」会让用户看到换了人。
+ * 不写的话，客服会在用户来问的时候才发现自己刚刚做了什么。
+ *
+ * ⚠️ 也点明**两个动作都不退款**：客服最容易预设「换人 = 补偿」，
+ * 而本轮换人不涉及任何金额（退款是另一个动作）。
+ */
+export const STAFF_ORDER_ACTIONS_NOTICE =
+  "更换护航与退回公共池都会通知下单用户。两个动作都不改变订单金额，也不产生退款；" +
+  "已完成的订单与还没有人接单的订单不提供这两个动作。";
+
+/** 订单上没有可执行动作时替代面板的那一句（`canRelease === false`）。 */
+export const STAFF_ORDER_ACTIONS_UNAVAILABLE_NOTICE =
+  "当前订单没有可执行的处置：只有「已接单」与「护航中」的订单可以更换护航或退回公共池。";
+
+export const STAFF_ORDER_RELEASE_LABEL = "重新进入公共池";
+export const STAFF_ORDER_RELEASE_CONFIRM_LABEL = "确认退回公共池";
+export const STAFF_ORDER_RELEASE_REASON_LABEL = "退回原因";
+/** 与打手取消同一条取舍：**不写任何字数提示**（需求未冻结字数）。 */
+export const STAFF_ORDER_RELEASE_REASON_PLACEHOLDER = "请说明为什么需要更换护航";
+
+/**
+ * 展开确认区时的那段说明。
+ *
+ * ⚠️ 必须说清**这一单不会取消**、**金额不变**、**原护航立即失去这一单**。
+ * 少一条，客服就得在按下按钮之后去别处确认自己做了什么。
+ */
+export const STAFF_ORDER_RELEASE_CONFIRM_NOTICE =
+  "退回后原护航立即不再负责这一单，订单重新进入公共订单池，等待其他护航接取。订单不会被取消，金额也不变；下单用户会收到一条通知。";
+
+export const STAFF_ORDER_RELEASE_SUCCESS_LABEL =
+  "已退回公共订单池。原护航已不再负责这一单，下单用户已收到通知。";
+
+export const STAFF_ORDER_REPLACE_LABEL = "更换护航";
+export const STAFF_ORDER_REPLACE_CONFIRM_LABEL = "确认更换护航";
+export const STAFF_ORDER_REPLACE_SELECT_LABEL = "指定新护航";
+
+/**
+ * 换人确认区的那段说明。
+ *
+ * ⚠️ 必须点明**新护航拿到的只是「已接单」**：他仍要自己点「开始服务」、
+ * 自己交完成材料。不写的话，客服会以为换完就有人在做这一单了。
+ *
+ * ⚠️ 也要点明**原护航那份未审完的完成材料会作废**：那是这次操作的一个真实后果，
+ * 而且它会直接影响「这一单怎么又回到护航中了」这个客服一定会被问到的问题。
+ */
+export const STAFF_ORDER_REPLACE_CONFIRM_NOTICE =
+  "更换后原护航立即不再负责这一单，订单转由新护航履约（状态仍是「已接单」，由他自己开始服务）。" +
+  "原护航已提交但还没审完的完成材料会立即作废，不会再被自动通过。订单金额不变，下单用户会收到一条通知。";
+
+export const STAFF_ORDER_REPLACE_SUCCESS_LABEL =
+  "已更换护航。新护航已接手这一单，下单用户已收到通知。";
+
+/**
+ * 护航记录 → 换人候选项。
+ *
+ * ⚠️ 只取昵称与头像（外加由服务层算好的在履约单数）：联系方式、分账、内部主键
+ * 都不在这里。这与 `StaffUserSummary` 是同一条数据最小化口径，
+ * 只不过对象从「下单用户」换成了「护航」。
+ */
+export function toStaffOrderReplaceCandidate(
+  companion: Companion,
+  activeOrderCount: number,
+): StaffOrderReplaceCandidate {
+  return {
+    companionId: companion.id,
+    displayName: companion.displayName,
+    avatarUrl: companion.avatarUrl,
+    activeOrderCount,
+  };
+}
+

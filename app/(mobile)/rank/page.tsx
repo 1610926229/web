@@ -1,4 +1,5 @@
 import NavBar from "@/components/common/NavBar";
+import RankBoardSwitch from "@/components/rank/RankBoardSwitch";
 import RankingBoard from "@/components/rank/RankingBoard";
 import { RANKING_PAGE_TITLE } from "@/lib/constants/rankings";
 import { normalizeRankingPeriod } from "@/lib/constants/rankingPeriods";
@@ -24,6 +25,17 @@ import { toSearchParams } from "@/lib/utils/query";
  * 改写成默认周期，`RankingBoard` 负责这件事。
  *
  * Mock 参数原样传下去：`?mockEmpty=rankings` 演示空榜，`?mockError=1` 演示错误边界。
+ *
+ * ## P1-5 的改动**只有一处**：顶部多了一条 `RankBoardSwitch`
+ *
+ * 打手榜（`/rank/companions`）是本轮新增的另一个榜。产品裁定
+ * （`rounds/P1-5/02-decisions.md` §10）要求两个榜**必须是两个独立业务维度**，
+ * 而消费榜自己的「我的排名」逻辑**继续保留、不得改写**——因此这里**不做**「同一页
+ * 两个页签」：切榜是一次**跳转到另一个地址**，两条取数路径不共享任何状态。
+ *
+ * ⚠️ 本页的取数、周期、分页与名次逻辑**一行都没有改**：
+ * `getConsumptionRanking` 的参数与调用方式、`period` 的规范化、`RankingBoard` 的
+ * 全部 props 都保持原样。新增的只是上面那一个导航组件。
  */
 export default async function RankPage({ searchParams }: PageProps<"/rank">) {
   const params = toSearchParams(await searchParams);
@@ -37,6 +49,7 @@ export default async function RankPage({ searchParams }: PageProps<"/rank">) {
   return (
     <>
       <NavBar title={RANKING_PAGE_TITLE} showBack />
+      <RankBoardSwitch active="consumption" />
       <RankingBoard initialResult={initialResult} />
     </>
   );

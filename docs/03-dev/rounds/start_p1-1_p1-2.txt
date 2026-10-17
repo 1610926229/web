@@ -1,0 +1,56 @@
+连续执行 P1-1 与 P1-2，不等待中途人工回复。
+
+执行顺序：
+
+1. 完整读取并执行：
+   `docs/03-dev/rounds/cmd_p1-1.md`
+
+2. P1-1 完成后必须停在：
+   `AWAITING_ACCEPTANCE`
+   不得 DONE。
+
+3. 不等待人工验收，继续完整读取并执行：
+   `docs/03-dev/rounds/cmd_p1-2.md`
+
+4. P1-2 完成后停在：
+   `AWAITING_ACCEPTANCE`
+
+最终状态必须为：
+
+- P0-14 = AWAITING_ACCEPTANCE
+- P1-1 = AWAITING_ACCEPTANCE
+- P1-2 = AWAITING_ACCEPTANCE
+
+不得开始 P1-3。
+
+全程禁止任何 Git 写操作。
+
+每轮分别执行：
+
+Requirement Check
+→ READY
+→ IN_PROGRESS
+→ 开发
+→ targeted tests
+→ pnpm test
+→ typecheck
+→ lint
+→ build
+→ production APP_BASE_URL 全量测试
+→ reviewer-agent
+→ 修复全部 BLOCKER / MAJOR
+→ 最终完整复跑
+→ AWAITING_ACCEPTANCE
+
+如果 P1-1 reviewer / gate 发现 BLOCKER 或 MAJOR，必须先修复并完整复跑 P1-1，再进入 P1-2。
+
+如果 P1-1 仍存在产品 OPEN / CLARIFYING，只有真正阻塞 P1-2 才停止；不阻塞则按文档已冻结规则继续。
+
+最后一次性输出：
+
+A. P1-1 完整交付报告
+B. P1-2 完整交付报告
+C. P0-14 / P1-1 / P1-2 统一人工验收入口
+D. git status
+
+然后停止。

@@ -4,7 +4,8 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MINE_GRID_ENTRIES, MINE_PRIMARY_ENTRIES } from "../lib/constants/mine.ts";
-import { homeSeed } from "../lib/mocks/fixtures/seed.ts";
+import { validateSafePath } from "../lib/constants/safePath.ts";
+import { quickEntrySeed } from "../lib/mocks/fixtures/contentSeed.ts";
 import { findAppFile, hasAppFile } from "./app-path.mjs";
 
 /**
@@ -94,23 +95,45 @@ test("扫描器本身正确：能找到已知路由、并排除动态段与不�
   assert.equal(ROUTES.has("/definitely-not-a-route"), false);
 });
 
-test("陪玩列表用复数 /companions，单数 /companion 不再是页面路由", () => {
+/**
+ * 单数 `/companion` 与复数 `/companions` 的区分。
+ *
+ * ⚠️ 这条断言在 P0-4 时被**改写**过，方向与原意相反，因此把历史写在这里：
+ * 原先 `/companion` **不是**页面路由（它是被废弃的单数写法，谁指向它谁 404）；
+ * P0-4 起 `/companion` 是**打手工作台**——另一个东西，而不是名单的第二种写法。
+ *
+ * 名单只有一个地址这件事仍然必须被钉住：只要「寻找陪玩」的地址还是 `/companions`，
+ * 就没有人能靠改一个字母把用户带到工作台上去。因此原来那条
+ * 「入口不能指向 /companion」的断言没有被删掉，而是换成了下面
+ * 「入口地址恰好等于 /companions」这一条更精确的写法。
+ */
+test("陪玩列表是 /companions；单数 /companion 现在是打手工作台，不是名单的第二种写法", () => {
   assert.equal(ROUTES.has("/companions"), true, "缺少 /companions 页面");
-  assert.equal(ROUTES.has("/companion"), false, "/companion（单数）不应再是页面路由");
-  // hasAppFile 忽略路由组：页面搬进 `(mobile)` 之后，写死 `app/companion` 这种检查
-  // 会因为「目录压根不在这儿」而永远通过，变成一条不起作用的断言。
-  assert.equal(hasAppFile("companion/page.tsx"), false, "残留了单数路由目录");
+  assert.equal(ROUTES.has("/companion"), true, "缺少 /companion（打手工作台）页面");
+  // hasAppFile 忽略路由组：页面搬进 `(mobile)` / `(console)` 之后，写死 `app/companion`
+  // 这种检查会因为「目录压根不在这儿」而永远通过，变成一条不起作用的断言。
+  assert.equal(hasAppFile("companion/page.tsx"), true, "打手工作台的页面应当在 companion 这一段下");
 });
 
 test("「我的」页每个入口地址都真实存在，且寻找陪玩指向 /companions", () => {
   const entries = [...MINE_PRIMARY_ENTRIES, ...MINE_GRID_ENTRIES];
   const companion = entries.find((entry) => entry.id === "companion");
   const join = entries.find((entry) => entry.id === "join");
+  const consoleEntry = entries.find((entry) => entry.id === "companion-console");
 
   assert.ok(companion, "缺少寻找陪玩入口");
   assert.equal(companion.label, "寻找陪玩");
   assert.equal(companion.kind, "link");
   assert.equal(companion.href, "/companions");
+  // 名单入口与工作台入口是**两个地址**：单数 /companion 曾经是漏出去的那个错地址，
+  // P0-4 之后它成了一个真页面，因此这一条不能再靠「它不是路由」来保证
+  assert.notEqual(companion.href, "/companion", "「寻找陪玩」不能指向打手工作台");
+
+  // 打手工作台（P0-4 新增，原型里没有这个入口）：只有一条链接，不带参数、不带身份判断
+  assert.ok(consoleEntry, "缺打手工作台入口");
+  assert.equal(consoleEntry.label, "打手工作台");
+  assert.equal(consoleEntry.kind, "link");
+  assert.equal(consoleEntry.href, "/companion");
 
   // 「我的」页「成为护航」与首页「考核入驻」是同一个页面的两个入口，地址必须一致
   assert.ok(join, "缺成为护航入口");
@@ -125,26 +148,75 @@ test("「我的」页每个入口地址都真实存在，且寻找陪玩指向 /
       true,
       `「我的」页入口「${entry.label}」指向了不存在的路由：${entry.href}`,
     );
-    // 单数 /companion 曾经就是在这里漏出去的
-    assert.notEqual(pathnameOf(entry.href), "/companion");
   }
 });
 
+/**
+ * 首页快捷入口的预置数据。
+ *
+ * ⚠️ P8E-1 起首页入口**由后台管理**，因此它不再是一份写在首页里的常量，
+ * 而是 `contentSeed.ts` 里的**仓储初始记录**（`QuickEntryRecord[]`，字段叫 `path`
+ * 不叫 `href`）。这份测试因此改成从种子读——而这一条**必须留着**：
+ * 后台可以改入口地址，但**预置数据里那两个地址仍然必须是真实存在的路由**，
+ * 否则用户第一次打开首页就会看到一个 404 的格子。
+ *
+ * 对**运行期由后台新建**的入口，源码级扫描当然管不到（路由表只有构建期知道）。
+ * 那部分由写入侧的 `validateSafePath()` 与 `tests/safePath.test.mjs` 保证
+ * 「不会指向站外、不会执行脚本」，最坏情况是 404 —— 这是刻意的取舍：
+ * **宁可 404，不可执行**。
+ */
+const seededShortcuts = quickEntrySeed;
+
 test("首页每个快捷入口都真实存在：考核入驻统一指向 /join", () => {
-  const join = homeSeed.shortcuts.find((shortcut) => shortcut.id === "join");
+  const join = seededShortcuts.find((shortcut) => shortcut.id === "join");
 
   assert.ok(join, "缺少考核入驻入口");
   assert.equal(join.label, "考核入驻");
-  assert.equal(join.href, "/join");
-  assert.notEqual(join.href, "/placeholder?title=考核入驻");
+  assert.equal(join.path, "/join");
+  assert.notEqual(join.path, "/placeholder?title=考核入驻");
 
-  for (const shortcut of homeSeed.shortcuts) {
+  for (const shortcut of seededShortcuts) {
     assert.equal(
-      ROUTES.has(pathnameOf(shortcut.href)),
+      ROUTES.has(pathnameOf(shortcut.path)),
       true,
-      `首页入口「${shortcut.label}」指向了不存在的路由：${shortcut.href}`,
+      `首页入口「${shortcut.label}」指向了不存在的路由：${shortcut.path}`,
     );
   }
+});
+
+test("首页快捷入口的预置地址全部通过安全校验（站内路径）", () => {
+  for (const shortcut of seededShortcuts) {
+    const result = validateSafePath(shortcut.path);
+
+    assert.equal(
+      result.ok,
+      true,
+      `首页入口「${shortcut.label}」的地址没通过安全校验：${shortcut.path}（${result.ok ? "" : result.message}）`,
+    );
+    // 显式钉住两条最要紧的：协议相对地址与脚本协议
+    assert.notEqual(shortcut.path.startsWith("//"), true, `${shortcut.path} 是协议相对地址`);
+    assert.equal(
+      shortcut.path.toLowerCase().startsWith("javascript:"),
+      false,
+      `${shortcut.path} 是脚本协议`,
+    );
+  }
+
+  // 预置入口必须都是**用户端可见**的：一条默认停用的预置入口等于首页少一个格子，
+  // 而那不是任何人做过的决定
+  for (const shortcut of seededShortcuts) {
+    assert.equal(shortcut.enabled, true, `预置入口「${shortcut.label}」默认就是停用的`);
+    assert.equal(shortcut.removedAt, null, `预置入口「${shortcut.label}」默认就是已移除的`);
+  }
+
+  // 用户端四宫格：预置数据必须是四条，且排序值互不相同
+  // （相同的排序值会让顺序退化成按 id 排，运营改顺序时会发现「怎么改都不动」）
+  assert.equal(seededShortcuts.length, 4, "首页四宫格应当是四条预置入口");
+  assert.equal(
+    new Set(seededShortcuts.map((shortcut) => shortcut.sortOrder)).size,
+    4,
+    "预置入口的排序值有重复：按 sortOrder 排顺序会退化",
+  );
 });
 
 test("/join 需要登录：套用统一 RequireAuth，导航留在鉴权之外", () => {
@@ -416,8 +488,8 @@ test("不存在指向 /placeholder?title=考核入驻 的入口", () => {
   for (const entry of entries) {
     assert.notEqual(entry.href, "/placeholder?title=考核入驻");
   }
-  for (const shortcut of homeSeed.shortcuts) {
-    assert.notEqual(shortcut.href, "/placeholder?title=考核入驻");
+  for (const shortcut of seededShortcuts) {
+    assert.notEqual(shortcut.path, "/placeholder?title=考核入驻");
   }
 
   // 源码里也不该再出现这个地址（注释里写一句也算「还有入口」的隐患）
@@ -596,7 +668,10 @@ test("列表项与详情的共有字段只有一份：同一个字段不会在�
     3,
     "列表项与详情应当共用同一份共有字段（一个定义 + 两处引用）",
   );
-  assert.ok(source.includes("...toCompanionBase(companion, gameNameById)"));
+  // ⚠️ P1-8 之后共有字段多了一位入参：评分与评价数不再存在实体上，
+  // 而是由调用方传入的**同一份**聚合结果（`stats`）算出来（`D17` / `R3`）。
+  // 断言跟着入参一起更新，但守的东西不变：两份 DTO 仍然从同一个函数出发。
+  assert.ok(source.includes("...toCompanionBase(companion, gameNameById, stats)"));
 });
 
 test("陪玩的选择交互不产生任何业务结果：不发请求、不写存储、不进结算页", () => {
@@ -705,9 +780,13 @@ test("陪玩组件不引用 Mock / 数据层，且客户端只引用 *Http 取�
 });
 
 test("陪玩与入驻的路由地址没有第二种写法", () => {
-  // 单数 /companion 不是页面路由，也没有残留目录
-  assert.equal(ROUTES.has("/companion"), false);
-  assert.equal(hasAppFile("companion/page.tsx"), false, "残留了单数路由目录");
+  // 名单是 /companions，工作台是 /companion（P0-4 起）：两者都存在，但各只有一个地址。
+  // 这里不再断言「/companion 不是路由」——它现在是打手工作台，
+  // 「入口不许指向它」那条规则由上面「我的」页入口的用例负责。
+  assert.equal(ROUTES.has("/companions"), true);
+  assert.equal(ROUTES.has("/companion"), true);
+  assert.equal(ROUTES.has("/companions/console"), false);
+  assert.equal(ROUTES.has("/companion/list"), false);
 
   // 入驻进度是 /join/status，不是 /joinStatus 之类的第二种写法
   assert.equal(ROUTES.has("/join/status"), true);

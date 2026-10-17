@@ -17,7 +17,7 @@ import {
 import { IDEMPOTENCY_KEY_MISSING_MESSAGE } from "../lib/constants/writes.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
 import { couponClaimSeed, couponSeed } from "../lib/mocks/fixtures/couponSeed.ts";
-import { previewCheckout } from "../lib/services/checkout.ts";
+import { createPaymentRequest, previewCheckout } from "../lib/services/checkout.ts";
 import { claimCouponForUser, queryCouponsForUser } from "../lib/services/coupons.ts";
 
 /**
@@ -309,28 +309,72 @@ test("用户隔离：A 与 B 的领取互不影响", async () => {
   assert.equal(aIds.has("claim-seed-1001-01"), true);
 });
 
-test("领取优惠券不改变结算试算金额", async () => {
-  const before = await previewCheckout(SELECTION, undefined, "server");
-  const totalBefore = before.totalAmount;
+test("领券本身不改变结算金额：抵扣只在明确选中一张可用券时才发生", async () => {
+  const before = await previewCheckout(SELECTION, USER_A, undefined, "server");
 
   await claim(USER_A, OPEN_COUPON);
 
-  const after = await previewCheckout(SELECTION, undefined, "server");
+  const after = await previewCheckout(SELECTION, USER_A, undefined, "server");
 
-  // 试算结果逐字段相同：优惠券本阶段不参与结算，领了券也不会便宜
-  assert.deepEqual(after, before);
-  assert.equal(after.totalAmount, totalBefore);
-  assert.ok(Number.isInteger(after.totalAmount));
+  // 领券 ≠ 用券。**没有选券时金额域逐字段不变**——手里多了一张券，
+  // 不会让下一次试算悄悄变便宜（P1-4 之前这里断言的是「券完全不影响结算」，
+  // 那条规则已经被裁定 §1 取代：满减券参与结算，但必须由用户**明确选中**）
+  assert.deepEqual(after, before, "领券不该改变这一次试算的任何字段");
 
-  // 试算结果里不存在任何「券」的痕迹
-  const keys = Object.keys(after).join(",");
-  assert.equal(/coupon/i.test(keys), false, `试算结果不该出现券字段：${keys}`);
+  assert.equal(after.originalAmount, before.originalAmount);
+  assert.equal(after.couponDiscountAmount, 0);
+  assert.equal(after.actualPaidAmount, after.originalAmount);
+  assert.ok(Number.isInteger(after.actualPaidAmount), "金额必须是整数分");
+
+  // 没选券就**没有**「券未生效的原因」：不能因为手里有券就报一个原因出来，
+  // 那会让结算页显示一条用户看不懂的拦截
+  assert.equal(after.coupon, null);
+  assert.equal(after.couponReason, "");
+
+  // 反过来，券字段**必须**在试算结果里——它们是结算页的输入，不是内部字段
+  for (const field of ["coupon", "couponReason", "couponDiscountAmount", "actualPaidAmount"]) {
+    assert.ok(field in after, `试算结果应当包含 ${field}`);
+  }
+});
+
+test("非满减券不参与结算：选中它会被服务端拒绝，而不是按「减 0 元」继续下单", async () => {
+  // 裁定 §1：只有满减券参与结算，折扣券与礼品券**不得自行补计算语义**。
+  // 这条边界最危险的走法是「算不出来就当 0 元抵扣放过去」——用户以为用了券，
+  // 实际按原价付了钱
+
+  // OPEN_COUPON 是 gift 形态，服务端不会把它放进可选列表
+  const preview = await previewCheckout(SELECTION, USER_A, undefined, "server");
+  assert.equal(
+    preview.availableCoupons.some((item) => item.couponId === OPEN_COUPON),
+    false,
+    "不可计算的券不该出现在可选列表里",
+  );
+
+  // 但**绕过界面直接构造请求**也照样拒绝：可选列表是提示，服务端校验才是权限
+  const claimed = await claim(USER_A, OPEN_COUPON);
+  await expectApiError(
+    createPaymentRequest(
+      { ...SELECTION, couponClaimId: claimed.claimId, idempotencyKey: uniqueKey() },
+      USER_A,
+    ),
+    "BAD_REQUEST",
+  );
 });
 
 test("列表 DTO 不含 userId、快照与内部字段", async () => {
   const mine = await owned(USER_A);
   const item = mine.items[0];
 
+  // ⚠️ P1-4 验收整改轮 §六 / §九 加了**四个**字段。它们**都不是内部字段**，
+  // 而是这个 DTO 存在的理由本身——用户要看的就是这几件事：
+  //   · `source` / `sourceLabel`：这张券是自己领的还是平台发的
+  //     （同一个人手里可能同时有两张一模一样的券，来源是它们唯一的分辨方式）
+  //   · `settlementUsable` / `settlementReason`：**能不能用于结算**
+  //     ⚠️ 这两个字段存在的全部理由，就是「账户页说可用、结算页永远选不到」那个缺陷。
+  //     `status` 只说「这张券的记录状态」（unused 就显示未使用），
+  //     而一张未使用的折扣券在结算时**根本用不了**——只报 `status` 就会骗人。
+  // ⚠️ 隐私边界**没有放宽**：`userId` / `snapshot` / `enabled` / `grantedByAdminId`
+  // 仍然一个都不在下面这张表里（发券人是谁是管理端的审计信息，不是给用户看的）。
   assert.deepEqual(
     Object.keys(item).sort(),
     [
@@ -340,6 +384,10 @@ test("列表 DTO 不含 userId、快照与内部字段", async () => {
       "formLabel",
       "id",
       "name",
+      "settlementReason",
+      "settlementUsable",
+      "source",
+      "sourceLabel",
       "status",
       "statusLabel",
       "usedAt",
@@ -351,6 +399,7 @@ test("列表 DTO 不含 userId、快照与内部字段", async () => {
   assert.equal("userId" in item, false);
   assert.equal("snapshot" in item, false);
   assert.equal("enabled" in item, false);
+  assert.equal("grantedByAdminId" in item, false, "发券人是管理端的审计信息，不进用户端 DTO");
 
   const center = await claimable(USER_A);
   assert.deepEqual(

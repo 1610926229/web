@@ -1,0 +1,26 @@
+继续当前 P0-13，不创建新的 Round。
+
+完整读取：
+`docs/03-dev/rounds/cmd_p0-13_continue.md`
+
+把它作为 P0-13 从 CLARIFYING 恢复开发后的正式补充指令。
+
+先只读检查当前工作区、P0-10/P0-11/P0-12 改动和 P0-13 五件档案，然后：
+
+1. 将 Q1/Q2 正式裁定追加到 `P0-13/02-decisions.md` 和最新权威 requirements / tech-design；
+2. P0-13：`CLARIFYING → READY → IN_PROGRESS`；
+3. 检查并补齐 P0-10 `/staff/orders` 的真实 `displayId` 搜索能力；
+4. 完成 serving / completed 售后；
+5. 实现 Admin 最终退款金额与 responsibility；
+6. 实现最小 EarningAdjustment / refund_reversal；
+7. 保持 `Earning.incomeAmount` 永远不变；
+8. 支持 frozen / available 未提现收益的 partial/full reversal；
+9. withdrawn / 已提现继续 DEFER；
+10. 运行 targeted tests、全量 tests、typecheck、lint、build、production HTTP；
+11. reviewer-agent 只读审查；
+12. 修复全部 BLOCKER / MAJOR；
+13. 最终停在 `P0-13 = AWAITING_ACCEPTANCE`；
+14. 输出完整交付报告。
+
+禁止任何 Git 写操作。
+不得开始 P0-14。

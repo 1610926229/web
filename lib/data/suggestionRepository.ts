@@ -1,6 +1,8 @@
 import type { PageResult } from "@/lib/types/common";
 import type { Suggestion } from "@/lib/types/suggestion";
+import { pickRepository, type RepositoryBacking } from "./datasource";
 import { mockSuggestionRepository } from "./mockSuggestionRepository";
+import { pgSuggestionRepository } from "./pg/suggestionRepository";
 
 /**
  * 意见反馈的可替换仓储。
@@ -17,8 +19,9 @@ import { mockSuggestionRepository } from "./mockSuggestionRepository";
  * ⚠️ 本层**不判断**「这条反馈是谁的」「状态能不能改成已回复」：前者由服务层用
  * `userId` 作为查询条件保证，后者根本不存在用户端入口（回复只能来自预置或后台数据）。
  *
- * 当前实现是进程内内存存储，将来由数据库的唯一索引与事务替换——
- * 替换时这份契约不变（服务层不用改）。
+ * 有两个实现：进程内内存存储（默认）与 PostgreSQL（`DATA_SOURCE=postgres`）。
+ * 数据库版的 `UNIQUE (userId, idempotencyKey)` 正是上面那条约束的落点，
+ * 而**这份契约一个字没改**——服务层 `createSuggestionForUser` 不用改。
  */
 
 export type SuggestionListQuery = {
@@ -52,6 +55,26 @@ export type SuggestionRepository = {
   ): Promise<CreateSuggestionOutcome>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const suggestionRepositoryBacking: RepositoryBacking<SuggestionRepository> = {
+  name: "suggestion",
+  mock: mockSuggestionRepository,
+  pg: pgSuggestionRepository,
+};
+
+/**
+ * 取当前生效的反馈仓储。
+ *
+ * PROD-1A 起有**两个实现**，由 `DATA_SOURCE` 显式选择（见 `lib/data/pg/config.ts`）。
+ * 默认走 Mock，理由与 `getFavoriteRepository` 完全相同：迁移策略要求
+ * 「active datasource 的切换必须满足事务闭包完整」，没迁完的仓储绝不能悄悄切。
+ *
+ * ⚠️ PROD-1E 起选择逻辑**收敛到 `pickRepository`**（`lib/data/datasource.ts`），
+ * 理由与写法见 `favoriteRepository.ts` 的同名注释。
+ */
 export function getSuggestionRepository(): SuggestionRepository {
-  return mockSuggestionRepository;
+  return pickRepository(suggestionRepositoryBacking);
 }

@@ -23,6 +23,10 @@ export async function POST(request: Request) {
       id: created.id,
       status: created.status,
       totalAmount: created.totalAmount,
+      // 实付（P1-4）。⚠️ 与 `totalAmount` 一起返回是刻意的：前者是**优惠前**的
+      // 应付总额，后者才是用户实际要付的钱。只返回 `totalAmount` 会让调用方
+      // 在用了券的订单上显示一个偏大的金额
+      actualPaidAmount: created.actualPaidAmount,
     });
   } catch (cause) {
     return fail(toApiError(cause));

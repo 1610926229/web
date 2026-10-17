@@ -3,6 +3,8 @@ import type { PageResult } from "@/lib/types/common";
 import type { Order, OrderStatus } from "@/lib/types/order";
 import type { MockPaymentResult, PaymentRequest } from "@/lib/types/payment";
 import { mockPaymentRepository } from "./mockPaymentRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgPaymentRepository } from "./pg/paymentRepository";
 
 /**
  * 管理端订单查询条件。
@@ -82,13 +84,31 @@ export type PaymentRepository = {
    * `buildOrder` 由 service 传入：订单长什么样属于业务，仓库只负责「恰好生成一次」。
    * 这样订单快照所需的异步读取可以先在 service 里做完，原子区段里不再有 await。
    *
-   * 请求不存在时返回 null。
+   * ⚠️ **`buildOrder` 必须是纯函数**（PROD-1D 起强制的契约）：它只算金额域、拼订单字面量，
+   * **一行都不写**。建单真正需要的两件写操作——**券核销**与**派单记录**——由本方法
+   * 在**自己的原子提交之内**完成（Mock 走同步的
+   * `commitMockCheckoutParticipants()`，Pg 走同一事务里的 SQL）。
+   * 若把副作用留在回调里，Pg 实现就会变成
+   * 「订单进 PostgreSQL、券核销与派单进 Mock」——Hard Rule 1 禁止的半迁移。
+   *
+   * 返回值有三态：
+   * - `null` —— 支付请求不存在（对外 404）；
+   * - `{ request, order, orderCreated }` —— 正常结果（含「重复确认」时 `orderCreated: false`）；
+   * - `{ kind: "coupon-unavailable", reason }` —— **有券但那一刻不可用**（已用 / 停用 / 过期 /
+   *   未达门槛 / 不属于本人）。此时本方法已经把整个原子提交回滚掉（一个字节都没留下），
+   *   由 service 把它翻成 400。`reason` 取自 `lib/constants/coupons.ts` 的共享文案，
+   *   数据层不产生界面文案。用返回联合而不是抛错，是因为本仓的写路径统一用
+   *   「数据层回答失败种类、服务层翻译成 HTTP」这一套（见 `AdminComplaintWriteFailure`）。
    */
   confirmPaymentRequest(
     id: string,
     result: MockPaymentResult,
     buildOrder: (request: PaymentRequest) => Order,
-  ): Promise<{ request: PaymentRequest; order: Order | null; orderCreated: boolean } | null>;
+  ): Promise<
+    | { request: PaymentRequest; order: Order | null; orderCreated: boolean }
+    | { kind: "coupon-unavailable"; reason: string }
+    | null
+  >;
 
   /**
    * 查询某个用户的订单（列表页与「我的订单」的**唯一**入口）。
@@ -117,6 +137,21 @@ export type PaymentRepository = {
   listOrdersByUser(userId: string): Promise<Order[]>;
 
   /**
+   * 某个打手**实际履约**的订单（打手端「我的订单」的唯一入口，P0-6）。
+   *
+   * ⚠️ 条件是 `Order.actualCompanionId`，**不是**派单的 `exclusiveCompanionId`：
+   * 后者是「用户当初指定了谁」的历史事实，订单回公共池、被别人接走之后都不清，
+   * 拿它当归属就会把「用户想要的人」当成「现在在履约的人」。
+   * 与 `queryOrders` 一样，`companionId` 是**查询条件**而不是可选的过滤项——
+   * 本方法只可能返回这一位打手实际接过的单，调用方不需要（也不应该）拿到结果后再过滤。
+   *
+   * 不分页、也不筛状态：打手端「我的订单」本轮是一份平铺列表（进行中的与历史都在），
+   * 页面结构由后续 UI 批次决定。返回值**只在服务端转成打手端 DTO**
+   * （`CompanionOrderListItem`），任何情况下都不会原样作为响应体返回。
+   */
+  queryOrdersByCompanion(companionId: string): Promise<Order[]>;
+
+  /**
    * 全部用户的**全部订单**（不分页、不筛状态），消费排行榜聚合用。
    *
    * ⚠️ 返回值**只在服务端参与聚合**，任何情况下都不会作为响应体返回：
@@ -141,6 +176,16 @@ export type PaymentRepository = {
   queryOrdersForAdmin(filter: AdminOrderQueryFilter): Promise<Order[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const paymentRepositoryBacking: RepositoryBacking<PaymentRepository> = {
+  name: "payment",
+  mock: mockPaymentRepository,
+  pg: pgPaymentRepository,
+};
+
 export function getPaymentRepository(): PaymentRepository {
-  return mockPaymentRepository;
+  return pickRepository(paymentRepositoryBacking);
 }

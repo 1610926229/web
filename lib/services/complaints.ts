@@ -3,7 +3,9 @@ import {
   COMPLAINT_STATUS_LABELS,
   COMPLAINT_TYPE_LABELS,
   COMPLAINT_TYPE_REQUIRED_MESSAGE,
+  COMPLAINT_WINDOW_CLOSED_MESSAGE,
   isComplaintType,
+  isComplaintWindowClosed,
   parseComplaintListQuery,
   validateComplaintText,
 } from "@/lib/constants/complaints";
@@ -257,6 +259,16 @@ export async function createComplaintForUser(
       getPaymentRepository().findOrderById(input.orderId),
     );
     if (!order || order.userId !== userId) throw new ApiError("NOT_FOUND", "订单不存在");
+
+    // 普通投诉窗口（P0-9）：completed 的订单在窗口关闭后不再接受普通投诉。
+    // ⚠️ 判定**只用订单自己的快照**（`complaintDeadlineAt`），不读当前平台配置——
+    // 否则改一次配置就会追溯改变历史订单的投诉入口。
+    // ⚠️ 没有窗口（在途订单 / P0-9 之前完成的历史订单）**不关闭**：
+    // 那三种订单在窗口规则出现之前就能投诉，本轮不顺手收紧它们
+    if (isComplaintWindowClosed(order, new Date().toISOString())) {
+      throw new ApiError("BAD_REQUEST", COMPLAINT_WINDOW_CLOSED_MESSAGE);
+    }
+
     orderId = order.id;
     // 订单号快照：之后订单号规则变化不影响历史投诉的展示
     orderNo = order.orderNo;

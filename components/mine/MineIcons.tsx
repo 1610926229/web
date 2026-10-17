@@ -134,6 +134,16 @@ export const MINE_ICONS: Record<string, GlyphComponent> = {
       <circle cx="12" cy="16.6" r="0.7" fill="currentColor" stroke="none" />
     </Glyph>
   ),
+  // P0-4 打手工作台。手绘游戏手柄：这是「打手」这一行的用具，
+  // 与 `companion`（两个人）区分开——名单是找人，工作台是自己上手。
+  console: (props) => (
+    <Glyph {...props}>
+      <path d="M8.4 7.5h7.2a5 5 0 0 1 4.9 4l.6 3.4a2.4 2.4 0 0 1-4.3 1.9l-.9-1.2H8.1l-.9 1.2a2.4 2.4 0 0 1-4.3-1.9l.6-3.4a5 5 0 0 1 4.9-4z" />
+      <path d="M7.6 11.6v2.6M6.3 12.9h2.6" />
+      <circle cx="16.6" cy="12.2" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="18.3" cy="13.9" r="0.7" fill="currentColor" stroke="none" />
+    </Glyph>
+  ),
   external: (props) => (
     <Glyph {...props}>
       <path d="M14 4h6v6" />

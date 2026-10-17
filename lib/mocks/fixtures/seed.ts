@@ -1,21 +1,21 @@
 import type { UserRecord } from "@/lib/data/userRepository";
 import type { Companion } from "@/lib/types/companion";
-import type { HomeContentSeed } from "@/lib/types/content";
-import { getMockSeedNow } from "./mockClock";
 
 /**
- * 首页静态内容、Mock 用户与陪玩名单的种子。
+ * Mock 用户与陪玩名单的种子。
  *
  * ⚠️ 全部为 Mock 数据，仅用于打通取数链路与版式验证：
  * - 图片均为 public/mock 下的本地占位图，待管理端与对象存储就绪后替换；
- * - 公告图片内容待管理端上传，此处仅为占位；
  * - 用户为虚构的 Mock 身份，不含 openid 等任何真实微信标识。
  *
- * ⚠️ **目录数据（游戏 / 类目 / 增值服务 / 商品 / 首页分组）在
- * `./catalogSeed.ts`**（P8B 起）：它从这一阶段开始可写，单独一份文件能让
- * 「哪些东西后台改得动」一眼看出来。本文件剩下的三样都不可写：
- * 用户由登录流程产生、陪玩名单由审核与后台管理产生（自有仓储）、
- * 首页的公告与快捷入口本阶段没有管理界面。
+ * ⚠️ **两份数据在 P8B / P8E-1 搬走了**，各自单独一份文件——
+ * 「哪些东西后台改得动」因此一眼看得出来：
+ * - 目录数据（游戏 / 类目 / 增值服务 / 商品 / 首页商品分组）在 `./catalogSeed.ts`；
+ * - 首页运营内容（图片公告 / 活动 Banner / 快捷入口）在 `./contentSeed.ts`。
+ *
+ * 两者都是**仓储的初始记录**，后台能改、用户端读的是改过之后的那份。
+ * 本文件剩下的两样都不由后台直接编辑：用户由登录流程产生、
+ * 陪玩名单由审核与后台管理产生（走各自的仓储与事务）。
  *
  * 接入真实后端后，本目录随 lib/mocks 一并移除。
  */
@@ -198,6 +198,31 @@ export const userSeed: UserRecord[] = [
     avatarUrl: "/mock/avatar-2.svg",
     bio: "",
   },
+  {
+    // ————— 以下两人只服务 DEV-1 的多角色人工验收 —————
+    // 他们**已经**是有效打手：名下有一条 `approved` 入驻申请（`ca-1008` / `ca-1009`）
+    // 与一条绑定了 `userId` 的护航资料（`cp-10` / `cp-11`）。
+    //
+    // 为什么不能拿现成的 `u-1002` / `u-1003` 顶替：那两位的申请预置是「待查看 / 审核中」，
+    // 是「后台直接通过一条申请」这个验收场景唯一的样本，改成已通过等于把那一步弄没。
+    // 为什么不去把 `u-1004`（`ca-1004` 已通过）补一条护航：同一份理由——那一条是
+    // 「申请已通过」这个状态的样本，动它会让后台申请列表少一个可看的终态。
+    // 因此验收需要的「现成的打手」单独造，不动既有样本。
+    //
+    // ⚠️ 昵称与护航展示名保持一致，但**不用昵称做关联**：关联是 `Companion.userId`。
+    id: "u-1022",
+    displayId: "c8a4f169-3b72-4d58-8e04-9a1f5c7b2d63",
+    nickname: "夜航（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    bio: "晚上八点后在线（占位）",
+  },
+  {
+    id: "u-1023",
+    displayId: "d2b7e408-5c91-4a63-b7f2-6e8d3a0c5f19",
+    nickname: "栖迟（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    bio: "端游排位为主（占位）",
+  },
 ];
 
 /**
@@ -211,36 +236,57 @@ export const userSeed: UserRecord[] = [
  * 这里就不留「先填个数字」的字段。
  *
  * 覆盖的边界（缺一个就会有某个界面状态看不到）：
- * - `cp-1`…`cp-3`、`cp-8`、`cp-9` 当前可选；其中 `cp-3` 与 `cp-8` **没有任何评价**
- *   （详情页显示「暂无评分」而不是 0 分）；
+ * - `cp-1`…`cp-3`、`cp-8`、`cp-9` 当前可选；其中 `cp-2` 与 `cp-8` **没有任何 approved 评价**
+ *   （详情页显示「暂无评分」而不是 0 分）。⚠️ 从 P1-8 起这句话说的是**真实评价记录**
+ *   （`reviewSeed.ts` 里那些关联到实际订单的评价），不再是本文件里手写的数字；
+ *   `cp-2` 与 `cp-8` 之所以是 0，理由不同、都值得留着：`cp-2` **有订单但没人评过打手维度**，
+ *   `cp-8` 则根本没进过任何已完成订单——页面上两者长得一样，成因不同；
  * - `cp-4`（休息中）与 `cp-6`（已排满）**在架但当前不可选**：仍然出现在列表里并标注原因，
  *   不静默隐藏——直接消失会让人以为名单里没有这个人；
  *   `cp-4` 同时是「不可用陪玩不能被写入支付请求」这条服务端规则的验证用例；
  * - `cp-7` **已下架**（`enabled: false`）：不进公开列表，直链打开只有一页只读资料，
  *   没有任何选择或下单入口；
- * - `cp-5` 是超长昵称 + 超长自我介绍，`cp-9` 是超长自我介绍 + 4 条评价
- *   （详情页因此能看到「评价只展示前几条」的状态）；
+ * - `cp-5` 是超长昵称 + 超长自我介绍；
  * - 游戏覆盖 g-delta 与 g-valorant 两个游戏、手游与端游两个大区，
  *   服务标签覆盖目录里的五项。
+ * - `cp-10` / `cp-11` 是**唯一两条由入驻审核产生**的记录（`userId` / `applicationId` 都有值），
+ *   也是 Mock 身份切换工具里「打手 A / 打手 B」两个身份对应的资料（DEV-1）。
  *
- * 评价时间相对**进程内冻结的基准时间**构造（`getMockSeedNow()`），不写绝对日期：
- * 写死日期的话，过一段时间打开详情页看到的全是几个月前的评价。
  *
- * P8A 给每条记录补上了三个**平台侧**字段，这里全部取「没有」：
- * - `userId: null` / `applicationId: null`：这批陪玩是平台早期数据，不由任何入驻申请产生。
- *   审核通过产生的那一条则两者都有值（见 `lib/data/companionRepository.ts`），
- *   因此「这份名单里有没有人是审核进来的」是看得出来的；
- * - `removedAt: null`：没有被移除。软移除是后台动作，预置数据不该一上来就有一条移除记录
+ * P8A 给每条记录补上了三个**平台侧**字段：
+ * - `cp-1`…`cp-9` 的 `userId: null` / `applicationId: null`：这批陪玩是平台早期数据，
+ *   不由任何入驻申请产生；
+ * - **`cp-10` / `cp-11` 是例外，两者都有值**：他们由虚构的入驻申请 `ca-1008` / `ca-1009`
+ *   审核通过产生（DEV-1 的多角色人工验收需要「一启动就已经是打手」的账号，
+ *   否则每轮验收都要先手工走一遍审核）。因此「这份名单里有没有人是审核进来的」
+ *   一眼看得出来，`cp-10` / `cp-11` 就是那两个样本，不必去后台翻申请；
+ * - `removedAt: null`：都没有被移除。软移除是后台动作，预置数据不该一上来就有一条移除记录
  *   ——那样「筛选出已移除的护航」这一条筛选项就没有一个干净的空态可看。
  * 三个字段都**不进任何公开 DTO**。
+ *
+ * ⚠️ `cp-10` / `cp-11` 的 `enabled` 与 `available` **都必须是 `true`**：
+ * 前者决定他们进不进得了打手工作台（`disabled` 态），后者决定公共池给不给他们单
+ * （`BR-01`：`available=false` 时公共池一条都不返回）。DEV-1 的验收正是要他们能直接接单。
+ * 顺带一提，`available: false` 的那两条既有样本是 `cp-4` / `cp-6`，`enabled: false` 的只有 `cp-7`
+ * ——`tests/companions.test.mjs` 与 `tests/adminCompanionManagement.test.mjs` 按 id 写死了这三条，
+ * 新增记录保持 `available: true && enabled: true` 就不会撞上它们。
  */
-const DAY_MS = 24 * 60 * 60 * 1000;
-const COMPANION_SEED_NOW_MS = getMockSeedNow().getTime();
-
-/** 评价时间：相对基准时间往前推若干天。 */
-function reviewDaysAgo(days: number): string {
-  return new Date(COMPANION_SEED_NOW_MS - days * DAY_MS).toISOString();
-}
+/**
+ * ⚠️ **本数组不再有 `rating` / `reviewCount` / `reviews`**（P1-8，`D17`）。
+ *
+ * 这里曾经每一条陪玩都手写着一个形如 `rating: 4.8, reviewCount: 3, reviews: [...]`
+ * 的字面量，页面上那个「4.8 分 · 3 条评价」就是从它来的。它与用户真实提交的评价
+ * **没有任何关系**——用户写一条差评，卡片上的分数纹丝不动；管理员隐藏一条评价，
+ * 那个数字也不变。把一份手写的常量摆在「评分」的位置上，比不显示评分更糟：
+ * 读者会拿它做判断，而它其实什么也没测过。
+ *
+ * 现在陪玩的评分由 `lib/services/reviewAggregates.ts` 从**真实评价仓储**现算：
+ * 只计入 `approved`（`D14`），数量按维度统计（`D15`），与商品侧同源（`R3`）。
+ * 陪玩真实存在的评价在 `lib/mocks/fixtures/reviewSeed.ts` 里，与订单一一对应。
+ *
+ * `completedOrderCount` / `tipsCount` **保留**：它们是平台侧的历史计数，
+ * 不是评价聚合的产物，也没有第二处真值源。它们的口径未变。
+ */
 
 export const companionSeed: Companion[] = [
   {
@@ -259,34 +305,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 128,
-    rating: 4.8,
     tipsCount: 21,
-    reviewCount: 3,
     sortOrder: 10,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-1-r1",
-        nickname: "老板A（占位）",
-        rating: 5,
-        content: "全程在线，节奏很好。（Mock 评价）",
-        createdAt: reviewDaysAgo(4),
-      },
-      {
-        id: "cp-1-r2",
-        nickname: "老板B（占位）",
-        rating: 5,
-        content: "沟通顺畅，按时交付。（Mock 评价）",
-        createdAt: reviewDaysAgo(11),
-      },
-      {
-        id: "cp-1-r3",
-        nickname: "星野（占位）",
-        rating: 4,
-        content: "整体不错，中间等了十分钟。（Mock 评价）",
-        createdAt: reviewDaysAgo(26),
-      },
-    ],
   },
   {
     id: "cp-2",
@@ -303,20 +324,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 29,
-    rating: 5,
     tipsCount: 4,
-    reviewCount: 1,
     sortOrder: 20,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-2-r1",
-        nickname: "日落（占位）",
-        rating: 5,
-        content: "讲得很细，第二把就能自己走了。（Mock 评价）",
-        createdAt: reviewDaysAgo(2),
-      },
-    ],
   },
   {
     id: "cp-3",
@@ -332,14 +342,11 @@ export const companionSeed: Companion[] = [
     serviceTags: ["上分", "语音开黑"],
     available: true,
     unavailableReason: "",
-    // 没有任何评价：详情页要能显示「暂无评分」，而不是用 0 分冒充
+    // 没有任何 approved 评价：详情页要能显示「暂无评分」，而不是用 0 分冒充
     completedOrderCount: 31,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
     sortOrder: 30,
     enabled: true,
-    reviews: [],
   },
   {
     id: "cp-4",
@@ -356,27 +363,9 @@ export const companionSeed: Companion[] = [
     available: false,
     unavailableReason: "该陪玩当前休息中，暂不接单",
     completedOrderCount: 12,
-    rating: 4.1,
     tipsCount: 2,
-    reviewCount: 2,
     sortOrder: 40,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-4-r1",
-        nickname: "叶缘（占位）",
-        rating: 4,
-        content: "打完了，中间换过一次大区。（Mock 评价）",
-        createdAt: reviewDaysAgo(9),
-      },
-      {
-        id: "cp-4-r2",
-        nickname: "阿柴（占位）",
-        rating: 4,
-        content: "还行，回复稍慢。（Mock 评价）",
-        createdAt: reviewDaysAgo(38),
-      },
-    ],
   },
   {
     id: "cp-5",
@@ -394,27 +383,9 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 306,
-    rating: 4.6,
     tipsCount: 57,
-    reviewCount: 2,
     sortOrder: 50,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-5-r1",
-        nickname: "晚风（占位）",
-        rating: 5,
-        content: "凌晨两点还接单，很难得。（Mock 评价）",
-        createdAt: reviewDaysAgo(1),
-      },
-      {
-        id: "cp-5-r2",
-        nickname: "拾光（占位）",
-        rating: 4,
-        content: "单子有点多，等了一会儿。（Mock 评价）",
-        createdAt: reviewDaysAgo(16),
-      },
-    ],
   },
   {
     id: "cp-6",
@@ -431,20 +402,9 @@ export const companionSeed: Companion[] = [
     available: false,
     unavailableReason: "该陪玩本周已排满，暂不接单",
     completedOrderCount: 74,
-    rating: 4.9,
     tipsCount: 13,
-    reviewCount: 1,
     sortOrder: 60,
     enabled: true,
-    reviews: [
-      {
-        id: "cp-6-r1",
-        nickname: "云开（占位）",
-        rating: 5,
-        content: "很稳，一晚上上了两段。（Mock 评价）",
-        createdAt: reviewDaysAgo(6),
-      },
-    ],
   },
   {
     id: "cp-7",
@@ -461,21 +421,10 @@ export const companionSeed: Companion[] = [
     available: false,
     unavailableReason: "该陪玩已下线",
     completedOrderCount: 58,
-    rating: 4.4,
     tipsCount: 9,
-    reviewCount: 1,
     sortOrder: 70,
     // 已下架：不进公开列表，直链详情只有只读资料页
     enabled: false,
-    reviews: [
-      {
-        id: "cp-7-r1",
-        nickname: "听澜（占位）",
-        rating: 4,
-        content: "已经是最后一单了。（Mock 评价）",
-        createdAt: reviewDaysAgo(52),
-      },
-    ],
   },
   {
     id: "cp-8",
@@ -491,14 +440,11 @@ export const companionSeed: Companion[] = [
     serviceTags: ["陪练"],
     available: true,
     unavailableReason: "",
-    // 刚接单：既没有评价也没有鸡腿，列表卡片要能显示「暂无评分」
+    // 刚接单：既没有 approved 评价也没有鸡腿，列表卡片要能显示「暂无评分」
     completedOrderCount: 3,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
     sortOrder: 80,
     enabled: true,
-    reviews: [],
   },
   {
     id: "cp-9",
@@ -516,65 +462,56 @@ export const companionSeed: Companion[] = [
     available: true,
     unavailableReason: "",
     completedOrderCount: 512,
-    rating: 4.9,
     tipsCount: 96,
-    reviewCount: 4,
     sortOrder: 90,
     enabled: true,
-    // 4 条评价 > 详情页上限，用于验证「只展示前几条」的提示确实会出现
-    reviews: [
-      {
-        id: "cp-9-r1",
-        nickname: "老板A（占位）",
-        rating: 5,
-        content: "第三次找他了，还是稳。（Mock 评价）",
-        createdAt: reviewDaysAgo(3),
-      },
-      {
-        id: "cp-9-r2",
-        nickname: "老板B（占位）",
-        rating: 5,
-        content: "全程没换人，体验很好。（Mock 评价）",
-        createdAt: reviewDaysAgo(13),
-      },
-      {
-        id: "cp-9-r3",
-        nickname: "星野（占位）",
-        rating: 5,
-        content: "响应很快，半夜也在。（Mock 评价）",
-        createdAt: reviewDaysAgo(21),
-      },
-      {
-        id: "cp-9-r4",
-        nickname: "阿柴（占位）",
-        rating: 4,
-        content: "价格没变，速度稍慢一点。（Mock 评价）",
-        createdAt: reviewDaysAgo(45),
-      },
-    ],
+  },
+  {
+    // DEV-1 验收用：**由入驻审核产生**的打手 A。
+    // `userId` / `applicationId` 都指向真实存在的预置记录（`u-1022` / `ca-1008`），
+    // `enabled` 与 `available` 都为 true —— 因此 `resolveCompanionAccess("u-1022")`
+    // 判定 `granted`、`requireCompanion()` 放行、公共池给他单、接单区段的
+    // `isCompanionAcceptingOrders()` 也放行。四个条件缺一不可，别为了「看着像休息中」改掉。
+    id: "cp-10",
+    userId: "u-1022",
+    applicationId: "ca-1008",
+    removedAt: null,
+    displayName: "夜航（占位）",
+    avatarUrl: "/mock/avatar-3.svg",
+    rankLabel: "星耀打手",
+    intro:
+      "工作日晚上八点后在线，周末全天可以打。三角洲行动机密单跑得多，端游排位也接。（占位文案）",
+    gameIds: ["g-delta", "g-valorant"],
+    regions: ["手游", "端游"],
+    serviceTags: ["护航", "上分", "语音开黑"],
+    available: true,
+    unavailableReason: "",
+    completedOrderCount: 76,
+    tipsCount: 12,
+    sortOrder: 100,
+    enabled: true,
+  },
+  {
+    // DEV-1 验收用：由入驻审核产生的打手 B。
+    // 与 cp-10 打**不同的游戏**（只打无畏契约端游），用来证明公共池**不按游戏过滤**：
+    // 打手 A 取消接单后回池的那张单，打手 B 照样接得到（`lib/services/companionDispatch.ts`
+    // 明确不做游戏 / 商品 / 等级过滤）。这一点在 04-acceptance.md 的 §G 会走到。
+    id: "cp-11",
+    userId: "u-1023",
+    applicationId: "ca-1009",
+    removedAt: null,
+    displayName: "栖迟（占位）",
+    avatarUrl: "/mock/avatar-4.svg",
+    rankLabel: "钻石打手",
+    intro: "只打无畏契约端游排位，语音全程可开，不接加急单。（占位文案）",
+    gameIds: ["g-valorant"],
+    regions: ["端游"],
+    serviceTags: ["上分", "语音开黑", "新手带打"],
+    available: true,
+    unavailableReason: "",
+    completedOrderCount: 41,
+    tipsCount: 5,
+    sortOrder: 110,
+    enabled: true,
   },
 ];
-
-/**
- * 首页里**不随商品变化**的部分：公告、活动图、快捷入口。
- *
- * ⚠️ 商品分组**不在这里**（`./catalogSeed.ts` 的 `homeSectionSeed`）：
- * 它必须在每次请求时从目录仓储现取，否则后台下架一件商品之后，
- * 首页当晚还在推荐它。本文件剩下的这三样本阶段没有管理界面，照旧静态。
- */
-export const homeSeed: HomeContentSeed = {
-  // 公告区：仅图片滚动展示，无跳转字段
-  announcements: [
-    { id: "a1", imageUrl: "/mock/announcement-1.svg", alt: "公告图片占位 1" },
-    { id: "a2", imageUrl: "/mock/announcement-2.svg", alt: "公告图片占位 2" },
-  ],
-
-  activityImageUrl: "/mock/promo-activity.svg",
-
-  shortcuts: [
-    { id: "service", label: "联系客服", href: "/service" },
-    { id: "benefits", label: "点单权益", href: "/placeholder?title=点单权益" },
-    { id: "join", label: "考核入驻", href: "/join" },
-    { id: "complaint", label: "投诉客服专区", href: "/complaints" },
-  ],
-};

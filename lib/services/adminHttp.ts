@@ -1,5 +1,10 @@
 import { apiGet, apiPatch, apiPost } from "@/lib/api/client";
 import {
+  ADMIN_AFTERSALE_PAGE_SIZE,
+  type AdminAftersaleCaseType,
+  type AdminAftersaleView,
+} from "@/lib/constants/adminAftersales";
+import {
   ADMIN_APPLICATION_PAGE_SIZE,
   type AdminApplicationStatusFilter,
 } from "@/lib/constants/adminApplications";
@@ -10,11 +15,13 @@ import {
   type AdminStatusFilter,
 } from "@/lib/constants/adminCatalog";
 import { ADMIN_CATEGORY_PAGE_SIZE } from "@/lib/constants/adminCategories";
+import { ADMIN_COUPON_PAGE_SIZE } from "@/lib/constants/adminCoupons";
 import {
   ADMIN_COMPLAINT_PAGE_SIZE,
   type AdminComplaintStatusFilter,
   type AdminComplaintTypeFilter,
 } from "@/lib/constants/adminComplaints";
+import type { ContentRemovalFilter } from "@/lib/constants/adminContent";
 import {
   ADMIN_STAFF_PAGE_SIZE,
   type AdminStaffProfileInput,
@@ -31,7 +38,10 @@ import {
   type AdminCompanionStateFilter,
 } from "@/lib/constants/adminCompanions";
 import { ADMIN_PRODUCT_PAGE_SIZE } from "@/lib/constants/adminProducts";
-import type { AdminLoginResult, AdminSessionUser } from "@/lib/types/admin";
+import type { AdminReviewStatusFilter } from "@/lib/constants/adminReviews";
+import { REVIEW_PAGE_SIZE } from "@/lib/constants/reviews";
+import type { AdminDashboardDTO, AdminLoginResult, AdminSessionUser } from "@/lib/types/admin";
+import type { AdminAftersaleListData } from "@/lib/types/aftersale";
 import type {
   AdminCategoryListData,
   AdminCategoryListItem,
@@ -62,11 +72,45 @@ import type {
 } from "@/lib/types/complaint";
 import type { AdminOrderDetail, AdminOrderListData } from "@/lib/types/order";
 import type {
+  AdminReviewDetail,
+  AdminReviewListData,
+  AdminReviewWriteResult,
+} from "@/lib/types/review";
+import type {
+  AdminPlatformConfigPatch,
+  AdminPlatformConfigWriteResult,
+  PlatformConfig,
+} from "@/lib/types/platformConfig";
+import type {
   AdminRefundDetail,
   AdminRefundListData,
   AdminRefundWriteResult,
 } from "@/lib/types/refund";
 import type { AdminStaffDetail, AdminStaffListData, AdminStaffWriteResult } from "@/lib/types/staff";
+import type {
+  AdminAgreementDetail,
+  AdminAgreementListData,
+  AdminAgreementProfilePatch,
+  AdminAgreementWriteResult,
+} from "@/lib/types/agreement";
+import type {
+  AdminAnnouncementItem,
+  AdminAnnouncementProfilePatch,
+  AdminBannerItem,
+  AdminBannerProfilePatch,
+  AdminContentList,
+  AdminQuickEntryItem,
+  AdminQuickEntryProfilePatch,
+} from "@/lib/types/content";
+import type {
+  AdminCouponGrantOption,
+  AdminCouponGrantResult,
+  AdminCouponTemplateItem,
+  AdminCouponTemplateListData,
+  AdminCouponTemplateProfilePatch,
+  AdminCouponTemplateWriteResult,
+  AdminGrantTargetUser,
+} from "@/lib/types/coupon";
 
 /**
  * 管理端的**浏览器端**取数。
@@ -101,6 +145,23 @@ export function mockLoginAdmin(): Promise<AdminLoginResult> {
 /** 退出登录：服务端删除管理端 Cookie。 */
 export function logoutAdmin(): Promise<{ ok: true }> {
   return apiPost<{ ok: true }>("/api/admin/auth/logout");
+}
+
+// ——————————————————————————— 经营首页（P1-1） ———————————————————————————
+
+/**
+ * 经营首页的六个数字（今日订单 / 今日 GMV / 今日退款 + 三个待办）。
+ *
+ * ⚠️ **只有 GET，而且没有参数**：这是一个纯快照，没有筛选、没有分页、没有身份字段。
+ * 它属于哪一天由**服务端**决定（北京时间），客户端不传日期也不自己算——
+ * 因此不可能出现「浏览器按本地时区算今天、服务端按 UTC+8 算今天」这种两侧不一致。
+ *
+ * ⚠️ 它**不是**首屏取数通道：`/admin` 是 Server Component，首屏数字由服务端
+ * 直接调 `getAdminDashboard()` 渲染出来（不闪占位）。这个函数服务于
+ * **页面之后的动作**——点「刷新数据」或失败后点「重试」。
+ */
+export function fetchAdminDashboard(): Promise<AdminDashboardDTO> {
+  return apiGet<AdminDashboardDTO>("/api/admin/dashboard");
 }
 
 // ——————————————————————————— 入驻审核 ———————————————————————————
@@ -577,11 +638,15 @@ export function fetchAdminRefund(id: string): Promise<AdminRefundDetail> {
 /**
  * 三个审核动作。都是 POST，请求体只有幂等键（通过与被拒绝另加审核意见）。
  *
- * ⚠️ **请求体里没有金额**，类型上也加不进来：退款金额取申请创建时的服务端订单实付快照，
- * 管理端不可修改（§退款审核）。
+ * ⚠️ **请求体里没有金额**（P0-13 起口径微调：通过动作传的是**比例**，仍然不是金额）。
+ * 管理员只填写退款比例，两个金额由服务端按订单冻结的经济快照算出来
+ * （`业务流程表.md` §16.B：「管理员只输入退款比例，金额由系统计算」）。
+ * 类型上也没有任何字段能传金额进来。
+ * ⚠️ P0-13 到 P0-15 之间还要传一个「责任归属」；那一个随责任模型删除。
  *
  * ⚠️ 三个动作是**三个接口**，不是一个「把状态改成 X」的接口：通过会在同一次写入里
- * 把订单也改成 `refunded`，与「开始审核」这种只改一个状态的动作用途完全不同，
+ * 写入资金决策、订单累计退款额与打手收益冲回（比例 100% 时才改订单状态），
+ * 与「开始审核」这种只改一个状态的动作用途完全不同，
  * 合成一个接口就会出现「点错按钮直接把款退了」这种后果很重的错误。
  *
  * ⚠️ 通过是 **Mock 审核**：不调用真实微信退款、不生成微信退款单号、不代表款项已退回。
@@ -596,15 +661,61 @@ export function startReviewRefund(
   );
 }
 
-/** 审核通过：退款与订单在同一次写入里改到位。`reviewNote` 选填。 */
+/**
+ * 资金决策（P0-13 建立 · **P0-15 收敛为一个字段**）—— 通过动作的必填入参。
+ *
+ * ⚠️ **比例用字符串、不用数字**：`"0"` 与「没填」在数字口径下都是 `0` 或 `undefined`，
+ * 而它们是完全不同的两件事（填了 0% 是「不退钱」，没填是「还没决定」）。
+ * 服务端按整数字符串解析，`"33.5"` 一律 400（金额字段不做静默取整）。
+ *
+ * ⚠️ **「全额退款」就是填 `"100"`**。P0-14 曾为「多步部分退款够不到的尾差」
+ * 引入过第二种表达方式（`refundFullRemaining` / 「退满剩余」），
+ * 而 P0-15 把一个订单的退款收敛为一次之后，`floor(实付 × 100%) === 实付`——
+ * 那个概念自动坍缩回 100%，于是第二种表达方式连同它的联合成员一起删除。
+ */
+export type AdminRefundDecisionRequest = {
+  /** 0~100 的整数字符串（0% 会被服务端按「退款金额为 0」拒绝） */
+  refundRatePercent: string;
+};
+
+/**
+ * 审核通过：资金决策、退款记录、订单与打手收益在同一次写入里改到位。`reviewNote` 选填。
+ *
+ * ⚠️ **客户端不做金额算术**（`architecture-rules.md` §三）——但**页面会实时预览金额**。
+ * 原先「页面不做金额预览、按钮只说『金额由系统计算』」的取舍已被 **P0-13 D19 取代**：
+ * 管理端确认框调 `previewRefundDecisionAmounts()`（`lib/constants/adminRefunds.ts`），
+ * 它复用的正是服务端写入路径上的同一个纯函数（`computeRefundDecisionAmounts`），
+ * 因此「预览出来的」与「写下去的」必然是同一份公式算的。
+ *
+ * 客户端始终只传**退款比例**，**永不自己算钱**。
+ *
+ * ## 这个类型从「四个成员的联合」退化成一个对象（P0-15）
+ *
+ * 它原先按两条判别轴展开：`refundFullRemaining`（退满剩余 / 按比例，P0-14）
+ * 与 `responsibility`（`platform` / `companion` / `shared`，P0-13）。
+ * 两条轴各自的**理由都消失了**：
+ * - 「退满剩余」补的是「多步部分退款留下的尾差」，一个订单只退一次之后尾差不存在；
+ * - 责任模型整体废止，管理员不再选择归属。
+ *
+ * ⚠️ 判别联合**不是为了好看**：它当时的价值是把「同时传比例与退满标志」
+ * 「选了平台承担却传了责任比例」变成**编译错误**而不是运行时 400。
+ * 现在只剩一个字段、一种可能，联合没有要区分的东西——
+ * 继续留着一个单成员联合只会让人以为「还有别的分支没写出来」，
+ * 反而比直白的对象更容易被误读。
+ */
 export function approveRefund(
   id: string,
   idempotencyKey: string,
   reviewNote: string,
+  decision: AdminRefundDecisionRequest,
 ): Promise<AdminRefundWriteResult> {
   return apiPost<AdminRefundWriteResult>(`/api/admin/refunds/${encodeURIComponent(id)}/approve`, {
     idempotencyKey,
     reviewNote,
+    // ⚠️ **显式挑字段**（原先这里是一个三元表达式，用来在两条互斥的路之间二选一）：
+    // 直接摊开 `...decision` 会让请求体跟着客户端类型一起漂移——
+    // 界面上多一个字段，服务端就会收到一个它不认识的东西。
+    refundRatePercent: decision.refundRatePercent,
   });
 }
 
@@ -799,4 +910,644 @@ export function removeAdminStaff(
   return apiPost<AdminStaffWriteResult>(`/api/admin/staff/${encodeURIComponent(id)}/remove`, {
     idempotencyKey,
   });
+}
+
+// ——————————————————————————— 运营内容（P8E-1） ———————————————————————————
+
+/**
+ * 三张内容列表共用的查询参数。
+ *
+ * ⚠️ **没有分页参数**，而且不是「这一版先不做」：这类运营内容在任何现实运营里
+ * 都是个位数到几十条（见 `AdminContentList` 的注释），加分页会带来
+ * 「改完第 3 页的排序、第 1 页没变」这类纯粹由分页制造的问题。
+ * 接口同样读不到 `page` / `pageSize`，传了也不会有任何效果。
+ */
+export type AdminContentListRequest = {
+  /** `active`（默认）看未移除的；`removed` 只看被软移除的 */
+  removal?: ContentRemovalFilter;
+};
+
+/**
+ * 拼一张内容列表的地址。
+ *
+ * ⚠️ 默认值也**显式写进地址栏**（`removal=active`）：这一页的筛选状态在 URL 里
+ * 看得见，复制给同事的链接打开的是同一个视图，而不是「我以为是默认值」的另一份数据。
+ */
+function contentListPath(segment: string, input: AdminContentListRequest): string {
+  const params = new URLSearchParams();
+  params.set("removal", input.removal ?? "active");
+  return `/api/admin/content/${segment}?${params.toString()}`;
+}
+
+/**
+ * 三组内容的写操作形状完全相同，只有路径段不同。
+ *
+ * ⚠️ 走的是**窄写入**接口而不是「把整条记录写回去」：列表上的「停用」只应当改
+ * `enabled` 一个字段，不该顺带把标题、图片、排序覆盖成按钮渲染时的旧值——
+ * 两位管理员同时操作时，后写的那次会把另一位刚改好的标题改回旧值（§九）。
+ * 「移除」同理：它是一条独立的状态迁移，不是一次普通保存。
+ */
+function contentWritePath(segment: string, id: string, action?: string): string {
+  const base = `/api/admin/content/${segment}/${encodeURIComponent(id)}`;
+  return action ? `${base}/${action}` : base;
+}
+
+/**
+ * 三组内容写操作的返回（界面真正读得懂的那两个字段）。
+ *
+ * ⚠️ 服务端返回的是一个**信封**而不是记录本身，理由在
+ * `lib/services/adminAnnouncements.ts` 的 `AdminAnnouncementWriteResult`：
+ * 一次写请求有三种「没写」的可能，客户端必须能分清——
+ *
+ * - `changed: false`：提交的内容与现状一模一样（点了一次保存却没改任何东西）。
+ *   界面**不能**显示成「已保存」，那会让人以为自己刚才的改动生效了（§九）。
+ * - `replayed: true`：这个幂等键早就做过了，服务端没有第二次写入。
+ *   这是重试命中了第一次的结果，与「本次写成功」不是同一件事。
+ *
+ * 这里只声明这两个字段：接口还返回 `action`（事务层算好的审计动作名）与确认后的记录
+ * （公告/活动图放在 `updated` 里，快捷入口直接展开在顶层），但**界面不用它们**——
+ * 写成功之后页面显示的那一行由「重新取一份列表」决定，读响应的几个字段自己拼一行出来
+ * 会和真实记录分叉。声明成响应体的**子集**，因此服务端多返回一个字段也不会让它报错。
+ */
+export type AdminContentWriteAck = {
+  changed: boolean;
+  replayed: boolean;
+};
+
+// —— 图片公告 ——
+
+/** 取一页图片公告（**不分页**，含停用的；`removal=removed` 时是已移除的那批）。 */
+export function fetchAdminAnnouncements(
+  input: AdminContentListRequest = {},
+): Promise<AdminContentList<AdminAnnouncementItem>> {
+  return apiGet<AdminContentList<AdminAnnouncementItem>>(contentListPath("announcements", input));
+}
+
+/** 新建一条公告。启用状态由服务端按 `enabled` 写入，客户端无法自己成为「已启用」以外的东西。 */
+export function createAdminAnnouncement(
+  idempotencyKey: string,
+  patch: AdminAnnouncementProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>("/api/admin/content/announcements", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+/** 编辑公告（整份资料的覆盖写：名称 / 图片地址 / 图片说明 / 排序 / 启用状态）。 */
+export function saveAnnouncementProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminAnnouncementProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPatch<AdminContentWriteAck>(contentWritePath("announcements", id), {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function enableAnnouncement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("announcements", id, "enable"), {
+    idempotencyKey,
+  });
+}
+
+export function disableAnnouncement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("announcements", id, "disable"), {
+    idempotencyKey,
+  });
+}
+
+/** 移除公告（软删除）。**记录不删**：用户当时看到的是哪张图，事后要能回答。 */
+export function removeAnnouncement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("announcements", id, "remove"), {
+    idempotencyKey,
+  });
+}
+
+// —— 活动 Banner ——
+
+/**
+ * 取一页活动 Banner（**不分页**）。
+ *
+ * ⚠️ 后台可以预置多张 Banner，但用户端首页**只展示排序最前的那一张启用图**
+ * （`selectActivityImageUrl()`）。因此这里的 `sortOrder` 与 `enabled` 不是
+ * 「一堆图里的偏好」，而是「现在前台看到的是哪一张」这个唯一答案的输入。
+ */
+export function fetchAdminBanners(
+  input: AdminContentListRequest = {},
+): Promise<AdminContentList<AdminBannerItem>> {
+  return apiGet<AdminContentList<AdminBannerItem>>(contentListPath("banners", input));
+}
+
+export function createAdminBanner(
+  idempotencyKey: string,
+  patch: AdminBannerProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>("/api/admin/content/banners", { idempotencyKey, ...patch });
+}
+
+export function saveBannerProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminBannerProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPatch<AdminContentWriteAck>(contentWritePath("banners", id), {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function enableBanner(id: string, idempotencyKey: string): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("banners", id, "enable"), {
+    idempotencyKey,
+  });
+}
+
+export function disableBanner(id: string, idempotencyKey: string): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("banners", id, "disable"), {
+    idempotencyKey,
+  });
+}
+
+export function removeBanner(id: string, idempotencyKey: string): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("banners", id, "remove"), {
+    idempotencyKey,
+  });
+}
+
+// —— 快捷入口 ——
+
+/**
+ * 取一页快捷入口（**不分页**）。
+ *
+ * ⚠️ 用户端是**四宫格**：多于四条时后面的会被挤到下一行、布局不再是设计稿里的样子。
+ * 后台因此不限制数量，但页面必须把这件事说出来（`sortOrder` 决定谁在前四个位置）。
+ */
+export function fetchAdminQuickEntries(
+  input: AdminContentListRequest = {},
+): Promise<AdminContentList<AdminQuickEntryItem>> {
+  return apiGet<AdminContentList<AdminQuickEntryItem>>(contentListPath("quick-entries", input));
+}
+
+export function createAdminQuickEntry(
+  idempotencyKey: string,
+  patch: AdminQuickEntryProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>("/api/admin/content/quick-entries", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function saveQuickEntryProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminQuickEntryProfilePatch,
+): Promise<AdminContentWriteAck> {
+  return apiPatch<AdminContentWriteAck>(contentWritePath("quick-entries", id), {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+export function enableQuickEntry(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("quick-entries", id, "enable"), {
+    idempotencyKey,
+  });
+}
+
+export function disableQuickEntry(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("quick-entries", id, "disable"), {
+    idempotencyKey,
+  });
+}
+
+export function removeQuickEntry(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminContentWriteAck> {
+  return apiPost<AdminContentWriteAck>(contentWritePath("quick-entries", id, "remove"), {
+    idempotencyKey,
+  });
+}
+
+// —— 协议与版本介绍 ——
+
+/**
+ * 取协议列表。
+ *
+ * ⚠️ **没有新建、没有移除，也没有分页**：协议是五类固定的内容
+ * （`AGREEMENT_TYPES`），同一个类型可以有多个版本，但「哪一版是当前版本」
+ * 由版本号与启用状态决定，不是靠删掉旧版本做到的。
+ */
+export function fetchAdminAgreements(): Promise<AdminAgreementListData> {
+  return apiGet<AdminAgreementListData>("/api/admin/content/agreements");
+}
+
+/**
+ * 取一份协议的**正文**（列表行 + `sections`）。
+ *
+ * ⚠️ 编辑表单必须走它：列表行刻意不带正文（`AdminAgreementListItem` 里没有 `sections`），
+ * 拿列表去拼编辑表单只能拼出一个空正文，一保存就把用户看到的协议清空了。
+ */
+export function fetchAdminAgreementDetail(id: string): Promise<AdminAgreementDetail> {
+  return apiGet<AdminAgreementDetail>(`/api/admin/content/agreements/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 编辑一份协议（标题 / 正文段落 / 启用状态）。
+ *
+ * ⚠️ 正文是**结构化段落**，不是 HTML 字符串：`sections` 里每个元素是
+ * `{ heading, paragraphs }`，页面按段落渲染。因此这里传不出
+ * `<script>` 这类东西——客户端根本没有一个「把 HTML 发上去」的字段。
+ *
+ * ⚠️ 版本号不在请求体里：正文变化时由服务端**自动递增**
+ * （`bumpAgreementVersion()`），客户端伪造一个版本号没有可传的位置。
+ *
+ * ⚠️ 返回的是**写入结果**（`AdminAgreementWriteResult`）而不是详情：它不带正文，
+ * 但带一个 `changed`。界面靠它区分「真的写进去了」与「提交的内容与现状完全一致」
+ * ——后者**不是错误**，却绝不能显示成「保存成功」（§九）。写入后的新正文
+ * 由服务端在写入时算出来，要看得重新取一次详情，不能拿本地那份拼。
+ */
+export function saveAgreementProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminAgreementProfilePatch,
+): Promise<AdminAgreementWriteResult> {
+  return apiPatch<AdminAgreementWriteResult>(
+    `/api/admin/content/agreements/${encodeURIComponent(id)}`,
+    { idempotencyKey, ...patch },
+  );
+}
+
+/** 启用一份协议。重复启用是幂等的：服务端返回 `changed: false`，不产生第二次写入。 */
+export function enableAgreement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminAgreementWriteResult> {
+  return apiPost<AdminAgreementWriteResult>(
+    `/api/admin/content/agreements/${encodeURIComponent(id)}/enable`,
+    { idempotencyKey },
+  );
+}
+
+/** 停用一份协议。停用后用户端看到的是同类型里版本号最高的那份**启用**内容。 */
+export function disableAgreement(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminAgreementWriteResult> {
+  return apiPost<AdminAgreementWriteResult>(
+    `/api/admin/content/agreements/${encodeURIComponent(id)}/disable`,
+    { idempotencyKey },
+  );
+}
+
+// ——————————————————————————— 平台参数 ———————————————————————————
+
+/**
+ * 取当前平台参数。
+ *
+ * ⚠️ 地址里**没有 id**：平台参数是单例，全局只有这一份配置。用
+ * `/api/admin/platform-config` 而不是 `/api/admin/platform-configs/1`，
+ * 是为了让「参数只有一份」这件事在地址上就成立。
+ */
+export function fetchAdminPlatformConfig(): Promise<PlatformConfig> {
+  return apiGet<PlatformConfig>("/api/admin/platform-config");
+}
+
+/**
+ * 修改平台参数。
+ *
+ * 只提交要改的字段（PATCH）：`updatedAt` / `updatedByAdminId` 不在
+ * `AdminPlatformConfigPatch` 里，它们由服务端按会话与时钟填。
+ *
+ * ⚠️ 返回的是**写入结果**而不是「成功」：它带回整份配置与服务端的 `changed`。
+ * 界面用 `changed === false` 区分「服务端没有产生新的改动」（提交的值与现状相同，
+ * 或同一个幂等键第二次到达）。那种情况**不是错误**，但绝不能显示成「已保存」——
+ * 管理员会以为值变了，而实际上 `updatedAt` 与配置都没动。
+ */
+export function saveAdminPlatformConfig(
+  idempotencyKey: string,
+  patch: AdminPlatformConfigPatch,
+): Promise<AdminPlatformConfigWriteResult> {
+  return apiPatch<AdminPlatformConfigWriteResult>("/api/admin/platform-config", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+// ————————————————————— 售后统一工作台（P1-3） —————————————————————
+
+/**
+ * 一页售后案件的筛选条件。`view` 与 `caseType` 都是**必填**——
+ * 与退款、投诉两个列表不同，本列表没有「不传就代表默认」的余地：
+ * 「全部 / 未完结 / 处理中 / 已结束」四档必须显式选一档，
+ * 否则服务端返回的 `counts` 与当前页面对不上，角标就成了另一个数。
+ */
+export type AdminAftersaleListRequest = {
+  view: AdminAftersaleView;
+  caseType: AdminAftersaleCaseType | "all";
+  keyword: string;
+  from: string;
+  to: string;
+  page?: number;
+};
+
+/**
+ * 取一页售后案件（退款申请与投诉的**混合**列表）。
+ *
+ * ⚠️ **只传筛选与分页**：案件属于谁、订单是什么、打手是谁全部由服务端按记录给出，
+ * 访问资格由服务端会话决定。空值不写进查询串（`?keyword=&from=` 只会让日志更难读）。
+ *
+ * ⚠️ 本函数**没有任何金额运算**：金额口径（申请金额 / 核定金额）由服务端算好放在 DTO 上，
+ * 这里只是把它搬回来。页面的金额列也照此只做展示。
+ *
+ * ⚠️ 本列表**只读**：退款与投诉的处置动作各自留在专用页面（`/admin/refunds/[id]`、
+ * `/admin/complaints/[id]`），本文件里没有也**不应有**任何「售后动作」的写函数——
+ * 那会在聚合页上出现第二条改状态的路径。
+ */
+export function fetchAdminAftersales(
+  input: AdminAftersaleListRequest,
+): Promise<AdminAftersaleListData> {
+  const params = new URLSearchParams();
+  if (input.view) params.set("view", input.view);
+  if (input.caseType) params.set("caseType", input.caseType);
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.from) params.set("from", input.from);
+  if (input.to) params.set("to", input.to);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(ADMIN_AFTERSALE_PAGE_SIZE));
+
+  return apiGet<AdminAftersaleListData>(`/api/admin/aftersales?${params.toString()}`);
+}
+
+// ————————————————————— 优惠券发放（P1-4 验收整改轮 §四） —————————————————————
+
+/**
+ * 可发放的券模板（**只有当前启用的**）。
+ *
+ * ⚠️ 过滤在**服务端**做，这里不自己筛：两个地方各筛一次，迟早分叉。
+ * 有效期不在过滤条件里——模板可能 `enabled` 但已经过期，服务端照样返回它，
+ * 并把 `withinValidity` 一并给出来供**显示**（发出去一张过期的券是废的，
+ * 管理员有权知道自己正在这么做，而不是被一个没写在裁定里的硬规则挡住）。
+ *
+ * ⚠️ 没有参数，也**不该有分页**：券模板是个位数量级的配置数据。
+ */
+export function fetchAdminCouponGrantOptions(): Promise<AdminCouponGrantOption[]> {
+  return apiGet<AdminCouponGrantOption[]>("/api/admin/coupons");
+}
+
+/**
+ * 按关键词找发放目标（匹配 id / 显示号 / 昵称，由服务端决定匹配规则与返回上限）。
+ *
+ * ⚠️ 空关键词**不写进地址栏**（与其他函数同一条规矩：`?keyword=` 只会让日志更难读），
+ * 服务端对空关键词返回空列表——「不带筛选地拉全量用户」不该是一个顺手可得的操作。
+ *
+ * ⚠️ 返回项里的 `ownedCount` 是**这个人当前已持有的券张数**：发放允许重复
+ * （§五），因此能拦住重复的不是这里，而是让管理员**看得见**「他已经有两张了」。
+ */
+export function searchAdminGrantTargets(keyword: string): Promise<AdminGrantTargetUser[]> {
+  const params = new URLSearchParams();
+  const trimmed = keyword.trim();
+  if (trimmed) params.set("keyword", trimmed);
+
+  const query = params.toString();
+  return apiGet<AdminGrantTargetUser[]>(
+    `/api/admin/coupons/grant-targets${query ? `?${query}` : ""}`,
+  );
+}
+
+/**
+ * 向指定用户发放一张券。
+ *
+ * ⚠️ 请求体只有**三个字段**：目标用户、券模板与幂等键。
+ * 券面、门槛、有效期、金额一概不由请求体决定——它们取**当前模板**的快照（§七）。
+ * 发放人更没有可传的位置：它由服务端按会话写入（`grantedByAdminId`）。
+ *
+ * ⚠️ 幂等键由**调用方**生成并在**同一次用户意图内保持不变**（见本文件开头的说明）。
+ * 这一点在发券上比别处更要紧：发放**不受**「一人一模板一次」约束（§五），
+ * 因此「请求已到达服务端、回执丢了、管理员重新点一次」若换了键，
+ * 就会真的多发一张券——服务端那边没有任何唯一索引能拦住它。
+ */
+export function grantAdminCoupon(input: {
+  userId: string;
+  couponId: string;
+  idempotencyKey: string;
+}): Promise<AdminCouponGrantResult> {
+  return apiPost<AdminCouponGrantResult>("/api/admin/coupons/grant", {
+    idempotencyKey: input.idempotencyKey,
+    userId: input.userId,
+    couponId: input.couponId,
+  });
+}
+
+// ————————————————————— 优惠券模板管理（P1-6） —————————————————————
+
+/** 列表请求。三个筛选字段都可省，省略即「不筛」。 */
+export type AdminCouponTemplateListRequest = {
+  keyword?: string;
+  enabled?: AdminEnabledFilter;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 券模板列表（管理员视角）。
+ *
+ * ⚠️ 与 `fetchAdminCouponGrantOptions()` **不是一回事**，两者也不能合并：
+ * 那一个回答「有哪些券现在可以发」，服务端只返回启用中的满减券；
+ * 这一个回答「平台上有哪些券、它们现在是什么状态」，**含已停用的全部模板**。
+ * 合并成一个「取券列表」会让发放页突然看得到停用的券。
+ *
+ * ⚠️ `enabled` 的两个取值与类目列表共用同一套（`""` / `enabled` / `disabled`），
+ * 因此这里不另写一份筛选语义。
+ */
+export function fetchAdminCouponTemplates(
+  input: AdminCouponTemplateListRequest = {},
+): Promise<AdminCouponTemplateListData> {
+  const params = new URLSearchParams();
+  if (input.keyword) params.set("keyword", input.keyword);
+  if (input.enabled) params.set("enabled", input.enabled);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? ADMIN_COUPON_PAGE_SIZE));
+
+  return apiGet<AdminCouponTemplateListData>(`/api/admin/coupon-templates?${params.toString()}`);
+}
+
+/** 取一条券模板详情。**已停用的模板照样返回**：后台要能查看并重新启用它。 */
+export function fetchAdminCouponTemplate(id: string): Promise<AdminCouponTemplateItem> {
+  return apiGet<AdminCouponTemplateItem>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}`,
+  );
+}
+
+/**
+ * 新建 / 编辑券模板。
+ *
+ * 请求体是**整份白名单**：名称、门槛、优惠金额、有效期、启用状态。
+ * `formKey`、`formLabel`、`valueLabel`、`conditionLabel`、`createdAt`、`updatedAt`、`id`
+ * **没有可传的位置**——形态由服务端钉死为满减券，文案由服务端按金额派生（§1 / §3）。
+ */
+export function saveCouponTemplateProfile(
+  id: string,
+  idempotencyKey: string,
+  patch: AdminCouponTemplateProfilePatch,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPatch<AdminCouponTemplateWriteResult>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}`,
+    { idempotencyKey, ...patch },
+  );
+}
+
+export function createCouponTemplate(
+  idempotencyKey: string,
+  patch: AdminCouponTemplateProfilePatch,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPost<AdminCouponTemplateWriteResult>("/api/admin/coupon-templates", {
+    idempotencyKey,
+    ...patch,
+  });
+}
+
+/**
+ * 启用 / 停用，两个**窄写入**接口。
+ *
+ * ⚠️ 与 `saveCouponTemplateProfile()` 分开：详情页上的开关只应当改启用状态，
+ * 而不是「读出整条记录、拼一个完整 patch 再写回去」——后者会在两位管理员
+ * 同时操作时，用后写的那次把另一位刚改好的金额覆盖回旧值。
+ *
+ * ⚠️ 这个开关在**详情页**，不在列表行上（列表是只读的）：停用会让已经领到券的
+ * 用户当下不能核销，所以不把它做成列表上「顺手一点」的开关。
+ *
+ * ⚠️ 两者都是 `POST` + 幂等键：重复点击不会产生第二条审计，也不会刷新 `updatedAt`。
+ */
+export function enableCouponTemplate(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPost<AdminCouponTemplateWriteResult>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}/enable`,
+    { idempotencyKey },
+  );
+}
+
+export function disableCouponTemplate(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminCouponTemplateWriteResult> {
+  return apiPost<AdminCouponTemplateWriteResult>(
+    `/api/admin/coupon-templates/${encodeURIComponent(id)}/disable`,
+    { idempotencyKey },
+  );
+}
+
+// ————————————————————— 评价审核（P1-8） —————————————————————
+//
+// ⚠️ 这一组**没有**「改星级 / 改正文」的函数（`D12`）：接口层根本没有接收这两个字段的位置，
+// 客户端也就没有可构造的请求。管理员能做的只有四个状态动作。
+//
+// ⚠️ 四个动作各自一个函数（不是一个「moderate(id, action)」）：它们的目标状态、
+// 是否需要原因、审计动作名都不同，页面上的按钮也就各接各的。请求体只有
+// `idempotencyKey`（拒绝与隐藏另加 `reason`），没有 `status` —— 目标状态由路径段决定。
+
+export type AdminReviewListRequest = {
+  status?: AdminReviewStatusFilter;
+  keyword?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+/**
+ * 取一页评价（含作者摘要与服务端判定的四个可执行动作）。
+ *
+ * ⚠️ **缺省（不传 `status`）时服务端只看 `pending`**：这个页面的主用途是处理待审队列。
+ * 客户端因此要把「当前筛选」如实带上，而不是靠省略参数来表达「全部」——
+ * 那样打开页面会看到一个默认落在待审的列表，却以为它已经是全部。
+ *
+ * ⚠️ 关键词 **不按作者昵称匹配**（昵称为空也照样由服务端决定），只匹配
+ * 订单号 / 评价 id / 商品名 / 规格名 / 打手名。
+ */
+export function fetchAdminReviews(
+  input: AdminReviewListRequest = {},
+): Promise<AdminReviewListData> {
+  const params = new URLSearchParams();
+  if (input.status) params.set("status", input.status);
+  if (input.keyword) params.set("keyword", input.keyword);
+  params.set("page", String(input.page ?? 1));
+  params.set("pageSize", String(input.pageSize ?? REVIEW_PAGE_SIZE));
+
+  return apiGet<AdminReviewListData>(`/api/admin/reviews?${params.toString()}`);
+}
+
+/** 取一条评价详情（含两个维度、凭证与审核历史）。 */
+export function fetchAdminReview(id: string): Promise<AdminReviewDetail> {
+  return apiGet<AdminReviewDetail>(`/api/admin/reviews/${encodeURIComponent(id)}`);
+}
+
+/**
+ * 通过（`pending → approved`）：这条评价进入公开面，商品页与打手页的评分立刻把它算进去。
+ *
+ * ⚠️ **不传原因**：通过是默认预期。对一条**隐藏中**的评价点「通过」是无效的
+ * （那是「恢复公开」），服务端会 400；界面上这个按钮那时本来就是禁用的
+ * ——可用性完全来自 `allowedActions`，不是页面自己判断状态。
+ */
+export function approveAdminReview(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/approve`,
+    { idempotencyKey },
+  );
+}
+
+/** 驳回（`pending → rejected`）：**必须填写原因**（`D10`），用户在原评价上改完重提（`D9`）。 */
+export function rejectAdminReview(
+  id: string,
+  idempotencyKey: string,
+  reason: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/reject`,
+    { idempotencyKey, reason },
+  );
+}
+
+/** 隐藏（`approved → hidden`）：**必须填写原因**，原因作者可见（`D8`）。 */
+export function hideAdminReview(
+  id: string,
+  idempotencyKey: string,
+  reason: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/hide`,
+    { idempotencyKey, reason },
+  );
+}
+
+/** 恢复公开（`hidden → approved`）：不需要业务原因，但照样写审计（`D11` / `D22`）。 */
+export function unhideAdminReview(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminReviewWriteResult> {
+  return apiPost<AdminReviewWriteResult>(
+    `/api/admin/reviews/${encodeURIComponent(id)}/unhide`,
+    { idempotencyKey },
+  );
 }

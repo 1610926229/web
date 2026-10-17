@@ -37,6 +37,7 @@ import {
   type ProductProfileInput,
   type ProductSpecRowErrors,
 } from "@/lib/constants/adminProducts";
+import { formatShareRatioBpForInput } from "@/lib/constants/shareRatio";
 import { createProduct, saveProductProfile } from "@/lib/services/adminHttp";
 import type {
   AdminProductFormOptions,
@@ -52,7 +53,8 @@ const NO_SPEC_ROW_ERRORS: ProductSpecRowErrors = [];
  * 商品表单 —— 新建与编辑共用一份（含单组规格编辑器）。
  *
  * 能改的字段就是下面这一整份：所属游戏与类目、标题、副标题、封面、标签、
- * 图文详情（文字 + 图片）、展示排序、推荐状态、上下架状态、**以及全部规格**。
+ * 图文详情（文字 + 图片）、展示排序、**分账比例**、推荐状态、上下架状态、
+ * **以及全部规格**。
  * `monthlySales`（销量）、`gameTag`、`createdAt`、`updatedAt`、`removedAt`、`id`
  * **在界面上没有输入框、在接口入参里也没有位置**——客户端多传一个不会有任何效果
  * （§八、§九），因为服务层根本没有读取它们的地方。
@@ -67,9 +69,10 @@ const NO_SPEC_ROW_ERRORS: ProductSpecRowErrors = [];
  * 3. **校验与服务端共用同一份函数**（`productProfileFieldErrors()` /
  *    `normalizeProductProfilePatch()`），而且提交出去的**就是归一化的产物本身**，
  *    服务端读的字段与这里写下的字段逐个对得上，不会出现「前端说能提交、服务端却拒绝」。
- *    ⚠️ 金额也不例外：产物里的规格行带的是 `priceYuan`（元文本），元转分只发生在
- *    服务端。这里曾经把归一化理解成「顺便把价格转成分」，于是发出去的是 `price`、
- *    服务端读的是 `priceYuan`，界面上填 `10` 会被判成非法单价、商品建不出来。
+ *    ⚠️ 金额与比例都不例外：产物里的规格行带的是 `priceYuan`（元文本）、
+ *    分账比例带的是 `companionRatePercent`（百分比文本），转成「分」与「基点」
+ *    只发生在服务端。这里曾经把归一化理解成「顺便把价格转成分」，于是发出去的是
+ *    `price`、服务端读的是 `priceYuan`，界面上填 `10` 会被判成非法单价、商品建不出来。
  *    与其它表单一样，错误在**提交时**才出现——边输入边标红会让「还没来得及填」
  *    看起来像「填错了」；字数上限是例外，它一直实时可见。
  *
@@ -107,6 +110,12 @@ export default function AdminProductForm({
   const [detailText, setDetailText] = useState(record?.detailText ?? "");
   const [detailImages, setDetailImages] = useState<string[]>(record?.detailImages ?? []);
   const [sortOrder, setSortOrder] = useState(record ? String(record.sortOrder) : "0");
+  // 分账比例：界面上是百分比文本，存进记录时由服务端换算成整数基点。
+  // ⚠️ 新建时**留空**：需求文档没有给出「新商品的默认分账比例」，
+  // 这里补一个 80 就等于替产品定了一条资金规则，而且是会静默生效的那种
+  const [companionRatePercent, setCompanionRatePercent] = useState(
+    record ? formatShareRatioBpForInput(record.companionRateBp) : "",
+  );
   const [recommended, setRecommended] = useState(record?.recommended ?? false);
   const [status, setStatus] = useState(record?.status ?? "off");
   const [specRows, setSpecRows] = useState<AdminSpecRow[]>(
@@ -180,6 +189,9 @@ export default function AdminProductForm({
       detailImages,
       // 空串与非数字都变成 NaN：校验会给出「展示排序只能是…」，而不是静默当成 0 写进去
       sortOrder: trimmed === "" ? Number.NaN : Number(trimmed),
+      // 原样传文本：基点的换算只发生在服务端（与 `priceYuan` 同一条规则），
+      // 这里不做任何猜测性的格式化，空串就是空串——校验会把它变成一条错误
+      companionRatePercent,
       recommended,
       status,
       specs: specRows.map(toProductSpecInput),
@@ -598,8 +610,8 @@ export default function AdminProductForm({
         </div>
       </AdminField>
 
-      {/* 9 / 10 / 11 展示排序、推荐状态、上下架状态 */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      {/* 9 / 10 / 11 / 12 展示排序、分账比例、推荐状态、上下架状态 */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <AdminField
           label={PRODUCT_FIELD_LABELS.sortOrder}
           error={fieldProps("sortOrder").message}
@@ -616,6 +628,26 @@ export default function AdminProductForm({
             aria-invalid={fieldProps("sortOrder")["aria-invalid"]}
             aria-describedby={fieldProps("sortOrder")["aria-describedby"]}
             className={`h-9 w-full ${fieldProps("sortOrder").className}`}
+          />
+        </AdminField>
+
+        {/* 10 分账比例：填百分比，存的是基点（换算在服务端，见 lib/constants/shareRatio.ts） */}
+        <AdminField
+          label={PRODUCT_FIELD_LABELS.companionRatePercent}
+          error={fieldProps("companionRatePercent").message}
+          errorId="product-companionRatePercent-error"
+          hint="百分比，0 到 100，最多两位小数；下单时冻结进订单，改动只影响之后的新订单"
+          htmlFor="product-companionRatePercent"
+        >
+          <input
+            id="product-companionRatePercent"
+            data-product-field="companionRatePercent"
+            value={companionRatePercent}
+            inputMode="decimal"
+            onChange={(event) => setCompanionRatePercent(event.target.value)}
+            aria-invalid={fieldProps("companionRatePercent")["aria-invalid"]}
+            aria-describedby={fieldProps("companionRatePercent")["aria-describedby"]}
+            className={`h-9 w-full ${fieldProps("companionRatePercent").className}`}
           />
         </AdminField>
 
@@ -668,7 +700,7 @@ export default function AdminProductForm({
         </AdminField>
       </div>
 
-      {/* 12 规格：与商品一起原子写入 */}
+      {/* 13 规格：与商品一起原子写入 */}
       <AdminSpecEditor
         rows={specRows}
         // 逐行错误在**提交时**才出现，与其它字段一致：刚点出来的空行不该立刻变红。

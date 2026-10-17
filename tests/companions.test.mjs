@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test, { afterEach } from "node:test";
 import {
   COMPANION_AVAILABILITY_INVALID_MESSAGE,
-  COMPANION_DETAIL_REVIEW_LIMIT,
   COMPANION_DETAIL_DISABLED_NOTICE,
   COMPANION_GAME_INVALID_MESSAGE,
   COMPANION_INTRO_BRIEF_LENGTH,
@@ -14,6 +13,7 @@ import {
   toCompanionListItem,
 } from "../lib/constants/companions.ts";
 import { companionSeed } from "../lib/mocks/fixtures/seed.ts";
+import { EMPTY_REVIEW_AGGREGATE, REVIEW_AGGREGATE_LIMIT } from "../lib/constants/reviews.ts";
 import {
   getCompanionDetail,
   listCompanionGameOptions,
@@ -120,13 +120,31 @@ test("列表只含在架陪玩，排序稳定，分页不重不漏", async () =>
   assert.equal(all.total, expected.length);
   assert.equal(all.hasMore, false);
 
-  // 分页：把三页拼起来，应当与一次性取出的顺序完全一致，且没有重复
+  // 分页：逐页翻到底，拼起来应当与一次性取出的顺序完全一致，且没有重复。
+  //
+  // ⚠️ 页数由**数据**决定，不写死「三页」。DEV-1 往种子里补了两位在架陪玩之后，
+  // 写死的三页断言立刻变红——而它红的原因与「分页对不对」毫无关系，
+  // 只是在说「列表恰好是 8 条」。这种断言会在每次加数据时误报，掩盖真正的回归。
+  const pageSize = 3;
   const collected = [];
-  for (const pageNumber of [1, 2, 3]) {
-    const one = await query({ pageSize: 3, page: pageNumber });
+  let pageNumber = 1;
+  let hasMore = true;
+  while (hasMore) {
+    const one = await query({ pageSize, page: pageNumber });
     collected.push(...one.items.map((item) => item.id));
-    assert.equal(one.hasMore, pageNumber < 3);
+    hasMore = one.hasMore;
+
+    // 「还有下一页」必须与实际剩余条数一致：否则翻页入口会凭空停住（少）或多出一页空白（多）
+    assert.equal(
+      hasMore,
+      collected.length < expected.length,
+      `第 ${pageNumber} 页的 hasMore 与实际剩余条数对不上`,
+    );
+
+    pageNumber += 1;
+    assert.ok(pageNumber < 100, "分页没有终止：hasMore 一直是 true");
   }
+  // 取完最后还是不满一页时，也必须停下来——否则最后一页会被重复取一次
   assert.deepEqual(collected, expected);
   assert.equal(new Set(collected).size, collected.length, "分页出现了重复的陪玩");
 });
@@ -279,15 +297,20 @@ test("详情 DTO：完整自我介绍、有限的评价摘要、selectable 由�
   assert.ok(dto);
   // 详情给完整自我介绍，列表给截断摘要——两者的差别只在这里
   assert.equal(dto.intro, entity.intro);
-  const listItem = toCompanionListItem(entity, {});
+  const listItem = toCompanionListItem(entity, {}, EMPTY_REVIEW_AGGREGATE);
   assert.ok(listItem.introBrief.length <= COMPANION_INTRO_BRIEF_LENGTH + 1);
   assert.equal(listItem.introBrief.endsWith("…"), true);
   assert.equal("intro" in listItem, false, "列表项不该带完整自我介绍");
 
-  // 评价只展示前若干条，并说明还有更多
-  assert.equal(dto.reviews.length, COMPANION_DETAIL_REVIEW_LIMIT);
-  assert.equal(entity.reviews.length > COMPANION_DETAIL_REVIEW_LIMIT, true);
-  assert.equal(dto.reviewsTruncated, true);
+  // 评价只展示最近 3 条，并说明还有更多。
+  // ⚠️ P1-8 起「有几条评价」不再由种子里的数组决定，而是由**真实评价记录**聚合出来
+  // （`D17`），因此这里从 `cp-9`（没有任何评价）改为 `cp-3`（4 条 approved）。
+  const truncated = await detail("cp-3");
+  assert.equal(truncated.reviews.length, REVIEW_AGGREGATE_LIMIT);
+  assert.equal(truncated.reviewCount > REVIEW_AGGREGATE_LIMIT, true);
+  assert.equal(truncated.reviewsTruncated, true);
+  // 详情上列出的评价就是聚合给出的那几条，不是另取一份
+  assert.equal(truncated.reviews.length, truncated.reviewCount > 3 ? 3 : truncated.reviewCount);
 
   // 没有评价的陪玩：评分是 null（不拿 0 分冒充「暂无评分」）
   const fresh = await detail("cp-8");
@@ -351,7 +374,7 @@ test("公开 DTO 显式挑字段：内部字段与身份字段一律不外泄", 
     ].sort(),
   );
   assert.deepEqual(
-    Object.keys(toCompanionDetail(companionSeed[0], {})).sort(),
+    Object.keys(toCompanionDetail(companionSeed[0], {}, EMPTY_REVIEW_AGGREGATE)).sort(),
     [
       "available",
       "avatarUrl",

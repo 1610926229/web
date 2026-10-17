@@ -10,6 +10,7 @@ import {
   adminComplaintTransitionMessage,
   buildAdminComplaintListQuery,
   complaintMatchesAdminKeyword,
+  complaintStatusesForFilter,
   normalizeAdminComplaintResult,
   readAdminComplaintStatusFilter,
   readAdminComplaintTypeFilter,
@@ -27,7 +28,6 @@ import {
 } from "@/lib/data/adminComplaintTransaction";
 import { getComplaintRepository } from "@/lib/data/complaintRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
-import { getUserRepository } from "@/lib/data/userRepository";
 import { mockEmptyApplies, withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type {
   AdminComplaintDetail,
@@ -35,7 +35,7 @@ import type {
   AdminComplaintWriteResult,
   Complaint,
 } from "@/lib/types/complaint";
-import type { AdminUserSummary } from "@/lib/types/user";
+import { adminUserIndex, missingUser } from "./adminIndex";
 
 /**
  * 管理端「投诉处理」服务 —— 列表、详情与三个处理动作的唯一入口。
@@ -53,18 +53,8 @@ import type { AdminUserSummary } from "@/lib/types/user";
 
 // ——————————————————————————— 用户摘要 ———————————————————————————
 
-/** userId → 用户摘要。与另外两组管理服务同一做法：一次取回全部用户，避免逐条查询。 */
-async function adminUserIndex(): Promise<Map<string, AdminUserSummary>> {
-  const users = await getUserRepository().listUsers();
-  return new Map(
-    users.map((user) => [user.id, { id: user.id, displayId: user.displayId, nickname: user.nickname }]),
-  );
-}
-
-/** 用户记录缺失时的占位摘要（缺一条用户记录不该让整页打不开）。 */
-function missingUser(userId: string): AdminUserSummary {
-  return { id: userId, nickname: "", displayId: "" };
-}
+// `adminUserIndex` / `missingUser` 见 `./adminIndex`（P1-3 抽出：四个管理列表此前
+// 各有一份逐字节相同的副本）。本文件只是使用者。
 
 /**
  * 投诉关联的订单摘要输入。
@@ -88,7 +78,7 @@ async function orderSummaryInput(orderId: string | null): Promise<AdminComplaint
     orderNo: order.orderNo,
     status: order.status,
     productTitle: order.productTitle,
-    totalAmount: order.totalAmount,
+    actualPaidAmount: order.actualPaidAmount,
   };
 }
 
@@ -148,7 +138,7 @@ export async function queryAdminComplaintList(
 
     const [rows, users] = await Promise.all([
       getComplaintRepository().queryComplaintsForAdmin({
-        status: query.status === "all" ? null : query.status,
+        statuses: complaintStatusesForFilter(query.status),
         type: query.type === "all" ? null : query.type,
       }),
       adminUserIndex(),

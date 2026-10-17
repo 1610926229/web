@@ -1,4 +1,6 @@
 import { mockQualificationRepository } from "./mockQualificationRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgQualificationRepository } from "./pg/qualificationRepository";
 
 /**
  * 用户**资格**仓储（多角色结构里「平台侧身份」的落点）。
@@ -59,6 +61,16 @@ export type QualificationRepository = {
   listQualifications(): Promise<UserQualificationRecord[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const qualificationRepositoryBacking: RepositoryBacking<QualificationRepository> = {
+  name: "qualification",
+  mock: mockQualificationRepository,
+  pg: pgQualificationRepository,
+};
+
 export function getQualificationRepository(): QualificationRepository {
-  return mockQualificationRepository;
+  return pickRepository(qualificationRepositoryBacking);
 }

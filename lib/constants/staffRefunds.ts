@@ -19,7 +19,7 @@ import type {
   StaffRefundDetail,
   StaffRefundListItem,
 } from "@/lib/types/refund";
-import type { StaffUserSummary } from "@/lib/types/staff";
+import type { StaffCompanionReleaseEntry, StaffUserSummary } from "@/lib/types/staff";
 
 /**
  * 客服端「退款处理」的筛选规则、状态机结论与 DTO 转换（服务端与浏览器共用）。
@@ -58,7 +58,8 @@ export const STAFF_REFUND_LIST_NOTICE =
 
 /** 退款金额不可修改的说明（客服端）。 */
 export const STAFF_REFUND_AMOUNT_NOTE =
-  "退款金额取申请创建时的订单实付快照，由系统记录，客服不可修改。";
+  "「申请金额」是申请创建时的订单实付快照；实际退款金额由管理员按退款比例与责任归属核定，" +
+  "由系统计算，客服不可修改、也不参与核定。";
 
 /**
  * 客服遇到「应该退」的申请时该做什么。
@@ -67,8 +68,9 @@ export const STAFF_REFUND_AMOUNT_NOTE =
  * 最终划拨，客服的正确做法是把它留在审核中并向上报备，而不是替平台把钱批出去。
  */
 export const STAFF_REFUND_REPORT_NOTE =
-  "客服没有「通过」入口：通过会在同一次写入里把订单改成「已退款」，涉及资金最终划拨，" +
-  "只在管理员侧。处理完一笔申请后如果结论是「应该退」，请把它留在审核中并向上报备。";
+  "客服没有「通过」入口：通过会写入退款金额、打手收益冲回（累计退满时还包括订单转为「已退款」），" +
+  "涉及资金最终划拨，只在管理员侧。处理完一笔申请后如果结论是「应该退」，" +
+  "请把它留在审核中并向上报备——退多少、由谁承担，也都由管理员认定。";
 
 /** 列表为空时的提示。 */
 export const STAFF_REFUND_EMPTY_MESSAGE = "当前筛选下没有退款申请。";
@@ -270,6 +272,9 @@ export function toStaffRefundListItem(
     statusLabel: REFUND_STATUS_LABELS[refund.status],
     // 只读展示值：它来自申请创建时的服务端快照，客服没有入口能改
     amount: refund.amount,
+    // ⚠️ 只给**结果金额**，不给责任归属与平台承担额：那两项是管理员的决策依据
+    // （产品裁定 Q1-b：客服只能调查、记录、提出处理意见）
+    decidedAmount: refund.decision?.refundAmount ?? null,
     createdAt: refund.createdAt,
     updatedAt: refund.updatedAt,
     user,
@@ -281,7 +286,14 @@ export function toStaffRefundListItem(
   };
 }
 
-/** 内部实体 → 客服端详情。在列表项之上补齐原因、说明、凭证、金额对照、审核信息与可执行动作。 */
+/**
+ * 内部实体 → 客服端详情。在列表项之上补齐原因、说明、凭证、金额对照、审核信息、
+ * 履约退出历史与可执行动作。
+ *
+ * ⚠️ `releaseHistory` 与 `conversationOrderId` 一样由服务层查好传进来：
+ * 本层不碰 `lib/data`（它同时被浏览器端引用）。条目本身由
+ * `toStaffCompanionReleaseEntry` 转换——那是「退出历史怎么显示」的唯一出处。
+ */
 export function toStaffRefundDetail(
   refund: RefundRequest,
   order: {
@@ -289,10 +301,21 @@ export function toStaffRefundDetail(
     orderNo: string;
     status: OrderStatus;
     productTitle: string;
-    totalAmount: number;
+    /**
+     * 单位：分。用户实付（P1-4）。
+     *
+     * 详情页那行「原订单实付金额」读的是**这个**（下方 `orderTotalAmount`），
+     * 列表那行「申请金额」读的是申请时冻结的 `refund.amount`。
+     *
+     * ⚠️ 入参里**刻意不要** `totalAmount`（优惠前应付总额）：本层不读它，
+     * 而一个没人读的原价字段正是「拿原价充实付」的入口——同一处错误已经在
+     * 用户端与客服端各出现过一次（见下方 `orderTotalAmount`）。
+     */
+    actualPaidAmount: number;
   },
   user: StaffUserSummary,
   conversationOrderId: string | null,
+  releaseHistory: StaffCompanionReleaseEntry[],
 ): StaffRefundDetail {
   return {
     ...toStaffRefundListItem(refund, order, user),
@@ -300,7 +323,10 @@ export function toStaffRefundDetail(
     reasonLabel: refund.reasonLabel || (REFUND_REASON_LABELS[refund.reasonKey] ?? refund.reasonKey),
     description: refund.description,
     evidence: refund.evidence,
-    orderTotalAmount: order.totalAmount,
+    // ⚠️ **读实付，不读 `totalAmount`（P1-4 修正）**：详情页那一行标着「原订单实付金额」，
+    // 而值原先取自**优惠前**应付总额。有券时客服会拿着一个比用户实付更大的数去对账
+    // （同一处错误在用户端由 `lib/services/refunds.ts` 的同一个字段名一起改掉）
+    orderTotalAmount: order.actualPaidAmount,
     reviewingAt: refund.reviewingAt,
     reviewedAt: refund.reviewedAt,
     reviewedBy: refund.reviewedBy,
@@ -310,6 +336,7 @@ export function toStaffRefundDetail(
     cancelledAt: refund.cancelledAt,
     timeline: buildStaffRefundTimeline(refund),
     conversationOrderId,
+    releaseHistory,
     allowedActions: staffRefundAllowedActions(refund.status),
   };
 }

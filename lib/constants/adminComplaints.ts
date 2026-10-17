@@ -3,6 +3,7 @@ import {
   COMPLAINT_STATUS_LABELS,
   COMPLAINT_TYPES,
   COMPLAINT_TYPE_LABELS,
+  OPEN_COMPLAINT_STATUSES,
 } from "@/lib/constants/complaints";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import type {
@@ -75,24 +76,51 @@ export const ADMIN_COMPLAINT_LIST_FIELDS_NOTE =
 
 /** 筛选条件不合法时的提示。**返回 400，不静默回退**。 */
 export const ADMIN_COMPLAINT_STATUS_INVALID_MESSAGE =
-  "筛选条件 status 只能是 all / pending / processing / resolved / closed";
+  "筛选条件 status 只能是 all / open / pending / processing / resolved / closed";
 export const ADMIN_COMPLAINT_TYPE_INVALID_MESSAGE =
   "筛选条件 type 只能是 companion_service / refund_dispute / payment_issue / platform_service / other";
 
 // ——————————————————————————— 状态筛选 ———————————————————————————
 
-/** 状态筛选。`all` 表示不限。 */
-export type AdminComplaintStatusFilter = ComplaintStatus | "all";
+/**
+ * 状态筛选。`all` 表示不限，`open` 表示「未完结」。
+ *
+ * ⚠️ `open` **不是领域状态**：不写进 store、不进状态机、不在 `ComplaintStatus` 里，
+ * 只是「把 `OPEN_COMPLAINT_STATUSES` 一次筛出来」的地址栏写法。
+ * 服务层在调用仓储前用 `complaintStatusesForFilter()` 解析成真实状态集合，
+ * 因此数据层永远看不到 `open`。
+ */
+export type AdminComplaintStatusFilter = ComplaintStatus | "all" | "open";
 
 export const ADMIN_COMPLAINT_STATUS_FILTERS: readonly AdminComplaintStatusFilter[] = [
   "all",
+  "open",
   ...COMPLAINT_STATUSES,
 ];
 
 export const ADMIN_COMPLAINT_STATUS_FILTER_LABELS: Record<AdminComplaintStatusFilter, string> = {
   all: "全部",
+  open: "待处理",
   ...COMPLAINT_STATUS_LABELS,
 };
+
+/**
+ * 筛选值 → **真实领域状态集合**（`null` 表示不限）。
+ *
+ * ⚠️ 列表服务与首页 Dashboard 都调这一个函数，不各自写
+ * `status === "all" ? null : status`——那样 `open` 会被当成字面量状态去筛，
+ * 结果是 0 条且不报错。
+ *
+ * `StaffComplaintStatusFilter`（`ComplaintStatus | "all"`）是本类型的子集，
+ * 因此客服端调用同一个函数、且天然拿不到 `open`。
+ */
+export function complaintStatusesForFilter(
+  filter: AdminComplaintStatusFilter,
+): readonly ComplaintStatus[] | null {
+  if (filter === "all") return null;
+  if (filter === "open") return OPEN_COMPLAINT_STATUSES;
+  return [filter];
+}
 
 /**
  * 默认筛选：**待处理**。
@@ -303,7 +331,7 @@ export function normalizeAdminComplaintResult(
 
 /** 管理端投诉列表查询条件（已解析、已校验）。 */
 export type AdminComplaintListQuery = {
-  /** `all` 表示不限状态 */
+  /** `all` 表示不限状态，`open` 表示未完结（见 `AdminComplaintStatusFilter`） */
   status: AdminComplaintStatusFilter;
   /** `all` 表示不限类型 */
   type: AdminComplaintTypeFilter;
@@ -398,7 +426,8 @@ export type AdminComplaintOrderInput = {
   orderNo: string;
   status: OrderStatus;
   productTitle: string;
-  totalAmount: number;
+  /** 用户实付（P1-4）。投诉页写的「实付金额」读的是它 */
+  actualPaidAmount: number;
 };
 
 export function toAdminComplaintOrderSummary(
@@ -410,7 +439,7 @@ export function toAdminComplaintOrderSummary(
     status: order.status,
     statusLabel: ORDER_STATUS_LABELS[order.status],
     productTitle: order.productTitle,
-    totalAmount: order.totalAmount,
+    actualPaidAmount: order.actualPaidAmount,
   };
 }
 

@@ -89,10 +89,10 @@ export const mockCompanionApplicationRepository: CompanionApplicationRepository 
   },
 
   async queryApplicationsForAdmin(filter) {
-    const { status, keyword, gameId } = filter;
+    const { statuses, keyword, gameId } = filter;
 
     return [...store().applications.values()]
-      .filter((application) => !status || application.status === status)
+      .filter((application) => !statuses || statuses.includes(application.status))
       .filter((application) => !gameId || application.gameIds.includes(gameId))
       .filter((application) => applicationMatchesAdminKeyword(application, keyword))
       // 默认排序：提交时间倒序，相等时按 id 兜底——顺序不确定时分页会出现

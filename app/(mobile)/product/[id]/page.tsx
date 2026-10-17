@@ -3,6 +3,8 @@ import NavBar from "@/components/common/NavBar";
 import ComplianceNotice from "@/components/product/ComplianceNotice";
 import ProductMainImage from "@/components/product/ProductMainImage";
 import ProductPurchasePanel from "@/components/product/ProductPurchasePanel";
+import ProductReviews from "@/components/product/ProductReviews";
+import { isPublicPreviewRequest } from "@/lib/auth/publicPreviewRequest";
 import { getSessionUser } from "@/lib/auth/session";
 import { isMockAuthEnabled } from "@/lib/config/env";
 import { getProductDetail } from "@/lib/services/catalog";
@@ -54,8 +56,12 @@ export default async function ProductDetailPage({
           product={product}
           loggedIn={user !== null}
           initialFavorited={favorited}
-          mockAuthEnabled={isMockAuthEnabled()}
+          mockAuthEnabled={
+            isMockAuthEnabled() && !(await isPublicPreviewRequest())
+          }
         />
+        {/* 公开评分聚合由服务层贴在 `ProductDetailView.reviews` 上，页面只负责渲染 */}
+        <ProductReviews reviews={product.reviews} />
       </div>
     </>
   );

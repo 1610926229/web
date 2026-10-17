@@ -60,9 +60,22 @@ function level(id, name, thresholdAmount, extra = {}) {
   };
 }
 
-/** 造一条订单；口径函数只读 id / status / totalAmount。 */
-function order(id, status, totalAmount, userId = "u-x") {
-  return { id, userId, status, totalAmount };
+/**
+ * 造一条订单；口径函数只读 id / status / actualPaidAmount。
+ *
+ * ⚠️ 第 5 个参数是**券抵扣额**，不是可选的装饰：口径读的是 `actualPaidAmount`，
+ * 想验证「接券后按实付计入」就必须让两个数**不相等**。默认 0（无券订单，
+ * 此时 `totalAmount === actualPaidAmount`），既有的三参数调用点因此保持原意。
+ */
+function order(id, status, totalAmount, userId = "u-x", couponDiscountAmount = 0) {
+  return {
+    id,
+    userId,
+    status,
+    totalAmount,
+    couponDiscountAmount,
+    actualPaidAmount: totalAmount - couponDiscountAmount,
+  };
 }
 
 function page(params = {}) {
@@ -120,6 +133,31 @@ test("口径：金额取订单的服务端快照，同一订单只累计一次",
   // 空数组：金额是 0，不是 NaN
   assert.equal(sumEffectiveSpend([]), 0);
   assert.equal(Number.isInteger(sumEffectiveSpend([])), true);
+});
+
+test("口径：接券后按实付计入，不按优惠前应付（P1-4）", () => {
+  // 原价 100 元、满减券抵 10 元 → 用户实付 90 元。累计有效消费必须是 90。
+  // ⚠️ 这条用例的全部价值在于**两个数不相等**：只要口径函数读错字段，
+  // 它就会返回 1000 而不是 900，立刻失败。
+  const withCoupon = order("o1", "completed", 1000, "u-x", 100);
+  assert.equal(withCoupon.totalAmount, 1000);
+  assert.equal(withCoupon.actualPaidAmount, 900);
+
+  assert.equal(sumEffectiveSpend([withCoupon]), 900, "必须按实付计入，不能按原价");
+
+  // 等级也据此判定：90 元的消费不该被当成 100 元而提前升级
+  const levels = [level("lv-1", "普通", 0), level("lv-2", "高级", 950)];
+  assert.equal(resolveConsumptionLevel(sumEffectiveSpend([withCoupon]), levels).state?.currentLevel.name, "普通");
+
+  // 全额抵扣（实付 0）的已完成订单：金额是 0，因此**不进榜**（榜单门槛是 > 0），
+  // 但它仍然是一笔有效订单笔数——金额与笔数是两个独立的数，不互相推导
+  const fullyDiscounted = order("o2", "completed", 1000, "u-x", 1000);
+  assert.equal(sumEffectiveSpend([fullyDiscounted]), 0);
+  assert.equal(countEffectiveOrders([fullyDiscounted]), 1);
+
+  // 混合：一张有券 + 一张无券，各自按自己的实付累加
+  const plain = order("o3", "completed", 250, "u-x");
+  assert.equal(sumEffectiveSpend([withCoupon, plain]), 1150);
 });
 
 test("等级判定：0 消费落在最低等级，正好到阈值即升级", () => {
@@ -531,6 +569,11 @@ test("页面必须标注 Mock 配置与统计口径，且不直接引用 lib/moc
     "components/rights/PrivilegeList.tsx",
     "components/rights/LevelProgress.tsx",
     "components/mine/LevelSummaryPanel.tsx",
+    // P1-7：老板数据面板的这两个同样是客户端组件（`"use client"`）。
+    // ⚠️ 新加客户端组件时要**一起加到这里**——这是本清单唯一的作用，
+    // 漏加了不会红，只会让那条「Mock 不得进浏览器产物」的规则在这两个文件上静默失效。
+    "components/mine/BossStatsCard.tsx",
+    "components/mine/BossStatsPanel.tsx",
   ]) {
     // 先去掉注释：注释里写一句「数据来自 lib/mocks/fixtures/...」不算引用
     const code = stripComments(readFileSync(resolveSource(file), "utf8"));

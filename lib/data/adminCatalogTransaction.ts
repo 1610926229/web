@@ -38,6 +38,17 @@ import {
   createCategoryRecord,
   createProductRecord,
 } from "./mockCatalogRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import {
+  createCategoryPg,
+  createProductPg,
+  removeCategoryPg,
+  removeProductPg,
+  setCategoryEnabledPg,
+  setProductStatusPg,
+  updateCategoryPg,
+  updateProductPg,
+} from "./pg/catalogTransactions";
 
 /**
  * 商品目录写操作的**伪事务** —— 本阶段所有类目、商品与规格改动的唯一写入入口。
@@ -190,8 +201,13 @@ export type AdminProductWriteOutcome =
  *   不占用名字的话，启用之后就会冒出两条同名类目；
  * - 名称按**去首尾空格后的完全相同**比较，不做大小写或全半角折叠：
  *   「机密单」与「机密 单」是两条不同的类目，规则不替运营猜。
+ *
+ * ⚠️ **导出是为了共用，不是复制**：PostgreSQL 事务（`pg/catalogTransactions.ts`）
+ * 的 `createCategoryPg` / `updateCategoryPg` 直接 import 这一个函数，而不是在 Pg 侧
+ * 再写一份同名判定。两份实现一旦分叉，「两条同名类目算不算重复」就会在两个存储上
+ * 各有一个答案，而这类差异只在运营同时新建时才会暴露。
  */
-function hasDuplicateCategoryName(
+export function hasDuplicateCategoryName(
   categories: Map<string, CategoryRecord>,
   gameId: string,
   name: string,
@@ -219,8 +235,11 @@ type CatalogStore = ReturnType<typeof catalogStore>;
  *
  * 返回 `null` 表示没问题。三种失败分开报，是因为处置完全不同：
  * 游戏选错了要改游戏，类目选错了要改类目，类目被停用了要么换一个、要么先启用它。
+ *
+ * ⚠️ **导出是为了共用，不是复制**：PostgreSQL 事务（`pg/catalogTransactions.ts`）读目录表
+ * 拼出一个同样形状的 `CatalogStore` 交给这一个函数，而不是在 Pg 侧照抄一遍判定树。
  */
-function categoryFailure(
+export function categoryFailure(
   catalog: CatalogStore,
   gameId: string,
   categoryId: string,
@@ -233,7 +252,7 @@ function categoryFailure(
   return null;
 }
 
-type SpecResolution =
+export type SpecResolution =
   | { ok: true; specs: ProductSpecRecord[] }
   | { ok: false; failure: AdminCatalogWriteFailure };
 
@@ -251,8 +270,13 @@ type SpecResolution =
  *
  * ⚠️ 完整解析之后再交给写入器：规格数组是整份替换的，因此不存在
  * 「前两条改了、第三条没写进去」这种半完成状态。
+ *
+ * ⚠️ **导出是为了共用，不是复制**：`pg/catalogTransactions.ts` 的
+ * `createProductPg` / `updateProductPg` 直接调用这一个函数来解析规格。
+ * 发 id、拒伪造 id、算 `removedAt`、校验金额与排序这四件事只在这里定义一处；
+ * 在 Pg 侧另写一份，等于让「什么样的规格提交算合法」出现第二个答案。
  */
-function resolveSpecs(
+export function resolveSpecs(
   drafts: readonly AdminProductSpecPatch[],
   existing: readonly ProductSpecRecord[] | null,
   at: string,
@@ -315,7 +339,7 @@ function resolveSpecs(
  * 按 id 比对只会把它误判成「幂等键被别的对象用了」。`takeCreateReplay()` 因此
  * 只认「这个键已经被同类型的对象用过」，再拿审计里记下的 id 把当时那条记录找回来。
  */
-export async function createCategory(
+async function createCategoryMock(
   draft: CategoryDraft,
   ctx: AdminWriteContext,
 ): Promise<AdminCategoryWriteOutcome> {
@@ -380,7 +404,7 @@ export async function createCategory(
  * 「启用类目 / 停用类目」——不管这次改动是来自 `PATCH` 还是 `POST /disable`，
  * 记的都是同一件事。
  */
-export async function updateCategory(
+async function updateCategoryMock(
   id: string,
   draft: CategoryDraft,
   ctx: AdminWriteContext,
@@ -435,7 +459,7 @@ export async function updateCategory(
  * 列表页上的启用开关只应当改启用状态。走「先读出来、拼一个完整 patch 再保存」的话，
  * 两位管理员同时操作时，后写的那次会把另一位刚改好的名称覆盖回旧值。
  */
-export async function setCategoryEnabled(
+async function setCategoryEnabledMock(
   id: string,
   enabled: boolean,
   ctx: AdminWriteContext,
@@ -491,7 +515,7 @@ export async function setCategoryEnabled(
  * 「未移除」是唯一的计数条件：已经软删除的商品在用户端本来就不可见，
  * 让它们把类目锁死说不通。
  */
-export async function removeCategory(
+async function removeCategoryMock(
   id: string,
   ctx: AdminWriteContext,
 ): Promise<AdminCategoryWriteOutcome> {
@@ -549,7 +573,7 @@ export async function removeCategory(
  * 「上架前至少有一个有效规格」在这里就生效：以 `on` 状态新建、却一条有效规格都没有，
  * 会建出一条买不了的商品——它出现在列表里、点进去却没有任何可选项。
  */
-export async function createProduct(
+async function createProductMock(
   draft: ProductDraft,
   ctx: AdminWriteContext,
 ): Promise<AdminProductWriteOutcome> {
@@ -635,7 +659,7 @@ export async function createProduct(
  * （`PaymentRequestSnapshot` → `OrderRecord`），与这条商品记录没有任何关联。
  * 改价只影响之后的试算与支付。
  */
-export async function updateProduct(
+async function updateProductMock(
   id: string,
   draft: ProductDraft,
   ctx: AdminWriteContext,
@@ -706,7 +730,7 @@ export async function updateProduct(
  * 是合法的），因此这个校验只在**转向 `on`** 时生效，而且放在「状态没变」判断之后
  * ——重复上架一条已在架的商品不该报错。
  */
-export async function setProductStatus(
+async function setProductStatusMock(
   id: string,
   status: ProductStatus,
   ctx: AdminWriteContext,
@@ -765,7 +789,7 @@ export async function setProductStatus(
  * ⚠️ **不删除记录**：历史订单、收藏记录与评价都要继续指得到它。
  * 移除之后商品从用户端完全消失（直链也是 404），后台可以用「已移除」筛选查到。
  */
-export async function removeProduct(
+async function removeProductMock(
   id: string,
   ctx: AdminWriteContext,
 ): Promise<AdminProductWriteOutcome> {
@@ -821,4 +845,106 @@ function cloneRecord(record: CatalogProductRecord): CatalogProductRecord {
     detailImages: [...record.detailImages],
     specs: record.specs.map((spec) => ({ ...spec })),
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 8 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/catalogTransactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：目录写入被
+ * `adminCategories.ts` / `adminProducts.ts` 等多个调用点引用，逐个改调用点意味着
+ * 将来新增一个调用点就会漏改一处，而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」
+ * 的半事务——事务提交了，进程内的账本却把「管理员改过这条类目」记了下来。
+ * 路由放在这一个函数里，调用方无感，也就不存在「忘了切」的位置。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发
+ * 悄无声息地切库。
+ */
+
+/** 新建类目。 */
+export async function createCategory(
+  draft: CategoryDraft,
+  ctx: AdminWriteContext,
+): Promise<AdminCategoryWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? createCategoryPg(draft, ctx)
+    : createCategoryMock(draft, ctx);
+}
+
+/** 编辑类目（名称 / 所属游戏 / 排序 / 启用状态）。 */
+export async function updateCategory(
+  id: string,
+  draft: CategoryDraft,
+  ctx: AdminWriteContext,
+): Promise<AdminCategoryWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? updateCategoryPg(id, draft, ctx)
+    : updateCategoryMock(id, draft, ctx);
+}
+
+/** 启用 / 停用类目（窄写入）。 */
+export async function setCategoryEnabled(
+  id: string,
+  enabled: boolean,
+  ctx: AdminWriteContext,
+): Promise<AdminCategoryWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? setCategoryEnabledPg(id, enabled, ctx)
+    : setCategoryEnabledMock(id, enabled, ctx);
+}
+
+/** 移除类目（软删除，有未移除商品时拒绝）。 */
+export async function removeCategory(
+  id: string,
+  ctx: AdminWriteContext,
+): Promise<AdminCategoryWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? removeCategoryPg(id, ctx)
+    : removeCategoryMock(id, ctx);
+}
+
+/** 新建商品（含它的全部规格，一次写入）。 */
+export async function createProduct(
+  draft: ProductDraft,
+  ctx: AdminWriteContext,
+): Promise<AdminProductWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? createProductPg(draft, ctx)
+    : createProductMock(draft, ctx);
+}
+
+/** 编辑商品与它的全部规格（一次原子写入）。 */
+export async function updateProduct(
+  id: string,
+  draft: ProductDraft,
+  ctx: AdminWriteContext,
+): Promise<AdminProductWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? updateProductPg(id, draft, ctx)
+    : updateProductMock(id, draft, ctx);
+}
+
+/** 上架 / 下架商品（窄写入）。 */
+export async function setProductStatus(
+  id: string,
+  status: ProductStatus,
+  ctx: AdminWriteContext,
+): Promise<AdminProductWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? setProductStatusPg(id, status, ctx)
+    : setProductStatusMock(id, status, ctx);
+}
+
+/** 移除商品（软删除）。 */
+export async function removeProduct(
+  id: string,
+  ctx: AdminWriteContext,
+): Promise<AdminProductWriteOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? removeProductPg(id, ctx)
+    : removeProductMock(id, ctx);
 }

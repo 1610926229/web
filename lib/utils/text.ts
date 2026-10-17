@@ -18,3 +18,49 @@ export function countCharacters(value: string): number {
   // Array.from 按 code point 拆分，代理对（Emoji）自然算作 1 个
   return Array.from(value).length;
 }
+
+/** 昵称为空、或只剩空白时公开面显示的说法。 */
+export const MASKED_NICKNAME_FALLBACK = "匿名用户";
+
+/** 脱敏后用于替换其余字符的符号。 */
+const NICKNAME_MASK = "**";
+
+/**
+ * 昵称脱敏 —— **公开面展示用户昵称的唯一入口**。
+ *
+ * 保留**首个字符**，其余一律替换成 `**`：
+ *
+ * ```
+ * 李四        → 李**
+ * 张小明      → 张**
+ * 打游戏的阿强 → 打**
+ * A           → A**
+ * ""/"  "     → 匿名用户
+ * ```
+ *
+ * ## 为什么是「首字 + 固定两个星」而不是「张*明」
+ *
+ * 后者（保留首尾、按实际长度补星）是不少 App 的做法，但它**泄漏昵称长度**：
+ * 「李**」与「李*****」的区别本身就携带信息，配合「这个昵称是几字」可以把候选范围收窄。
+ * 固定两个星对任何长度的昵称产生**同一个形状**，长度不构成额外信道。
+ *
+ * ## 为什么只保留一个字符就够
+ *
+ * 评价的公开面要回答的是「这条评价可信吗」，为此只需要一个**稳定且可区分**的署名
+ * （同一个人在同一条评价下始终显示同一个名字），不需要让读者还原出是谁。
+ * 首字符已经满足「看起来不像匿名灌水」，再多一个字符就只是多泄漏一点。
+ *
+ * ## 唯一性
+ *
+ * ⚠️ **商品详情与打手详情必须调用本函数**（`D13`：不允许两个页面各写一套脱敏规则）。
+ * 脱敏不是「展示层的小修饰」：昵称里常常塞着手机号、微信号、平台 ID，
+ * 少脱敏一处就等于把这些信息挂到了公开接口上，而且**接口返回什么是服务端说了算**，
+ * 前端即使不显示也已经泄漏。因此脱敏在**服务端组 DTO 时**完成（见 `toPublicReviewItem`），
+ * 客户端拿到的就已经是脱敏后的字符串。
+ */
+export function maskNickname(nickname: string): string {
+  const characters = Array.from(nickname.trim());
+  const head = characters[0];
+  if (!head) return MASKED_NICKNAME_FALLBACK;
+  return `${head}${NICKNAME_MASK}`;
+}

@@ -93,7 +93,7 @@ async function ResultBody({
         tone="success"
         title="支付成功"
         description="订单已生成，陪玩接单与后续进度可稍后在订单列表查看。"
-        amount={request.totalAmount}
+        amount={request.actualPaidAmount}
         actions={
           <>
             {/* 直接进入这一单的详情；订单一时取不到时退回列表，绝不给出指向不存在订单的链接 */}
@@ -139,7 +139,7 @@ async function ResultBody({
             ? "本次支付已取消，未生成订单，也不会产生任何扣款。"
             : "本次支付未完成，未生成订单，也不会产生任何扣款。"
         }
-        amount={request.totalAmount}
+        amount={request.actualPaidAmount}
         actions={
           <>
             <RetryLink productId={request.productId} specId={request.specId} />
@@ -163,7 +163,7 @@ async function ResultBody({
           ? "支付尚未完成，请在下方选择模拟支付结果以继续验证流程。"
           : "支付尚未完成。当前未开启模拟支付，无法在本地完成这笔支付。"
       }
-      amount={request.totalAmount}
+      amount={request.actualPaidAmount}
       actions={
         <>
           <RetryLink productId={request.productId} specId={request.specId} label="返回结算页" />
