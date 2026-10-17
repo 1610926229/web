@@ -196,6 +196,15 @@ test("systemd 单元把绑定地址写死在 ExecStart 里", () => {
   assert.match(exec, /NODE_ENV=production/);
 });
 
+test("systemd 单元的 Node 使用目标服务器上存在的绝对路径", () => {
+  const exec = code.unit.split("\n").find((l) => l.startsWith("ExecStart="));
+  assert.ok(exec, "缺少 ExecStart");
+  // 裸 `node` 依赖 PATH；`/usr/bin/node` 在目标服务器上不存在。
+  // 两者都只会表现为 systemd 的 status=1/FAILURE，所以在这里钉死。
+  assert.match(exec, /\/usr\/local\/bin\/node server\.js$/, "Node 必须是 /usr/local/bin/node");
+  assert.doesNotMatch(exec, /\/usr\/bin\/node\b/, "目标服务器上不存在 /usr/bin/node");
+});
+
 test("systemd 单元实现开机自启与异常重启", () => {
   assert.match(code.unit, /^Restart=always$/m);
   assert.match(code.unit, /^RestartSec=5$/m);
@@ -338,6 +347,17 @@ test("发布脚本拒绝含 .env 的产物与非回环监听", () => {
   assert.match(code.install, /拒绝安装/);
   assert.match(code.common, /端口 \$port 监听在\*\*非回环\*\*地址上/);
   assert.match(code.common, /127\\\.0\\\.0\\\.1/);
+});
+
+test("发布脚本在解包前断言单元里的 Node 存在且可执行", () => {
+  assert.match(code.install, /UNIT_EXEC=.*systemctl cat "\$SERVICE"/);
+  assert.match(code.install, /NODE_BIN/);
+  assert.match(code.install, /\[\[ -x "\$NODE_BIN" \]\]/);
+
+  const guardAt = code.install.indexOf('[[ -x "$NODE_BIN" ]]');
+  const extractAt = code.install.indexOf('tar -xzf "$ARTIFACT" -C "$REL"');
+  assert.ok(guardAt >= 0, "缺少 Node 存在性断言");
+  assert.ok(extractAt > guardAt, "Node 校验必须早于解包");
 });
 
 test("回滚脚本只切换链接并重启，不重新构建", () => {

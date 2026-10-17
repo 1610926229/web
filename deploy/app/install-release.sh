@@ -85,6 +85,20 @@ systemctl cat "$SERVICE" >/dev/null 2>&1 || die \
       sudo cp deploy/app/chaoge-staging.service /etc/systemd/system/
       sudo systemctl daemon-reload"
 
+# ── 0. 运行时 Node 校验 ──────────────────────────────────────────────────────
+#
+# 单元里的 Node 是绝对路径。路径写错（例如写了这台机器上不存在的 /usr/bin/node）
+# 时，systemd 只会报 status=1/FAILURE，日志里没有「找不到 node」这种直白提示。
+# 所以在解包、切换、重启之前，先从已安装单元里取出那个路径并实测。
+UNIT_EXEC="$(systemctl cat "$SERVICE" | sed -n 's/^ExecStart=//p' | tail -1)"
+NODE_BIN="$(printf '%s\n' "$UNIT_EXEC" | awk '
+  { for (i = 1; i <= NF; i++) if ($i ~ /^\// && $i != "/usr/bin/env") { print $i; exit } }')"
+[[ -n "$NODE_BIN" ]] || die "无法从 $SERVICE 的 ExecStart 解析出 Node 绝对路径：
+      $UNIT_EXEC"
+[[ -x "$NODE_BIN" ]] || die "systemd 单元里的 Node 不存在或不可执行：$NODE_BIN
+      这会让服务以 status=1/FAILURE 启动失败。修正 ExecStart 后 daemon-reload 再发布。"
+ok "运行时 Node 可用：$NODE_BIN（$( "$NODE_BIN" -v 2>/dev/null || echo '版本未知')）"
+
 step "1. 环境变量文件校验"
 [[ -f "$ENV_FILE" ]] || die "找不到 $ENV_FILE。先跑 bash deploy/app/setup-staging-env.sh。"
 PERM="$(stat -c '%U:%G %a' "$ENV_FILE")"

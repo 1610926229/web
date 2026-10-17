@@ -25,7 +25,11 @@ EnvironmentFile=/etc/chaoge/staging.env
 #    HOSTNAME=0.0.0.0，服务就会暴露到公网，而且从 unit 文件上看不出来。
 #    用 `/usr/bin/env VAR=... node server.js` 让这两个值不可能被配置文件改变。
 #    Next 的 server.js 在 HOSTNAME 未设置时默认绑 0.0.0.0——所以这一行是安全边界。
-ExecStart=/usr/bin/env NODE_ENV=production PORT=3000 HOSTNAME=127.0.0.1 /usr/bin/node server.js
+#
+# ⚠️ Node 用**绝对路径** `/usr/local/bin/node`（指向 /opt/node-v24.15.0/bin/node），
+#    不写成裸 `node` 依赖 PATH，也不写 `/usr/bin/node`——目标服务器上不存在后者。
+#    `install-release.sh` 在解包前会断言这里的二进制存在且可执行。
+ExecStart=/usr/bin/env NODE_ENV=production PORT=3000 HOSTNAME=127.0.0.1 /usr/local/bin/node server.js
 
 # 异常退出 / 被 OOM killer 杀掉 / 机器重启后都会回来。
 Restart=always
