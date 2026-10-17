@@ -44,10 +44,6 @@ ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n── %s\n' "$*"; }
 
-status_of() {
-  curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 8 "$@" 2>/dev/null || printf '000'
-}
-
 # ── 0. 前置检查 ──────────────────────────────────────────────────────────────
 
 step "0. 前置检查"
@@ -136,42 +132,87 @@ ok "Nginx 已启动/重载，并设为开机自启"
 
 step "5. 本地验收"
 
-CODE="000"
-for _ in $(seq 1 20); do
-  CODE="$(status_of "$PUBLIC_URL/")"
-  [[ "$CODE" == "200" ]] && break
+HEADERS="$(mktemp)"
+BODY="$(mktemp)"
+trap 'rm -f "$HEADERS" "$BODY"' EXIT
+
+# 请求经过 Nginx，把响应头/响应体分别落到临时文件，返回状态码。
+http_of() {
+  local path="$1"; shift
+  local code
+  code="$(curl --noproxy '*' -sS -D "$HEADERS" -o "$BODY" \
+    -w '%{http_code}' --max-time 8 "$@" "$PUBLIC_URL$path" 2>/dev/null || true)"
+  printf '%s' "${code:-000}"
+}
+
+# 只有本配置会返回该响应头。默认站点同样返回 200，所以**不能只看状态码**：
+# reload 之后旧 worker 可能还会用旧配置接几个请求，只看 200 会误判成安装成功。
+has_proxy_marker() {
+  grep -qiE '^X-Chaoge-Public-Proxy: 1' "$HEADERS"
+}
+
+dump_home_diagnostics() {
+  printf '  诊断（这些内容用于区分「默认站点」「代理到错误服务」「应用未就绪」）：\n'
+  printf '    status: %s\n' "${CODE:-?}"
+  printf '    title : %s\n' "$(grep -o '<title>[^<]*</title>' "$BODY" 2>/dev/null | head -1 || true)"
+  printf '    body  : %s bytes\n' "$(wc -c < "$BODY" 2>/dev/null | tr -d ' ' || printf '?')"
+  printf '    headers:\n'
+  sed -n '1,15p' "$HEADERS" 2>/dev/null | sed 's/^/      /' || true
+  printf '    注意：站点配置已启用且 nginx -t 已通过（验收失败不会自动回滚）。\n'
+  printf '    未查明原因前不要放行公网 80；回滚脚本：rollback-public-proxy.sh\n'
+}
+
+# 最多等 20 秒，直到响应同时满足：200 + chaoge 标记头。
+READY=0
+for _ in $(seq 1 40); do
+  CODE="$(http_of /)"
+  if [[ "$CODE" == "200" ]] && has_proxy_marker; then
+    READY=1
+    break
+  fi
   sleep 0.5
 done
-[[ "$CODE" == "200" ]] || die "经 Nginx（127.0.0.1:80）访问首页 → $CODE（期望 200）。"
-ok "经 Nginx 访问首页 → 200"
+if [[ "$READY" != "1" ]]; then
+  dump_home_diagnostics
+  die "20 秒内没有等到 chaoge 站点响应（X-Chaoge-Public-Proxy: 1）。公网 80 不要放行。"
+fi
+ok "经 Nginx 访问首页 → 200，且响应来自 chaoge 站点"
 
-HTML="$(curl --noproxy '*' -sS --max-time 8 "$PUBLIC_URL/" || true)"
-printf '%s' "$HTML" | grep -q '超哥电竞' \
-  || die "首页 HTML 里没有产品名「超哥电竞」——代理可能落到了错误的服务。"
-ok "首页内容包含「超哥电竞」"
+TITLE="$(grep -o '<title>[^<]*</title>' "$BODY" | head -1 || true)"
+if [[ "$TITLE" != "<title>超哥电竞</title>" ]]; then
+  dump_home_diagnostics
+  die "首页标题不是「超哥电竞」——代理可能落到了错误的服务。"
+fi
+ok "首页标题为「超哥电竞」"
 
-# 这一条同时验证「Nginx 注入标记头」和「应用只读守卫」两层：
+# 这一条同时验证「Nginx 注入请求标记头」和「应用只读守卫」两层：
 # 公网请求下 Mock 身份切换面板必须不出现在 HTML 里。
-if printf '%s' "$HTML" | grep -q '开发工具'; then
+if grep -q '开发工具' "$BODY"; then
   die "首页 HTML 出现了 Mock 身份切换面板（开发工具）——公网标记头或应用守卫失效。"
 fi
 ok "公网页面不包含 Mock 身份切换面板"
 
-CODE="$(status_of "$PUBLIC_URL/api/home")"
+CODE="$(http_of /api/home)"
 [[ "$CODE" == "200" ]] || die "GET /api/home → $CODE（期望 200）"
-ok "公开只读接口 /api/home → 200"
+has_proxy_marker || die "GET /api/home 的 200 不是 chaoge 站点返回的。"
+grep -q '"announcements"' "$BODY" \
+  || die "GET /api/home 返回 200，但响应体不是首页数据（没有 announcements）。"
+ok "公开只读接口 /api/home → 200，响应体是首页数据"
 
-CODE="$(status_of "$PUBLIC_URL/api/admin/dashboard")"
+CODE="$(http_of /api/admin/dashboard)"
 [[ "$CODE" == "404" ]] || die "GET /api/admin/dashboard → $CODE（期望 404，Nginx 白名单失效）"
-ok "私有接口 /api/admin/dashboard → 404"
+has_proxy_marker || die "私有接口的 404 不是 chaoge 站点返回的——可能命中了默认站点。"
+ok "私有接口 /api/admin/dashboard → 404（由 chaoge 站点拒绝）"
 
-CODE="$(status_of -X POST -H 'content-type: application/json' -d '{}' "$PUBLIC_URL/api/auth/mock-login")"
+CODE="$(http_of -X POST -H 'content-type: application/json' -d '{}' /api/auth/mock-login)"
 [[ "$CODE" == "404" ]] || die "POST /api/auth/mock-login → $CODE（期望 404，公网不得触达 Mock 登录）"
+has_proxy_marker || die "Mock 登录拒绝的 404 不是 chaoge 站点返回的。"
 ok "POST /api/auth/mock-login → 404（无法切换到任何 Mock 身份）"
 
-CODE="$(status_of "$PUBLIC_URL/admin")"
+CODE="$(http_of /admin)"
 [[ "$CODE" == "404" ]] || die "GET /admin → $CODE（期望 404）"
-ok "管理后台 /admin → 404"
+has_proxy_marker || die "管理后台 404 不是 chaoge 站点返回的。"
+ok "管理后台 /admin → 404（由 chaoge 站点拒绝）"
 
 # 监听面：Nginx 只应新增 80；上游必须仍是回环。
 ss -ltn | grep -qE 'LISTEN[[:space:]].*:80[[:space:]]' \

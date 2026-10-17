@@ -28,6 +28,9 @@ Internet :80 → Nginx → 127.0.0.1:3000 (chaoge-staging / Next.js)
 - `proxy_set_header Cookie "";` 与 `Authorization ""`：公网请求即使携带
   `mock_user_id` / `mock_admin_id` / `mock_staff_id` 等 Cookie，也不会到达应用。
 - 注入 `X-Chaoge-Public-Preview: 1`，供第二层识别公网请求。
+- 返回 `X-Chaoge-Public-Proxy: 1` **响应头**，安装脚本据此确认请求确实经过
+  本配置。默认站点同样返回 200，不能只凭状态码验收；`reload` 后旧 worker
+  可能还会接几个请求。
 - 安全响应头（nosniff / DENY / Referrer-Policy / Permissions-Policy /
   frame-ancestors）、限流（`limit_req` + `limit_conn`）、请求体上限 64 KB。
 

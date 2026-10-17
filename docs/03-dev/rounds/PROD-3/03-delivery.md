@@ -20,10 +20,10 @@
 
 | 命令 | 结果 |
 |---|---|
-| `pnpm test` | 2302 tests · 1886 pass · 0 fail · 416 skipped（HTTP 用例需要 `APP_BASE_URL`；本机无 nginx 时真实配置测试跳过） |
+| `pnpm test` | 2304 tests · 1888 pass · 0 fail · 416 skipped（HTTP 用例需要 `APP_BASE_URL`；本机无 nginx 时真实配置测试跳过） |
 | `pnpm typecheck` | 通过 |
 | `pnpm lint` | 通过 |
-| `tests/publicPreview.test.mjs` | 24 tests · 23 pass · 1 skipped（真实 nginx -t，本机无 nginx） |
+| `tests/publicPreview.test.mjs` | 26 tests · 25 pass · 1 skipped（真实 nginx -t，本机无 nginx） |
 | `tests/stagingDeploy.test.mjs` | 58 tests · 56 pass · 0 fail · 2 skipped（POSIX 执行位） |
 
 ## 部署后实测（服务器回环）
@@ -50,8 +50,8 @@
    已上传到 `/home/deploy/chaoge-proxy/`，与本地提交的哈希一致：
 
    ```
-   010c22113c6aac929bdff790f811e42d3fc35515f85aa1fd218fc9f845d9b5b4  chaoge-public.conf
-   2abb7df6183d96297c5e50da4dfdaa66cebba7406c5ad98b2c8c9c22618a345a  install-public-proxy.sh
+   0f85ae7f02a117869fe5eb3c4b5cce4ececb2cd0a81a193bf5bd0642b29a051d  chaoge-public.conf
+   7afd905fd0c8f004a2dfb6101d0a667fcd04d3100bc67628535a48a8964563b1  install-public-proxy.sh
    7d8e3b8d7a8f89a58b6e306b8c7556f8bacd2aae2af2e70c68c5817cd8904b30  rollback-public-proxy.sh
    ```
 
@@ -110,6 +110,55 @@ nginx: configuration file .../nginx.conf test is successful
 只读诊断确认：`sites-enabled` 仅恢复的 `default`；`chaoge-public.conf`
 留在 `sites-available` 未启用；Nginx active/enabled；80 在监听（腾讯云
 安全组仍阻断公网）；应用仍只在 `127.0.0.1:3000`。
+
+## 第二次安装：验收误判（reload 竞态）
+
+**现象：** `nginx -t` 通过、站点已启用、经 80 访问首页 200，但安装器的
+字符串检查报「首页 HTML 里没有产品名超哥电竞」。
+
+**只读证据（不是代理配置错误）：**
+
+- 安装时段 `chaoge-public.access.log` **没有**安装器的请求；该文件随后
+  只有我们排查时的 3 条 `GET /`（01:47:02、01:47:14）；
+- 默认站点 `/var/log/nginx/access.log` 的 mtime 正是安装时刻 01:46；
+- `sites-enabled` 已是 `chaoge-public.conf -> sites-available/...`，
+  内容哈希为 `010c2211…`（修复了 limit_conn 的版本）；
+- 当前经 80 的响应：`Server: nginx`（`server_tokens off` 只在本配置里）、
+  本配置的 6 个安全响应头、`<title>超哥电竞</title>`；直连 3000 的响应没有
+  这些头且带 `X-Powered-By: Next.js`；
+- 经 80 的 HTML 47,527 字节，直连 3000 为 48,614 字节，差异来自公网标记
+  导致不渲染 Mock 身份面板；两者标题一致。
+
+**根因：** `systemctl reload nginx` 返回时旧 worker 仍可能继续接少量请求；
+Ubuntu 默认站点同样返回 200。安装器原先「看到 200 就继续」，恰好命中默认
+站点，随后单字符串检查失败。站点本身在毫秒级后已由新 worker 正确服务。
+**验收竞态，不是代理错误。**
+
+**修复：**
+
+1. Nginx 增加**响应头** `X-Chaoge-Public-Proxy: 1`（`always`，200/404 都带）。
+   只有 chaoge 配置会返回它，默认站点不会。
+2. 安装器最多等待 20 秒，直到「200 + 专属响应头」同时成立；不再把任意 200
+   当成成功。
+3. 首页校验完整 `<title>超哥电竞</title>`；`/api/home` 校验响应体含
+   `"announcements"`；私有接口的 404 也必须带专属响应头。
+4. 失败时打印状态、标题、响应头与字节数，并明确「不要放行 80」。
+5. 验收失败**不自动回滚**（`nginx -t` 失败才回滚），避免把「应用暂时不可用」
+   误判成配置错误；诊断输出会提示当前站点仍启用及回滚脚本名。
+
+**修复后在服务器上的真实 Nginx 1.28.3 验证**（deploy 身份、临时目录、
+127.0.0.1:18080，不触碰系统配置）：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /` | 200，`X-Chaoge-Public-Proxy: 1`，`<title>超哥电竞</title>`，无「开发工具」 |
+| `GET /api/home` | 200 + 标记头，响应体含 `"announcements"` |
+| `GET /api/admin/dashboard` | 404 + 标记头 |
+| `POST /api/auth/mock-login` | 404 |
+| `GET /admin` | 404 |
+| 直连 `127.0.0.1:3000` | 200，但**没有**标记头（证明标记只由 Nginx 添加） |
+
+`nginx -t` 对修复后配置再次通过。
 
 ## 回滚
 

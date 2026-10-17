@@ -684,20 +684,54 @@ test("安装脚本的验收必须经过 Nginx 80，不能直连上游", () => {
     "必须定义经过 Nginx 的验收地址",
   );
 
-  for (const expected of [
-    '"$PUBLIC_URL/"',
-    '"$PUBLIC_URL/api/home"',
-    '"$PUBLIC_URL/api/admin/dashboard"',
-    '"$PUBLIC_URL/api/auth/mock-login"',
-    '"$PUBLIC_URL/admin"',
-  ]) {
-    assert.ok(installer.includes(expected), `验收请求必须走 ${expected}`);
-  }
+  // 所有验收请求统一由 http_of 拼到 PUBLIC_URL 上。
+  assert.ok(installer.includes('"$PUBLIC_URL$path"'), "http_of 必须请求 Nginx 地址");
 
-  // 所有 status_of 的验收地址都必须是 PUBLIC_URL；出现 UPSTREAM 说明又直连了 3000。
+  for (const call of [
+    '"$(http_of /)"',
+    '"$(http_of /api/home)"',
+    '"$(http_of /api/admin/dashboard)"',
+    '"$(http_of /admin)"',
+  ]) {
+    assert.ok(installer.includes(call), `缺少经过 Nginx 的验收请求：${call}`);
+  }
+  assert.match(
+    installerCode,
+    /http_of -X POST[^\n]*\/api\/auth\/mock-login/,
+    "Mock 登录验收必须经过 Nginx",
+  );
+
+  // 出现 UPSTREAM 说明又直连了 3000。
   assert.doesNotMatch(
     installerCode,
     /status_of[^\n]*\$UPSTREAM/,
     "验收不得直连上游 3000",
+  );
+  assert.ok(!installer.includes("status_of()"), "status_of 已由 http_of 取代");
+});
+
+test("Nginx 返回安装验收专用响应头，请求侧标记保持不变", () => {
+  // 默认站点同样返回 200；验收必须靠这个只有本配置才有的响应头区分。
+  assert.ok(nginx.includes('add_header X-Chaoge-Public-Proxy "1" always;'));
+  // 请求侧标记仍然存在，且与响应头不同名。
+  assert.ok(nginx.includes('proxy_set_header X-Chaoge-Public-Preview "1";'));
+});
+
+test("安装验收等待专属响应头，默认站点的 200 不会误判为成功", () => {
+  assert.match(installerCode, /X-Chaoge-Public-Proxy: 1/);
+  assert.ok(
+    installer.includes('[[ "$CODE" == "200" ]] && has_proxy_marker'),
+    "必须同时满足 200 与专属响应头才继续",
+  );
+  assert.match(installerCode, /for _ in \$\(seq 1 40\)/, "必须带重试窗口");
+  assert.ok(installer.includes("dump_home_diagnostics"), "失败时必须打印诊断");
+  assert.ok(
+    installer.includes('"$TITLE" != "<title>超哥电竞</title>"'),
+    "必须校验完整标题，而不是只看单个字符串",
+  );
+  assert.ok(installer.includes('"announcements"'), "首页 API 必须校验响应体内容");
+  assert.ok(
+    installer.includes("has_proxy_marker || die"),
+    "私有接口的 404 也必须确认来自 chaoge 站点",
   );
 });
