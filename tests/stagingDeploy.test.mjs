@@ -525,6 +525,8 @@ test("bootstrap 构建 root:root 快照并拒绝路径/符号链接逃逸", () =
   assert.match(code.bootstrap, /node_modules 里存在绝对符号链接/);
   assert.match(code.bootstrap, /chown -R root:root "\$NEW"/);
   assert.match(code.bootstrap, /chmod -R a\+rX,go-w "\$NEW"/);
+  assert.match(code.bootstrap, /-perm -4000 -o -perm -2000.*-exec chmod u-s,g-s/);
+  assert.match(code.bootstrap, /快照里仍存在 setuid\/setgid 文件/);
   assert.match(code.bootstrap, /runuser -u "\$MIGRATE_USER"/);
   assert.match(code.bootstrap, /bash "\$TRUST_DIR\/deploy\/app\/finalize-staging\.sh"/);
   assert.match(code.bootstrap, /find "\$TRUST_DIR" -xdev .* -perm -0020 -o -perm -0002/);

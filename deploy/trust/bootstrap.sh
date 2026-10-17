@@ -202,6 +202,12 @@ chmod -R a+rX,go-w "$NEW"
 find "$NEW" -type d -exec chmod 0755 {} +
 find "$NEW" -type f -exec chmod u+rw,go+r,go-w {} +
 
+# node_modules 来自 deploy 可写的目录。复制后它是 root:root，若原文件带
+# setuid/setgid，deploy 执行它就可能拿到 root —— 必须显式剥掉并断言为零。
+find "$NEW" -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod u-s,g-s {} +
+[[ -z "$(find "$NEW" -xdev \( -perm -4000 -o -perm -2000 \) -print -quit)" ]] \
+  || die "快照里仍存在 setuid/setgid 文件，拒绝继续。"
+
 # 复制完整性复核：任何字节与 manifest 不符都不得进入信任目录。
 ( cd "$NEW" && sha256sum -c --quiet deploy/trust/deploy-files.sha256 ) \
   || die "快照复制后部署文件校验失败。"
