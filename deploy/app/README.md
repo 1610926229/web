@@ -99,28 +99,65 @@ EXPECTED_SHA=$(git rev-parse HEAD) bash deploy/app/build-standalone.sh
 
 ## 4. 服务器一次性准备
 
-以下命令**尚未执行**，需人工在服务器上逐条确认：
+从 PROD-2 安全整改起，root 收尾**不再执行 `/home/deploy` 下 deploy 可替换的脚本**。
+入口是一个 SHA-256 已被人工命令钉死的 bundle：
+
+```text
+prod2-trust-bundle-<sha8>.tar.gz
+├── deploy/            本次修复后的部署脚本（deploy 可读、不可写）
+└── src/               APP_GIT_SHA 对应的迁移代码（来自 git 对象，不来自工作区）
+```
+
+人工执行的那一条命令（由交付方给出）会：
+
+1. 校验 bundle 的 SHA-256（期望值写在命令里，不读服务器上的文件）；
+2. 解压到 root 拥有的临时目录，调用 `deploy/trust/bootstrap.sh`；
+3. `bootstrap.sh` 校验 `deploy/trust/deploy-files.sha256`，把 bundle 复制成
+   `/opt/chaoge-deploy-trust/`（`root:root`，组/其他用户不可写）；
+4. 从服务器现有 `/home/deploy/chaoge-deploy-src/node_modules` 复制迁移依赖，
+   以 `deploy` 身份做一次 `import("pg")` 冒烟测试；
+5. 调用 `deploy/app/finalize-staging.sh --artifact … [--drill]`，由它完成：
+   服务账号 → 数据库 `check/create/init` → 两个角色口令 → 迁移（**以 deploy 身份**）
+   → 最小测试数据 → `verify` → `staging.env` → systemd 单元 → 首版发布与健康检查
+   → 持久化 / SIGKILL 恢复 → 可选回滚演练。
+
+bundle 的校验值、产物 SHA-256（`f1070077…`）与 `BUILD_INFO` Git SHA
+（`8ad9d6b…`）是**三个不同的东西**，见 §4.1。
+
+### 4.1 版本与哈希不要混淆
+
+| 名称 | 值 | 含义 |
+|---|---|---|
+| `APP_GIT_SHA` | `8ad9d6ba9dcd…` | CI 产物的提交；迁移代码快照也取这个提交 |
+| `ARTIFACT_SHA256` | `f1070077…` | 上述 CI 产物的 tar.gz 哈希 |
+| bundle SHA-256 | 人工命令中给出 | 本次**部署脚本修复**的打包哈希 |
+
+部署脚本的 Git 提交通常晚于 `APP_GIT_SHA`。**不要**把部署脚本的提交写进
+`BUILD_INFO`，也不要因为脚本版本变化而重新标记产物——服务器安装的必须是
+已经构建、已经验证过的那一个产物。
+
+### 4.2 手工分步（仅在 finalize 失败后排查时使用）
+
+finalizer 失败时不要绕过它，先读 `/var/log/chaoge/prod2-finalize.log`。
+确需单独重跑某一阶段时，命令里的脚本路径必须是信任目录：
 
 ```bash
-ssh deploy@<server-ip>
-cd /opt/chaoge-deploy
-
-# 4.1 服务账号与目录（创建 chaoge 系统用户、/opt/chaoge-staging、/etc/chaoge）
-sudo bash deploy/app/create-service-user.sh
-
-# 4.2 准备**独立** Staging 数据库（详见 deploy/db/staging/README.md）
-#     check → create → init → 设置两个 staging 角色口令 → migrate → bootstrap → verify
-
-# 4.3 生成环境变量文件（交互式输入 chaoge_staging_app 口令，不落任何日志）
-sudo bash deploy/app/setup-staging-env.sh
-#    写入前会试连一次；先看内容对不对：
-sudo bash deploy/app/setup-staging-env.sh --dry-run
-
-# 4.4 安装 systemd 单元
-sudo cp deploy/app/chaoge-staging.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable chaoge-staging        # 开机自启
+sudo bash /opt/chaoge-deploy-trust/deploy/db/staging/deploy-staging.sh check --database chaoge_staging
+sudo bash /opt/chaoge-deploy-trust/deploy/app/rollback.sh --list
 ```
+
+### 4.3 Secure Cookie 限制（已知，不修改）
+
+`NODE_ENV=production` 下管理端 / 客服端的会话 Cookie 带 `Secure`。
+SSH 隧道是纯 HTTP，浏览器不会回传 `Secure` Cookie，因此**管理端 / 客服端的
+Mock 登录在 `http://127.0.0.1:3000` 上不可用**；用户端 `mock_user_id`
+不带 `Secure`，不受影响。
+
+这是刻意保留的行为：为了「HTTP 隧道里能登录」而关闭 `Secure`，会把会话
+Cookie 在 HTTPS 缺失时暴露出去。完整的管理端 / 客服端验收需要 HTTPS
+（或后续接入真实登录）；当前 Staging 验收以用户端 + 只读接口为准。
+日志位置：`/var/log/chaoge/{bootstrap,prod2-finalize}.log`，`root:deploy 0640`，
+deploy 只读、不可删除。
 
 ### 4.2 的环境变量文件
 
@@ -152,10 +189,15 @@ ENABLE_MOCK_PAYMENT=true
 # 本地：把产物传上去
 scp staging-standalone-<SHA>.tar.gz deploy@<server-ip>:/tmp/
 
-# 服务器：安装并切换
-sudo bash /opt/chaoge-deploy/deploy/app/install-release.sh \
-     --artifact /tmp/staging-standalone-<SHA>.tar.gz
+# 服务器：安装并切换（强制校验产物 SHA 与 BUILD_INFO SHA）
+sudo bash /opt/chaoge-deploy-trust/deploy/app/install-release.sh \
+     --artifact /tmp/staging-standalone-<APP_SHA>.tar.gz \
+     --sha256 <ARTIFACT_SHA256> \
+     --expected-sha <APP_GIT_SHA>
 ```
+
+日常手工发布也走信任目录；`/home/deploy/chaoge-deploy-src` 只是 CI 检出与
+构建输入，不再是 root 执行的脚本来源。信任目录由 bundle 原子替换，见 §4。
 
 脚本依次做：
 
@@ -325,6 +367,10 @@ staging 上就没有任何登录入口——这不是假设，是读代码得出
 - [ ] `ss -ltnp "sport = :3000"` **只有** `127.0.0.1` / `[::1]`
 - [ ] 从公网直接访问 `http://<server-ip>:3000/` **超时**（不得 200）
 - [ ] 产物里没有 `.env`（`tar -tzf ... | grep '\.env'` 无输出）
+- [ ] `install-release.sh` 的调用参数同时含 `--sha256 f107…` 与 `--expected-sha 8ad9…`
+- [ ] `/opt/chaoge-deploy-trust` 是 `root:root`，且 `find … -perm -0020 -o -perm -0002` 无输出
+- [ ] `/var/log/chaoge` 是 `root:deploy 0750`，日志文件 `0640`
+- [ ] 迁移进程以 `deploy` 身份运行（finalizer 日志「执行身份：deploy」），root 未执行迁移代码
 - [ ] GitHub Actions 日志里没有任何连接串或口令
 
 ## 11. 故障排查
@@ -344,9 +390,10 @@ staging 上就没有任何登录入口——这不是假设，是读代码得出
 不碰服务器也能验证的部分：
 
 ```bash
-bash -n deploy/app/*.sh                 # 语法
+bash -n deploy/app/*.sh deploy/trust/*.sh   # 语法
+bash deploy/trust/generate-manifests.sh      # 重新生成两个 manifest（提交前）
 EXPECTED_SHA=$(git rev-parse HEAD) bash deploy/app/build-standalone.sh
-pnpm test                               # 含 tests/stagingDeploy.test.mjs
+pnpm test                                    # 含 tests/stagingDeploy.test.mjs
 ```
 
 产物结构验收（不启动服务）：

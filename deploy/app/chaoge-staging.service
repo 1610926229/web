@@ -1,6 +1,6 @@
 [Unit]
 Description=超哥电竞 私有 Staging（Next.js standalone）
-Documentation=file:///opt/chaoge-deploy/deploy/app/README.md
+Documentation=file:///opt/chaoge-deploy-trust/deploy/app/README.md
 After=network-online.target postgresql.service
 Wants=network-online.target
 

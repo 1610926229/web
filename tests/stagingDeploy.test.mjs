@@ -28,6 +28,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -35,10 +36,31 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const APP_DIR = path.join(REPO_ROOT, "deploy", "app");
+const TRUST_DIR = path.join(REPO_ROOT, "deploy", "trust");
 const WORKFLOW = path.join(REPO_ROOT, ".github", "workflows", "staging-build.yml");
 const NEXT_CONFIG = path.join(REPO_ROOT, "next.config.ts");
 
 const read = (file) => readFileSync(file, "utf8");
+
+/**
+ * manifest 的哈希按 LF 计算（见 deploy/trust/generate-manifests.sh）：
+ * bundle 由 git blob 组成，永远是 LF；Windows 工作区检出的可能是 CRLF。
+ */
+function sha256LF(file) {
+  const src = read(file).replace(/\r\n/g, "\n");
+  return createHash("sha256").update(src, "utf8").digest("hex");
+}
+
+function parseManifest(file) {
+  return read(file)
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const match = /^([0-9a-f]{64}) [ *](.+)$/.exec(line);
+      assert.ok(match, `${path.basename(file)} 行格式不正确：${line}`);
+      return { hash: match[1], path: match[2] };
+    });
+}
 
 /**
  * 去掉以 `#` 开头的注释行。
@@ -65,6 +87,10 @@ const FILES = {
   unit: path.join(APP_DIR, "chaoge-staging.service"),
   envExample: path.join(APP_DIR, "staging.env.example"),
   readme: path.join(APP_DIR, "README.md"),
+  finalize: path.join(APP_DIR, "finalize-staging.sh"),
+  bootstrap: path.join(TRUST_DIR, "bootstrap.sh"),
+  generateManifests: path.join(TRUST_DIR, "generate-manifests.sh"),
+  trustReadme: path.join(TRUST_DIR, "README.md"),
 };
 
 const raw = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)]));
@@ -368,7 +394,7 @@ test("回滚脚本只切换链接并重启，不重新构建", () => {
 });
 
 test("服务器端脚本都不执行 next build（构建只在 CI/本地）", () => {
-  for (const key of ["install", "rollback", "user", "env", "health"]) {
+  for (const key of ["install", "rollback", "user", "env", "health", "finalize", "bootstrap"]) {
     assert.doesNotMatch(code[key], /next build|pnpm build/, `${key} 不应在服务器上构建`);
   }
 });
@@ -414,7 +440,176 @@ test("README 记录了独立 staging 库与最小数据准备方式", () => {
   assert.match(raw.readme, /chaoge_staging_app/);
 });
 
-// ── 9. bash 语法 ────────────────────────────────────────────────────────────
+// ── 9. 信任快照与 root 收尾（PROD-2 安全整改）────────────────────────────────
+
+test("finalizer 钉死 CI 产物 SHA 与 BUILD_INFO SHA，并与部署脚本版本区分", () => {
+  assert.match(code.finalize, /^APP_GIT_SHA="8ad9d6ba9dcd0094b31d8fc75a8cceb44065bb07"$/m);
+  assert.match(
+    code.finalize,
+    /^ARTIFACT_SHA256_EXPECTED="f10700772c6bab7fc75a438dba82a2e0de5cbcc6d5348a5106f0b59ae646fd5c"$/m,
+  );
+  assert.match(code.finalize, /^FINALIZER_VERSION="prod2-finalize-v2"$/m);
+  assert.match(code.finalize, /BUILD_INFO 的 Git SHA 与预期不一致/);
+  assert.match(code.finalize, /部署脚本版本与 CI 产物版本是两个不同的 SHA/);
+  // 产物必须同时经 --sha256 与 --expected-sha 安装。
+  assert.match(code.finalize, /--sha256 "\$ARTIFACT_SHA256_EXPECTED"/);
+  assert.match(code.finalize, /--expected-sha "\$APP_GIT_SHA"/);
+});
+
+test("finalizer 只执行 root 信任目录里的脚本", () => {
+  assert.match(code.finalize, /^TRUST_DIR="\/opt\/chaoge-deploy-trust"$/m);
+  assert.match(code.finalize, /TRUST_DIR" == "\/opt\/chaoge-deploy-trust"/);
+  assert.match(code.finalize, /deploy\/trust\/deploy-files\.sha256/);
+  assert.match(code.finalize, /deploy\/trust\/migration-code\.sha256/);
+  assert.match(code.finalize, /sha256sum -c --quiet deploy\/trust\/deploy-files\.sha256/);
+  assert.match(code.finalize, /信任目录中仍有组\/其他用户可写的路径/);
+  assert.match(code.finalize, /deploy_script deploy\/db\/staging\/deploy-staging\.sh/);
+
+  // 不允许回落到 /home/deploy 下的脚本或 pnpm/corepack 缓存。
+  assert.doesNotMatch(code.finalize, /\/home\/deploy/);
+  assert.doesNotMatch(code.finalize, /\bpnpm\b/);
+  assert.doesNotMatch(code.finalize, /corepack/);
+});
+
+test("finalizer 把产物复制到 root 临时文件后才校验（消除 TOCTOU）", () => {
+  assert.match(code.finalize, /mktemp --suffix=\.tar\.gz \/var\/tmp\/prod2-artifact\.XXXXXX/);
+  assert.match(code.finalize, /install -o root -g root -m 0600 -- "\$ART" "\$ART_TMP"/);
+  assert.match(code.finalize, /ART="\$ART_TMP"/);
+
+  const copyAt = code.finalize.indexOf('install -o root -g root -m 0600 -- "$ART" "$ART_TMP"');
+  const hashAt = code.finalize.indexOf('ACTUAL_SHA256="$(sha256sum "$ART"');
+  assert.ok(copyAt >= 0 && hashAt > copyAt, "哈希必须在 root 拥有的副本上计算");
+  assert.match(code.finalize, /产物包含不安全的 tar 条目/);
+});
+
+test("finalizer 以 deploy 身份执行迁移，root 不执行迁移代码", () => {
+  assert.match(code.finalize, /^MIGRATE_USER="deploy"$/m);
+  assert.match(code.finalize, /CHAOGE_APP_DIR="\$TRUST_DIR\/src"/);
+  assert.match(code.finalize, /CHAOGE_MIGRATE_AS="\$MIGRATE_USER"/);
+  assert.match(code.finalize, /CHAOGE_NODE_BIN="\$NODE_BIN"/);
+  assert.match(code.finalize, /--migrator-url-fd 9/);
+  assert.match(code.finalize, /exec 9< <\(printf '%s\\n' "\$MIG_URL"\)/);
+  assert.match(code.finalize, /unset MIG_URL/);
+  // 连接串走 fd，不能进 argv 或子进程环境变量列表。
+  assert.doesNotMatch(code.finalize, /DATABASE_URL="\$MIG_URL"/);
+});
+
+test("finalizer 的日志在 root 控制的目录里", () => {
+  assert.match(code.finalize, /^LOG_DIR="\/var\/log\/chaoge"$/m);
+  assert.match(code.finalize, /^LOG="\$LOG_DIR\/prod2-finalize\.log"$/m);
+  assert.match(code.finalize, /chmod 0750 "\$LOG_DIR"/);
+  assert.match(code.finalize, /chmod 0640 "\$LOG"/);
+  assert.match(code.finalize, /\[\[ -L "\$LOG" \]\] && die/);
+  assert.match(code.finalize, /tee -a "\$LOG"/);
+  assert.doesNotMatch(code.finalize, /\/home\/deploy\/prod2-finalize\.log/);
+});
+
+test("finalizer 用 mktemp 做回滚演练并在退出时清理", () => {
+  assert.match(code.finalize, /DRILL_DIR="\$\(mktemp -d\)"/);
+  assert.match(code.finalize, /DRILL_ART="\$\(mktemp --suffix=\.tar\.gz \/var\/tmp\/prod2-drill\.XXXXXX\)"/);
+  assert.match(code.finalize, /trap cleanup EXIT/);
+  assert.match(code.finalize, /rm -rf -- "\$DRILL_DIR"/);
+  assert.match(code.finalize, /rm -f -- "\$DRILL_ART"/);
+  assert.match(code.finalize, /回滚演练失败：坏产物居然通过了健康检查/);
+});
+
+test("bootstrap 构建 root:root 快照并拒绝路径/符号链接逃逸", () => {
+  assert.match(code.bootstrap, /\[\[ "\$\(id -u\)" == "0" \]\]/);
+  assert.match(code.bootstrap, /^TRUST_DIR="\/opt\/chaoge-deploy-trust"$/m);
+  assert.match(code.bootstrap, /sha256sum -c --quiet deploy\/trust\/deploy-files\.sha256/);
+  assert.match(code.bootstrap, /deploy\/trust\/migration-code\.sha256/);
+  assert.match(code.bootstrap, /mktemp -d \/opt\/\.chaoge-deploy-trust\.XXXXXX/);
+  assert.match(code.bootstrap, /install -D -o root -g root -m 0644/);
+  assert.match(code.bootstrap, /manifest 包含不安全的路径/);
+  assert.match(code.bootstrap, /node_modules 符号链接逃逸出快照/);
+  assert.match(code.bootstrap, /node_modules 里存在绝对符号链接/);
+  assert.match(code.bootstrap, /chown -R root:root "\$NEW"/);
+  assert.match(code.bootstrap, /chmod -R a\+rX,go-w "\$NEW"/);
+  assert.match(code.bootstrap, /runuser -u "\$MIGRATE_USER"/);
+  assert.match(code.bootstrap, /bash "\$TRUST_DIR\/deploy\/app\/finalize-staging\.sh"/);
+  assert.match(code.bootstrap, /find "\$TRUST_DIR" -xdev .* -perm -0020 -o -perm -0002/);
+});
+
+test("部署文件 manifest 覆盖全部部署脚本且哈希与工作区一致", () => {
+  const manifest = parseManifest(path.join(TRUST_DIR, "deploy-files.sha256"));
+  const listed = new Map(manifest.map((entry) => [entry.path, entry.hash]));
+  const findSh = spawnSync("bash", ["-c",
+    "find deploy -type f -name '*.sh' -print"], { cwd: REPO_ROOT, encoding: "utf8" });
+  const shellFiles = findSh.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((p) => p.replace(/\\/g, "/"))
+    .filter((p) => p !== "deploy/trust/generate-manifests.sh");
+
+  for (const rel of shellFiles) {
+    assert.ok(listed.has(rel), `deploy-files.sha256 缺少 ${rel}`);
+  }
+  assert.ok(listed.has("deploy/app/chaoge-staging.service"));
+  assert.ok(!listed.has("deploy/trust/deploy-files.sha256"), "manifest 不能包含自己");
+  assert.ok(!listed.has("deploy/trust/generate-manifests.sh"), "生成器不进入服务器信任目录");
+
+  for (const { hash, path: rel } of manifest) {
+    assert.ok(rel.startsWith("deploy/"), `manifest 路径必须在 deploy/ 下：${rel}`);
+    assert.equal(sha256LF(path.join(REPO_ROOT, rel)), hash, `${rel} 的哈希与 manifest 不一致`);
+  }
+});
+
+test("迁移代码 manifest 只覆盖可执行迁移所需的源码，且哈希一致", () => {
+  const manifest = parseManifest(path.join(TRUST_DIR, "migration-code.sha256"));
+  const listed = new Set(manifest.map((entry) => entry.path));
+  const allowed = (p) =>
+    p === "package.json" ||
+    p === "tests/alias-hook.mjs" ||
+    p === "tests/alias-loader.mjs" ||
+    p.startsWith("lib/") ||
+    p.startsWith("db/migrations/");
+
+  assert.ok(listed.has("package.json"));
+  assert.ok(listed.has("tests/alias-hook.mjs"));
+  assert.ok(listed.has("tests/alias-loader.mjs"));
+  assert.ok(listed.has("lib/data/pg/cli.ts"));
+  assert.ok([...listed].some((p) => /^db\/migrations\/\d{4}_.+\.sql$/.test(p)));
+  assert.ok(manifest.length > 300, `迁移源码数量异常：${manifest.length}`);
+
+  for (const { hash, path: rel } of manifest) {
+    assert.ok(allowed(rel), `迁移 manifest 出现不该部署的文件：${rel}`);
+    assert.equal(sha256LF(path.join(REPO_ROOT, rel)), hash, `${rel} 的哈希与 manifest 不一致`);
+  }
+});
+
+test("三个组件钉死的 APP_GIT_SHA 完全一致", () => {
+  const shaOf = (src) => /^APP_GIT_SHA="([0-9a-f]{40})"$/m.exec(src)?.[1];
+  const expected = "8ad9d6ba9dcd0094b31d8fc75a8cceb44065bb07";
+  assert.equal(shaOf(code.finalize), expected);
+  assert.equal(shaOf(code.bootstrap), expected);
+  assert.match(code.generateManifests, /8ad9d6ba9dcd0094b31d8fc75a8cceb44065bb07/);
+});
+
+test("信任流程不修改 sudoers / SSH / 防火墙，也不扩大权限", () => {
+  for (const key of ["finalize", "bootstrap", "generateManifests"]) {
+    assert.doesNotMatch(code[key], /chmod 777|chmod -R 777/, `${key} 不得放开权限`);
+    assert.doesNotMatch(code[key], /NOPASSWD/, `${key} 不得修改 sudo 免密`);
+    assert.doesNotMatch(code[key], /\/etc\/sudoers|visudo/, `${key} 不得触碰 sudoers`);
+    assert.doesNotMatch(code[key], /sshd_config|ufw\b|iptables|firewall-cmd/, `${key} 不得修改 SSH/防火墙`);
+  }
+});
+
+test("systemd 单元的文档路径指向信任目录", () => {
+  assert.match(code.unit, /^Documentation=file:\/\/\/opt\/chaoge-deploy-trust\/deploy\/app\/README\.md$/m);
+  assert.doesNotMatch(code.unit, /\/opt\/chaoge-deploy\//);
+});
+
+test("README 记录版本区分、信任目录与 Secure Cookie 限制", () => {
+  assert.match(code.readme, /\/opt\/chaoge-deploy-trust/);
+  assert.match(code.readme, /APP_GIT_SHA/);
+  assert.match(code.readme, /BUILD_INFO/);
+  assert.match(raw.readme, /Secure Cookie 限制/);
+  assert.match(code.readme, /\/var\/log\/chaoge/);
+  assert.match(code.trustReadme, /bundle SHA-256/);
+  assert.match(code.trustReadme, /chaoge_prod/);
+});
+
+// ── 10. bash 语法 ────────────────────────────────────────────────────────────
 
 test("全部 shell 脚本语法正确（bash -n）", { skip: SKIP_NO_BASH }, () => {
   for (const file of Object.values(FILES).filter((p) => p.endsWith(".sh"))) {

@@ -56,6 +56,16 @@ DRY_RUN=0
 SELF_TEST=0
 ROLLBACK_SELFTEST=0
 
+# 迁移代码所在目录。默认是本脚本所属仓库的根目录；PROD-2 的 root 收尾脚本
+# 会把它指向 /opt/chaoge-deploy-trust/src（root 拥有、deploy 不可写的快照）。
+APP_DIR="${CHAOGE_APP_DIR:-$REPO_ROOT}"
+
+# 迁移执行身份。为空时沿用历史的 `pnpm db:migrate`（当前用户）；
+# 设为 deploy 时用 runuser 直接以该用户运行 Node，root 不执行迁移代码。
+MIGRATE_AS="${CHAOGE_MIGRATE_AS:-}"
+NODE_BIN="${CHAOGE_NODE_BIN:-}"
+MIGRATOR_URL_FD=""
+
 # 以什么身份执行管理类 psql。默认 `sudo -u postgres`（peer 认证，不需要口令）。
 if [[ -z "${CHAOGE_SUDO+x}" ]]; then
   if [[ "$(id -un 2>/dev/null || echo unknown)" == "postgres" ]]; then
@@ -88,12 +98,14 @@ usage() {
   check      只读预检。任何时刻都可以跑。
   create     创建独立数据库（默认 chaoge_staging，属主 postgres）。一次性。
   init       权限初始化 01→05，单事务原子执行（写操作，需显式确认）。
-  migrate    以 chaoge_staging_migrator 执行 pnpm db:migrate，随后重跑 05 授权。
+  migrate    以 chaoge_staging_migrator 执行迁移，随后重跑 05 授权。
   bootstrap  以 chaoge_staging_app 写入最小测试数据（06，只插入，可重复）。
   verify     只读验收 99-verify.sql，输出 PASS / FAIL。
 
 选项:
   --database NAME     目标库（默认 chaoge_staging；只允许 chaoge_staging*）
+  --migrator-url-fd N 从文件描述符 N 读取 migrator 连接串（仅 root；内部使用，
+                      避免连接串出现在 argv / 环境变量中）
   --dry-run           只打印将要执行的内容，不写库
   --self-test         跳过交互确认。**只允许** chaoge_staging*_test
   --rollback-selftest 仅 init：事务以 ROLLBACK 结束，零残留。只允许 *_test
@@ -104,13 +116,17 @@ usage() {
   CHAOGE_PSQL_ARGS    附加 psql 连接参数（本地验证用 "-h 127.0.0.1 -U postgres"）
   CHAOGE_DB_HOST      数据库主机（默认 127.0.0.1，只允许本机回环）
   CHAOGE_DB_PORT      数据库端口（默认 5432）
+  CHAOGE_APP_DIR      迁移代码目录（默认仓库根；信任快照中指向 src/）
+  CHAOGE_MIGRATE_AS   以哪个用户执行迁移（设置后使用 runuser + 绝对 Node，
+                      而不是 pnpm；root 不执行迁移代码）
+  CHAOGE_NODE_BIN     CHAOGE_MIGRATE_AS 模式下的 Node 绝对路径
   CHAOGE_STAGING_MIGRATOR_URL
                       migrate 阶段非交互验证用：完整的 migrator 连接串。
                       只限本地隔离验证（`--self-test`）；正常运维请使用交互式口令输入。
 
 说明:
   · 本脚本不提供 db:seed / db:reset，也不接受这两个词作为阶段名。
-  · migrate 的口令只经 read -s 读入，放进 pnpm 子进程的 DATABASE_URL，不落盘、不打印。
+  · migrate 的口令只经 read -s 读入，放进迁移子进程的 DATABASE_URL，不落盘、不打印。
 USAGE
 }
 
@@ -127,6 +143,7 @@ esac
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --database)          DB_NAME="${2:?--database 需要一个值}"; shift 2 ;;
+    --migrator-url-fd)   MIGRATOR_URL_FD="${2:?--migrator-url-fd 需要一个文件描述符}"; shift 2 ;;
     --dry-run)           DRY_RUN=1; shift ;;
     --self-test)         SELF_TEST=1; shift ;;
     --rollback-selftest) ROLLBACK_SELFTEST=1; shift ;;
@@ -134,6 +151,21 @@ while [[ $# -gt 0 ]]; do
     *) die "未知选项「$1」" ;;
   esac
 done
+
+if [[ -n "$MIGRATOR_URL_FD" ]]; then
+  [[ "$(id -u)" == "0" ]] \
+    || die "--migrator-url-fd 只允许 root 使用（它用于避免连接串进入 argv）。"
+  [[ "$MIGRATOR_URL_FD" =~ ^[0-9]+$ ]] \
+    || die "--migrator-url-fd 必须是文件描述符号（当前：$MIGRATOR_URL_FD）。"
+  [[ -n "$MIGRATE_AS" ]] \
+    || die "--migrator-url-fd 必须与 CHAOGE_MIGRATE_AS 一起使用：root 不能直接执行迁移代码。"
+fi
+
+case "$PHASE" in
+  check|migrate)
+    [[ -d "$APP_DIR" ]] || die "迁移代码目录不存在：$APP_DIR"
+    ;;
+esac
 
 # ── 库名守卫（不依赖数据库连接）───────────────────────────────────────────────
 
@@ -329,7 +361,7 @@ phase_check() {
     step "6. 迁移与最小数据"
     local has_sm files maxv boot
     has_sm="$(q "SELECT (to_regclass('public.schema_migrations') IS NOT NULL)::text")"
-    files="$(ls -1 "$REPO_ROOT/db/migrations" 2>/dev/null | grep -cE '^[0-9]+_.+\.sql$' || true)"
+    files="$(ls -1 "$APP_DIR/db/migrations" 2>/dev/null | grep -cE '^[0-9]+_.+\.sql$' || true)"
     if [[ "$has_sm" == "true" ]]; then
       maxv="$(q "SELECT coalesce(max(version)::text, '') FROM public.schema_migrations")"
       info "  schema_migrations 已存在，最高版本: ${maxv:-（空）}"
@@ -517,13 +549,27 @@ phase_migrate() {
   require_database
   require_psql
 
-  command -v pnpm >/dev/null 2>&1 || die "找不到 pnpm。迁移通过仓库脚本执行：pnpm db:migrate。"
-  [[ -r "$REPO_ROOT/package.json" ]] || die "仓库根目录不正确：$REPO_ROOT"
+  [[ -r "$APP_DIR/package.json" ]] || die "迁移代码目录不正确（缺少 package.json）：$APP_DIR"
+
+  if [[ -n "$MIGRATE_AS" ]]; then
+    # root 只负责调度：迁移进程以 deploy 身份运行，读取 root 拥有的快照。
+    # 这样即使 deploy 账号被攻破，也无法让 root 执行它可替换的迁移代码。
+    command -v runuser >/dev/null 2>&1 || die "找不到 runuser，无法切换到 $MIGRATE_AS 执行迁移。"
+    id -u "$MIGRATE_AS" >/dev/null 2>&1 || die "迁移执行账号不存在：$MIGRATE_AS"
+    [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] \
+      || die "CHAOGE_NODE_BIN 必须是可执行的 Node 绝对路径（当前：${NODE_BIN:-未设置}）。"
+  else
+    command -v pnpm >/dev/null 2>&1 || die "找不到 pnpm。迁移通过仓库脚本执行：pnpm db:migrate。"
+  fi
 
   local url="${CHAOGE_STAGING_MIGRATOR_URL:-}"
   local raw_pw=""
 
-  if [[ -z "$url" ]]; then
+  if [[ -n "$MIGRATOR_URL_FD" ]]; then
+    IFS= read -r url <&"$MIGRATOR_URL_FD" \
+      || die "无法从文件描述符 $MIGRATOR_URL_FD 读取 migrator 连接串。"
+    [[ -n "$url" ]] || die "文件描述符 $MIGRATOR_URL_FD 里的连接串为空。"
+  elif [[ -z "$url" ]]; then
     assert_interactive
     printf '  请输入 chaoge_staging_migrator 的口令（输入不回显）: ' >&2
     read -rs raw_pw; printf '\n' >&2
@@ -533,31 +579,60 @@ phase_migrate() {
   else
     # 非交互路径只用于本地隔离验证。仍然要求角色 / 主机 / 库名完全对得上，
     # 否则一个写错的 URL 会把迁移打到别的库上——那就是本方案要防的事故本身。
-    case "$url" in
-      "postgresql://chaoge_staging_migrator:"*"@$DB_HOST:$DB_PORT/$DB_NAME") ;;
-      *) die "CHAOGE_STAGING_MIGRATOR_URL 与目标不匹配：必须是 chaoge_staging_migrator@$DB_HOST:$DB_PORT/$DB_NAME。" ;;
-    esac
     warn "使用 CHAOGE_STAGING_MIGRATOR_URL（非交互）。仅限本地隔离验证。"
   fi
 
+  # 无论连接串来自 fd、环境变量还是交互输入，都必须在执行前核对目标。
+  case "$url" in
+    "postgresql://chaoge_staging_migrator:"*"@$DB_HOST:$DB_PORT/$DB_NAME") ;;
+    *) unset url raw_pw; die "迁移连接串与目标不匹配：必须是 chaoge_staging_migrator@$DB_HOST:$DB_PORT/$DB_NAME。" ;;
+  esac
+
   if [[ "$DRY_RUN" == "1" ]]; then
     step "--dry-run：将执行"
-    info "  cd $REPO_ROOT"
-    info "  NODE_ENV=production DATABASE_URL='postgresql://chaoge_staging_migrator:<REDACTED>@$DB_HOST:$DB_PORT/$DB_NAME' pnpm db:migrate"
+    info "  cd $APP_DIR"
+    if [[ -n "$MIGRATE_AS" ]]; then
+      info "  runuser -u $MIGRATE_AS -- env -i ... '$NODE_BIN' --import ./tests/alias-hook.mjs lib/data/pg/cli.ts migrate"
+    else
+      info "  NODE_ENV=production DATABASE_URL='postgresql://chaoge_staging_migrator:<REDACTED>@$DB_HOST:$DB_PORT/$DB_NAME' pnpm db:migrate"
+    fi
     info "  然后以 chaoge_staging_migrator 重跑 staging/05-table-grants.sql"
     return 0
   fi
 
   require_confirmation "即将执行数据库迁移：$DB_NAME"
 
-  step "1. pnpm db:migrate（以 chaoge_staging_migrator）"
-  # NODE_ENV=production 保持 seed / reset 的守卫关闭；migrate 本身与它们无关。
-  # DATABASE_URL 只存在于这个子进程的环境里，不写文件、不出现在命令行参数中。
-  local rc=0
-  ( cd "$REPO_ROOT" && NODE_ENV=production DATABASE_URL="$url" pnpm db:migrate ) || rc=$?
-  unset url
-  if (( rc != 0 )); then
-    die "迁移失败（pnpm 退出码 $rc）。修复后重跑本阶段；迁移运行器按版本断点续跑，已成功的不会重复执行。"
+  if [[ -n "$MIGRATE_AS" ]]; then
+    step "1. 迁移（以 $MIGRATE_AS 读取 root 拥有的代码快照）"
+    local home_dir
+    home_dir="$(getent passwd "$MIGRATE_AS" | cut -d: -f6)"
+    [[ -n "$home_dir" ]] || home_dir="/tmp"
+    local rc=0
+    # env -i：不把 root 的环境（包括其它凭据）带进迁移进程。
+    # DATABASE_URL 只存在于这个子进程的环境里；不写文件、不出现在 argv。
+    ( cd "$APP_DIR" && runuser -u "$MIGRATE_AS" -- env -i \
+        PATH=/usr/local/bin:/usr/bin:/bin \
+        HOME="$home_dir" \
+        TMPDIR=/tmp \
+        LANG=C.UTF-8 \
+        NODE_ENV=production \
+        DATABASE_URL="$url" \
+        "$NODE_BIN" --disable-warning=MODULE_TYPELESS_PACKAGE_JSON \
+        --import ./tests/alias-hook.mjs lib/data/pg/cli.ts migrate ) || rc=$?
+    unset url raw_pw
+    if (( rc != 0 )); then
+      die "迁移失败（Node 退出码 $rc，执行身份 $MIGRATE_AS）。修复后重跑本阶段；迁移运行器按版本断点续跑，已成功的不会重复执行。"
+    fi
+  else
+    step "1. pnpm db:migrate（以 chaoge_staging_migrator）"
+    # NODE_ENV=production 保持 seed / reset 的守卫关闭；migrate 本身与它们无关。
+    # DATABASE_URL 只存在于这个子进程的环境里，不写文件、不出现在命令行参数中。
+    local rc=0
+    ( cd "$APP_DIR" && NODE_ENV=production DATABASE_URL="$url" pnpm db:migrate ) || rc=$?
+    unset url raw_pw
+    if (( rc != 0 )); then
+      die "迁移失败（pnpm 退出码 $rc）。修复后重跑本阶段；迁移运行器按版本断点续跑，已成功的不会重复执行。"
+    fi
   fi
   ok "迁移完成"
 

@@ -40,6 +40,8 @@ PORT="${CHAOGE_STAGING_PORT:-3000}"
 KEEP="${CHAOGE_KEEP_RELEASES:-5}"
 
 ARTIFACT=""
+ARTIFACT_SHA256=""
+EXPECTED_SHA=""
 RELEASE_ID=""
 DRY_RUN=0
 FORCE=0
@@ -50,6 +52,8 @@ usage() {
 用法: install-release.sh --artifact FILE [选项]
 
   --artifact FILE    standalone 产物（staging-standalone-<SHA>.tar.gz）
+  --sha256 HEX       强制校验产物文件的 SHA-256（64 位小写十六进制）
+  --expected-sha SHA 强制校验 BUILD_INFO 中的 Git SHA（40 位小写十六进制）
   --release-id ID    版本目录名（默认 <UTC时间>-<SHA前7位>）
   --keep N           保留最近 N 个旧版本（默认 5）
   --no-prune         本次不清理旧版本
@@ -61,13 +65,15 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --artifact)   ARTIFACT="${2:?--artifact 需要一个文件}"; shift 2 ;;
-    --release-id) RELEASE_ID="${2:?--release-id 需要一个值}"; shift 2 ;;
-    --keep)       KEEP="${2:?--keep 需要一个数字}"; shift 2 ;;
-    --no-prune)   NO_PRUNE=1; shift ;;
-    --force)      FORCE=1; shift ;;
-    --dry-run)    DRY_RUN=1; shift ;;
-    -h|--help)    usage; exit 0 ;;
+    --artifact)     ARTIFACT="${2:?--artifact 需要一个文件}"; shift 2 ;;
+    --sha256)       ARTIFACT_SHA256="${2:?--sha256 需要一个值}"; shift 2 ;;
+    --expected-sha) EXPECTED_SHA="${2:?--expected-sha 需要一个值}"; shift 2 ;;
+    --release-id)   RELEASE_ID="${2:?--release-id 需要一个值}"; shift 2 ;;
+    --keep)         KEEP="${2:?--keep 需要一个数字}"; shift 2 ;;
+    --no-prune)     NO_PRUNE=1; shift ;;
+    --force)        FORCE=1; shift ;;
+    --dry-run)      DRY_RUN=1; shift ;;
+    -h|--help)      usage; exit 0 ;;
     *) die "未知选项「$1」" ;;
   esac
 done
@@ -150,13 +156,44 @@ info "  $(grep -oE '^[A-Z_]+=' "$ENV_FILE" | tr -d '=' | paste -sd' ')"
 
 step "2. 产物校验"
 
+if [[ -n "$ARTIFACT_SHA256" ]]; then
+  command -v sha256sum >/dev/null 2>&1 || die "找不到 sha256sum，无法校验产物。"
+  [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "--sha256 必须是 64 位小写十六进制：$ARTIFACT_SHA256"
+  ACTUAL_SHA256="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
+  [[ "$ACTUAL_SHA256" == "$ARTIFACT_SHA256" ]] || die \
+    "产物 SHA-256 不匹配。
+      期望: $ARTIFACT_SHA256
+      实际: $ACTUAL_SHA256
+      拒绝安装一个来源不明的产物。"
+  ok "产物 SHA-256 与预期一致：$ACTUAL_SHA256"
+fi
+
 tar -tzf "$ARTIFACT" > /dev/null 2>&1 || die "不是有效的 tar.gz：$ARTIFACT"
+
+# 解包前的路径守卫：即使产物 SHA 已经锁定，也不允许 tar 条目用绝对路径或 ..
+# 把文件写到 releases/<id> 之外。root 执行 tar 时这是最后一道防线。
+while IFS= read -r entry; do
+  case "$entry" in
+    /*|..|../*|*/../*|*/..) die "产物包含不安全的 tar 条目：$entry" ;;
+  esac
+done < <(tar -tzf "$ARTIFACT")
 
 BUILD_INFO="$(tar -xzf "$ARTIFACT" -O ./BUILD_INFO 2>/dev/null || true)"
 [[ -n "$BUILD_INFO" ]] || die "产物里没有 BUILD_INFO —— 不是 build-standalone.sh 产出的包。"
 
 SHA="$(printf '%s\n' "$BUILD_INFO" | sed -n 's/^sha=//p' | head -1 | tr -d '\r')"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "BUILD_INFO 里的 SHA 不合法：$SHA"
+if [[ -n "$EXPECTED_SHA" ]]; then
+  [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] \
+    || die "--expected-sha 必须是 40 位小写十六进制：$EXPECTED_SHA"
+  [[ "$SHA" == "$EXPECTED_SHA" ]] || die \
+    "BUILD_INFO 的 Git SHA 与预期不一致。
+      期望: $EXPECTED_SHA
+      实际: $SHA
+      注意：'部署脚本版本' 与 'CI 构建产物版本' 是两个不同的 SHA。"
+  ok "BUILD_INFO Git SHA 与预期一致：$SHA"
+fi
 info "BUILD_INFO:"
 printf '%s\n' "$BUILD_INFO" | sed 's/^/      /'
 
