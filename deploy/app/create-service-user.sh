@@ -56,15 +56,19 @@ esac
 
 # ── 3. 目录 ──────────────────────────────────────────────────────────────────
 #
-# /opt/chaoge-staging         root:chaoge 0750  ← 组外连 ls 都进不去
-# /opt/chaoge-staging/releases root:chaoge 0755 ← 每个发布版本一个子目录（root 写，chaoge 读）
-# /etc/chaoge                 root:chaoge 0750  ← 环境变量文件所在目录
+# /opt/chaoge-staging          root:chaoge 0750 ← 服务账号经组权限进入
+# /opt/chaoge-staging/releases root:root    0755 ← 版本目录对所有用户只读（deploy 迁移、chaoge 运行）
+# /etc/chaoge                  root:root    0750 ← 环境变量与凭据文件所在目录，仅 root
+#
+# 版本目录必须对 deploy（迁移身份）和 chaoge（运行身份）都可读；它不含密钥，
+# 产物在入口处已拒绝 .env / 链接 / 设备节点。
 
 mkdir -p "$ROOT_DIR/releases" "$CONF_DIR"
-chown "root:$SERVICE_USER" "$ROOT_DIR" "$ROOT_DIR/releases" "$CONF_DIR"
+chown "root:$SERVICE_USER" "$ROOT_DIR"
+chown root:root "$ROOT_DIR/releases" "$CONF_DIR"
 chmod 750 "$ROOT_DIR" "$CONF_DIR"
 chmod 755 "$ROOT_DIR/releases"
-ok "目录已就位：$ROOT_DIR（0750）、$ROOT_DIR/releases（0755）、$CONF_DIR（0750）"
+ok "目录已就位：$ROOT_DIR（root:$SERVICE_USER 0750）、$ROOT_DIR/releases（root:root 0755）、$CONF_DIR（root:root 0750）"
 
 # ── 4. 下一步 ────────────────────────────────────────────────────────────────
 

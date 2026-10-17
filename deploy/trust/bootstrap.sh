@@ -55,6 +55,7 @@ OLD=""
 die()  { printf '\033[31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
+warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 step() { printf '\n\033[1m── %s ──\033[0m\n' "$*"; }
 
 usage() {
@@ -88,6 +89,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(id -u)" == "0" ]] || die "必须以 root 运行。"
+# 本流程已被 deploy/entry/install.sh + 受控入口取代：它接收 deploy 可写路径上的
+# 产物、并把最终发布交给 root 脚本，不再符合 PROD-2 的最小权限模型。保留代码
+# 只为历史取证与本地回归，禁止再用它做服务器部署。
+[[ "${CHAOGE_ENABLE_LEGACY_PROD2_FLOW:-}" == "1" ]] \
+  || die "bootstrap.sh 已废弃。请改用 deploy/entry/install.sh 一次性安装受控入口。"
+warn "正在运行已废弃的 bootstrap.sh（CHAOGE_ENABLE_LEGACY_PROD2_FLOW=1）。"
 [[ -n "$BUNDLE_DIR" ]] || { usage >&2; die "缺少 --bundle-dir"; }
 [[ -n "$ARTIFACT" ]] || { usage >&2; die "缺少 --artifact"; }
 [[ -d "$BUNDLE_DIR" && ! -L "$BUNDLE_DIR" ]] || die "bundle 目录不存在或是符号链接：$BUNDLE_DIR"

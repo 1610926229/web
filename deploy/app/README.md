@@ -44,19 +44,23 @@
 
 /opt/chaoge-staging/                    root:chaoge  0750
   releases/
-    20261017T101500Z-f7ec35a/           root:chaoge  每个版本一个完整产物
+    20261017T101500Z-f7ec35a/           root:root  0755 每个版本一个完整产物
       server.js
       node_modules/
       .next/
       public/
       BUILD_INFO
     20261017T090000Z-a9bfc0a/           ← 回滚目标
-  current -> releases/20261017.../      ← 原子切换
+  current -> releases/20261017.../      ← 原子切换（root:root 符号链接）
 
 /etc/chaoge/
-  staging.env                           root:chaoge  0640  ← DATABASE_URL 等
-  db.env                                root:chaoge  0640  ← 数据库脚本用（可选）
+  staging.secrets                       root:root  0600  ← 两个数据库角色口令
+  staging.env                           root:root  0600  ← DATABASE_URL 等
 
+/usr/local/sbin/chaoge-deploy           root:root  0755  ← 唯一受控入口
+/usr/local/lib/chaoge/                  root:root  0755  ← 被入口调用的固定脚本
+  app/ db/ src/                         src = root 拥有的迁移代码快照
+/etc/sudoers.d/chaoge-deploy            root:root  0440  ← 单命令 NOPASSWD
 /etc/systemd/system/chaoge-staging.service
 ```
 
@@ -97,54 +101,65 @@ EXPECTED_SHA=$(git rev-parse HEAD) bash deploy/app/build-standalone.sh
 > `.next/node_modules/pg-<hash> -> <构建机>/node_modules/pg`。
 > `build-standalone.sh` 会把它改写为指向产物内部的相对链接，并断言不残留任何绝对链接。
 
-## 4. 服务器一次性准备
+## 4. 服务器一次性准备（受控入口）
 
-从 PROD-2 安全整改起，root 收尾**不再执行 `/home/deploy` 下 deploy 可替换的脚本**。
-入口是一个 SHA-256 已被人工命令钉死的 bundle：
+从 PROD-2 安全整改起，服务器上只有一个 root 拥有的固定入口；`deploy` 只能
+通过 sudoers 里**唯一一条**规则免密执行它：
 
 ```text
-prod2-trust-bundle-<sha8>.tar.gz
-├── deploy/            本次修复后的部署脚本（deploy 可读、不可写）
-└── src/               APP_GIT_SHA 对应的迁移代码（来自 git 对象，不来自工作区）
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/chaoge-deploy
 ```
 
-人工执行的那一条命令（由交付方给出）会：
+初始化是**一次** root 操作：从人工校验过 SHA-256 的 bundle 运行
+`deploy/entry/install.sh --bundle-dir <root 解压目录>`。安装器完成：
 
-1. 校验 bundle 的 SHA-256（期望值写在命令里，不读服务器上的文件）；
-2. 解压到 root 拥有的临时目录，调用 `deploy/trust/bootstrap.sh`；
-3. `bootstrap.sh` 校验 `deploy/trust/deploy-files.sha256`，把 bundle 复制成
-   `/opt/chaoge-deploy-trust/`（`root:root`，组/其他用户不可写）；
-4. 从服务器现有 `/home/deploy/chaoge-deploy-src/node_modules` 复制迁移依赖，
-   以 `deploy` 身份做一次 `import("pg")` 冒烟测试；
-5. 调用 `deploy/app/finalize-staging.sh --artifact … [--drill]`，由它完成：
-   服务账号 → 数据库 `check/create/init` → 两个角色口令 → 迁移（**以 deploy 身份**）
-   → 最小测试数据 → `verify` → `staging.env` → systemd 单元 → 首版发布与健康检查
-   → 持久化 / SIGKILL 恢复 → 可选回滚演练。
+1. 校验 `deploy/trust/deploy-files.sha256` 与 `migration-code.sha256`；
+2. 把固定入口、`_common.sh`、发布/回滚/环境脚本、SQL 安装到
+   `/usr/local/lib/chaoge/`（root:root，deploy 只读）；
+3. 把迁移源码安装到 `/usr/local/lib/chaoge/src`（root:root），并从
+   `/home/deploy/chaoge-deploy-src/node_modules` 复制 `pg` 依赖；
+4. 生成两个 64 位十六进制随机口令，写入 `/etc/chaoge/staging.secrets`
+   （root:root 0600，内容不输出）；
+5. 以 `runuser -u postgres` 建库 / 初始化 / 设置 SCRAM 校验子；
+6. 原子写入 `/etc/chaoge/staging.env`（root:root 0600）与 systemd 单元；
+7. 写入并 `visudo -cf` 校验 sudoers 单命令规则。
 
-bundle 的校验值、产物 SHA-256（`f1070077…`）与 `BUILD_INFO` Git SHA
-（`8ad9d6b…`）是**三个不同的东西**，见 §4.1。
+**初始化之后**，所有发布/回滚/状态查询都不再需要人工输入 sudo 或数据库口令：
+
+```bash
+sudo -n /usr/local/sbin/chaoge-deploy deploy   /home/deploy/incoming/staging-standalone-<SHA>.tar.gz <ARTIFACT_SHA256> <GIT_SHA>
+sudo -n /usr/local/sbin/chaoge-deploy rollback
+sudo -n /usr/local/sbin/chaoge-deploy status
+```
+
+> 旧的 `deploy/trust/bootstrap.sh` 与 `deploy/app/finalize-staging.sh` 已废弃，
+> 仅保留用于历史取证与本地回归，脚本启动即拒绝运行（除非显式设置
+> `CHAOGE_ENABLE_LEGACY_PROD2_FLOW=1`）。
 
 ### 4.1 版本与哈希不要混淆
 
-| 名称 | 值 | 含义 |
-|---|---|---|
-| `APP_GIT_SHA` | `8ad9d6ba9dcd…` | CI 产物的提交；迁移代码快照也取这个提交 |
-| `ARTIFACT_SHA256` | `f1070077…` | 上述 CI 产物的 tar.gz 哈希 |
-| bundle SHA-256 | 人工命令中给出 | 本次**部署脚本修复**的打包哈希 |
+| 名称 | 含义 |
+|---|---|
+| `GIT_SHA` | CI 产物的提交（40 位），必须与文件名和 `BUILD_INFO` 一致 |
+| `ARTIFACT_SHA256` | 该 tar.gz 的 SHA-256（64 位） |
+| bundle SHA-256 | **部署脚本**打包的哈希，只在一次性安装时人工核对 |
 
-部署脚本的 Git 提交通常晚于 `APP_GIT_SHA`。**不要**把部署脚本的提交写进
+部署脚本的 Git 提交通常晚于产物提交。**不要**把部署脚本的提交写进
 `BUILD_INFO`，也不要因为脚本版本变化而重新标记产物——服务器安装的必须是
 已经构建、已经验证过的那一个产物。
 
-### 4.2 手工分步（仅在 finalize 失败后排查时使用）
+### 4.2 手工排查（只读优先）
 
-finalizer 失败时不要绕过它，先读 `/var/log/chaoge/prod2-finalize.log`。
-确需单独重跑某一阶段时，命令里的脚本路径必须是信任目录：
+受控入口失败时先看 `/var/log/chaoge/chaoge-deploy.log`（root 写、deploy 只读）。
+不要绕过入口直接改服务器状态；确需只读核对时：
 
 ```bash
-sudo bash /opt/chaoge-deploy-trust/deploy/db/staging/deploy-staging.sh check --database chaoge_staging
-sudo bash /opt/chaoge-deploy-trust/deploy/app/rollback.sh --list
+sudo -n /usr/local/sbin/chaoge-deploy status
+sudo runuser -u postgres -- psql -d postgres -Atc "SELECT datname FROM pg_database WHERE datname LIKE 'chaoge_staging%'"
 ```
+
+任何手工修复都应回写成代码、测试与新的 bundle，再走安装器，而不是在服务器上
+留下不可复现的改动。
 
 ### 4.3 Secure Cookie 限制（已知，不修改）
 
@@ -156,12 +171,13 @@ Mock 登录在 `http://127.0.0.1:3000` 上不可用**；用户端 `mock_user_id`
 这是刻意保留的行为：为了「HTTP 隧道里能登录」而关闭 `Secure`，会把会话
 Cookie 在 HTTPS 缺失时暴露出去。完整的管理端 / 客服端验收需要 HTTPS
 （或后续接入真实登录）；当前 Staging 验收以用户端 + 只读接口为准。
-日志位置：`/var/log/chaoge/{bootstrap,prod2-finalize}.log`，`root:deploy 0640`，
+日志位置：`/var/log/chaoge/{chaoge-deploy,install}.log`，`root:deploy 0640`，
 deploy 只读、不可删除。
 
-### 4.2 的环境变量文件
+### 4.4 的环境变量文件
 
-`/etc/chaoge/staging.env`，权限 `root:chaoge 0640`，由脚本原子写入。内容：
+`/etc/chaoge/staging.env`，权限 `root:root 0600`，由受控入口经匿名 fd 原子写入。
+systemd 以 root 读取后注入服务进程，服务账号无法直接读取文件。内容：
 
 ```
 NODE_ENV=production
@@ -186,45 +202,44 @@ ENABLE_MOCK_PAYMENT=true
 ## 5. 发布
 
 ```bash
-# 本地：把产物传上去
-scp staging-standalone-<SHA>.tar.gz deploy@<server-ip>:/tmp/
+# 本地：上传到 deploy 可写的固定上传目录
+scp staging-standalone-<GIT_SHA>.tar.gz deploy@<server-ip>:/home/deploy/incoming/
 
-# 服务器：安装并切换（强制校验产物 SHA 与 BUILD_INFO SHA）
-sudo bash /opt/chaoge-deploy-trust/deploy/app/install-release.sh \
-     --artifact /tmp/staging-standalone-<APP_SHA>.tar.gz \
-     --sha256 <ARTIFACT_SHA256> \
-     --expected-sha <APP_GIT_SHA>
+# 服务器 / Claude 自动执行：受控入口（sudoers 已授权，无需口令）
+sudo -n /usr/local/sbin/chaoge-deploy deploy \
+     /home/deploy/incoming/staging-standalone-<GIT_SHA>.tar.gz \
+     <ARTIFACT_SHA256> <GIT_SHA>
 ```
 
-日常手工发布也走信任目录；`/home/deploy/chaoge-deploy-src` 只是 CI 检出与
-构建输入，不再是 root 执行的脚本来源。信任目录由 bundle 原子替换，见 §4。
-
-脚本依次做：
-
-1. 校验 `staging.env` 的权限、`DATA_SOURCE=postgres`、不含 `HOSTNAME/PORT`
-2. 校验产物：`BUILD_INFO` 里的 SHA、`server.js`、`node_modules`、`.next/static`、`public/`、不含 `.env`
-3. 解包到 `releases/<UTC时间>-<SHA前7位>/`
-4. `ln -sfn` + `mv -T` **原子**切换 `current`
-5. `systemctl restart chaoge-staging`
-6. **实测**：`curl` 首页 + `ss -ltn` 确认**只有回环地址**
-7. 任一项失败 → 自动切回上一版并重启；第一次发布没有上一版则停服务并打印日志
-8. 清理旧版本（保留最近 5 个 + 当前）
-
-只做校验不落地：
+入口先做只读预检（不切换、不重启）：
 
 ```bash
-sudo bash deploy/app/install-release.sh --artifact /tmp/xxx.tar.gz --dry-run
+/usr/local/sbin/chaoge-deploy check-artifact \
+  /home/deploy/incoming/staging-standalone-<GIT_SHA>.tar.gz <ARTIFACT_SHA256> <GIT_SHA>
 ```
+
+受控入口依次做：
+
+1. 把产物复制到 root 拥有的 0700 临时目录（消除 TOCTOU），再校验
+   SHA-256、Git SHA（`BUILD_INFO`）、tar 结构、路径与符号链接；
+2. 以 `deploy` 身份、用 root 拥有的迁移快照执行数据库迁移；
+3. 以 root 拥有的 SQL 写入最小测试数据并 `verify`；
+4. 调用 root 固定库里的 `install-release.sh` 解包、原子切换 `current`、重启服务；
+5. **实测**首页健康检查 + `ss -ltn` 确认只有回环地址；失败自动回滚。
+
+产物要求：文件名 `staging-standalone-<40位SHA>.tar.gz`，位于
+`/home/deploy/incoming/`，包含 `server.js`、`BUILD_INFO`、`node_modules/`、
+`.next/static/`、`public/`，且不得含 `.env`。root 从不执行产物里的代码。
 
 ## 6. 回滚
 
 ```bash
-sudo bash deploy/app/rollback.sh --list              # 列出所有版本，* 为当前
-sudo bash deploy/app/rollback.sh                     # 回到最近的非当前版本
-sudo bash deploy/app/rollback.sh --to 20261017T090000Z-a9bfc0a
+sudo -n /usr/local/sbin/chaoge-deploy rollback       # 回到最近的非当前版本
 ```
 
-回滚不重新构建，只改符号链接并重启，因此是秒级且可重复的。
+受控入口**不接受**版本名参数；选择逻辑固定为「最近的一个非当前版本」。
+`/usr/local/lib/chaoge/app/rollback.sh --list` 存在仅供 root 排查，deploy 无法
+直接执行它。回滚不重新构建，只改符号链接并重启，因此是秒级且可重复的。
 
 ## 7. SSH 隧道验收
 
@@ -265,8 +280,9 @@ curl -sS -c "$JAR" -X POST -H 'content-type: application/json' \
 curl -sS -b "$JAR" -X POST -H 'content-type: application/json' \
      -d '{"productId":"p-400w"}' "$B/api/favorites"
 
-# 3) 在服务器上重启
-ssh deploy@<server-ip> 'sudo systemctl restart chaoge-staging'
+# 3) 在服务器上重启（重新走一次受控部署；deploy 没有直接 systemctl 权限）
+ssh deploy@<server-ip> 'sudo -n /usr/local/sbin/chaoge-deploy deploy \
+  /home/deploy/incoming/staging-standalone-<GIT_SHA>.tar.gz <ARTIFACT_SHA256> <GIT_SHA>'
 
 # 4) 重启后读回（这一步证明数据在 PostgreSQL 里，不在进程内存里）
 curl -sS -b "$JAR" "$B/api/favorites" | grep -o 'p-400w'
@@ -280,11 +296,8 @@ rm -f "$JAR"
 
 ```bash
 ssh deploy@<server-ip> '
-  sudo systemctl restart chaoge-staging
-  sleep 2
-  systemctl is-active chaoge-staging
-  sudo ss -ltnp "sport = :3000"
-  journalctl -u chaoge-staging -n 30 --no-pager
+  sudo -n /usr/local/sbin/chaoge-deploy status
+  ss -ltn "sport = :3000"
 '
 ```
 
@@ -355,24 +368,27 @@ staging 上就没有任何登录入口——这不是假设，是读代码得出
 
 发布前逐条确认：
 
-- [ ] `staging.env` 是 `root:chaoge 0640`（`stat -c '%U:%G %a'`）
+- [ ] `sudo -n /usr/local/sbin/chaoge-deploy status` 显示 sudoers 规则符合预期
+- [ ] `/etc/chaoge/staging.secrets` 与 `staging.env` 都是 `root:root 600`
 - [ ] `staging.env` 里没有 `HOSTNAME=` / `PORT=` / `ENABLE_MOCK_DEBUG=true`
 - [ ] `staging.env` 的 `DATABASE_URL` 是 `chaoge_staging_app@.../chaoge_staging`
       （不是 `chaoge_app@.../chaoge_prod`）
-- [ ] `sudo deploy/db/staging/deploy-staging.sh verify` 输出 `OVERALL = PASS`
+- [ ] `deploy/db/staging/deploy-staging.sh verify`（受控入口 deploy 阶段内执行）通过
 - [ ] `psql` 里 `has_database_privilege('chaoge_app','chaoge_staging','CONNECT')` 与
       `has_database_privilege('chaoge_staging_app','chaoge_prod','CONNECT')` 都是 false
 - [ ] 服务账号 `chaoge` 不在 `sudo` 组、shell 是 `nologin`
 - [ ] `systemctl cat chaoge-staging` 的 `ExecStart` 含 `HOSTNAME=127.0.0.1`
-- [ ] `ss -ltnp "sport = :3000"` **只有** `127.0.0.1` / `[::1]`
+- [ ] `ss -ltn "sport = :3000"` **只有** `127.0.0.1` / `[::1]`
 - [ ] 从公网直接访问 `http://<server-ip>:3000/` **超时**（不得 200）
 - [ ] 产物里没有 `.env`（`tar -tzf ... | grep '\.env'` 无输出）
-- [ ] `install-release.sh` 的调用参数同时含 `--sha256 f107…` 与 `--expected-sha 8ad9…`
-- [ ] `/opt/chaoge-deploy-trust` 是 `root:root`，且
-      `find … ! -type l \( -perm -0020 -o -perm -0002 \)` 无输出
-      （符号链接在 Linux 上恒为 0777，必须排除，否则会误报 `node_modules/.bin`）
+- [ ] `sudo -n /usr/local/sbin/chaoge-deploy check-artifact` 对产物返回通过
+- [ ] `/usr/local/sbin/chaoge-deploy` 与 `/usr/local/lib/chaoge` 是 `root:root`，
+      deploy 不可写；`/usr/local/lib/chaoge/src` 无组/其他用户可写路径
+- [ ] `/etc/sudoers.d/chaoge-deploy` 是 `root:root 0440`，且只有一行
+      `deploy ALL=(root) NOPASSWD: /usr/local/sbin/chaoge-deploy`
 - [ ] `/var/log/chaoge` 是 `root:deploy 0750`，日志文件 `0640`
-- [ ] 迁移进程以 `deploy` 身份运行（finalizer 日志「执行身份：deploy」），root 未执行迁移代码
+- [ ] 迁移进程以 `deploy` 身份运行（部署日志「迁移完成」前可见 runuser 路径），
+      root 未执行产物代码
 - [ ] GitHub Actions 日志里没有任何连接串或口令
 
 ## 11. 故障排查
@@ -386,18 +402,20 @@ staging 上就没有任何登录入口——这不是假设，是读代码得出
 | mock 登录 404 + 「接口未启用」 | `staging.env` | `ENABLE_MOCK_AUTH` 没开 |
 | 发布后健康检查失败并自动回滚 | `journalctl` + 上一版是否有同样问题 | 新版本本身有问题；回滚已生效，服务应已恢复 |
 | `ss` 显示 `0.0.0.0:3000` | `systemctl cat chaoge-staging` | ExecStart 被改过，`HOSTNAME` 丢失 |
-| 迁移报 `password authentication failed` | finalizer 日志第 7 步是否出现 `Passwords didn't match.` | 两次口令不一致，旧口令未变；重跑并在步骤 7 重设。步骤 8 现在会先做 TCP 认证预检 |
-| `迁移代码目录不正确（缺少 package.json）` | `CHAOGE_APP_DIR` 是否设置 | 手工运行 staging 脚本时变量名是 `CHAOGE_APP_DIR`（不是 `CHAOGE_SRC`）；正常流程请重跑 finalizer |
+| 迁移报 `password authentication failed` | `/var/log/chaoge/chaoge-deploy.log` | 角色口令与 `/etc/chaoge/staging.secrets` 不一致；重跑 `deploy/entry/install.sh` 收敛即可（口令不输出） |
+| `迁移代码目录不正确（缺少 package.json）` | `deploy/entry/install.sh` 是否装好 `/usr/local/lib/chaoge/src` | 受控入口固定使用该快照；重新运行安装器，不要手工传 `CHAOGE_APP_DIR` |
+| `sudo -n ... 需要密码` | `/etc/sudoers.d/chaoge-deploy` | 规则缺失或被其它 sudoers 覆盖（如 `requiretty`）；重新运行安装器并核对 `visudo -c` |
 
 ## 12. 本地验证
 
 不碰服务器也能验证的部分：
 
 ```bash
-bash -n deploy/app/*.sh deploy/trust/*.sh   # 语法
+bash -n deploy/app/*.sh deploy/entry/*.sh deploy/trust/*.sh   # 语法
 bash deploy/trust/generate-manifests.sh      # 重新生成两个 manifest（提交前）
 EXPECTED_SHA=$(git rev-parse HEAD) bash deploy/app/build-standalone.sh
-pnpm test                                    # 含 tests/stagingDeploy.test.mjs
+node --test tests/stagingEntry.test.mjs       # 入口/安装器安全不变量 + 产物校验
+pnpm test                                     # 含 tests/stagingDeploy.test.mjs
 ```
 
 产物结构验收（不启动服务）：

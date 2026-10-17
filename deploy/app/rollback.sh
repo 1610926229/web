@@ -67,6 +67,9 @@ if [[ "$DO_LIST" == "1" ]]; then
 fi
 
 if [[ -n "$TARGET" ]]; then
+  # 版本名只能是一层目录名：--to 由 root 手工使用，受控入口不传参数。
+  [[ "$TARGET" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || die "版本目录名不合法：$TARGET"
   REL="$RELEASES/$TARGET"
   [[ -d "$REL" ]] || die "版本不存在：$REL"
 else

@@ -97,6 +97,8 @@ const FILES = {
   envExample: path.join(APP_DIR, "staging.env.example"),
   readme: path.join(APP_DIR, "README.md"),
   finalize: path.join(APP_DIR, "finalize-staging.sh"),
+  entry: path.join(REPO_ROOT, "deploy", "entry", "chaoge-deploy.sh"),
+  installer: path.join(REPO_ROOT, "deploy", "entry", "install.sh"),
   bootstrap: path.join(TRUST_DIR, "bootstrap.sh"),
   generateManifests: path.join(TRUST_DIR, "generate-manifests.sh"),
   trustReadme: path.join(TRUST_DIR, "README.md"),
@@ -336,8 +338,12 @@ test("env 生成脚本用 mktemp + 0600 + 原子 mv 写入", () => {
   assert.match(code.env, /mktemp "\$ENV_DIR\/\.staging\.env\.XXXXXX"/);
   assert.match(code.env, /chmod 600 "\$TMP"/);
   assert.match(code.env, /mv -f "\$TMP" "\$ENV_PATH"/);
-  assert.match(code.env, /chown "root:\$SERVICE_GROUP"/);
-  assert.match(code.env, /chmod 640/);
+  // 受控部署入口要求该文件 root:root 0600：只有 systemd（root）读取内容，
+  // 运行账号通过注入的环境变量取值。组可读会让同机 deploy 直接拿到应用口令。
+  assert.match(code.env, /chown root:root "\$TMP"/);
+  assert.match(code.env, /\[\[ "\$ACT" == "root:root 600" \]\]/);
+  assert.doesNotMatch(code.env, /chmod 640/);
+  assert.doesNotMatch(code.env, /chown "root:\$SERVICE_GROUP"/);
 });
 
 test("env 生成脚本不接受命令行/环境变量传入口令", () => {
@@ -516,6 +522,13 @@ test("finalizer 以 deploy 身份执行迁移，root 不执行迁移代码", () 
   assert.ok(preflightAt >= 0 && migrateAt > preflightAt, "认证预检必须在迁移之前");
 });
 
+test("finalizer 用到的输出函数全部有定义", () => {
+  // `set -e` 下调用未定义函数会以 127 立即中止；曾因漏定义 warn() 停在步骤 7。
+  for (const fn of ["die", "ok", "info", "warn", "step"]) {
+    assert.match(code.finalize, new RegExp(`^${fn}\\(\\)`, "m"), `finalizer 缺少 ${fn}()`);
+  }
+});
+
 test("口令步骤在重跑时仍可重设，且能识别 Passwords didn't match", () => {
   // 不能因为「口令非空」就跳过 psql：旧口令会保留，步骤 8 输入的新口令必然失败。
   assert.doesNotMatch(code.finalize, /两个口令均已设置，跳过/);
@@ -668,19 +681,21 @@ test("信任流程不修改 sudoers / SSH / 防火墙，也不扩大权限", () 
   }
 });
 
-test("systemd 单元的文档路径指向信任目录", () => {
-  assert.match(code.unit, /^Documentation=file:\/\/\/opt\/chaoge-deploy-trust\/deploy\/app\/README\.md$/m);
+test("systemd 单元的文档路径指向受控入口安装的固定库", () => {
+  assert.match(code.unit, /^Documentation=file:\/\/\/usr\/local\/lib\/chaoge\/app\/README\.md$/m);
   assert.doesNotMatch(code.unit, /\/opt\/chaoge-deploy\//);
 });
 
-test("README 记录版本区分、信任目录与 Secure Cookie 限制", () => {
-  assert.match(code.readme, /\/opt\/chaoge-deploy-trust/);
-  assert.match(code.readme, /APP_GIT_SHA/);
+test("README 记录受控入口、版本区分与 Secure Cookie 限制", () => {
+  assert.match(code.readme, /\/usr\/local\/sbin\/chaoge-deploy/);
+  assert.match(code.readme, /\/usr\/local\/lib\/chaoge/);
+  assert.match(code.readme, /ARTIFACT_SHA256/);
   assert.match(code.readme, /BUILD_INFO/);
   assert.match(raw.readme, /Secure Cookie 限制/);
   assert.match(code.readme, /\/var\/log\/chaoge/);
   assert.match(code.trustReadme, /bundle SHA-256/);
   assert.match(code.trustReadme, /chaoge_prod/);
+  assert.match(code.trustReadme, /deploy\/entry\/install\.sh/);
 });
 
 // ── 10. bash 语法 ────────────────────────────────────────────────────────────

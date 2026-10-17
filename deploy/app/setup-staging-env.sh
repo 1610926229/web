@@ -4,8 +4,9 @@
 #
 #     sudo deploy/app/setup-staging-env.sh [选项]
 #
-# 在服务器上生成 `/etc/chaoge/staging.env`（root:chaoge 0640），
-# 供 systemd 的 `EnvironmentFile=` 读取。
+# 在服务器上生成 `/etc/chaoge/staging.env`（root:root 0600），
+# 供 systemd 的 `EnvironmentFile=` 读取。systemd 以 root 身份读取该文件，
+# 再把变量注入服务进程；服务账号 `chaoge` 不需要、也不能直接读取文件本身。
 #
 # ## 独立数据库（Step 5.8.2）
 #
@@ -27,8 +28,10 @@
 #
 # ## 口令从哪来
 #
-# 只用 `read -s` 从终端读，**不接受命令行参数、不读环境变量、不读管道**。
-# 于是明文不会出现在 shell 历史、`ps` 输出、`/proc/PID/environ` 或任何日志里。
+# 正常人工路径只用 `read -s` 从终端读：**不接受命令行参数、不读环境变量**。
+# 受控部署入口（root 拥有的 chaoge-deploy）走 `--password-fd N`：root 从
+# `/etc/chaoge/staging.secrets` 读出随机口令后，经匿名管道 fd 传入。
+# 两种路径都不让明文进入 argv、`/proc/PID/environ`、shell 历史或日志。
 
 set -euo pipefail
 
@@ -43,6 +46,7 @@ WITH_MOCK=1
 DRY_RUN=0
 FORCE=0
 DO_CHECK=1
+PASSWORD_FD=""
 
 usage() {
   cat <<'USAGE'
@@ -57,13 +61,15 @@ usage() {
   --port PORT       端口（默认 5432）
   --no-mock         不写入四个 ENABLE_MOCK_* 开关（接入真实登录后使用）
   --no-check        写完不试连（默认会用临时 .pgpass 试连一次）
+  --password-fd N   从文件描述符 N 读取应用口令（**仅 root**，受控部署入口使用；
+                    不再要求终端，也不会回显）
   --dry-run         只打印将写入的内容（口令以 <REDACTED> 代替），不落盘
   --force           目标文件已存在时直接覆盖（默认先问）
   -h, --help        本帮助
 
 权限模型:
-  /etc/chaoge            root:chaoge  0750
-  /etc/chaoge/staging.env root:chaoge 0640
+  /etc/chaoge             root:root  0750
+  /etc/chaoge/staging.env root:root  0600  ← 只有 systemd（root）读取
 USAGE
 }
 
@@ -82,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --port)      DB_PORT="${2:?}"; shift 2 ;;
     --no-mock)   WITH_MOCK=0; shift ;;
     --no-check)  DO_CHECK=0; shift ;;
+    --password-fd) PASSWORD_FD="${2:?--password-fd 需要一个描述符}"; shift 2 ;;
     --dry-run)   DRY_RUN=1; shift ;;
     --force)     FORCE=1; shift ;;
     -h|--help)   usage; exit 0 ;;
@@ -132,7 +139,13 @@ esac
 
 # ── 执行身份与服务账号（参数校验之后） ─────────────────────────────────────────
 
-[[ "$(id -u)" == "0" ]] || die "必须以 root 运行：要写 /etc 下的文件并 chown 给服务账号。"
+[[ "$(id -u)" == "0" ]] || die "必须以 root 运行：要写 /etc 下的文件。"
+
+if [[ -n "$PASSWORD_FD" ]]; then
+  [[ "$PASSWORD_FD" =~ ^[3-9][0-9]*$ ]] \
+    || die "--password-fd 必须是 >=3 的文件描述符号（当前：$PASSWORD_FD）。"
+  [[ "$DRY_RUN" == "0" ]] || die "--dry-run 与 --password-fd 不能同时使用。"
+fi
 
 id -u "$SERVICE_USER" >/dev/null 2>&1 || die "服务账号「$SERVICE_USER」不存在。先跑 deploy/app/create-service-user.sh。"
 getent group "$SERVICE_GROUP" >/dev/null 2>&1 || die "服务组「$SERVICE_GROUP」不存在。"
@@ -160,26 +173,37 @@ RAW_PW=""
 ENCODED_PW="<REDACTED>"
 
 if [[ "$DRY_RUN" == "0" ]]; then
-  [[ -t 0 ]] || die "需要交互式终端输入口令。本脚本刻意不支持从管道/参数传入。"
+  if [[ -n "$PASSWORD_FD" ]]; then
+    # 受控入口路径：口令经匿名 fd 传入，不经过终端、管道命令或环境变量。
+    IFS= read -r RAW_PW <&"$PASSWORD_FD" \
+      || die "无法从文件描述符 $PASSWORD_FD 读取应用口令。"
+    [[ -n "$RAW_PW" ]] || die "从文件描述符 $PASSWORD_FD 读到的口令为空。"
+    # 受控入口只生成 64 位十六进制口令；格式不对说明上游被改过，拒绝继续。
+    [[ "$RAW_PW" =~ ^[0-9a-f]{64}$ ]] \
+      || die "受控入口传入的口令格式不正确（期望 64 位小写十六进制）。"
+    ENCODED_PW="$(urlencode "$RAW_PW")"
+  else
+    [[ -t 0 ]] || die "需要交互式终端输入口令。人工路径刻意不支持从管道/参数传入。"
 
-  if [[ -e "$ENV_PATH" && "$FORCE" != "1" ]]; then
-    warn "目标文件已存在：$ENV_PATH"
-    printf '  覆盖会替换掉里面现有的口令。输入 yes 继续: '
-    answer=""; read -r answer
-    [[ "$answer" == "yes" ]] || { info "已取消，未做任何改动。"; exit 1; }
+    if [[ -e "$ENV_PATH" && "$FORCE" != "1" ]]; then
+      warn "目标文件已存在：$ENV_PATH"
+      printf '  覆盖会替换掉里面现有的口令。输入 yes 继续: '
+      answer=""; read -r answer
+      [[ "$answer" == "yes" ]] || { info "已取消，未做任何改动。"; exit 1; }
+    fi
+
+    printf '  请输入 %s@%s/%s 的口令（输入不回显）: ' "$DB_ROLE" "$DB_HOST" "$DB_NAME"
+    read -rs RAW_PW; printf '\n'
+    CONFIRM_PW=""
+    printf '  再输入一次确认: '
+    read -rs CONFIRM_PW; printf '\n'
+
+    [[ -n "$RAW_PW" ]] || die "口令为空。"
+    [[ "$RAW_PW" == "$CONFIRM_PW" ]] || die "两次输入不一致。"
+    unset CONFIRM_PW
+
+    ENCODED_PW="$(urlencode "$RAW_PW")"
   fi
-
-  printf '  请输入 %s@%s/%s 的口令（输入不回显）: ' "$DB_ROLE" "$DB_HOST" "$DB_NAME"
-  read -rs RAW_PW; printf '\n'
-  CONFIRM_PW=""
-  printf '  再输入一次确认: '
-  read -rs CONFIRM_PW; printf '\n'
-
-  [[ -n "$RAW_PW" ]] || die "口令为空。"
-  [[ "$RAW_PW" == "$CONFIRM_PW" ]] || die "两次输入不一致。"
-  unset CONFIRM_PW
-
-  ENCODED_PW="$(urlencode "$RAW_PW")"
 fi
 
 # ── 写入前试连：确认凭据真的能连上**这个独立库** ────────────────────────────────
@@ -238,8 +262,8 @@ render_env() {
   cat <<EOF
 # 由 deploy/app/setup-staging-env.sh 生成 —— 请勿手工编辑，勿纳入版本控制。
 #
-# 权限 root:$SERVICE_GROUP 0640：运行时账号（$SERVICE_USER）可读，同机其它用户不可读。
-# 改口令后重新运行该脚本。
+# 权限 root:root 0600：只有 systemd（root）读取并把变量注入服务进程；
+# 运行时账号（$SERVICE_USER）不能直接读取文件。改口令后重新运行该脚本。
 #
 # ⚠️ 这里刻意没有 HOSTNAME / PORT：绑定地址写死在 systemd 单元的 ExecStart 里，
 #    避免配置文件把服务绑到 0.0.0.0。
@@ -267,8 +291,16 @@ fi
 # ── 原子写入 ──────────────────────────────────────────────────────────────────
 
 ENV_DIR="$(dirname "$ENV_PATH")"
-mkdir -p "$ENV_DIR"
-chown "root:$SERVICE_GROUP" "$ENV_DIR"
+# ENV_PATH 必须是 /etc 下至少两层（不把 /etc 本身 chmod 750），且目录必须是
+# 真实目录：否则 root 会顺着符号链接把文件与权限写到别处。
+[[ "$ENV_PATH" == /etc/*/* ]] || die "环境变量文件必须位于 /etc/<目录>/<文件>：$ENV_PATH"
+[[ ! -L "$ENV_PATH" ]] || die "目标文件是符号链接，拒绝写入：$ENV_PATH"
+if [[ -e "$ENV_DIR" || -L "$ENV_DIR" ]]; then
+  [[ -d "$ENV_DIR" && ! -L "$ENV_DIR" ]] || die "目标目录不是普通目录：$ENV_DIR"
+else
+  install -d -o root -g root -m 0750 "$ENV_DIR"
+fi
+chown root:root "$ENV_DIR"
 chmod 750 "$ENV_DIR"
 
 TMP="$(mktemp "$ENV_DIR/.staging.env.XXXXXX")"
@@ -276,8 +308,8 @@ chmod 600 "$TMP"
 
 render_env > "$TMP"
 
-chown "root:$SERVICE_GROUP" "$TMP"
-chmod 640 "$TMP"
+chown root:root "$TMP"
+chmod 600 "$TMP"
 mv -f "$TMP" "$ENV_PATH"          # 同目录原子替换，全程没有 others 可读的瞬间
 
 unset RAW_PW ENCODED_PW
@@ -286,7 +318,7 @@ unset RAW_PW ENCODED_PW
 
 ACT="$(stat -c '%U:%G %a' "$ENV_PATH")"
 ok "已写出 $ENV_PATH（$ACT）"
-[[ "$ACT" == "root:$SERVICE_GROUP 640" ]] || die "权限不符合预期：$ACT，期望 root:$SERVICE_GROUP 640。"
+[[ "$ACT" == "root:root 600" ]] || die "权限不符合预期：$ACT，期望 root:root 600。"
 
 # 绑定地址不能出现在这里（见文件头）：systemd 的 EnvironmentFile 会覆盖 unit 设置。
 if grep -qE '^(HOSTNAME|PORT)=' "$ENV_PATH"; then

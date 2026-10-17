@@ -82,7 +82,7 @@ done
 
 [[ "$(id -u)" == "0" ]] || die "必须以 root 运行（要写 /opt 并重启 systemd 服务）。"
 [[ -n "$ARTIFACT" ]] || { usage >&2; die "缺少 --artifact"; }
-[[ -f "$ARTIFACT" ]] || die "产物不存在：$ARTIFACT"
+[[ -f "$ARTIFACT" && ! -L "$ARTIFACT" ]] || die "产物不存在或是符号链接：$ARTIFACT"
 [[ -s "$ARTIFACT" ]] || die "产物是空的：$ARTIFACT"
 
 id -u "$SERVICE_USER" >/dev/null 2>&1 || die "服务账号「$SERVICE_USER」不存在。先跑 bash deploy/app/create-service-user.sh。"
@@ -106,10 +106,11 @@ NODE_BIN="$(printf '%s\n' "$UNIT_EXEC" | awk '
 ok "运行时 Node 可用：$NODE_BIN（$( "$NODE_BIN" -v 2>/dev/null || echo '版本未知')）"
 
 step "1. 环境变量文件校验"
-[[ -f "$ENV_FILE" ]] || die "找不到 $ENV_FILE。先跑 bash deploy/app/setup-staging-env.sh。"
+[[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || die "找不到 $ENV_FILE 或它是符号链接。先跑 bash deploy/app/setup-staging-env.sh。"
 PERM="$(stat -c '%U:%G %a' "$ENV_FILE")"
-[[ "$PERM" == "root:$SERVICE_USER 640" ]] \
-  || die "$ENV_FILE 的权限是「$PERM」，期望「root:$SERVICE_USER 640」。"
+[[ "$PERM" == "root:root 600" ]] \
+  || die "$ENV_FILE 的权限是「$PERM」，期望「root:root 600」。
+      该文件只由 systemd（root）读取；服务账号不需要直接读取它。"
 grep -qx 'DATA_SOURCE=postgres' "$ENV_FILE" \
   || die "$ENV_FILE 里没有 DATA_SOURCE=postgres —— 服务会退回 Mock 数据源。"
 if grep -qE '^(HOSTNAME|PORT)=' "$ENV_FILE"; then
@@ -179,7 +180,55 @@ while IFS= read -r entry; do
   esac
 done < <(tar -tzf "$ARTIFACT")
 
-BUILD_INFO="$(tar -xzf "$ARTIFACT" -O ./BUILD_INFO 2>/dev/null || true)"
+# Next standalone 产物里本来就有相对符号链接（node_modules/.bin 等），
+# 不能一律拒绝；但硬链接 / 设备 / FIFO / setuid / 绝对或逃逸的链接目标
+# 一律拒绝。链接安全判定与 chaoge-deploy 入口保持一致。
+if ! tar -tvzf "$ARTIFACT" | awk '
+  function depth_of(p,   n, a, i, d) {
+    d = 0
+    n = split(p, a, "/")
+    for (i = 1; i <= n; i++) if (a[i] != "" && a[i] != ".") d++
+    return d
+  }
+  function link_target_safe(path, target,   n, a, i, d) {
+    if (target ~ /^\//) return 0
+    sub(/\/[^\/]*$/, "", path)          # dirname(link)
+    d = depth_of(path)
+    n = split(target, a, "/")
+    for (i = 1; i <= n; i++) {
+      if (a[i] == "" || a[i] == ".") continue
+      if (a[i] == "..") { d--; if (d < 0) return 0 }
+      else d++
+    }
+    return 1
+  }
+  {
+    type = substr($1, 1, 1)
+    if (type != "-" && type != "d" && type != "l") {
+      print "unsafe entry type: " $0; bad = 1
+    }
+    if (substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/) {
+      print "setuid/setgid entry: " $0; bad = 1
+    }
+    if (type == "l") {
+      at = index($0, " -> ")
+      if (at == 0) { print "symlink without target: " $0; bad = 1; next }
+      target = substr($0, at + 4)
+      left = substr($0, 1, at - 1)
+      n = split(left, f, /[ \t]+/)
+      link = f[n]
+      if (!link_target_safe(link, target)) {
+        print "unsafe symlink target: " link " -> " target; bad = 1
+      }
+    }
+  }
+  END { exit (bad ? 1 : 0) }
+'; then
+  die "产物包含不安全的 tar 条目（链接逃逸、硬链接、设备、FIFO 或 setuid/setgid），拒绝安装。"
+fi
+
+# 只取前 4 KiB：BUILD_INFO 正常只有几十字节，限制输出以防解压炸弹。
+BUILD_INFO="$(tar -xzf "$ARTIFACT" -O ./BUILD_INFO 2>/dev/null | head -c 4096 || true)"
 [[ -n "$BUILD_INFO" ]] || die "产物里没有 BUILD_INFO —— 不是 build-standalone.sh 产出的包。"
 
 SHA="$(printf '%s\n' "$BUILD_INFO" | sed -n 's/^sha=//p' | head -1 | tr -d '\r')"
@@ -231,15 +280,37 @@ step "3. 解包到版本目录"
 mkdir -p "$RELEASES"
 [[ -e "$REL" ]] && rm -rf "$REL"
 mkdir -p "$REL"
-tar -xzf "$ARTIFACT" -C "$REL"
+# --no-same-owner / --no-same-permissions：归档里的属主与 setuid 位一律不生效。
+tar -xzf "$ARTIFACT" -C "$REL" --no-same-owner --no-same-permissions
 
-[[ -f "$REL/server.js" ]] || die "解包后缺 server.js"
-[[ -d "$REL/node_modules" ]] || die "解包后缺 node_modules"
+[[ -f "$REL/server.js" && ! -L "$REL/server.js" ]] || die "解包后缺 server.js 或它是符号链接"
+[[ -d "$REL/node_modules" && ! -L "$REL/node_modules" ]] || die "解包后缺 node_modules 或它是符号链接"
 
-# 服务账号只需要读：属组 chaoge 可读/可进入，others 全部去掉。
-chown -R "root:$SERVICE_USER" "$REL"
-chmod -R g+rX,o-rwx "$REL"
-ok "已解包并设置权限（root:$SERVICE_USER，others 无权限）"
+# 解包后再实测一次链接：所有链接必须是相对目标、解析后留在版本目录内，
+# 且不能悬空。tar 的预检是词法的，这一步是对真实文件系统的复核。
+while IFS= read -r -d '' link; do
+  tgt="$(readlink "$link")"
+  [[ "$tgt" != /* ]] || die "版本目录里有绝对符号链接，拒绝：$link -> $tgt"
+  resolved="$(realpath -m -- "$(dirname "$link")/$tgt")"
+  case "$resolved" in
+    "$REL"/*) ;;
+    *) die "符号链接解析后逃出版本目录，拒绝：$link -> $tgt（$resolved）" ;;
+  esac
+  [[ -e "$link" ]] || die "版本目录里有悬空符号链接，拒绝：$link -> $tgt"
+done < <(find "$REL" -type l -print0)
+
+# 迁移以 deploy 身份执行，服务以 chaoge 身份执行；版本目录因此必须对两者可读。
+# 产物已在入口处校验不含 .env / 不安全条目，代码本身不是机密。
+chown -R root:root "$REL"
+chmod -R a+rX,go-w "$REL"
+
+# 归一化后再断言：任何 setuid/setgid 或组/其他可写路径都不得进入发布目录。
+find "$REL" -xdev \( -perm -4000 -o -perm -2000 \) -exec chmod u-s,g-s {} +
+[[ -z "$(find "$REL" -xdev \( -perm -4000 -o -perm -2000 \) -print -quit)" ]] \
+  || die "发布目录里仍有 setuid/setgid 文件，拒绝继续。"
+[[ -z "$(find "$REL" -xdev ! -type l \( -perm -0020 -o -perm -0002 \) -print -quit)" ]] \
+  || die "发布目录里存在组/其他用户可写的路径，拒绝继续。"
+ok "已解包并设置权限（root:root，所有用户只读，无 setuid/setgid）"
 
 PREV=""
 if [[ -L "$CURRENT" ]]; then

@@ -1,6 +1,6 @@
 [Unit]
 Description=超哥电竞 私有 Staging（Next.js standalone）
-Documentation=file:///opt/chaoge-deploy-trust/deploy/app/README.md
+Documentation=file:///usr/local/lib/chaoge/app/README.md
 After=network-online.target postgresql.service
 Wants=network-online.target
 
@@ -15,8 +15,9 @@ User=chaoge
 Group=chaoge
 WorkingDirectory=/opt/chaoge-staging/current
 
-# 生产环境变量。文件由 deploy/app/setup-staging-env.sh 生成：
-#   root:chaoge 0640，含 DATA_SOURCE=postgres / DATABASE_URL / NODE_ENV。
+# 生产环境变量。文件由受控部署入口/ setup-staging-env.sh 生成：
+#   root:root 0600，含 DATA_SOURCE=postgres / DATABASE_URL / NODE_ENV。
+# systemd 以 root 读取该文件，再把变量注入下面的进程；服务账号不能直接读它。
 # 缺失时 systemd 直接拒绝启动——这是刻意的：不要让它带着半套配置跑起来。
 EnvironmentFile=/etc/chaoge/staging.env
 

@@ -55,9 +55,10 @@ PHASE=""
 DRY_RUN=0
 SELF_TEST=0
 ROLLBACK_SELFTEST=0
+NON_INTERACTIVE=0
 
-# 迁移代码所在目录。默认是本脚本所属仓库的根目录；PROD-2 的 root 收尾脚本
-# 会把它指向 /opt/chaoge-deploy-trust/src（root 拥有、deploy 不可写的快照）。
+# 迁移代码所在目录。默认是本脚本所属仓库的根目录；受控部署入口
+# 会把它指向 /usr/local/lib/chaoge/src（root 拥有、deploy 不可写的快照）。
 APP_DIR="${CHAOGE_APP_DIR:-$REPO_ROOT}"
 
 # 迁移执行身份。为空时沿用历史的 `pnpm db:migrate`（当前用户）；
@@ -108,6 +109,8 @@ usage() {
                       避免连接串出现在 argv / 环境变量中）
   --dry-run           只打印将要执行的内容，不写库
   --self-test         跳过交互确认。**只允许** chaoge_staging*_test
+  --non-interactive   跳过交互确认。**仅 root**，且库名必须正好是 chaoge_staging。
+                      供 root 拥有的受控部署入口调用，不接受其它库名。
   --rollback-selftest 仅 init：事务以 ROLLBACK 结束，零残留。只允许 *_test
   -h, --help          本帮助
 
@@ -145,12 +148,22 @@ while [[ $# -gt 0 ]]; do
     --database)          DB_NAME="${2:?--database 需要一个值}"; shift 2 ;;
     --migrator-url-fd)   MIGRATOR_URL_FD="${2:?--migrator-url-fd 需要一个文件描述符}"; shift 2 ;;
     --dry-run)           DRY_RUN=1; shift ;;
+    --non-interactive)   NON_INTERACTIVE=1; shift ;;
     --self-test)         SELF_TEST=1; shift ;;
     --rollback-selftest) ROLLBACK_SELFTEST=1; shift ;;
     -h|--help)           usage; exit 0 ;;
     *) die "未知选项「$1」" ;;
   esac
 done
+
+# 无人值守模式只服务一个固定目标：root 拥有的受控部署入口。
+# 它不能被用来绕过「必须恰好是 chaoge_staging」这条边界。
+if [[ "$NON_INTERACTIVE" == "1" ]]; then
+  [[ "$(id -u)" == "0" ]] \
+    || die "--non-interactive 只允许 root 使用（受控部署入口以 root 运行）。"
+  [[ "$DB_NAME" == "chaoge_staging" ]] \
+    || die "--non-interactive 只允许目标库正好是 chaoge_staging（当前：$DB_NAME）。"
+fi
 
 if [[ -n "$MIGRATOR_URL_FD" ]]; then
   [[ "$(id -u)" == "0" ]] \
@@ -271,6 +284,8 @@ require_database() {
 assert_interactive() {
   [[ -t 0 ]] && return 0
   [[ "$SELF_TEST" == "1" || "$ROLLBACK_SELFTEST" == "1" ]] && return 0
+  # 只有 root + 精确 chaoge_staging 才能走到这里（见参数解析后的守卫）。
+  [[ "$NON_INTERACTIVE" == "1" ]] && return 0
   die "写操作需要交互式确认，但标准输入不是终端。拒绝在无人值守的情况下继续。"
 }
 
@@ -279,6 +294,11 @@ require_confirmation() {
 
   if [[ "$SELF_TEST" == "1" || "$ROLLBACK_SELFTEST" == "1" ]]; then
     warn "[自测] 跳过交互确认：$prompt（目标库 $DB_NAME）"
+    return 0
+  fi
+
+  if [[ "$NON_INTERACTIVE" == "1" ]]; then
+    warn "[受控入口] 跳过交互确认：$prompt（目标库 $DB_NAME，调用者 root）"
     return 0
   fi
 

@@ -1,5 +1,11 @@
 # Staging 独立数据库部署（PROD-2 / Step 5.8.2）
 
+> **正常部署不需要手工执行本文件的命令。** 一次性运行
+> `deploy/entry/install.sh` 后，`check/create/init/migrate/bootstrap/verify`
+> 都由受控入口 `/usr/local/sbin/chaoge-deploy deploy` 以 root 调度、以 `deploy`
+> 身份执行迁移。本文件保留给 root 排查与本地隔离测试；其中的 `sudo ...`
+> 示例是 root 手工路径，`deploy` 用户没有这些 sudo 权限。
+
 Staging 使用**独立的** `chaoge_staging` 数据库与**独立的**两个角色，
 与 `chaoge_prod` 共享同一个 PostgreSQL 18 实例，但权限、默认权限、表属主完全隔离。
 

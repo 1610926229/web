@@ -69,6 +69,7 @@ DRILL_ART=""
 die()  { printf '\033[31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
+warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 step() { printf '\n\033[1m── %s ──\033[0m\n' "$*"; }
 
 usage() {
@@ -100,6 +101,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(id -u)" == "0" ]] || die "必须以 root 运行：sudo bash $0 --trust-dir DIR --artifact FILE [--drill]"
+# 已由 deploy/entry/install.sh + /usr/local/sbin/chaoge-deploy 取代。
+# 保留代码只为历史取证与本地回归，禁止再用它做服务器部署。
+[[ "${CHAOGE_ENABLE_LEGACY_PROD2_FLOW:-}" == "1" ]] \
+  || die "finalize-staging.sh 已废弃。请改用 deploy/entry/install.sh 一次性安装受控入口。"
+warn "正在运行已废弃的 finalize-staging.sh（CHAOGE_ENABLE_LEGACY_PROD2_FLOW=1）。"
 [[ -n "$ART" ]] || { usage >&2; die "缺少 --artifact"; }
 [[ "$TRUST_DIR" == "/opt/chaoge-deploy-trust" ]] \
   || die "trust 目录必须是 /opt/chaoge-deploy-trust（当前：$TRUST_DIR）。"
