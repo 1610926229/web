@@ -386,6 +386,8 @@ staging 上就没有任何登录入口——这不是假设，是读代码得出
 | mock 登录 404 + 「接口未启用」 | `staging.env` | `ENABLE_MOCK_AUTH` 没开 |
 | 发布后健康检查失败并自动回滚 | `journalctl` + 上一版是否有同样问题 | 新版本本身有问题；回滚已生效，服务应已恢复 |
 | `ss` 显示 `0.0.0.0:3000` | `systemctl cat chaoge-staging` | ExecStart 被改过，`HOSTNAME` 丢失 |
+| 迁移报 `password authentication failed` | finalizer 日志第 7 步是否出现 `Passwords didn't match.` | 两次口令不一致，旧口令未变；重跑并在步骤 7 重设。步骤 8 现在会先做 TCP 认证预检 |
+| `迁移代码目录不正确（缺少 package.json）` | `CHAOGE_APP_DIR` 是否设置 | 手工运行 staging 脚本时变量名是 `CHAOGE_APP_DIR`（不是 `CHAOGE_SRC`）；正常流程请重跑 finalizer |
 
 ## 12. 本地验证
 

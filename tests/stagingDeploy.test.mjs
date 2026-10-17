@@ -503,6 +503,27 @@ test("finalizer 以 deploy 身份执行迁移，root 不执行迁移代码", () 
   assert.match(code.finalize, /unset MIG_URL/);
   // 连接串走 fd，不能进 argv 或子进程环境变量列表。
   assert.doesNotMatch(code.finalize, /DATABASE_URL="\$MIG_URL"/);
+
+  // 迁移前必须用同一个口令做真实 TCP 认证预检，且预检发生在启动迁移之前。
+  assert.match(code.finalize, /PGPASSWORD="\$MIG_PW"/);
+  assert.match(code.finalize, /psql -w -h "\$DB_HOST"/);
+  assert.match(code.finalize, /-Atqc 'SELECT 1'/);
+  assert.match(code.finalize, /migrator 口令已通过 \$DB_HOST TCP 认证预检/);
+  const preflightAt = code.finalize.indexOf('PGPASSWORD="$MIG_PW"');
+  const migrateAt = code.finalize.indexOf(
+    "deploy_script deploy/db/staging/deploy-staging.sh migrate",
+  );
+  assert.ok(preflightAt >= 0 && migrateAt > preflightAt, "认证预检必须在迁移之前");
+});
+
+test("口令步骤在重跑时仍可重设，且能识别 Passwords didn't match", () => {
+  // 不能因为「口令非空」就跳过 psql：旧口令会保留，步骤 8 输入的新口令必然失败。
+  assert.doesNotMatch(code.finalize, /两个口令均已设置，跳过/);
+  assert.match(code.finalize, /sudo -u postgres psql -d "\$DB_NAME"/);
+  assert.match(code.finalize, /Passwords didn't match/);
+  assert.match(code.finalize, /确认可用就直接输入/);
+  // role_pw_set 只做存在性检查，不能作为认证凭据。
+  assert.match(code.finalize, /rolpassword IS NOT NULL/);
 });
 
 test("finalizer 的日志在 root 控制的目录里", () => {

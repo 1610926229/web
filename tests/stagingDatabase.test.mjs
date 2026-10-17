@@ -241,6 +241,12 @@ test("migrate 以 NODE_ENV=production 执行，且不打印口令", () => {
   assert.doesNotMatch(wrapper, /psql[^\n]*-U "\$DB_ROLE"[^\n]*"\$raw_pw"/);
 });
 
+test("迁移代码目录错误提示指向 CHAOGE_APP_DIR", () => {
+  assert.match(wrapper, /迁移代码目录不正确（缺少 package\.json）/);
+  assert.match(wrapper, /CHAOGE_APP_DIR/);
+  assert.match(wrapper, /不是 CHAOGE_SRC/);
+});
+
 test("verify 从报告里读 section=9 判定，而不是看退出码", () => {
   assert.match(wrapper, /\$1\+0==9 && \$2 ~ \/OVERALL\//);
   assert.match(wrapper, /PASS\) ok "验收通过/);

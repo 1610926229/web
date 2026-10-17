@@ -247,20 +247,25 @@ step "7/14 两个 staging 角色的口令"
 role_pw_set() {
   [[ "$(sudo -u postgres psql -tAc "SELECT rolpassword IS NOT NULL FROM pg_authid WHERE rolname = '$1'")" == "t" ]]
 }
+# 即使两个口令已存在也打开 psql：重跑时必须留出「重设口令」的入口。
+# 否则旧口令会一直保留，而步骤 8 只能拿到操作者新输入的口令，必然认证失败。
 if role_pw_set chaoge_staging_migrator && role_pw_set chaoge_staging_app; then
-  ok "两个口令均已设置，跳过"
+  warn "两个口令已存在。确认可用就直接输入 \\q 跳过；不确定请重新设置。"
 else
-  cat <<'EOS'
+  warn "至少一个口令尚未设置。"
+fi
+cat <<'EOS'
   即将打开 psql（postgres 身份）。请依次输入：
       \password chaoge_staging_migrator
       \password chaoge_staging_app
   每个角色会要求输入两次（不回显）。完成后输入 \q 退出。
+  注意：若出现 "Passwords didn't match."，该角色的口令**没有改变**；
+        请重新执行那条 \password，直到两次输入一致。
 EOS
-  sudo -u postgres psql -d "$DB_NAME"
-  role_pw_set chaoge_staging_migrator || die "chaoge_staging_migrator 口令仍未设置。"
-  role_pw_set chaoge_staging_app || die "chaoge_staging_app 口令仍未设置。"
-  ok "两个口令已设置（只输出布尔值，未读取口令内容）"
-fi
+sudo -u postgres psql -d "$DB_NAME"
+role_pw_set chaoge_staging_migrator || die "chaoge_staging_migrator 口令仍未设置。"
+role_pw_set chaoge_staging_app || die "chaoge_staging_app 口令仍未设置。"
+ok "两个口令已设置（只输出布尔值，未读取口令内容）"
 
 # ── 8. 迁移（以 deploy 身份执行 root 拥有的代码）─────────────────────────────
 
@@ -287,7 +292,33 @@ printf '  请输入 chaoge_staging_migrator 的口令（输入不回显）: ' >&
 read -rs MIG_PW; printf '\n' >&2
 [[ -n "$MIG_PW" ]] || die "口令为空。"
 MIG_URL="postgresql://chaoge_staging_migrator:$(urlencode "$MIG_PW")@$DB_HOST:$DB_PORT/$DB_NAME"
-unset MIG_PW
+
+# 认证预检：用即将交给迁移的同一个口令做一次真实 TCP 登录。
+# role_pw_set 只能证明「口令非空」，不能证明「它就是操作者刚输入的这个」；
+# 步骤 7 的 \password 若两次输入不一致，旧口令会保留，迁移才会报认证失败。
+# psql 以 deploy 身份运行，与迁移进程的网络路径和认证方式一致；
+# PGPASSWORD 只存在于该子进程环境，不进 argv、不写文件。
+MIG_HOME="$(getent passwd "$MIGRATE_USER" | cut -d: -f6)"
+[[ -n "$MIG_HOME" ]] || MIG_HOME="/home/$MIGRATE_USER"
+PREFLIGHT_OUT=""
+if ! PREFLIGHT_OUT="$(runuser -u "$MIGRATE_USER" -- env -i \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      HOME="$MIG_HOME" \
+      TMPDIR=/tmp LANG=C.UTF-8 \
+      PGPASSWORD="$MIG_PW" \
+      psql -w -h "$DB_HOST" -p "$DB_PORT" -U chaoge_staging_migrator \
+        -d "$DB_NAME" -Atqc 'SELECT 1' 2>&1)"; then
+  unset MIG_PW MIG_URL
+  die "chaoge_staging_migrator 口令认证失败：本次输入的口令与数据库中的口令不一致。
+       psql: ${PREFLIGHT_OUT:-（无输出）}
+       最常见原因是步骤 7 的 \\password 两次输入不一致（日志里的 Passwords didn't match）——
+       此时该角色的旧口令会保留。请重新执行本命令，在步骤 7 重设 migrator 口令，
+       并在步骤 8 输入同一个口令。"
+fi
+[[ "$PREFLIGHT_OUT" == "1" ]] \
+  || { unset MIG_PW MIG_URL; die "migrator 认证预检返回异常输出：$PREFLIGHT_OUT"; }
+ok "migrator 口令已通过 $DB_HOST TCP 认证预检"
+unset MIG_PW PREFLIGHT_OUT
 
 # 连接串走固定 fd 9：不出现在 argv，也不写进 root 的环境变量列表。
 exec 9< <(printf '%s\n' "$MIG_URL")

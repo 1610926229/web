@@ -549,7 +549,9 @@ phase_migrate() {
   require_database
   require_psql
 
-  [[ -r "$APP_DIR/package.json" ]] || die "迁移代码目录不正确（缺少 package.json）：$APP_DIR"
+  [[ -r "$APP_DIR/package.json" ]] || die "迁移代码目录不正确（缺少 package.json）：$APP_DIR
+      用环境变量 CHAOGE_APP_DIR 指定仓库根或快照 src/ 目录（不是 CHAOGE_SRC）。
+      正常运维请直接重跑 finalizer，不要手工拼这条命令。"
 
   if [[ -n "$MIGRATE_AS" ]]; then
     # root 只负责调度：迁移进程以 deploy 身份运行，读取 root 拥有的快照。
