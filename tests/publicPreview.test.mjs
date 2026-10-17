@@ -25,7 +25,14 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -314,6 +321,262 @@ test("Nginx 配置基础防护：安全头、限流、请求体上限", () => {
   assert.ok(nginx.includes("client_max_body_size 64k;"));
   assert.ok(nginx.includes("server_tokens off;"));
 });
+
+/**
+ * Nginx 指令的轻量语义解析。
+ *
+ * 为什么不能只做字符串断言：`limit_conn zone=name 20` 里的每个字符串都
+ * 「看起来对」，但 Nginx 的 limit_conn 语法是 `limit_conn <zone> <number>`，
+ * 没有 `zone=` 前缀。真实故障是 `nginx -t` 报
+ * `zero size shared memory zone "zone=chaoge_public_conn"`——只有把指令
+ * 拆成「名字 + 参数」并核对引用关系，才能在本地发现它。
+ */
+function tokenizeNginx(source) {
+  const tokens = [];
+  let word = "";
+  let i = 0;
+  const flush = () => {
+    if (word) {
+      tokens.push(word);
+      word = "";
+    }
+  };
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === "#") {
+      flush();
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      flush();
+      const quote = ch;
+      i++;
+      let value = "";
+      while (i < source.length && source[i] !== quote) value += source[i++];
+      i++;
+      tokens.push(`"${value}"`);
+      continue;
+    }
+
+    if (ch === "{" || ch === "}" || ch === ";") {
+      flush();
+      tokens.push(ch);
+      i++;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      flush();
+      i++;
+      continue;
+    }
+
+    word += ch;
+    i++;
+  }
+
+  flush();
+  return tokens;
+}
+
+/** 把 token 流切成 `{ words, depth, terminator }`，depth 为指令所在块深度。 */
+function parseNginxStatements(source) {
+  const statements = [];
+  let words = [];
+  let depth = 0;
+
+  for (const token of tokenizeNginx(source)) {
+    if (token === "{") {
+      if (words.length) statements.push({ words, depth, terminator: "{" });
+      words = [];
+      depth++;
+      continue;
+    }
+    if (token === "}") {
+      if (words.length) statements.push({ words, depth, terminator: ";" });
+      words = [];
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (token === ";") {
+      if (words.length) statements.push({ words, depth, terminator: ";" });
+      words = [];
+      continue;
+    }
+    words.push(token);
+  }
+
+  if (words.length) statements.push({ words, depth, terminator: ";" });
+  return statements;
+}
+
+function parseSize(value) {
+  const match = /^(\d+)([kKmMgG]?)$/.exec(value);
+  if (!match) return 0;
+  const scale = { "": 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 };
+  return Number(match[1]) * scale[match[2].toLowerCase()];
+}
+
+function parseLimitDirectives(source) {
+  const connZones = new Map();
+  const reqZones = new Map();
+  const connUsages = [];
+  const reqUsages = [];
+
+  for (const statement of parseNginxStatements(source)) {
+    const [name, ...args] = statement.words;
+
+    if (name === "limit_conn_zone") {
+      const match = /^(\S+)\s+zone=([A-Za-z0-9_]+):(\S+)$/.exec(args.join(" "));
+      assert.ok(match, `limit_conn_zone 语法不正确：${statement.words.join(" ")}`);
+      const size = parseSize(match[3]);
+      assert.ok(size > 0, `limit_conn_zone 的共享内存大小必须大于 0：${match[3]}`);
+      assert.equal(statement.depth, 0, "limit_conn_zone 必须位于 http 作用域");
+      connZones.set(match[2], { size, key: match[1] });
+    }
+
+    if (name === "limit_req_zone") {
+      const match = /^(\S+)\s+zone=([A-Za-z0-9_]+):(\S+)\s+rate=\S+$/.exec(
+        args.join(" "),
+      );
+      assert.ok(match, `limit_req_zone 语法不正确：${statement.words.join(" ")}`);
+      const size = parseSize(match[3]);
+      assert.ok(size > 0, `limit_req_zone 的共享内存大小必须大于 0：${match[3]}`);
+      assert.equal(statement.depth, 0, "limit_req_zone 必须位于 http 作用域");
+      reqZones.set(match[2], { size, key: match[1] });
+    }
+
+    if (name === "limit_conn") {
+      connUsages.push({ args, depth: statement.depth });
+    }
+
+    if (name === "limit_req") {
+      reqUsages.push({ args, depth: statement.depth });
+    }
+  }
+
+  return { connZones, reqZones, connUsages, reqUsages };
+}
+
+test("Nginx limit_conn 语义正确：区名不带 zone= 前缀且已声明", () => {
+  const { connZones, connUsages } = parseLimitDirectives(nginxCode);
+
+  assert.ok(connZones.size >= 1, "必须声明至少一个 limit_conn_zone");
+  assert.ok(connUsages.length >= 1, "必须使用 limit_conn");
+
+  for (const { args, depth } of connUsages) {
+    assert.ok(depth >= 1, "limit_conn 必须位于 server/location 作用域");
+    assert.equal(
+      args.length,
+      2,
+      `limit_conn 的语法必须是「limit_conn <zone> <number>」，收到：${args.join(" ")}`,
+    );
+
+    const [zone, number] = args;
+    assert.doesNotMatch(
+      zone,
+      /^zone=/,
+      "limit_conn 没有 zone= 前缀；写成 zone=name 会被当成区名，nginx -t 报 zero size shared memory zone",
+    );
+    assert.match(zone, /^[A-Za-z0-9_]+$/, `limit_conn 区名不合法：${zone}`);
+    assert.match(number, /^\d+$/, `limit_conn 连接数不合法：${number}`);
+    assert.ok(
+      connZones.has(zone),
+      `limit_conn 引用了未声明的区：${zone}（已声明：${[...connZones.keys()].join(", ")}）`,
+    );
+  }
+});
+
+test("Nginx limit_req 语义正确：zone= 引用已声明且参数合法", () => {
+  const { reqZones, reqUsages } = parseLimitDirectives(nginxCode);
+
+  assert.ok(reqZones.size >= 1, "必须声明至少一个 limit_req_zone");
+  assert.ok(reqUsages.length >= 1, "必须使用 limit_req");
+
+  for (const { args, depth } of reqUsages) {
+    assert.ok(depth >= 1, "limit_req 必须位于 server/location 作用域");
+
+    const match =
+      /^zone=([A-Za-z0-9_]+)(?:\s+burst=(\d+))?(?:\s+(?:nodelay|delay=\d+))?$/.exec(
+        args.join(" "),
+      );
+    assert.ok(
+      match,
+      `limit_req 语法不正确：limit_req ${args.join(" ")}（应为 zone=name [burst=N] [nodelay|delay=N]）`,
+    );
+    assert.ok(
+      reqZones.has(match[1]),
+      `limit_req 引用了未声明的区：${match[1]}（已声明：${[...reqZones.keys()].join(", ")}）`,
+    );
+  }
+});
+
+const NGINX_AVAILABLE = (() => {
+  try {
+    return spawnSync("nginx", ["-v"], { encoding: "utf8" }).status === 0;
+  } catch {
+    return false;
+  }
+})();
+
+test(
+  "Nginx 真实配置解析通过（有 nginx 可执行文件时）",
+  { skip: NGINX_AVAILABLE ? false : "本机没有 nginx；语义测试仍会运行" },
+  () => {
+    // 用临时 wrapper 把站点配置 include 进 http 作用域，并把日志/临时目录
+    // 指到临时目录，这样普通用户也能跑 nginx -t，不碰系统配置。
+    const tmp = mkdtempSync(path.join(tmpdir(), "chaoge-nginx-"));
+    try {
+      mkdirSync(path.join(tmp, "logs"), { recursive: true });
+      for (const dir of ["client_body", "proxy", "fastcgi", "uwsgi", "scgi"]) {
+        mkdirSync(path.join(tmp, dir), { recursive: true });
+      }
+
+      const siteConf = nginx.replaceAll("/var/log/nginx", `${tmp}/logs`);
+      const sitePath = path.join(tmp, "site.conf");
+      writeFileSync(sitePath, siteConf);
+
+      const wrapperPath = path.join(tmp, "nginx.conf");
+      writeFileSync(
+        wrapperPath,
+        [
+          "worker_processes 1;",
+          `error_log ${tmp}/logs/error.log;`,
+          `pid ${tmp}/nginx.pid;`,
+          "events { worker_connections 64; }",
+          "http {",
+          "    access_log off;",
+          `    client_body_temp_path ${tmp}/client_body;`,
+          `    proxy_temp_path ${tmp}/proxy;`,
+          `    fastcgi_temp_path ${tmp}/fastcgi;`,
+          `    uwsgi_temp_path ${tmp}/uwsgi;`,
+          `    scgi_temp_path ${tmp}/scgi;`,
+          `    include ${sitePath};`,
+          "}",
+          "",
+        ].join("\n"),
+      );
+
+      const result = spawnSync(
+        "nginx",
+        ["-t", "-p", tmp, "-c", wrapperPath],
+        { encoding: "utf8" },
+      );
+
+      assert.equal(
+        result.status,
+        0,
+        `nginx -t 失败：\n${result.stderr || result.stdout}`,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);
 
 test("Nginx 配置不包含任何后台/私有接口的代理", () => {
   for (const privatePath of [
