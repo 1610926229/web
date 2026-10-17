@@ -24,14 +24,9 @@
  * 纯静态：不安装 nginx、不连服务器、不读任何凭据。
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -731,7 +726,189 @@ test("安装验收等待专属响应头，默认站点的 200 不会误判为成
   );
   assert.ok(installer.includes('"announcements"'), "首页 API 必须校验响应体内容");
   assert.ok(
-    installer.includes("has_proxy_marker || die"),
+    installer.includes("has_proxy_marker || die_probe"),
     "私有接口的 404 也必须确认来自 chaoge 站点",
+  );
+});
+
+// ── 5. 验收探针的行为测试 ──────────────────────────────────────────────────────
+//
+// 只断言字符串救不了 `000000000`：旧实现把 path 当第一个参数，POST 调用里的
+// `-X` 被当成了路径，curl 于是收到 `POST`、`/api/auth/mock-login`、
+// `http://127.0.0.1-X` 三个 URL，每个失败都输出 `000`，拼成九位。
+// 下面的测试把安装器里的 http_of 原样提取出来，对着真实本地 HTTP 服务执行
+// 安装器里的每一条验收调用，核对服务器实际收到的 method/path。
+
+const CURL_AVAILABLE = (() => {
+  try {
+    return spawnSync("curl", ["--version"], { encoding: "utf8" }).status === 0;
+  } catch {
+    return false;
+  }
+})();
+
+const SKIP_NO_PROBE_TOOLCHAIN = SKIP_NO_BASH
+  ? SKIP_NO_BASH
+  : CURL_AVAILABLE
+    ? false
+    : "需要 curl 才能运行行为测试";
+
+function extractHttpOfFunction() {
+  const match = installer.match(/# >>> http_of[\s\S]*?# <<< http_of/);
+  assert.ok(match, "安装器必须用 http_of 标记包住探针函数，供行为测试提取");
+  return match[0].replace(/\r\n/g, "\n");
+}
+
+function extractProbeCalls() {
+  const calls = installer
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^CODE="\$\(http_of .+\)"$/.test(line));
+
+  assert.ok(
+    calls.length >= 5,
+    `应至少提取到 5 个验收调用，实际 ${calls.length} 个`,
+  );
+  return calls;
+}
+
+function buildProbeHarness({ publicUrl, calls }) {
+  return [
+    "set -uo pipefail",
+    'HEADERS="$(mktemp)"',
+    'BODY="$(mktemp)"',
+    'CURL_ERR="$(mktemp)"',
+    'CURL_RC="$(mktemp)"',
+    `PUBLIC_URL=${JSON.stringify(publicUrl)}`,
+    extractHttpOfFunction(),
+    ...calls.flatMap((call) => [call, `printf 'CODE=%s\\n' "$CODE"`]),
+    'rm -f "$HEADERS" "$BODY" "$CURL_ERR" "$CURL_RC"',
+    "",
+  ].join("\n");
+}
+
+function runBashAsync(script) {
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-s"], {
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", (error) =>
+      resolve({ code: -1, stdout, stderr: `${stderr}${error}` }),
+    );
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(script);
+  });
+}
+
+test(
+  "安装器验收探针把最后一个参数当作路径：POST mock-login 真正到达服务器",
+  { skip: SKIP_NO_PROBE_TOOLCHAIN },
+  async () => {
+    const requests = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        requests.push({
+          method: req.method,
+          url: req.url,
+          body,
+          contentType: req.headers["content-type"] ?? "",
+        });
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+      const { port } = server.address();
+      const publicUrl = `http://127.0.0.1:${port}`;
+      const calls = extractProbeCalls();
+
+      const result = await runBashAsync(
+        buildProbeHarness({ publicUrl, calls }),
+      );
+      assert.equal(result.code, 0, result.stderr);
+
+      const codes = [...result.stdout.matchAll(/^CODE=(.*)$/gm)].map(
+        (match) => match[1],
+      );
+      assert.equal(codes.length, calls.length, "每个验收调用都应输出一个状态码");
+      assert.deepEqual(codes, calls.map(() => "200"));
+
+      assert.deepEqual(
+        requests.map((request) => `${request.method} ${request.url}`),
+        [
+          "GET /",
+          "GET /api/home",
+          "GET /api/admin/dashboard",
+          "POST /api/auth/mock-login",
+          "GET /admin",
+        ],
+        "探针请求的 method/path 必须与安装器验收步骤一一对应",
+      );
+
+      const post = requests.find((request) => request.method === "POST");
+      assert.ok(post, "POST 探针没有到达服务器——path 可能被当成了 URL");
+      assert.equal(post.body, "{}");
+      assert.match(post.contentType, /application\/json/);
+
+      // curl 对多个 URL 会输出拼接的状态码；探针必须归一为单个 000，
+      // 而不是把 `200200` / `000000000` 当成接口状态。
+      const beforeMulti = requests.length;
+      const multi = await runBashAsync(
+        buildProbeHarness({
+          publicUrl,
+          calls: ['CODE="$(http_of "$PUBLIC_URL/extra" /api/home)"'],
+        }),
+      );
+      assert.equal(multi.code, 0, multi.stderr);
+      assert.match(multi.stdout, /^CODE=000$/m, "多 URL 输出必须归一为 000");
+      assert.equal(requests.length, beforeMulti + 2);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  },
+);
+
+test(
+  "安装器探针把 curl 失败归一为单个 000，并保留退出码与 stderr",
+  { skip: SKIP_NO_PROBE_TOOLCHAIN },
+  async () => {
+    const script = [
+      "set -uo pipefail",
+      'HEADERS="$(mktemp)"',
+      'BODY="$(mktemp)"',
+      'CURL_ERR="$(mktemp)"',
+      'CURL_RC="$(mktemp)"',
+      'PUBLIC_URL="http://127.0.0.1:1"',
+      extractHttpOfFunction(),
+      'CODE="$(http_of /api/home)"',
+      `printf 'CODE=%s\\nRC=%s\\nERR_LEN=%s\\n' "$CODE" "$(cat "$CURL_RC")" "$(wc -c < "$CURL_ERR" | tr -d ' ')"`,
+      'rm -f "$HEADERS" "$BODY" "$CURL_ERR" "$CURL_RC"',
+    ].join("\n");
+
+    const result = await runBashAsync(script);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /^CODE=000$/m);
+    assert.doesNotMatch(result.stdout, /^CODE=\d{4,}$/m);
+    assert.match(result.stdout, /^RC=[1-9][0-9]*$/m, "必须保留 curl 退出码");
+    assert.match(result.stdout, /^ERR_LEN=[1-9][0-9]*$/m, "必须保留 curl stderr");
+  },
+);
+
+test("安装器探针失败时打印 curl 退出码与 stderr", () => {
+  assert.ok(installer.includes("dump_curl_diagnostics"));
+  assert.ok(installer.includes("die_probe"));
+  assert.match(
+    installerCode,
+    /\[\[ "\$CODE" == "404" \]\] \|\| die_probe "POST \/api\/auth\/mock-login/,
+    "POST 探针失败必须走带 curl 诊断的分支",
   );
 });

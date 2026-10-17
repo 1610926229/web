@@ -134,15 +134,84 @@ step "5. 本地验收"
 
 HEADERS="$(mktemp)"
 BODY="$(mktemp)"
-trap 'rm -f "$HEADERS" "$BODY"' EXIT
+CURL_ERR="$(mktemp)"
+CURL_RC="$(mktemp)"
+trap 'rm -f "$HEADERS" "$BODY" "$CURL_ERR" "$CURL_RC"' EXIT
 
-# 请求经过 Nginx，把响应头/响应体分别落到临时文件，返回状态码。
+# >>> http_of（tests/publicPreview.test.mjs 会提取这段做行为测试）>>>
+#
+# 用法：http_of [curl 选项...] <path>
+#
+# path 必须是**最后一个**参数，前面的参数原样传给 curl。两种调用都成立：
+#
+#     http_of /api/home
+#     http_of -X POST -H 'content-type: application/json' -d '{}' /api/auth/mock-login
+#
+# ⚠️ 不要把 path 放在第一个参数。curl 会把选项值（如 POST）和路径当成 URL，
+#    `-w '%{http_code}'` 对每个 URL 各输出一次，拼起来就是 `000000000`。
+#    那是验收脚本的 bug，不是接口返回 000，也不能据此判断安全拦截是否生效。
+#
+# 请求经过 Nginx，把响应头/响应体分别落到临时文件，返回单个三位状态码。
+# curl 失败时统一返回 `000`，退出码与 stderr 留给 dump_curl_diagnostics。
 http_of() {
-  local path="$1"; shift
-  local code
+  local n=$#
+  if (( n == 0 )); then
+    printf 'http_of: 缺少路径参数\n' >&2
+    printf '64\n' > "$CURL_RC"
+    return 64
+  fi
+  local path="${@:n:1}"
+  if (( n > 1 )); then
+    set -- "${@:1:n-1}"
+  else
+    set --
+  fi
+
+  if [[ "$path" != /* ]]; then
+    printf 'http_of: 最后一个参数必须是路径（以 / 开头），收到：%s\n' "$path" >&2
+    printf '64\n' > "$CURL_RC"
+    return 64
+  fi
+
+  local code rc
+  local errexit=0
+  [[ $- == *e* ]] && errexit=1
+  set +e
   code="$(curl --noproxy '*' -sS -D "$HEADERS" -o "$BODY" \
-    -w '%{http_code}' --max-time 8 "$@" "$PUBLIC_URL$path" 2>/dev/null || true)"
-  printf '%s' "${code:-000}"
+    -w '%{http_code}' --max-time 8 "$@" "$PUBLIC_URL$path" 2>"$CURL_ERR")"
+  rc=$?
+  if (( errexit )); then set -e; fi
+
+  # http_of 总是在 `CODE="$(http_of ...)"` 里执行，函数体是子 shell——普通变量
+  # 传不回调用方。把退出码写进临时文件，die_probe 才能读到真实的 curl 状态。
+  printf '%s\n' "$rc" > "$CURL_RC"
+
+  # curl 对多个 URL 会输出多个 http_code（例如 000000000）。这里只接受恰好
+  # 三位数字；其它情况一律记 000，避免把拼接结果当成状态码。
+  if [[ ! "$code" =~ ^[0-9]{3}$ ]]; then
+    code=000
+  fi
+  printf '%s' "$code"
+}
+# <<< http_of <<<
+
+dump_curl_diagnostics() {
+  local rc="?"
+  if [[ -s "$CURL_RC" ]]; then
+    rc="$(cat "$CURL_RC" 2>/dev/null || printf '?')"
+  fi
+  printf '    curl exit: %s\n' "${rc:-?}"
+  if [[ -s "$CURL_ERR" ]]; then
+    printf '    curl stderr:\n'
+    sed -n '1,8p' "$CURL_ERR" | sed 's/^/      /'
+  fi
+}
+
+# 探针失败时一并打印 curl 退出码与 stderr：000 往往意味着请求根本没发出去，
+# 不能把它当成「接口返回 000」或「安全拦截成功」。
+die_probe() {
+  dump_curl_diagnostics
+  die "$@"
 }
 
 # 只有本配置会返回该响应头。默认站点同样返回 200，所以**不能只看状态码**：
@@ -158,6 +227,7 @@ dump_home_diagnostics() {
   printf '    body  : %s bytes\n' "$(wc -c < "$BODY" 2>/dev/null | tr -d ' ' || printf '?')"
   printf '    headers:\n'
   sed -n '1,15p' "$HEADERS" 2>/dev/null | sed 's/^/      /' || true
+  dump_curl_diagnostics
   printf '    注意：站点配置已启用且 nginx -t 已通过（验收失败不会自动回滚）。\n'
   printf '    未查明原因前不要放行公网 80；回滚脚本：rollback-public-proxy.sh\n'
 }
@@ -193,25 +263,27 @@ fi
 ok "公网页面不包含 Mock 身份切换面板"
 
 CODE="$(http_of /api/home)"
-[[ "$CODE" == "200" ]] || die "GET /api/home → $CODE（期望 200）"
-has_proxy_marker || die "GET /api/home 的 200 不是 chaoge 站点返回的。"
+[[ "$CODE" == "200" ]] || die_probe "GET /api/home → $CODE（期望 200）"
+has_proxy_marker || die_probe "GET /api/home 的 200 不是 chaoge 站点返回的。"
 grep -q '"announcements"' "$BODY" \
-  || die "GET /api/home 返回 200，但响应体不是首页数据（没有 announcements）。"
+  || die_probe "GET /api/home 返回 200，但响应体不是首页数据（没有 announcements）。"
 ok "公开只读接口 /api/home → 200，响应体是首页数据"
 
 CODE="$(http_of /api/admin/dashboard)"
-[[ "$CODE" == "404" ]] || die "GET /api/admin/dashboard → $CODE（期望 404，Nginx 白名单失效）"
-has_proxy_marker || die "私有接口的 404 不是 chaoge 站点返回的——可能命中了默认站点。"
+[[ "$CODE" == "404" ]] || die_probe "GET /api/admin/dashboard → $CODE（期望 404，Nginx 白名单失效）"
+has_proxy_marker || die_probe "私有接口的 404 不是 chaoge 站点返回的——可能命中了默认站点。"
 ok "私有接口 /api/admin/dashboard → 404（由 chaoge 站点拒绝）"
 
+# 这条调用的 path 在最后。steps 里的 http_of 也支持选项在前，但绝不能把
+# path 放到第一个参数——那正是 `000000000` 的来历。
 CODE="$(http_of -X POST -H 'content-type: application/json' -d '{}' /api/auth/mock-login)"
-[[ "$CODE" == "404" ]] || die "POST /api/auth/mock-login → $CODE（期望 404，公网不得触达 Mock 登录）"
-has_proxy_marker || die "Mock 登录拒绝的 404 不是 chaoge 站点返回的。"
+[[ "$CODE" == "404" ]] || die_probe "POST /api/auth/mock-login → $CODE（期望 404，公网不得触达 Mock 登录）"
+has_proxy_marker || die_probe "Mock 登录拒绝的 404 不是 chaoge 站点返回的。"
 ok "POST /api/auth/mock-login → 404（无法切换到任何 Mock 身份）"
 
 CODE="$(http_of /admin)"
-[[ "$CODE" == "404" ]] || die "GET /admin → $CODE（期望 404）"
-has_proxy_marker || die "管理后台 404 不是 chaoge 站点返回的。"
+[[ "$CODE" == "404" ]] || die_probe "GET /admin → $CODE（期望 404）"
+has_proxy_marker || die_probe "管理后台 404 不是 chaoge 站点返回的。"
 ok "管理后台 /admin → 404（由 chaoge 站点拒绝）"
 
 # 监听面：Nginx 只应新增 80；上游必须仍是回环。

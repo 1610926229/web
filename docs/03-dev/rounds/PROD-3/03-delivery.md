@@ -1,6 +1,6 @@
 # PROD-3 · 交付记录
 
-**Status:** 应用侧守卫已发布并验证；Nginx 安装与 80 端口放行等待一次性人工授权
+**Status:** 应用侧守卫已发布并验证；Nginx 已在服务器安装并通过回环全量验收；等待腾讯云放行 TCP 80
 **Release:** `20261017T172639Z-aa1c966`
 **App Git SHA:** `aa1c9663b0d6cc1b33add82f68a68dd35dd8ad2b`
 **Artifact SHA-256:** `b2da92ffbec258246f51774511f23d88ce83a4574e638904c5a4d138d002d741`
@@ -20,10 +20,10 @@
 
 | 命令 | 结果 |
 |---|---|
-| `pnpm test` | 2304 tests · 1888 pass · 0 fail · 416 skipped（HTTP 用例需要 `APP_BASE_URL`；本机无 nginx 时真实配置测试跳过） |
+| `pnpm test` | 2307 tests · 1891 pass · 0 fail · 416 skipped（HTTP 用例需要 `APP_BASE_URL`；本机无 nginx 时真实配置测试跳过） |
 | `pnpm typecheck` | 通过 |
 | `pnpm lint` | 通过 |
-| `tests/publicPreview.test.mjs` | 26 tests · 25 pass · 1 skipped（真实 nginx -t，本机无 nginx） |
+| `tests/publicPreview.test.mjs` | 29 tests · 28 pass · 1 skipped（真实 nginx -t，本机无 nginx） |
 | `tests/stagingDeploy.test.mjs` | 58 tests · 56 pass · 0 fail · 2 skipped（POSIX 执行位） |
 
 ## 部署后实测（服务器回环）
@@ -43,19 +43,21 @@
 
 首页 API 数据：公告 2、活动图 1、快捷入口 4、两个分区共 8 个商品。
 
-## 一次性授权计划（尚未执行）
+## 一次性授权记录（安装已完成）
 
-1. **安装 Nginx（root，人工输入一次 sudo 密码）**
+1. **安装 Nginx（root，已执行；2026-10-18 第二次安装成功启用）**
 
-   已上传到 `/home/deploy/chaoge-proxy/`，与本地提交的哈希一致：
+   当前生效配置与本地一致；安装器的验收探针 bug 已修复（见后文），
+   **不需要重新执行安装**。已上传到 `/home/deploy/chaoge-proxy/`，
+   与本地提交的哈希一致：
 
    ```
    0f85ae7f02a117869fe5eb3c4b5cce4ececb2cd0a81a193bf5bd0642b29a051d  chaoge-public.conf
-   7afd905fd0c8f004a2dfb6101d0a667fcd04d3100bc67628535a48a8964563b1  install-public-proxy.sh
+   2a1a2bde392ba95aeac1063dfef29f7429acea04b0e7633ffa0a4d2cbb4b0551  install-public-proxy.sh
    7d8e3b8d7a8f89a58b6e306b8c7556f8bacd2aae2af2e70c68c5817cd8904b30  rollback-public-proxy.sh
    ```
 
-   建议由 root 复制到私有临时目录后执行（避免 deploy 可写路径上的 TOCTOU）：
+   以下命令保留为将来重装/审计用的标准入口（需要一次性 sudo 密码）：
 
    ```bash
    ssh deploy@43.128.13.181
@@ -74,8 +76,8 @@
 
 2. **腾讯云 Lighthouse 放行 TCP 80**（控制台，来源 `0.0.0.0/0`）。
 
-顺序：先第 1 步并在服务器本地验收，再第 2 步。当前公网 80 实测不可达
-（8 秒超时），符合预期。
+第 1 步已完成，回环全量验收见后文；现在只剩第 2 步。放行前公网 80
+实测不可达（8 秒超时），符合预期。
 
 ## 首次安装失败与修复（2026-10-18）
 
@@ -159,6 +161,119 @@ Ubuntu 默认站点同样返回 200。安装器原先「看到 200 就继续」�
 | 直连 `127.0.0.1:3000` | 200，但**没有**标记头（证明标记只由 Nginx 添加） |
 
 `nginx -t` 对修复后配置再次通过。
+
+## 第三次安装：验收探针参数错位（`000000000`）
+
+**现象：** `nginx -t` 通过、Nginx 运行、首页 200 且标题正确、无 Mock 面板、
+`/api/home` 200、`/api/admin/dashboard` 404；随后安装器在
+`POST /api/auth/mock-login` 验收处输出 `000000000` 并退出。
+
+**根因：验收脚本的参数顺序错误，不是接口返回 000。**
+
+旧的 `http_of()` 把**第一个**参数当作路径：
+
+```bash
+http_of() {
+  local path="$1"; shift
+  curl ... "$@" "$PUBLIC_URL$path"
+}
+```
+
+而 POST 调用是 `http_of -X POST ... /api/auth/mock-login`。于是：
+
+- `path` 变成 `-X`；
+- curl 的 URL 变成 `POST`、`/api/auth/mock-login`（无主机）和
+  `http://127.0.0.1-X`；
+- 三个 URL 各失败一次，`-w '%{http_code}'` 各输出一个 `000`，拼成
+  `000000000`；
+- `2>/dev/null` 把 curl 的 28/3/28 错误全部吞掉。
+
+本地用安装器原样的调用复现，得到完全相同的九位输出与 stderr：
+
+```
+curl: (28) Resolving timed out after 2001 milliseconds   # POST
+curl: (3) URL rejected: Port number was not a decimal number between 0 and 65535
+curl: (28) Resolving timed out after 2014 milliseconds   # 127.0.0.1-X
+CODE=[000000000]
+```
+
+**服务器证据（请求根本没有到达 Nginx）：**
+
+- 安装时段 `chaoge-public.access.log`（01:57:47）只有
+  `GET /`、`GET /api/home`、`GET /api/admin/dashboard`；
+  **没有** `POST /api/auth/mock-login`。
+- 修正参数后手动探测（02:01:17）才出现第一条
+  `POST /api/auth/mock-login`，状态 404、响应体 146 字节。
+- `chaoge-public.error.log` 为 0 字节；日志中没有 429 或
+  `limiting requests/connections`。
+
+**安全结论的独立证明（不依赖 000）：**
+
+| 请求 | 结果 |
+|---|---|
+| 经 Nginx：`POST /api/auth/mock-login` | **404**，146 字节，响应体是 Nginx 自带 404 页，带 `X-Chaoge-Public-Proxy: 1` |
+| 直连 3000，带公网标记头 | **405**（应用守卫只允许 GET/HEAD） |
+| 直连 3000，不带标记头 | **200** + `Set-Cookie: mock_user_id=...`（私有 Mock 登录正常） |
+
+Next.js 里该路由确实存在：带标记时应用层返回 405，不带标记时返回 200。
+因此经 Nginx 得到的 404 只能来自 Nginx 的 `location /api/ { return 404; }`，
+请求**没有**进入 Next.js。版本号响应头也没有 `X-Powered-By`。
+
+**修复（最小改动，不新增权限入口）：**
+
+1. `http_of` 改为把**最后一个**参数当路径，前面的参数原样传给 curl；
+   非路径参数直接报错。
+2. `http_of` 只接受恰好三位的状态码，任何拼接输出（如 `000000000`、
+   `200200`）统一归一为 `000`。
+3. curl 的退出码写入临时文件（函数在命令替换的子 shell 中运行，普通变量
+   传不回调用方），stderr 写入 `CURL_ERR`；`die_probe` 失败时打印二者。
+4. 没有修改 sudoers、没有新增 `NOPASSWD ALL`、没有建立新的 root 入口：
+   现有 Nginx 配置已正确安装，剩余验收全部可用非特权命令完成。
+
+**回归测试（行为测试，不是字符串断言）：**
+
+- 从安装器提取真实的 `http_of`，把安装器里的**每一条**验收调用
+  （`/`、`/api/home`、`/api/admin/dashboard`、POST mock-login、`/admin`）
+  对着真实本地 HTTP 服务执行，核对服务器实际收到的 method/path；
+  POST 必须带 `{}` 与 `application/json`。
+- 多 URL 输出必须归一为单个 `000`。
+- curl 连接失败必须返回单个 `000`，并保留退出码与非空 stderr。
+- `tests/publicPreview.test.mjs`：29 tests · 28 pass · 1 skipped（本机无
+  nginx）。全量 `pnpm test` 结果见下。
+
+## 服务器回环全量验收（最终）
+
+以下全部在服务器上以 `deploy` 身份、经 `127.0.0.1:80` 完成；腾讯云 80
+仍处于阻断状态，未执行任何 root 操作。
+
+| 验收项 | 结果 |
+|---|---|
+| 首页 `GET /` | 200，`X-Chaoge-Public-Proxy: 1`，`<title>超哥电竞</title>`，47,601 字节，无「开发工具」 |
+| `HEAD /` | 200 + 标记头 |
+| `GET /api/home` | 200 + 标记头，响应体含 `"announcements"` |
+| `GET /api/admin/dashboard` | 404 + 标记头，146 字节 |
+| `POST /api/auth/mock-login` | 404 + 标记头，146 字节；访问日志证实到达 Nginx、未到达 Next.js |
+| `GET /admin` | 404 + 标记头 |
+| CSS | `/_next/static/chunks/3wfp51fmpvhlh.css` → 200，`text/css`，38,312 字节 |
+| JS | `/_next/static/chunks/310vm2bl3xxpt.js` → 200，`application/javascript`，5,364 字节 |
+| 图片 | `/mock/promo-activity.svg` → 200，`image/svg+xml`，2,114 字节 |
+| 限流/错误日志 | 无 429、无 limiting、error log 0 字节 |
+| Nginx systemd | `active (running)`，`enabled`；reload 成功 |
+| 80 监听 | `0.0.0.0:80` / `[::]:80` |
+| Next.js | 仅 `127.0.0.1:3000` |
+| PostgreSQL | 仅 `127.0.0.1:5432` 与 `[::1]:5432`（均为回环） |
+| 生效配置 | `sites-enabled/chaoge-public.conf` → `sites-available/...`，哈希 `0f85ae7f…` |
+| 回滚演练 | 用真实 Nginx 1.28.3 在 18080 启动同一份配置：200 + 标记头；停止后端口关闭；移除站点后的配置 `nginx -t` 通过 |
+| 回滚脚本 | 服务器上的哈希 `7d8e3b8d…` 与本地一致，`bash -n` 通过；备份目录 3 份均在 |
+
+安装器修复后的探针在同一台服务器的临时 Nginx（18080）上逐项通过；
+停止 Nginx 后探针返回 `000`，curl 退出码 7、stderr 非空——失败诊断也按
+预期工作。
+
+**当前不需要重新安装 Nginx**：生效配置没有变化，仍是 `0f85ae7f…`；
+本次只修改了安装器的验收逻辑，已上传到 `/home/deploy/chaoge-proxy/`
+（SHA-256 `2a1a2bde…`），供以后重装/审计使用。唯一剩余的人工动作是
+在腾讯云控制台放行 TCP 80。
 
 ## 回滚
 
