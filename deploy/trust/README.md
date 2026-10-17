@@ -101,6 +101,9 @@ finalizer 用 `mktemp` 复制已验证产物，把 `server.js` 换成立即退�
 - `chaoge_prod` 在 `deploy-staging.sh` 参数解析阶段被拒绝；本流程只创建/迁移
   `chaoge_staging`。
 - root 不执行迁移代码：迁移以 `runuser -u deploy` 运行，读取 root 拥有的快照。
+- 快照的「组/其他可写」断言只看真实文件与目录，跳过符号链接：Linux 上链接权限
+  恒为 `0777`（`chmod` 无法修改），而 `node_modules/.bin` 的 23 个相对链接
+  会在 `-perm` 下被误报。链接目标已在复制前校验为快照内部路径，并由同一断言覆盖。
 - root 不使用 deploy 的 pnpm/corepack 缓存；迁移直接用绝对路径 Node。
 - 不修改 sudoers / SSH / 防火墙；不监听公网端口（unit 固定 `127.0.0.1:3000`）。
 - 管理端/客服端 Secure Cookie 在纯 HTTP 隧道下不工作，见 `deploy/app/README.md` §4.3。

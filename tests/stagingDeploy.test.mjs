@@ -29,7 +29,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -529,8 +538,48 @@ test("bootstrap 构建 root:root 快照并拒绝路径/符号链接逃逸", () =
   assert.match(code.bootstrap, /快照里仍存在 setuid\/setgid 文件/);
   assert.match(code.bootstrap, /runuser -u "\$MIGRATE_USER"/);
   assert.match(code.bootstrap, /bash "\$TRUST_DIR\/deploy\/app\/finalize-staging\.sh"/);
-  assert.match(code.bootstrap, /find "\$TRUST_DIR" -xdev .* -perm -0020 -o -perm -0002/);
+  // 权限断言必须排除符号链接：Linux 上链接 lstat 恒为 0777，否则
+  // node_modules/.bin 的 23 个相对链接会被误判为「组/其他可写」。
+  assert.match(code.bootstrap, /find "\$TRUST_DIR" -xdev ! -type l/);
+  assert.match(code.bootstrap, /-perm -0020 -o -perm -0002/);
+  assert.match(code.bootstrap, /信任目录中存在组\/其他用户可写的路径/);
+  assert.doesNotMatch(
+    code.bootstrap,
+    /find "\$TRUST_DIR" -xdev \\\( -perm -0020/,
+    "回归：权限断言不得重新包含符号链接",
+  );
 });
+
+test(
+  "信任目录权限断言只标记真实文件/目录，不误报符号链接",
+  { skip: process.platform !== "linux" && "find 对符号链接的 lstat 权限语义仅在 Linux 上可复现" },
+  () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "chaoge-trust-perm-"));
+    try {
+      const real = path.join(dir, "group-writable.txt");
+      writeFileSync(real, "x");
+      chmodSync(real, 0o666);
+      symlinkSync("group-writable.txt", path.join(dir, "link"));
+
+      const runFind = (expr) =>
+        spawnSync("bash", ["-c", `find "$1" -xdev ${expr} -print`, "bash", dir], {
+          encoding: "utf8",
+        });
+
+      // 修复后的表达式：只有真实文件被标记。
+      const fixed = runFind("! -type l \\( -perm -0020 -o -perm -0002 \\)");
+      assert.equal(fixed.status, 0, fixed.stderr);
+      assert.equal(fixed.stdout.trim(), real);
+
+      // 旧表达式会把符号链接也标记 —— 这正是 Staging 首次执行失败的原因。
+      const old = runFind("\\( -perm -0020 -o -perm -0002 \\)");
+      assert.equal(old.status, 0, old.stderr);
+      assert.match(old.stdout, /link$/, "旧写法应能复现符号链接误报");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("部署文件 manifest 覆盖全部部署脚本且哈希与工作区一致", () => {
   const manifest = parseManifest(path.join(TRUST_DIR, "deploy-files.sha256"));

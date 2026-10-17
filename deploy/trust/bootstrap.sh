@@ -242,8 +242,11 @@ else
 fi
 chown root:root "$TRUST_DIR"
 chmod 0755 "$TRUST_DIR"
-[[ -z "$(find "$TRUST_DIR" -xdev \( -perm -0020 -o -perm -0002 \) -print -quit)" ]] \
-  || die "信任目录中仍有组/其他用户可写的路径。"
+# 符号链接在 Linux 上恒为 lrwxrwxrwx（0777），chmod 无法也不应修改它，
+# 因此 -perm 会把每个链接误判成「组/其他可写」。链接本身不可写；链接目标
+# 已在复制前校验为快照内部路径，并作为真实文件/目录被本检查单独覆盖。
+WRITABLE="$(find "$TRUST_DIR" -xdev ! -type l \( -perm -0020 -o -perm -0002 \) -print -quit)"
+[[ -z "$WRITABLE" ]] || die "信任目录中存在组/其他用户可写的路径：$WRITABLE"
 ok "信任目录已就位：$TRUST_DIR"
 
 # ── 4. 调用 finalizer ────────────────────────────────────────────────────────
