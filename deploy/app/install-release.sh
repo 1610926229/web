@@ -246,13 +246,17 @@ fi
 info "BUILD_INFO:"
 printf '%s\n' "$BUILD_INFO" | sed 's/^/      /'
 
-tar -tzf "$ARTIFACT" | grep -qxE '\./server\.js' || die "产物缺 ./server.js"
-tar -tzf "$ARTIFACT" | grep -qE '^\./node_modules/' || die "产物缺 ./node_modules/"
-tar -tzf "$ARTIFACT" | grep -qE '^\./\.next/static/' || die "产物缺 ./.next/static/（静态资源会全 404）"
-tar -tzf "$ARTIFACT" | grep -qE '^\./public/' || die "产物缺 ./public/"
+# 这里不能用 `tar ... | grep -q`：本脚本启用了 pipefail，`grep -q` 命中后
+# 立即退出会让仍在输出的 tar 收到 SIGPIPE（退出码 141），整条管道因此被
+# 判定为失败——即使条目确实存在。用进程替换把 grep 的退出码与 tar 的
+# SIGPIPE 解耦；tar 是否可读已在上面的 `tar -tzf > /dev/null` 中验证过。
+grep -qxE '\./server\.js' < <(tar -tzf "$ARTIFACT") || die "产物缺 ./server.js"
+grep -qE '^\./node_modules/' < <(tar -tzf "$ARTIFACT") || die "产物缺 ./node_modules/"
+grep -qE '^\./\.next/static/' < <(tar -tzf "$ARTIFACT") || die "产物缺 ./.next/static/（静态资源会全 404）"
+grep -qE '^\./public/' < <(tar -tzf "$ARTIFACT") || die "产物缺 ./public/"
 
 # 绝不让 .env 落地：安装后再查一次，防止有人手工塞进 tar。
-if tar -tzf "$ARTIFACT" | grep -qE '(^|/)\.env(\.|$)'; then
+if grep -qE '(^|/)\.env(\.|$)' < <(tar -tzf "$ARTIFACT"); then
   die "产物里出现了 .env 文件，拒绝安装。"
 fi
 ok "产物结构完整，且不含 .env"

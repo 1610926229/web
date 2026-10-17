@@ -390,6 +390,19 @@ test("发布脚本拒绝含 .env 的产物与非回环监听", () => {
   assert.match(code.common, /127\\\.0\\\.0\\\.1/);
 });
 
+test("发布脚本的 tar 结构检查不受 pipefail/SIGPIPE 误伤", () => {
+  // `grep -q` 命中后立即退出，仍在输出的 tar 会收到 SIGPIPE（141）。
+  // 脚本启用了 pipefail，`tar ... | grep -q` 因此会把「条目确实存在」
+  // 误判为失败。用进程替换让 grep 的退出码与 tar 的 SIGPIPE 解耦。
+  const offending = code.install
+    .split("\n")
+    .filter((line) => /tar\s+-t[^|]*\|\s*grep\s+-q/.test(line));
+  assert.deepEqual(offending, [], "tar | grep -q 在 pipefail 下会误报缺失");
+  assert.match(code.install, /grep -qxE '\\\.\/server\\\.js' < <\(tar -tzf "\$ARTIFACT"\)/);
+  assert.match(code.install, /grep -qE '\^\\\.\/node_modules\/' < <\(tar -tzf "\$ARTIFACT"\)/);
+  assert.match(code.install, /grep -qE '\(\^\|\/\)\\\.env\(\\\.\|\$\)' < <\(tar -tzf "\$ARTIFACT"\)/);
+});
+
 test("发布脚本在解包前断言单元里的 Node 存在且可执行", () => {
   assert.match(code.install, /UNIT_EXEC=.*systemctl cat "\$SERVICE"/);
   assert.match(code.install, /NODE_BIN/);
