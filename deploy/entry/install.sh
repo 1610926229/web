@@ -10,9 +10,9 @@
 #
 #   · /usr/local/sbin/chaoge-deploy 由 root 拥有、普通用户不可写
 #   · /etc/sudoers.d/chaoge-deploy 只给 deploy 一条固定命令的 NOPASSWD 规则
-#   · 数据库口令随机生成并写入 /etc/chaoge/staging.secrets（root:root 0600），
-#     任何输出、日志、argv 都不包含口令明文
-#   · chaoge_staging 建库/权限/角色口令就位
+#   · 优先沿用 /etc/chaoge/staging.secrets 与数据库现有角色口令；只有两个角色
+#     都还没有口令时才随机生成。任何输出、日志、argv 都不包含口令明文
+#   · chaoge_staging 建库/权限/角色口令就位（已存在的口令不会被覆盖）
 #   · /etc/chaoge/staging.env（root:root 0600）与 systemd 单元就位
 #   · 迁移代码快照与 pg 依赖放到 /usr/local/lib/chaoge/src（root:root）
 #   · 旧 bootstrap.log / prod2-finalize.log 归档到 root-only 目录（不删除）
@@ -38,7 +38,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB
 
-ENTRY_VERSION="prod2-installer-v2"
+ENTRY_VERSION="prod2-installer-v3"
 BUNDLE_DIR=""
 SOURCE_TREE="${CHAOGE_SOURCE_TREE:-/home/deploy/chaoge-deploy-src}"
 
@@ -88,6 +88,7 @@ USAGE
 cleanup() {
   [[ -n "${TMP_SECRETS:-}" && -f "$TMP_SECRETS" ]] && rm -f -- "$TMP_SECRETS"
   [[ -n "${TMP_SUDOERS:-}" && -f "$TMP_SUDOERS" ]] && rm -f -- "$TMP_SUDOERS"
+  [[ -n "${TMP_PGPASS:-}" && -f "$TMP_PGPASS" ]] && rm -f -- "$TMP_PGPASS"
   return 0
 }
 trap cleanup EXIT INT TERM HUP
@@ -426,25 +427,89 @@ ok "迁移代码快照：$LIB_DIR/src（root:root，manifest 一致，deploy 可
 
 # ── 4. 凭据 ──────────────────────────────────────────────────────────────────
 
-step "4/7 数据库口令（生成一次，不输出明文）"
+step "4/7 数据库口令（沿用已有口令；仅无口令角色生成一次）"
 command -v openssl >/dev/null 2>&1 || die "找不到 openssl，无法生成随机口令。"
+command -v psql >/dev/null 2>&1 || die "找不到 psql。"
+command -v runuser >/dev/null 2>&1 || die "找不到 runuser。"
 
-read_secret() {
-  local key="$1" line
-  line="$(grep -E "^${key}=[0-9a-f]{64}$" "$SECRETS" | head -1 || true)"
-  [[ -n "$line" ]] || die "凭据文件缺少或格式错误：$key"
-  printf '%s' "${line#*=}"
+psql_admin() {
+  runuser -u postgres -- psql -w -v ON_ERROR_STOP=1 "$@"
 }
 
-if [[ -e "$SECRETS" || -L "$SECRETS" ]]; then
-  [[ -f "$SECRETS" && ! -L "$SECRETS" ]] || die "$SECRETS 不是普通文件。"
-  chown root:root "$SECRETS"; chmod 0600 "$SECRETS"
-  MIG_PW="$(read_secret MIGRATOR_PASSWORD)"
-  APP_PW="$(read_secret APP_PASSWORD)"
-  ok "沿用现有凭据文件（权限已收敛为 root:root 0600）"
-else
-  MIG_PW="$(openssl rand -hex 32)"
-  APP_PW="$(openssl rand -hex 32)"
+# 现有角色状态决定口令来源：
+#   · 两个角色都已有口令 → 只能沿用，绝不能悄悄 ALTER 成新口令；
+#   · 两个角色都没有口令 → 新建角色，可以生成随机口令；
+#   · 只有一个有口令      → 状态不一致，停下等人工核对。
+DB_EXISTS=0
+if [[ "$(psql_admin -d postgres -Atqc \
+        "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")" == "1" ]]; then
+  DB_EXISTS=1
+fi
+EXISTING_ROLE_PW=0
+if (( DB_EXISTS )); then
+  EXISTING_ROLE_PW="$(psql_admin -d postgres -Atqc \
+    "SELECT count(*) FROM pg_authid WHERE rolname IN ('$MIGRATOR_ROLE', '$APP_ROLE') AND rolpassword IS NOT NULL AND rolpassword <> ''")"
+  [[ "$EXISTING_ROLE_PW" =~ ^[0-9]+$ ]] \
+    || die "无法读取现有角色口令状态：$EXISTING_ROLE_PW"
+fi
+
+read_secret() {
+  local key="$1" line value
+  line="$(grep -E "^${key}=" "$SECRETS" | head -1 || true)"
+  [[ -n "$line" ]] || die "凭据文件缺少：$key"
+  value="${line#*=}"
+  [[ -n "$value" ]] || die "凭据文件中的 $key 为空"
+  [[ "$value" != *$'\r'* ]] || die "凭据文件中的 $key 含 CR，拒绝继续"
+  printf '%s' "$value"
+}
+
+# .pgpass 的字段分隔符是 `:`，反斜杠是转义符；沿用既有口令时这两个字符
+# 可能出现，必须转义后再写入临时文件。
+pgpass_escape() {
+  local s="$1" out="" c i
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      '\'|':') out+="\\$c" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# 用即将沿用的口令做一次真实 TCP 登录。只有验证通过才写凭据文件；
+# 验证失败就停下，绝不把数据库里的现有口令覆盖成用户输入错的值。
+verify_role_password() {
+  local role="$1" pw="$2" out pgpass_pw out_rc=0
+  # 口令经 root-only 临时 .pgpass 传给 psql，不进入 argv 或环境变量。
+  TMP_PGPASS="$(mktemp)"
+  chmod 0600 "$TMP_PGPASS"
+  pgpass_pw="$(pgpass_escape "$pw")"
+  printf '%s:%s:%s:%s:%s\n' "$DB_HOST" "$DB_PORT" "$DB_NAME" "$role" "$pgpass_pw" > "$TMP_PGPASS"
+  unset pgpass_pw
+  out="$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/root TMPDIR=/tmp LANG=C.UTF-8 \
+      PGPASSFILE="$TMP_PGPASS" psql -w -h "$DB_HOST" -p "$DB_PORT" -U "$role" -d "$DB_NAME" \
+      -Atqc 'SELECT 1' 2>&1)" || out_rc=$?
+  rm -f -- "$TMP_PGPASS"; TMP_PGPASS=""
+  [[ "${out_rc:-0}" == "0" ]] \
+    || die "现有 $role 口令验证失败（未修改数据库口令）：${out:-无输出}"
+  [[ "$out" == "1" ]] \
+    || die "现有 $role 口令验证返回异常（未修改数据库口令）：$out"
+}
+
+prompt_existing_password() {
+  local role="$1" value=""
+  [[ -r /dev/tty && -w /dev/tty ]] \
+    || die "需要交互式终端输入现有 $role 口令（未修改数据库口令）。"
+  printf '  请输入现有 %s 的口令（输入不回显）: ' "$role" > /dev/tty
+  IFS= read -rs value < /dev/tty || die "读取现有 $role 口令失败。"
+  printf '\n' > /dev/tty
+  [[ -n "$value" ]] || die "现有 $role 口令为空，未修改数据库口令。"
+  verify_role_password "$role" "$value"
+  printf '%s' "$value"
+}
+
+write_secrets_file() {
   TMP_SECRETS="$(mktemp "$CONF_DIR/.staging.secrets.XXXXXXXX")"
   chmod 0600 "$TMP_SECRETS"
   printf 'MIGRATOR_PASSWORD=%s\nAPP_PASSWORD=%s\n' "$MIG_PW" "$APP_PW" > "$TMP_SECRETS"
@@ -452,7 +517,39 @@ else
   chmod 0600 "$TMP_SECRETS"
   mv -f "$TMP_SECRETS" "$SECRETS"
   TMP_SECRETS=""
-  ok "已生成随机口令并写入 $SECRETS（root:root 0600；内容未输出）"
+}
+
+SKIP_ROLE_ALTER=0
+if [[ -e "$SECRETS" || -L "$SECRETS" ]]; then
+  [[ -f "$SECRETS" && ! -L "$SECRETS" ]] || die "$SECRETS 不是普通文件。"
+  chown root:root "$SECRETS"; chmod 0600 "$SECRETS"
+  MIG_PW="$(read_secret MIGRATOR_PASSWORD)"
+  APP_PW="$(read_secret APP_PASSWORD)"
+  if (( DB_EXISTS && EXISTING_ROLE_PW == 2 )); then
+    verify_role_password "$MIGRATOR_ROLE" "$MIG_PW"
+    verify_role_password "$APP_ROLE" "$APP_PW"
+    SKIP_ROLE_ALTER=1
+    ok "沿用现有凭据文件，且与数据库现有口令一致（未修改角色口令）"
+  elif (( DB_EXISTS && EXISTING_ROLE_PW == 1 )); then
+    die "两个 staging 角色中只有一个已有口令，状态不一致；未修改任何口令，请人工核对。"
+  else
+    ok "沿用现有凭据文件（角色尚无口令，将由安装器设置）"
+  fi
+elif (( DB_EXISTS && EXISTING_ROLE_PW == 2 )); then
+  warn "检测到两个角色已有口令，但 $SECRETS 不存在。"
+  warn "为遵守「保留现有账号口令」，安装器不会生成新口令覆盖它们。"
+  MIG_PW="$(prompt_existing_password "$MIGRATOR_ROLE")"
+  APP_PW="$(prompt_existing_password "$APP_ROLE")"
+  write_secrets_file
+  SKIP_ROLE_ALTER=1
+  ok "已用现有口令创建 $SECRETS（root:root 0600；数据库口令未修改）"
+elif (( DB_EXISTS && EXISTING_ROLE_PW == 1 )); then
+  die "两个 staging 角色中只有一个已有口令，状态不一致；未修改任何口令，请人工核对。"
+else
+  MIG_PW="$(openssl rand -hex 32)"
+  APP_PW="$(openssl rand -hex 32)"
+  write_secrets_file
+  ok "角色尚无口令：已生成随机口令并写入 $SECRETS（root:root 0600；内容未输出）"
 fi
 [[ "$(stat -c '%u:%g %a' "$SECRETS")" == "0:0 600" ]] \
   || die "凭据文件权限异常：$(stat -c '%u:%g %a' "$SECRETS")"
@@ -460,13 +557,7 @@ fi
 # ── 5. 数据库初始化与口令收敛 ────────────────────────────────────────────────
 
 step "5/7 chaoge_staging 建库 / 权限 / 角色口令"
-command -v psql >/dev/null 2>&1 || die "找不到 psql。"
-command -v runuser >/dev/null 2>&1 || die "找不到 runuser。"
 [[ -x "$NODE_BIN" ]] || die "Node 不存在或不可执行：$NODE_BIN"
-
-psql_admin() {
-  runuser -u postgres -- psql -w -v ON_ERROR_STOP=1 "$@"
-}
 
 # 把明文口令转换成 PostgreSQL 的 SCRAM-SHA-256 校验子。
 # 这样发给 PostgreSQL 的 SQL 里只有校验子，没有明文；即使服务端日志或
@@ -494,7 +585,7 @@ make_scram_verifier() {
   printf '%s' "$out"
 }
 
-if [[ "$(psql_admin -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")" == "1" ]]; then
+if (( DB_EXISTS )); then
   ok "$DB_NAME 已存在"
 else
   env -i PATH="$PATH" LANG=C.UTF-8 \
@@ -504,18 +595,24 @@ fi
 env -i PATH="$PATH" LANG=C.UTF-8 \
   bash "$LIB_DIR/db/deploy-staging.sh" init --database "$DB_NAME" --non-interactive
 
-# 只把 SCRAM 校验子发给 psql：明文不进入 SQL、日志、argv 或环境变量。
-MIG_VERIFIER="$(make_scram_verifier "$MIG_PW")"
-APP_VERIFIER="$(make_scram_verifier "$APP_PW")"
-{
-  printf '\\set VERBOSITY terse\n'
-  printf "ALTER ROLE %s PASSWORD '%s';\n" "$MIGRATOR_ROLE" "$MIG_VERIFIER"
-  printf "ALTER ROLE %s PASSWORD '%s';\n" "$APP_ROLE" "$APP_VERIFIER"
-} | PGOPTIONS='-c log_statement=none -c log_min_error_statement=panic' \
-      runuser -u postgres -- psql -w -v ON_ERROR_STOP=1 -d postgres -q
-unset MIG_PW MIG_VERIFIER APP_VERIFIER
-
-ok "角色口令已与 $SECRETS 对齐（只发送 SCRAM 校验子，未输出明文）"
+if (( SKIP_ROLE_ALTER )); then
+  # 两个角色都已有口令，且刚刚用凭据文件 / 人工输入做过真实 TCP 登录。
+  # 不改写 rolpassword，确保「保留现有账号口令」不是口头承诺。
+  ok "沿用数据库现有角色口令（未执行 ALTER ROLE）"
+else
+  # 只把 SCRAM 校验子发给 psql：明文不进入 SQL、日志、argv 或环境变量。
+  MIG_VERIFIER="$(make_scram_verifier "$MIG_PW")"
+  APP_VERIFIER="$(make_scram_verifier "$APP_PW")"
+  {
+    printf '\\set VERBOSITY terse\n'
+    printf "ALTER ROLE %s PASSWORD '%s';\n" "$MIGRATOR_ROLE" "$MIG_VERIFIER"
+    printf "ALTER ROLE %s PASSWORD '%s';\n" "$APP_ROLE" "$APP_VERIFIER"
+  } | PGOPTIONS='-c log_statement=none -c log_min_error_statement=panic' \
+        runuser -u postgres -- psql -w -v ON_ERROR_STOP=1 -d postgres -q
+  unset MIG_VERIFIER APP_VERIFIER
+  ok "角色口令已与 $SECRETS 对齐（只发送 SCRAM 校验子，未输出明文）"
+fi
+unset MIG_PW
 
 # 运行时环境文件：应用口令经匿名 fd 进入，不经过 argv/环境变量。
 exec 9< <(printf '%s\n' "$APP_PW")

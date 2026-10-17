@@ -15,7 +15,7 @@
               ├─ 校验 deploy-files.sha256 / migration-code.sha256
               ├─ 安装 /usr/local/sbin/chaoge-deploy（root:root 0755）
               ├─ 安装 /usr/local/lib/chaoge/{app,db,src}（root:root）
-              ├─ 生成 /etc/chaoge/staging.secrets（root:root 0600）
+              ├─ 沿用现有口令 / 为无口令角色生成 /etc/chaoge/staging.secrets
               ├─ 建库 / 初始化 / 设置 SCRAM 校验子
               ├─ 写 /etc/chaoge/staging.env（root:root 0600）与 systemd 单元
               └─ 写入单命令 sudoers 规则并用 visudo 校验
@@ -88,8 +88,10 @@ bash "$TMP/root/deploy/entry/install.sh" --bundle-dir "$TMP/root"
 '
 ```
 
-安装器本身不再要求输入数据库口令：两个角色口令由 `openssl rand -hex 32`
-生成，只写入 `/etc/chaoge/staging.secrets`（root:root 0600），不输出。
+安装器优先保留数据库现有角色口令：两个角色都已有口令时，只做真实 TCP
+登录验证，不生成新口令、不执行 `ALTER ROLE`；`/etc/chaoge/staging.secrets`
+缺失时会在终端提示输入现有口令（不回显），验证通过后写入 root:root 0600
+的凭据文件。只有角色尚无口令（新库）时才用 `openssl rand -hex 32` 生成。
 安装器也不接收、不解包任何应用产物；首版发布随后走受控入口。
 
 安装器在写入安装文件前还会做两项前置检查：

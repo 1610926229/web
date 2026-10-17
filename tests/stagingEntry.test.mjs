@@ -220,16 +220,48 @@ test("tar 条目守卫允许安全相对链接，拒绝越界链接与危险类�
 test("凭据文件 root:root 0600，口令只从文件读取且不进入 argv/日志", () => {
   assert.match(entry, /SECRETS="\$CONF_DIR\/staging\.secrets"/);
   assert.match(entry, /assert_root_file_mode "\$SECRETS" "0:0 600"/);
-  assert.match(entry, /\^\[0-9a-f\]\{64\}\$/);
   assert.match(entry, /read_secret MIGRATOR_PASSWORD/);
+  // 既有角色口令可能是运维早先设置的非十六进制值；读取时不能要求 64 位 hex。
+  assert.match(entry, /value="\$\{line#\*=\}"/);
+  assert.match(entry, /凭据文件中的 \$key 含 CR/);
   assert.doesNotMatch(entry, /MIGRATOR_PASSWORD=[0-9a-f]/);
   assert.doesNotMatch(entry, /APP_PASSWORD=/);
 
-  // migrator 连接串经匿名 fd 传递，不写文件、不进 argv。
+  // migrator 连接串经匿名 fd 传递，不写文件、不进 argv；userinfo 必须编码。
+  assert.match(entry, /urlencode "\$mig_pw"/);
   assert.match(entry, /exec 9< <\(printf '%s\\n' "\$mig_url"\)/);
   assert.match(entry, /unset mig_url/);
   assert.match(entry, /--migrator-url-fd 9/);
   assert.doesNotMatch(entry, /DATABASE_URL="\$mig_url"/);
+});
+
+test("已有角色口令时安装器验证并沿用，不生成新口令覆盖", () => {
+  // 角色状态：0 = 无口令（可生成），2 = 两个都有（必须沿用）。
+  assert.match(installer, /SELECT count\(\*\) FROM pg_authid/);
+  assert.match(installer, /rolpassword IS NOT NULL/);
+  assert.match(installer, /EXISTING_ROLE_PW/);
+
+  // 已有口令但没有 secrets 文件：交互读取并用真实 TCP 登录验证，再原子写入。
+  assert.match(installer, /检测到两个角色已有口令/);
+  assert.match(installer, /安装器不会生成新口令覆盖/);
+  assert.match(installer, /prompt_existing_password "\$MIGRATOR_ROLE"/);
+  assert.match(installer, /prompt_existing_password "\$APP_ROLE"/);
+  assert.match(installer, /verify_role_password/);
+  assert.match(installer, /PGPASSFILE="\$TMP_PGPASS" psql -w/);
+  assert.match(installer, /未修改数据库口令/);
+  assert.match(installer, /read -rs value < \/dev\/tty/);
+
+  // 验证通过后跳过 ALTER ROLE；只有新角色才生成随机口令。
+  assert.match(installer, /SKIP_ROLE_ALTER=1/);
+  assert.match(installer, /if \(\( SKIP_ROLE_ALTER \)\); then/);
+  assert.match(installer, /未执行 ALTER ROLE/);
+  assert.match(installer, /openssl rand -hex 32/);
+  const skipAlter = installer.indexOf("未执行 ALTER ROLE");
+  const alterRole = installer.indexOf("ALTER ROLE %s PASSWORD");
+  assert.ok(skipAlter >= 0 && alterRole > skipAlter, "ALTER ROLE 只能在非沿用分支执行");
+
+  // 状态不一致（只有一个角色有口令）必须中止。
+  assert.match(installer, /两个 staging 角色中只有一个已有口令/);
 });
 
 test("迁移代码来自 root 安装的快照，而不是 deploy 可替换的产物", () => {

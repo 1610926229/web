@@ -118,9 +118,11 @@ deploy ALL=(root) NOPASSWD: /usr/local/sbin/chaoge-deploy
    `/usr/local/lib/chaoge/`（root:root，deploy 只读）；
 3. 把迁移源码安装到 `/usr/local/lib/chaoge/src`（root:root），并从
    `/home/deploy/chaoge-deploy-src/node_modules` 复制 `pg` 依赖；
-4. 生成两个 64 位十六进制随机口令，写入 `/etc/chaoge/staging.secrets`
-   （root:root 0600，内容不输出）；
-5. 以 `runuser -u postgres` 建库 / 初始化 / 设置 SCRAM 校验子；
+4. 优先沿用数据库现有角色口令；只有角色尚无口令时才生成随机口令，
+   并写入 `/etc/chaoge/staging.secrets`（root:root 0600，内容不输出）。
+   已有口令会先用真实 TCP 登录验证，验证失败即中止，绝不覆盖；
+5. 以 `runuser -u postgres` 建库 / 初始化；已有口令不改写，新口令才设置
+   SCRAM 校验子；
 6. 原子写入 `/etc/chaoge/staging.env`（root:root 0600）与 systemd 单元；
 7. 写入并 `visudo -cf` 校验 sudoers 单命令规则。
 

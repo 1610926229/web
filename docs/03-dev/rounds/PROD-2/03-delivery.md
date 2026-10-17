@@ -21,8 +21,8 @@
 
 | # | 要求 | 实现 | 证据 |
 |---|---|---|---|
-| 1 | 口令不在 Git/聊天/CI | `/etc/chaoge/staging.secrets` root:root 0600；`openssl rand` 服务器生成 | `install.sh` §4；测试 9/15 |
-| 2 | Claude 不读/输出明文 | 无任何 `echo` 口令路径；SCRAM 校验子经 stdin；日志只打印变量名 | `install.sh` §4/§5；测试 15 |
+| 1 | 口令不在 Git/聊天/CI | `/etc/chaoge/staging.secrets` root:root 0600；已有角色口令沿用并 TCP 验证，仅新角色用 `openssl rand` 生成 | `install.sh` §4；测试 9/15/25 |
+| 2 | Claude 不读/输出明文 | 无任何 `echo` 口令路径；SCRAM 校验子经 stdin；日志只打印变量名；沿用口令只在终端不回显输入 | `install.sh` §4/§5；测试 15 |
 | 3 | 不保存 deploy sudo 密码 | 安装后使用 `sudo -n`；无密码文件、无 expect | sudoers 单命令规则；测试 12 |
 | 4 | root 固定入口 + 严格 sudoers | `/usr/local/sbin/chaoge-deploy` 0755 root:root；一行规则；`visudo -cf` | 测试 12/13 |
 | 5 | 只操作固定库/服务 | 常量写死；子命令与参数个数严格；不接受库名/服务名/路径 | 测试 1/2/3 |
@@ -34,6 +34,7 @@
 | 11 | `check-artifact` 不成为 root 文件 oracle | 子命令显式拒绝 `id -u == 0`；普通用户按自身权限校验 | `chaoge-deploy.sh` `require_non_root`；测试 4/22 |
 | 12 | 旧日志敏感信息 | 安装器把 `bootstrap.log` / `prod2-finalize.log` 移入 `/var/log/chaoge/archive/<UTC>-<pid>/`（root:root 0700，文件 0600），不删除、不读取 | 测试 23 |
 | 13 | 安装前 sudo 授权审计 | `sudo -l -U deploy`；发现入口以外 `NOPASSWD`（含 `ALL`）即中止；不清洗其它规则 | 测试 24 |
+| 14 | 保留已有角色口令 | `pg_authid` 状态判定；已有口令只验证、不生成、不 `ALTER ROLE`；无 secrets 时终端不回显输入 | 测试 25 |
 
 ## 3. 威胁模型
 
@@ -66,11 +67,11 @@
 
 ```text
 node --test tests/stagingEntry.test.mjs
-# tests 25  pass 23  fail 0  skip 2（Linux 符号链接/执行位语义）
+# tests 26  pass 24  fail 0  skip 2（Linux 符号链接/执行位语义）
 
 node --test tests/stagingEntry.test.mjs tests/stagingDeploy.test.mjs \
   tests/deployScripts.test.mjs tests/stagingDatabase.test.mjs
-# tests 142  pass 137  fail 0  skip 5
+# tests 144  pass 139  fail 0  skip 5
 
 pnpm lint      # PASS
 pnpm typecheck # PASS
@@ -87,7 +88,9 @@ bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/*.
 - 安全相对符号链接通过；绝对与 `../../../etc/passwd` 目标被拒绝（POSIX）；
 - `check-artifact` 以 root 运行时明确失败（普通用户功能不受影响）；
 - 安装器在 `install_file` 之前执行 sudo 审计，并把旧日志移动到 root-only
-  归档目录而不是删除。
+  归档目录而不是删除；
+- 两个角色已有口令时只验证并沿用，不生成新口令、不执行 `ALTER ROLE`；
+  secrets 缺失时从终端不回显读取并用真实 TCP 登录验证，状态不一致则中止。
 
 ## 5. 一次性人工授权 vs 后续自动执行
 
@@ -95,7 +98,8 @@ bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/*.
 |---|---|---|
 | 构建 bundle、上传 bundle / 产物 | Claude（deploy） | 否 |
 | **运行 `install.sh`** | **人工（root）** | **sudo 密码（一次）** |
-| 生成/保存数据库口令 | 安装器 | 否 |
+| 沿用已有角色口令 | 安装器（验证后写 secrets） | 无 secrets 时输入现有口令（不回显） |
+| 为无口令的新角色生成口令 | 安装器 | 否 |
 | 建库、角色、权限、SCRAM | 安装器 | 否 |
 | 写 systemd / env / sudoers | 安装器 | 否（sudoers 由安装器写入并校验） |
 | `deploy` / `rollback` / `status` | Claude（`sudo -n`） | 否 |
@@ -127,6 +131,10 @@ bash -n deploy/entry/*.sh deploy/app/*.sh deploy/trust/*.sh deploy/db/staging/*.
 8. **sudo 审计只能查看到的规则。** 安装器用 `sudo -l -U deploy` 审计；如果
    sudo 配置本身损坏、或 root 无法自动读取，安装器会中止并要求人工执行同一
    命令。它不会修改其它 sudoers 规则。
+9. **沿用口令依赖操作者知道现有口令。** 若两个角色已有口令且 secrets 缺失，
+   安装器会要求人工输入并用真实 TCP 登录验证；不知道现有口令时安全通道是
+   先人工决定是否轮换，而不是让安装器静默生成新口令。验证失败会中止，
+   secrets 不会落盘、数据库不会被改写。
 
 ## 7. 未完成事项
 

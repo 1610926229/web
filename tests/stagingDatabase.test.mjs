@@ -278,6 +278,15 @@ test("setup-staging-env 默认与硬守卫都指向独立 staging", () => {
   assert.match(envScript, /只接受 chaoge_staging/);
 });
 
+test("setup-staging-env 沿用既有口令时正确转义 .pgpass，不强制 64 位 hex", () => {
+  assert.match(envScript, /pgpass_escape\(\)/);
+  assert.ok(envScript.includes('out+="\\\\$c"'), "必须给反斜杠和冒号加转义前缀");
+  assert.ok(envScript.includes("'\\'|':')"), "转义分支必须同时覆盖反斜杠与冒号");
+  assert.match(envScript, /PGPASS_PW="\$\(pgpass_escape "\$RAW_PW"\)"/);
+  assert.match(envScript, /RAW_PW" != \*\$'\\r'\*/);
+  assert.doesNotMatch(envScript, /RAW_PW" =~ \^\[0-9a-f\]\{64\}\$/);
+});
+
 test("setup-staging-env 的参数守卫先于 root 检查（本地也能验证拒绝理由）", () => {
   const roleGuardAt = envScript.indexOf("运行时不得复用生产应用角色 chaoge_app");
   const prodDbGuardAt = envScript.indexOf("staging 必须使用独立的 chaoge_staging 库");

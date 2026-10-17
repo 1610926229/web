@@ -22,7 +22,7 @@
 | 受控入口 `/usr/local/sbin/chaoge-deploy` | 已实现（`deploy/entry/chaoge-deploy.sh`） |
 | 一次性 root 安装器 | 已实现（`deploy/entry/install.sh`） |
 | 严格 sudoers 规则 | 已实现（安装器写入并 `visudo -cf` 校验；**本轮未在服务器执行**） |
-| 数据库口令 | 服务器生成、root:root 0600、不输出、不进 Git/CI |
+| 数据库口令 | 优先沿用现有角色口令（TCP 验证、不 ALTER）；仅新角色生成；root:root 0600、不输出、不进 Git/CI |
 | 产物校验 | SHA-256 + Git SHA + tar 结构 + 路径/链接 + `.env` 拒绝 |
 | 迁移/应用账号隔离 | `chaoge_staging_migrator` / `chaoge_staging_app` |
 | 生产库隔离 | 库名白名单 + 硬拒绝 `chaoge_prod` |

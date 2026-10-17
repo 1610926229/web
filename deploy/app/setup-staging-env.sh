@@ -30,7 +30,8 @@
 #
 # 正常人工路径只用 `read -s` 从终端读：**不接受命令行参数、不读环境变量**。
 # 受控部署入口（root 拥有的 chaoge-deploy）走 `--password-fd N`：root 从
-# `/etc/chaoge/staging.secrets` 读出随机口令后，经匿名管道 fd 传入。
+# `/etc/chaoge/staging.secrets` 读出应用口令（可能沿用数据库现有口令）后，
+# 经匿名管道 fd 传入。
 # 两种路径都不让明文进入 argv、`/proc/PID/environ`、shell 历史或日志。
 
 set -euo pipefail
@@ -167,6 +168,20 @@ urlencode() {
   printf '%s' "$out"
 }
 
+# .pgpass 的字段分隔符是 `:`，反斜杠是转义符；沿用既有口令时这两个字符
+# 可能出现，必须转义后再写入临时文件，否则试连会读到错误的口令。
+pgpass_escape() {
+  local s="$1" out="" c i
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      '\'|':') out+="\\$c" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # ── 读口令（dry-run 不读）─────────────────────────────────────────────────────
 
 RAW_PW=""
@@ -178,9 +193,9 @@ if [[ "$DRY_RUN" == "0" ]]; then
     IFS= read -r RAW_PW <&"$PASSWORD_FD" \
       || die "无法从文件描述符 $PASSWORD_FD 读取应用口令。"
     [[ -n "$RAW_PW" ]] || die "从文件描述符 $PASSWORD_FD 读到的口令为空。"
-    # 受控入口只生成 64 位十六进制口令；格式不对说明上游被改过，拒绝继续。
-    [[ "$RAW_PW" =~ ^[0-9a-f]{64}$ ]] \
-      || die "受控入口传入的口令格式不正确（期望 64 位小写十六进制）。"
+    # 受控入口优先沿用数据库现有角色口令，因此这里不限定字符集；
+    # 只拒绝无法写入单行凭据文件的 CR（read 已按行读取，不会含 LF）。
+    [[ "$RAW_PW" != *$'\r'* ]] || die "受控入口传入的口令含 CR，拒绝继续。"
     ENCODED_PW="$(urlencode "$RAW_PW")"
   else
     [[ -t 0 ]] || die "需要交互式终端输入口令。人工路径刻意不支持从管道/参数传入。"
@@ -223,7 +238,9 @@ if [[ "$DO_CHECK" == "1" ]]; then
     PGPASS_TMP="$(mktemp)"; chmod 600 "$PGPASS_TMP"
     trap 'rm -f "$PGPASS_TMP"' EXIT INT TERM
 
-    printf '%s:%s:%s:%s:%s\n' "$DB_HOST" "$DB_PORT" "$DB_NAME" "$DB_ROLE" "$RAW_PW" > "$PGPASS_TMP"
+    PGPASS_PW="$(pgpass_escape "$RAW_PW")"
+    printf '%s:%s:%s:%s:%s\n' "$DB_HOST" "$DB_PORT" "$DB_NAME" "$DB_ROLE" "$PGPASS_PW" > "$PGPASS_TMP"
+    unset PGPASS_PW
 
     CONN_OK=""
     CONN_RC=0

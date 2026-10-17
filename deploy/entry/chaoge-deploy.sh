@@ -48,7 +48,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH PYTHONPATH PERL5LIB
 
-ENTRY_VERSION="prod2-entry-v2"
+ENTRY_VERSION="prod2-entry-v3"
 ENTRY_PATH="/usr/local/sbin/chaoge-deploy"
 LIB_DIR="/usr/local/lib/chaoge"
 DB_NAME="chaoge_staging"
@@ -169,11 +169,29 @@ take_lock() {
 }
 
 read_secret() {
-  local key="$1" line
+  local key="$1" line value
   assert_root_file_mode "$SECRETS" "0:0 600" "凭据文件"
-  line="$(grep -E "^${key}=[0-9a-f]{64}$" "$SECRETS" | head -1 || true)"
-  [[ -n "$line" ]] || die "凭据文件缺少或格式错误：$key（期望 64 位小写十六进制）。"
-  printf '%s' "${line#*=}"
+  line="$(grep -E "^${key}=" "$SECRETS" | head -1 || true)"
+  [[ -n "$line" ]] || die "凭据文件缺少：$key"
+  value="${line#*=}"
+  [[ -n "$value" ]] || die "凭据文件中的 $key 为空"
+  [[ "$value" != *$'\r'* ]] || die "凭据文件中的 $key 含 CR，拒绝继续"
+  printf '%s' "$value"
+}
+
+# 口令可能沿用运维早先设置的非十六进制值；连接串里的 userinfo 必须编码，
+# 否则 @ : / % # 等字符会把 URL 解析到错误的主机或库。
+urlencode() {
+  local s="$1" out="" c i
+  LC_ALL=C
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out+="$c" ;;
+      *) out+="$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
 }
 
 require_initialized() {
@@ -399,7 +417,7 @@ cmd_deploy() {
   # 根是「人工安装的那一次」，而不是 deploy 可以自行替换的上传产物。
   local mig_pw mig_url
   mig_pw="$(read_secret MIGRATOR_PASSWORD)"
-  mig_url="postgresql://$MIGRATOR_ROLE:${mig_pw}@$DB_HOST:$DB_PORT/$DB_NAME"
+  mig_url="postgresql://$MIGRATOR_ROLE:$(urlencode "$mig_pw")@$DB_HOST:$DB_PORT/$DB_NAME"
   unset mig_pw
   exec 9< <(printf '%s\n' "$mig_url")
   unset mig_url

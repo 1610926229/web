@@ -27,12 +27,22 @@ PROD-2 的服务器侧部署只经过两个文件：
 |---|---|---|
 | 构建并上传部署 bundle | Claude / deploy | 否 |
 | **运行 `deploy/entry/install.sh`（sudo）** | **人工执行一次** | **是：sudo 密码** |
-| 安装器生成数据库口令 | 安装器 | 否（随机生成，不显示） |
-| 建库 / 初始化 / 设置角色口令 | 安装器（`runuser -u postgres`） | 否 |
+| 沿用数据库现有角色口令 | 安装器（真实 TCP 登录验证） | 无 secrets 文件时：终端输入现有口令（不回显） |
+| 为尚无口令的角色生成口令 | 安装器 | 否（随机生成，不显示） |
+| 建库 / 初始化 / 设置新角色口令 | 安装器（`runuser -u postgres`） | 否 |
 | 写 secrets / env / systemd / sudoers | 安装器（root） | 否 |
 | 上传应用产物 | Claude / deploy | 否 |
 | `chaoge-deploy deploy` / `rollback` / `status` | Claude / deploy | **否**（`sudo -n`） |
 | 数据库迁移 | 受控入口以 `deploy` 身份执行 | 否 |
+
+安装器先读取 `pg_authid` 判断两个 staging 角色是否已有口令：
+
+- 两个都有：只沿用，不生成、不 `ALTER ROLE`；有 secrets 文件就验证文件，
+  没有就提示在终端输入现有口令并做真实 TCP 登录验证。
+- 两个都没有：按新角色处理，随机生成口令并写入 secrets。
+- 只有一个有：状态不一致，安装器中止，不做任何口令改写。
+
+因此「保留已有 `chaoge_staging` 账号与密码」是安装器的硬约束，不是操作提醒。
 
 一次性安装完成后，sudoers 中只有这一条规则：
 
