@@ -23,7 +23,7 @@
 | `pnpm test` | 2298 tests · 1883 pass · 0 fail · 415 skipped（HTTP 用例需要 `APP_BASE_URL`） |
 | `pnpm typecheck` | 通过 |
 | `pnpm lint` | 通过 |
-| `tests/publicPreview.test.mjs` | 20/20 通过 |
+| `tests/publicPreview.test.mjs` | 21/21 通过 |
 | `tests/stagingDeploy.test.mjs` | 58 tests · 56 pass · 0 fail · 2 skipped（POSIX 执行位） |
 
 ## 部署后实测（服务器回环）
@@ -50,9 +50,9 @@
    已上传到 `/home/deploy/chaoge-proxy/`，与本地提交的哈希一致：
 
    ```
-   4ce2f833...492837  chaoge-public.conf
-   bb6648cf...a1312d  install-public-proxy.sh
-   7d8e3b8d...904b30  rollback-public-proxy.sh
+   4ce2f833c591adda0645f81363b5e197de12c181e4a26d9b082451f4fc492837  chaoge-public.conf
+   2abb7df6183d96297c5e50da4dfdaa66cebba7406c5ad98b2c8c9c22618a345a  install-public-proxy.sh
+   7d8e3b8d7a8f89a58b6e306b8c7556f8bacd2aae2af2e70c68c5817cd8904b30  rollback-public-proxy.sh
    ```
 
    建议由 root 复制到私有临时目录后执行（避免 deploy 可写路径上的 TOCTOU）：

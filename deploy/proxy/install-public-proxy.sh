@@ -35,7 +35,9 @@ DEFAULT_LINK="$SITES_ENABLED/default"
 BACKUP_ROOT="/var/backups/chaoge-public-proxy"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
-UPSTREAM="http://127.0.0.1:3000"
+# 本地验收必须**经过 Nginx**（80 → 127.0.0.1:3000），而不是直连上游：
+# 直连 3000 测的是私有路径，看不到公网标记头与白名单是否真的生效。
+PUBLIC_URL="http://127.0.0.1"
 
 die()  { printf '\033[31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
@@ -136,14 +138,14 @@ step "5. 本地验收"
 
 CODE="000"
 for _ in $(seq 1 20); do
-  CODE="$(status_of "$UPSTREAM/")"
+  CODE="$(status_of "$PUBLIC_URL/")"
   [[ "$CODE" == "200" ]] && break
   sleep 0.5
 done
-[[ "$CODE" == "200" ]] || die "经 Nginx 访问首页 → $CODE（期望 200）。"
+[[ "$CODE" == "200" ]] || die "经 Nginx（127.0.0.1:80）访问首页 → $CODE（期望 200）。"
 ok "经 Nginx 访问首页 → 200"
 
-HTML="$(curl --noproxy '*' -sS --max-time 8 "$UPSTREAM/" || true)"
+HTML="$(curl --noproxy '*' -sS --max-time 8 "$PUBLIC_URL/" || true)"
 printf '%s' "$HTML" | grep -q '超哥电竞' \
   || die "首页 HTML 里没有产品名「超哥电竞」——代理可能落到了错误的服务。"
 ok "首页内容包含「超哥电竞」"
@@ -155,19 +157,19 @@ if printf '%s' "$HTML" | grep -q '开发工具'; then
 fi
 ok "公网页面不包含 Mock 身份切换面板"
 
-CODE="$(status_of "$UPSTREAM/api/home")"
+CODE="$(status_of "$PUBLIC_URL/api/home")"
 [[ "$CODE" == "200" ]] || die "GET /api/home → $CODE（期望 200）"
 ok "公开只读接口 /api/home → 200"
 
-CODE="$(status_of "$UPSTREAM/api/admin/dashboard")"
+CODE="$(status_of "$PUBLIC_URL/api/admin/dashboard")"
 [[ "$CODE" == "404" ]] || die "GET /api/admin/dashboard → $CODE（期望 404，Nginx 白名单失效）"
 ok "私有接口 /api/admin/dashboard → 404"
 
-CODE="$(status_of -X POST -H 'content-type: application/json' -d '{}' "$UPSTREAM/api/auth/mock-login")"
+CODE="$(status_of -X POST -H 'content-type: application/json' -d '{}' "$PUBLIC_URL/api/auth/mock-login")"
 [[ "$CODE" == "404" ]] || die "POST /api/auth/mock-login → $CODE（期望 404，公网不得触达 Mock 登录）"
 ok "POST /api/auth/mock-login → 404（无法切换到任何 Mock 身份）"
 
-CODE="$(status_of "$UPSTREAM/admin")"
+CODE="$(status_of "$PUBLIC_URL/admin")"
 [[ "$CODE" == "404" ]] || die "GET /admin → $CODE（期望 404）"
 ok "管理后台 /admin → 404"
 

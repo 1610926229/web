@@ -404,3 +404,29 @@ test("安装脚本的本地验收覆盖公开内容与私有接口拒绝", () =>
   assert.ok(installer.includes("127.0.0.1:3000"));
   assert.ok(installer.includes("5432"));
 });
+
+test("安装脚本的验收必须经过 Nginx 80，不能直连上游", () => {
+  // 直连 3000 看到的是私有路径：没有公网标记头，/api/admin/dashboard 会返回
+  // 401 而不是 404，Mock 面板也会正常渲染——用它做验收会得出错误结论。
+  assert.ok(
+    installer.includes('PUBLIC_URL="http://127.0.0.1"'),
+    "必须定义经过 Nginx 的验收地址",
+  );
+
+  for (const expected of [
+    '"$PUBLIC_URL/"',
+    '"$PUBLIC_URL/api/home"',
+    '"$PUBLIC_URL/api/admin/dashboard"',
+    '"$PUBLIC_URL/api/auth/mock-login"',
+    '"$PUBLIC_URL/admin"',
+  ]) {
+    assert.ok(installer.includes(expected), `验收请求必须走 ${expected}`);
+  }
+
+  // 所有 status_of 的验收地址都必须是 PUBLIC_URL；出现 UPSTREAM 说明又直连了 3000。
+  assert.doesNotMatch(
+    installerCode,
+    /status_of[^\n]*\$UPSTREAM/,
+    "验收不得直连上游 3000",
+  );
+});
