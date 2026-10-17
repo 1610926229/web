@@ -40,3 +40,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# standalone 部署产物（由 deploy/app/build-standalone.sh 生成，不进版本控制）
+/dist/

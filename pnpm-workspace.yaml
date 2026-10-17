@@ -1,3 +1,16 @@
+# PROD-2 / Step 5.8.1 · standalone 产物必须能离开构建机
+#
+# pnpm 默认用符号链接（node_modules/.pnpm + 顶层链接）组织依赖。
+# Next 的 `output: "standalone"` 在追踪文件时按原样复制这些链接，
+# 而它们是构建机的**绝对路径**。产物上传到服务器解包后链接全部悬空，
+# 实测表现为 `Cannot find module '@swc/helpers/...'`，进程直接起不来。
+#
+# hoisted 让 node_modules 变成与 npm 一样的扁平真实目录：
+#   · 没有符号链接 → standalone 里全是真实文件，产物天然可移植；
+#   · CI（ubuntu-latest）与本地（Windows/Git Bash）产出结构一致，本地可完整验收。
+# 只改变磁盘布局，不影响 import 路径或运行行为。
+nodeLinker: hoisted
+
 allowBuilds:
   sharp: false
   unrs-resolver: false

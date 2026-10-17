@@ -1,0 +1,67 @@
+[Unit]
+Description=超哥电竞 私有 Staging（Next.js standalone）
+Documentation=file:///opt/chaoge-deploy/deploy/app/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+# 连续失败时不要无限重启刷日志：20 次 / 5 分钟之后进入 failed，
+# 让 `systemctl status` 留下一个可读的终态。正常崩溃由 Restart=always 兜住。
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=chaoge
+Group=chaoge
+WorkingDirectory=/opt/chaoge-staging/current
+
+# 生产环境变量。文件由 deploy/app/setup-staging-env.sh 生成：
+#   root:chaoge 0640，含 DATA_SOURCE=postgres / DATABASE_URL / NODE_ENV。
+# 缺失时 systemd 直接拒绝启动——这是刻意的：不要让它带着半套配置跑起来。
+EnvironmentFile=/etc/chaoge/staging.env
+
+# ⚠️ 绑定地址与端口**写死在 ExecStart 的 env 前缀里**，不放在 EnvironmentFile。
+#    systemd 的 EnvironmentFile 会覆盖 Environment=；如果配置文件里误写一行
+#    HOSTNAME=0.0.0.0，服务就会暴露到公网，而且从 unit 文件上看不出来。
+#    用 `/usr/bin/env VAR=... node server.js` 让这两个值不可能被配置文件改变。
+#    Next 的 server.js 在 HOSTNAME 未设置时默认绑 0.0.0.0——所以这一行是安全边界。
+ExecStart=/usr/bin/env NODE_ENV=production PORT=3000 HOSTNAME=127.0.0.1 /usr/bin/node server.js
+
+# 异常退出 / 被 OOM killer 杀掉 / 机器重启后都会回来。
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chaoge-staging
+
+# ── 加固 ──────────────────────────────────────────────────────────────────────
+# 服务账号本身已是无 shell 的非特权用户；下面这些把「就算进程被攻破」的面再收窄。
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+# ⚠️ 刻意**不设** MemoryDenyWriteExecute=true：V8 的 JIT 需要可写可执行内存，
+#    打开它会让 Node 直接起不来，而这个错误在 systemd 日志里只有一句
+#    「status=1/FAILURE」，排查成本很高。
+
+[Install]
+WantedBy=multi-user.target

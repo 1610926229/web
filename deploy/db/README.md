@@ -2,6 +2,11 @@
 
 生产库 `chaoge_prod` 的角色与权限。**首次执行**按 §4 的 0～8 步走，之后每次部署只需 `check` + `verify`（见 §4 末）。
 
+> **Staging 使用另一套独立脚本**：`deploy/db/staging/`（独立库 `chaoge_staging`、
+> 独立角色 `chaoge_staging_*`、独立入口 `deploy-staging.sh`）。
+> 本目录的脚本不会被 staging 调用，生产角色与授权也不会被 staging 修改。
+> 见 [`staging/README.md`](staging/README.md)。
+
 ---
 
 ## 0. 怎么用：一个入口，四个阶段
