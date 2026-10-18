@@ -852,6 +852,51 @@ export type StaffOrderReplaceOutcome =
   | { kind: "inconsistent"; orderId: string };
 
 /**
+ * 客服给**还没有人接**的订单（`paid`）直接指派护航的结果（PROD-4）。
+ *
+ * 与「换人」的区别不是文案，而是**起点**：这一单此刻没有任何履约人，
+ * 因此没有退出历史、没有完成材料需要作废；动作只有「派单改绑 + 订单进入
+ * `accepted` + 通知用户 + 审计」四件。
+ *
+ * ## 为什么不绕过派单规则
+ *
+ * 指派的落点仍然受派单记录约束：
+ *
+ * | 派单状态 | 能指派给谁 |
+ * |---|---|
+ * | `exclusive`（用户指定了护航、专属期未过） | **只能**是用户指定的那位 |
+ * | `public`（公共池） | 任何此刻可接单、且不是下单用户本人的护航 |
+ *
+ * 专属期已过 → `expired`（与打手接单、`.sweepExpiredDispatches` 同一条时限口径）；
+ * 派单已 `timed_out` / `accepted` → `not-assignable`（订单与派单不自洽或已有人接）。
+ *
+ * ⚠️ **不写接单事件**（`companion_accept_events`），派单写 `accepted_via = "staff"`：
+ * 「订单进入 accepted」与「护航自己接单」是两个概念（P1-5 §九-F 产品裁定）。
+ */
+export type StaffOrderAssignOutcome =
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNo: string;
+      /** 被指派的护航 */
+      companionId: string;
+      /** 指派时刻（= 订单 `acceptedAt` = 派单 `acceptedAt`） */
+      assignedAt: string;
+      changed: true;
+    }
+  | { kind: "not-found" }
+  | { kind: "not-assignable"; status: OrderStatus }
+  | { kind: "companion-not-found" }
+  | { kind: "companion-unavailable" }
+  | { kind: "self-order" }
+  /** 专属池：要指定的人不是用户当初指定的那位 */
+  | { kind: "not-eligible" }
+  /** 派单已超过当前池的等待时限 */
+  | { kind: "expired" }
+  | { kind: "dispatch-missing" }
+  | { kind: "inconsistent"; orderId: string };
+
+/**
  * 打手被下架（`enabled = false`）时，把他**手上所有还在履约的订单**退回公共池的结果
  * （事务层，P0-11，**同步**）。
  *

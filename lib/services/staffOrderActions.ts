@@ -3,8 +3,14 @@ import { isCompanionAcceptingOrders } from "@/lib/constants/companions";
 import { ORDER_DATA_INCONSISTENT_MESSAGE } from "@/lib/constants/dispatch";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
 import {
+  STAFF_ORDER_ASSIGN_CANDIDATES_NOTICE,
+  STAFF_ORDER_ASSIGN_EMPTY_DESCRIPTION,
+  STAFF_ORDER_ASSIGN_EXCLUSIVE_NOTICE,
+  STAFF_ORDER_ASSIGN_EXPIRED_MESSAGE,
+  STAFF_ORDER_ASSIGN_NOT_ELIGIBLE_MESSAGE,
   STAFF_ORDER_COMPANION_NOT_FOUND_MESSAGE,
   STAFF_ORDER_COMPANION_UNAVAILABLE_MESSAGE,
+  STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE,
   STAFF_ORDER_NOT_FOUND_MESSAGE,
   STAFF_ORDER_NOT_RELEASABLE_MESSAGE,
   STAFF_ORDER_NOT_REPLACEABLE_MESSAGE,
@@ -19,11 +25,15 @@ import {
 import { readTrimmedString } from "@/lib/constants/writes";
 import { getCompanionRepository } from "@/lib/data/companionRepository";
 import {
+  assignOrderCompanionByStaff,
   releaseOrderByStaff,
   replaceOrderCompanionByStaff,
 } from "@/lib/data/companionOrderTransaction";
+import { getDispatchRepository } from "@/lib/data/dispatchRepository";
 import { ADMIN_ORDER_UNFILTERED_QUERY, getPaymentRepository } from "@/lib/data/paymentRepository";
 import type {
+  StaffOrderAssignCandidateListData,
+  StaffOrderAssignResult,
   StaffOrderReleaseResult,
   StaffOrderReplaceCandidateListData,
   StaffOrderReplaceResult,
@@ -214,6 +224,138 @@ export async function replaceStaffOrderCompanion(
     case "inconsistent":
       throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
   }
+}
+
+/**
+ * 客服给**还没有人接**的订单（`paid`）直接指派护航（PROD-4）。
+ *
+ * ## 失败语义
+ *
+ * | 结果 | 抛出 | 为什么 |
+ * |---|---|---|
+ * | 订单不存在 | `NOT_FOUND` → 404 | —— |
+ * | 状态不是 `paid` / 已挂着履约人 | `BAD_REQUEST` → 400 | 这一单此刻不该出现指派按钮 |
+ * | 没指定人 / 指定的人不存在 | `BAD_REQUEST` → 400 | 请求本身不完整 |
+ * | 指定的人此刻不能接单 | `BAD_REQUEST` → 400 | 停用 / 已移除 / 暂停接单，共用一句 |
+ * | 指定的人是下单用户本人 | `BAD_REQUEST` → 400 | 与用户端接单的禁止自接单同一条规则 |
+ * | 派单已超过等待时限 | `BAD_REQUEST` → 400 | 这一单该走超时流程 |
+ * | 专属池里指定了别的人 | `BAD_REQUEST` → 400 | 不能覆盖用户在下单时做出的选择 |
+ * | 派单数据不自洽 | `SERVER_ERROR` → 500 | 不可能状态，且一笔没写 |
+ *
+ * ⚠️ 操作者只来自 `requireStaff()` 的会话；`staffId` / `staffName` 不进请求体。
+ * 审计的 `operationId` 每次请求现生成——这个动作没有幂等键（幂等判据是状态本身）。
+ */
+export async function assignStaffOrderCompanion(
+  orderId: string,
+  staff: StaffSessionUser,
+  body: Record<string, unknown>,
+): Promise<StaffOrderAssignResult> {
+  if (!orderId) throw new ApiError("NOT_FOUND", STAFF_ORDER_NOT_FOUND_MESSAGE, 404);
+
+  const companionId = readTrimmedString(body, "companionId");
+  if (!companionId) {
+    throw new ApiError("BAD_REQUEST", STAFF_ORDER_REPLACE_COMPANION_REQUIRED_MESSAGE, 400);
+  }
+
+  const at = new Date().toISOString();
+
+  const outcome = await assignOrderCompanionByStaff({
+    orderId,
+    companionId,
+    staffId: staff.id,
+    staffName: staff.displayName,
+    operationId: `op_${crypto.randomUUID()}`,
+    at,
+  });
+
+  switch (outcome.kind) {
+    case "ok":
+      // 落点状态与文案都是常量；写成功之后的回读只会多一个「刚写成功却被报 404」的分支
+      return {
+        orderId: outcome.orderId,
+        orderNo: outcome.orderNo,
+        status: "accepted",
+        statusLabel: ORDER_STATUS_LABELS.accepted,
+        companionId: outcome.companionId,
+        assignedAt: outcome.assignedAt,
+        changed: true,
+      };
+    case "not-found":
+      throw new ApiError("NOT_FOUND", STAFF_ORDER_NOT_FOUND_MESSAGE, 404);
+    case "not-assignable":
+      throw new ApiError("BAD_REQUEST", STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE, 400);
+    case "companion-not-found":
+      throw new ApiError("BAD_REQUEST", STAFF_ORDER_COMPANION_NOT_FOUND_MESSAGE, 400);
+    case "companion-unavailable":
+      throw new ApiError("BAD_REQUEST", STAFF_ORDER_COMPANION_UNAVAILABLE_MESSAGE, 400);
+    case "self-order":
+      throw new ApiError("BAD_REQUEST", STAFF_ORDER_SELF_ORDER_MESSAGE, 400);
+    case "not-eligible":
+      throw new ApiError("BAD_REQUEST", STAFF_ORDER_ASSIGN_NOT_ELIGIBLE_MESSAGE, 400);
+    case "expired":
+      throw new ApiError("BAD_REQUEST", STAFF_ORDER_ASSIGN_EXPIRED_MESSAGE, 400);
+    case "dispatch-missing":
+    case "inconsistent":
+      throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
+  }
+}
+
+/**
+ * 客服**指派候选名单**：此刻可以指派给这一单的护航（PROD-4）。
+ *
+ * 与换人名单的资格过滤相同（`isCompanionAcceptingOrders()` + 排除下单用户本人），
+ * 多一条**专属池不得绕过**：用户指定了护航、专属期未过时，名单里只有那一位。
+ *
+ * ⚠️ 订单不是 `paid`、或已经挂着履约人时**报错而不是回空名单**：
+ * 空名单会让界面说「没有可指派的护航」，而真实原因是「这一单不该有指派按钮」。
+ */
+export async function listStaffOrderAssignCandidates(
+  orderId: string,
+): Promise<StaffOrderAssignCandidateListData> {
+  if (!orderId) throw new ApiError("NOT_FOUND", STAFF_ORDER_NOT_FOUND_MESSAGE, 404);
+
+  const order = await getPaymentRepository().findOrderById(orderId);
+  if (!order) throw new ApiError("NOT_FOUND", STAFF_ORDER_NOT_FOUND_MESSAGE, 404);
+
+  if (order.status !== "paid" || order.actualCompanionId !== null) {
+    throw new ApiError("BAD_REQUEST", STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE, 400);
+  }
+
+  const record = await getDispatchRepository().findDispatchByOrderId(order.id);
+  if (!record) throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
+  if (record.state === "timed_out" || record.state === "accepted") {
+    throw new ApiError("BAD_REQUEST", STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE, 400);
+  }
+
+  const deadlineAt =
+    record.state === "exclusive" ? record.exclusiveDeadlineAt : record.publicDeadlineAt;
+  if (deadlineAt === null) {
+    throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
+  }
+  if (Date.parse(deadlineAt) <= Date.now()) {
+    throw new ApiError("BAD_REQUEST", STAFF_ORDER_ASSIGN_EXPIRED_MESSAGE, 400);
+  }
+
+  const exclusive = record.state === "exclusive";
+  const companions = await getCompanionRepository().listCompanions();
+  const activeCounts = await activeOrderCounts();
+
+  const items = companions
+    .filter((companion) => isCompanionAcceptingOrders(companion))
+    // 专属池：用户指定了谁，就只能指派给谁
+    .filter((companion) => !exclusive || companion.id === record.exclusiveCompanionId)
+    .filter((companion) => companion.userId === null || companion.userId !== order.userId)
+    .map((companion) => toStaffOrderReplaceCandidate(companion, activeCounts.get(companion.id) ?? 0));
+
+  return {
+    items,
+    notice:
+      items.length === 0
+        ? STAFF_ORDER_ASSIGN_EMPTY_DESCRIPTION
+        : exclusive
+          ? STAFF_ORDER_ASSIGN_EXCLUSIVE_NOTICE
+          : STAFF_ORDER_ASSIGN_CANDIDATES_NOTICE,
+  };
 }
 
 /**

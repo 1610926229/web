@@ -2,6 +2,8 @@ import { cookies } from "next/headers";
 import { isMockStaffEnabled } from "@/lib/config/env";
 import { getStaffRepository } from "@/lib/data/staffRepository";
 import type { StaffAccount } from "@/lib/types/staff";
+import { MOCK_STAFF_SESSION_COOKIE as MOCK_STAFF_SESSION_COOKIE_NAME } from "./cookieNames";
+import { lookupRealSession } from "./realSession";
 
 /**
  * 客服端会话（仅服务端使用）。
@@ -32,7 +34,7 @@ import type { StaffAccount } from "@/lib/types/staff";
  * 未来实现：服务端会话表（会话 id 不可反推账号），Cookie 只放会话凭证。
  */
 
-export const MOCK_STAFF_SESSION_COOKIE = "mock_staff_id";
+export const MOCK_STAFF_SESSION_COOKIE = MOCK_STAFF_SESSION_COOKIE_NAME;
 
 /** 会话有效期，与用户端、管理端保持同一个数量级（7 天）。 */
 const STAFF_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
@@ -72,6 +74,11 @@ export async function getSessionStaff(): Promise<StaffAccount | null> {
   // 无论开关如何都先读一次 Cookie：客服页面必须按请求渲染，
   // 不能在构建期被预渲染成一份「未登录」的静态页面。
   const jar = await cookies();
+
+  // PROD-4：真实客服会话优先；失效的真实 Cookie 直接按匿名处理，不回退 Mock。
+  const real = await lookupRealSession("staff");
+  if (real.kind === "active") return getStaffRepository().findStaffById(real.subjectId);
+  if (real.kind === "invalid") return null;
 
   if (!isMockStaffEnabled()) return null;
 

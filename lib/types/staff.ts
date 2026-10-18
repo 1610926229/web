@@ -685,6 +685,13 @@ export type StaffOrderDetail = {
  * 它的准入条件与履约无关（`completed` 也能退），塞进同一个布尔组只会让两套规则看起来是一套。
  */
 export type StaffOrderAllowedActions = {
+  /**
+   * 这一单还在等护航（`paid` 且没有实际履约人）：客服可以**直接指派**。
+   *
+   * PROD-4 新增。与 `canRelease` / `canReplace` **不同时成立**——
+   * 指派只发生在「还没有人接」，解除只在「已经有人接」。
+   */
+  canAssign: boolean;
   canRelease: boolean;
   canReplace: boolean;
 };
@@ -764,4 +771,29 @@ export type StaffOrderReplaceCandidateListData = {
   items: StaffOrderReplaceCandidate[];
   /** 候选为空时页面上要说的话；非空时是一句口径说明。服务端给，页面不自己拼 */
   notice: string;
+};
+
+/**
+ * 客服**直接指派**的候选名单（PROD-4）。
+ *
+ * 与换人候选共用同一份条目形状（昵称 / 头像 / 在履约单数）：
+ * 客服在这两个场景里要判断的是同一件事——「把这一单交给谁」。
+ * 差别只在筛选规则（专属池只列用户指定的那位）与文案。
+ */
+export type StaffOrderAssignCandidateListData = StaffOrderReplaceCandidateListData;
+
+/**
+ * 客服给还没有人接的订单指派护航的接口返回（PROD-4）。
+ *
+ * ⚠️ `status` 是 `"accepted"`：指派完成后订单与护航自己接单拿到的是同一个状态。
+ * 与换人一样，新护航仍要自己点「开始服务」、自己交完成材料。
+ */
+export type StaffOrderAssignResult = {
+  orderId: string;
+  orderNo: string;
+  status: "accepted";
+  statusLabel: string;
+  companionId: string;
+  assignedAt: string;
+  changed: true;
 };

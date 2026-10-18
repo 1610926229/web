@@ -907,21 +907,21 @@ test("HTTP 200 与 DTO 边界：响应体里没有分账、平台收入、游戏
   assert.equal(detail.status, 200, "seed 订单必须查得到——「全量查询」的含义就是不按客服过滤");
   const detailJson = JSON.parse(detail.body);
   assert.equal(detailJson.data.order.orderId, SEED_ORDER);
-  // P0-11：`allowedActions` 是**服务端算好**的两个布尔值，前端不自己用订单状态推断。
-  // 写成「恰好这两个键」而不是「不含某几个」——以后给它加 `canRefund` 这类字段时，
+  // 处置动作是**服务端算好**的几个布尔值，前端不自己用订单状态推断。
+  // 写成「恰好这几个键」而不是「不含某几个」——以后给它加 `canRefund` 这类字段时，
   // 会在这里先撞上一次（那是产品决定，不该在顺手重构里长出来）。
   assert.deepEqual(
     Object.keys(detailJson.data.allowedActions).sort(),
-    ["canRelease", "canReplace"],
-    "处置动作只有回池与换人两个：没有 canRefund —— 退款的入口不在订单详情上",
+    ["canAssign", "canRelease", "canReplace"],
+    "处置动作只有指派 / 回池 / 换人三个：没有 canRefund —— 退款的入口不在订单详情上",
   );
-  // 这一条 seed 单是 `paid`、且没人履约：两个动作都必须为 false。
+  // 这一条 seed 单是 `paid`、且没人履约：可以指派，但还不能回池或换人。
   // ⚠️ 这是**接口层**的断言，服务层已有一条（`staffOrderActions.test.mjs`），
   //    两条都要有：服务层保证判据对，接口层保证这个判据真的随响应发出去
   assert.deepEqual(
     detailJson.data.allowedActions,
-    { canRelease: false, canReplace: false },
-    "已付款、无人接单的订单不提供任何处置动作",
+    { canAssign: true, canRelease: false, canReplace: false },
+    "已付款、无人接单的订单只能指派护航",
   );
   assert.deepEqual(
     Object.keys(detailJson.data.user).sort(),

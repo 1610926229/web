@@ -3,6 +3,8 @@ import { STAFF_PAGE_SIZE, type StaffOrderStatusFilter } from "@/lib/constants/st
 import type {
   StaffConversationDetail,
   StaffConversationListData,
+  StaffOrderAssignCandidateListData,
+  StaffOrderAssignResult,
   StaffOrderListData,
   StaffOrderReleaseResult,
   StaffOrderReplaceCandidateListData,
@@ -47,6 +49,19 @@ export function fetchStaffSession(): Promise<StaffSessionUser> {
  */
 export function mockLoginStaff(staffId: string): Promise<{ staff: StaffSessionUser }> {
   return apiPost<{ staff: StaffSessionUser }>("/api/staff/auth/mock-login", { staffId });
+}
+
+/**
+ * 客服密码登录（PROD-4）。
+ *
+ * 请求体只有登录名与密码；角色、账号 id、启用状态没有可传的位置。
+ * 失败时服务端给同一句话，不区分「登录名不存在」与「密码错误」。
+ */
+export function loginStaffWithPassword(input: {
+  username: string;
+  password: string;
+}): Promise<{ staff: StaffSessionUser }> {
+  return apiPost<{ staff: StaffSessionUser }>("/api/staff/auth/login", input);
 }
 
 /** 退出登录：只删除客服端 Cookie，用户端与管理端会话不受影响。 */
@@ -252,6 +267,33 @@ export function replaceStaffOrderCompanion(
 ): Promise<StaffOrderReplaceResult> {
   return apiPost<StaffOrderReplaceResult>(
     `/api/staff/orders/${encodeURIComponent(orderId)}/replace`,
+    body,
+  );
+}
+
+/** 指派候选名单（PROD-4）：只对「已支付、还没有人接」的订单可用。 */
+export function fetchStaffOrderAssignCandidates(
+  orderId: string,
+): Promise<StaffOrderAssignCandidateListData> {
+  return apiGet<StaffOrderAssignCandidateListData>(
+    `/api/staff/orders/${encodeURIComponent(orderId)}/assign-candidates`,
+  );
+}
+
+/**
+ * 给还没有人接的订单直接指派护航（PROD-4）。
+ *
+ * ⚠️ 与换人一样**没有幂等键**：第二次点击时订单已经不在 `paid`，
+ * 服务端回 400 并说明当前状态。
+ *
+ * ⚠️ 请求体里**只有要指派的人**；操作者身份由服务端从客服会话推导。
+ */
+export function assignStaffOrderCompanion(
+  orderId: string,
+  body: { companionId: string },
+): Promise<StaffOrderAssignResult> {
+  return apiPost<StaffOrderAssignResult>(
+    `/api/staff/orders/${encodeURIComponent(orderId)}/assign`,
     body,
   );
 }

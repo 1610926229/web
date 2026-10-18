@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { isMockAuthEnabled } from "@/lib/config/env";
+import { isRealAuthEnabled } from "./realSession";
 import type { User } from "@/lib/types/user";
 import { getSessionUser } from "./session";
 import LoginGate from "./LoginGate";
@@ -27,7 +28,14 @@ export default async function RequireAuth({
 }) {
   const user = await getSessionUser();
 
-  if (!user) return <LoginGate mockAuthEnabled={isMockAuthEnabled()} />;
+  if (!user) {
+    return (
+      <LoginGate
+        mockAuthEnabled={isMockAuthEnabled()}
+        realAuthEnabled={isRealAuthEnabled()}
+      />
+    );
+  }
 
   const content = typeof children === "function" ? children(user) : children;
 

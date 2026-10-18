@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ADMIN_LOGOUT_LABEL } from "@/lib/constants/admin";
 import { logoutAdmin } from "@/lib/services/adminHttp";
@@ -45,14 +46,23 @@ export default function AdminHeader({ admin }: { admin: AdminSessionUser }) {
         </p>
       </div>
 
-      <button
-        type="button"
-        onClick={handleLogout}
-        disabled={pending}
-        className="rounded-lg border border-admin-line px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:bg-page disabled:opacity-60"
-      >
-        {pending ? "退出中…" : ADMIN_LOGOUT_LABEL}
-      </button>
+      <div className="flex items-center gap-2">
+        <Link
+          href="/admin/account"
+          className="rounded-lg border border-admin-line px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:bg-page"
+        >
+          账号安全
+        </Link>
+
+        <button
+          type="button"
+          onClick={handleLogout}
+          disabled={pending}
+          className="rounded-lg border border-admin-line px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:bg-page disabled:opacity-60"
+        >
+          {pending ? "退出中…" : ADMIN_LOGOUT_LABEL}
+        </button>
+      </div>
     </header>
   );
 }

@@ -17,6 +17,10 @@ import {
   canEnterAdminConsole,
   countCompanionStates,
 } from "../lib/constants/admin.ts";
+import {
+  MOCK_ADMIN_SESSION_COOKIE,
+  MOCK_USER_SESSION_COOKIE,
+} from "../lib/auth/cookieNames.ts";
 import { getAdminRepository } from "../lib/data/adminRepository.ts";
 import { getCompanionApplicationRepository } from "../lib/data/companionApplicationRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
@@ -191,8 +195,16 @@ test("每个管理接口都自己鉴权：只有登录与退出可以不要管�
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
   assert.ok(routeFiles.length >= 3, "管理端认证接口至少有三个");
 
-  /** 登录与退出发生在「还没有会话」的时候，不可能要求管理者身份。 */
-  const anonymousRoutes = new Set(["auth/mock-login", "auth/logout"]);
+  /**
+   * 登录与退出发生在「还没有会话」的时候，不可能要求管理者身份。
+   *
+   * PROD-4 起有三条：`auth/login`（真实账号密码）与 `auth/mock-login`
+   * （私有 staging 首次凭据引导）都是**换会话**的入口，`auth/logout` 是丢弃会话。
+   * 它们都不接受身份声明（角色 / id 没有可传的位置），登录对象由服务端查库决定。
+   * 除这三条之外，**每一条**管理接口都必须自己 `requireAdmin()`——
+   * 包括 `auth/password`（改自己的密码）与 `auth/session`（读自己的会话）。
+   */
+  const anonymousRoutes = new Set(["auth/login", "auth/mock-login", "auth/logout"]);
 
   for (const file of routeFiles) {
     const relative = path.relative(ADMIN_API_DIR, file).replace(/\\/g, "/");
@@ -236,15 +248,27 @@ test("模拟登录接口不接受任何身份输入：没有请求体、没有�
     readSource(path.join(ROOT, "components", "admin", "AdminLoginPanel.tsx")),
   );
   assert.equal(panel.includes("userId"), false, "登录面板不该出现可以指定的身份");
-  assert.equal(/<input\b/.test(panel), false, "登录面板不该有输入框（没有账号密码可填）");
+  // PROD-4：模拟入口仍然**不带参数**——身份由服务端固定
+  assert.ok(panel.includes("mockLoginAdmin()"), "模拟登录不得携带任何身份参数");
+  assert.equal(/mockLoginAdmin\(\s*\{/.test(panel), false);
+
+  // 输入框只属于真实账号密码登录，且只有这两个字段：
+  // 没有角色、账号 id、身份切换器可填
+  const inputNames = [...panel.matchAll(/name="([^"]+)"/g)].map((match) => match[1]).sort();
+  assert.deepEqual(inputNames, ["password", "username"], "登录表单不得接受身份声明");
 });
 
-test("登录页与登录面板只有一个固定的模拟入口", () => {
+test("登录页与登录面板：真实密码登录与模拟登录互斥，不存在身份切换器", () => {
   const source = readSource(path.join(ROOT, "components", "admin", "AdminLoginPanel.tsx"));
 
-  // 唯一的按钮就是「模拟管理员登录」，且随 ENABLE_MOCK_ADMIN 开关出现或消失
-  const buttons = source.match(/<button[\s\S]*?>/g) ?? [];
-  assert.equal(buttons.length, 1, "登录面板只该有一个按钮");
+  // PROD-4：真实认证开着一律走账号密码；只有它没开时才回落到固定的模拟入口
+  assert.ok(source.includes("loginAdminWithPassword"), "真实认证开启后必须渲染密码登录表单");
+  const realBranch = source.indexOf("realAuthEnabled ?");
+  const mockBranch = source.indexOf("mockAdminEnabled ?");
+  assert.notEqual(realBranch, -1);
+  assert.notEqual(mockBranch, -1);
+  assert.ok(realBranch < mockBranch, "真实登录必须优先于模拟登录");
+
   assert.ok(source.includes("ADMIN_MOCK_LOGIN_LABEL"));
   assert.ok(source.includes("mockAdminEnabled"));
   // 未启用时不渲染按钮，而是如实说明该能力未启用
@@ -257,10 +281,13 @@ test("管理端与用户端是两个 Cookie、两个仓储：没有互相转换�
   const adminSession = stripComments(readSource(path.join(ROOT, "lib", "auth", "adminSession.ts")));
   const userSession = stripComments(readSource(path.join(ROOT, "lib", "auth", "session.ts")));
 
-  // 两个不同的 Cookie 名
-  assert.ok(adminSession.includes('"mock_admin_id"'));
-  assert.ok(userSession.includes('"mock_user_id"'));
-  assert.equal(userSession.includes("mock_admin_id"), false, "用户端会话不该认得管理端 Cookie");
+  // 两个不同的 Cookie 名（PROD-4 起名字集中在 cookieNames.ts，三套身份各两个）
+  assert.ok(adminSession.includes("MOCK_ADMIN_SESSION_COOKIE"));
+  assert.ok(userSession.includes("MOCK_USER_SESSION_COOKIE"));
+  assert.equal(userSession.includes("MOCK_ADMIN_SESSION_COOKIE"), false, "用户端会话不该认得管理端 Cookie");
+  assert.equal(adminSession.includes("MOCK_USER_SESSION_COOKIE"), false, "管理端会话不该认得用户端 Cookie");
+  assert.equal(MOCK_ADMIN_SESSION_COOKIE, "mock_admin_id");
+  assert.equal(MOCK_USER_SESSION_COOKIE, "mock_user_id");
 
   // 两条链路各自查各自的仓储
   assert.ok(adminSession.includes("getAdminRepository"));
@@ -745,7 +772,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 评价审核六件 + 投诉五件 + 客服五件 + 运营内容十九件 + 券模板四件 + 发券三件 + 平台参数一件 + 经营首页一件 + 售后聚合一件", () => {
+test("管理接口清单固定：认证五件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 评价审核六件 + 投诉五件 + 客服六件 + 运营内容十九件 + 券模板四件 + 发券三件 + 平台参数一件 + 经营首页一件 + 售后聚合一件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -758,8 +785,13 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       // 开始处理 / 解决 / 关闭）仍然只挂在各自的 `/api/admin/refunds/**`、`/api/admin/complaints/**` 上。
       // 工作台再开一套动作地址，就等于给同一份事务逻辑开了第二个入口。
       "aftersales/route.ts",
+      // PROD-4：真实管理员账号密码登录 + 登录后修改自己的密码。
+      // ⚠️ 密码**只属于当前登录者**：`auth/password` 从会话取人，请求体里没有账号 id；
+      // 管理员不能借它改别人的密码（那是 `staff/[id]/password`，作用对象是客服账号）。
+      "auth/login/route.ts",
       "auth/logout/route.ts",
       "auth/mock-login/route.ts",
+      "auth/password/route.ts",
       "auth/session/route.ts",
       // P8B：类目（列表 / 新建、详情 / 编辑、启用、停用、移除）
       "categories/[id]/disable/route.ts",
@@ -888,12 +920,16 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "reviews/[id]/unhide/route.ts",
       "reviews/route.ts",
       // P8D-1：客服账号（列表 / 新建、详情 / 编辑、启用、停用、移除）
-      // ⚠️ 这里没有「重置密码」地址：本阶段是 Mock 认证，客服账号里根本没有密码字段。
-      // ⚠️ 也没有「登录 / 退出」地址：那是**客服端**的接口（`/api/staff/auth/**`），
+      // ⚠️ PROD-4 起多了一个「设置密码」地址（`staff/[id]/password`）：
+      // 真实认证需要客服能用账号密码登录，而密码不得出现在创建 / 编辑的请求体里——
+      // 否则同一次写入会既改资料又改凭据，审计也分不清发生了什么。
+      // 它只写密码，不启用 / 不改变角色；管理员也不能用它改**自己**的密码（那是 `auth/password`）。
+      // ⚠️ 仍然没有「登录 / 退出」地址：那是**客服端**的接口（`/api/staff/auth/**`），
       // 管理员不能替客服登录，客服的会话也不能由管理端接口发放。
       // ⚠️ 没有「删除」地址——移除是软删除，`remove` 就是它。
       "staff/[id]/disable/route.ts",
       "staff/[id]/enable/route.ts",
+      "staff/[id]/password/route.ts",
       "staff/[id]/remove/route.ts",
       "staff/[id]/route.ts",
       "staff/route.ts",

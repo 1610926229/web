@@ -2,6 +2,8 @@ import { cookies } from "next/headers";
 import { isMockAdminEnabled } from "@/lib/config/env";
 import { getAdminRepository } from "@/lib/data/adminRepository";
 import type { AdminAccount } from "@/lib/types/admin";
+import { MOCK_ADMIN_SESSION_COOKIE as MOCK_ADMIN_SESSION_COOKIE_NAME } from "./cookieNames";
+import { lookupRealSession } from "./realSession";
 
 /**
  * 管理端会话（仅服务端使用）。
@@ -25,7 +27,7 @@ import type { AdminAccount } from "@/lib/types/admin";
  * 未来实现：服务端会话表（会话 id 不可反推账号），Cookie 只放会话凭证。
  */
 
-export const MOCK_ADMIN_SESSION_COOKIE = "mock_admin_id";
+export const MOCK_ADMIN_SESSION_COOKIE = MOCK_ADMIN_SESSION_COOKIE_NAME;
 
 /** 会话有效期，与用户端保持同一个数量级（7 天）。 */
 const ADMIN_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
@@ -65,6 +67,11 @@ export async function getSessionAdmin(): Promise<AdminAccount | null> {
   // 无论开关如何都先读一次 Cookie：管理页面必须按请求渲染，
   // 不能在构建期被预渲染成一份「未登录」的静态页面。
   const jar = await cookies();
+
+  // PROD-4：真实管理员会话优先；失效的真实 Cookie 直接按匿名处理，不回退 Mock。
+  const real = await lookupRealSession("admin");
+  if (real.kind === "active") return getAdminRepository().findAdminById(real.subjectId);
+  if (real.kind === "invalid") return null;
 
   if (!isMockAdminEnabled()) return null;
 

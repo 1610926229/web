@@ -238,7 +238,7 @@ test("§十三.4 面板不自带用户名单：名单只有 lib/constants/mockUs
   assert.ok(panel.includes("<MockUserPicker"), "面板必须复用登录界面那份选择器，而不是自己再画一份列表");
 });
 
-test("§十三.9 没有新增任何认证接口：app/api/**/auth/** 恰好是这八个", () => {
+test("§十三.9 认证接口清单固定：app/api/**/auth/** 恰好这十三个（PROD-4 起）", () => {
   const found = [];
   for (const full of walk(path.join(ROOT, "app", "api"))) {
     const relative = relativeOf(full);
@@ -248,20 +248,29 @@ test("§十三.9 没有新增任何认证接口：app/api/**/auth/** 恰好是�
   assert.deepEqual(
     found.sort(),
     [
+      // PROD-4：三套身份各自的真实登录（管理员 / 用户 / 客服）。
+      // 它们只接受账号密码，身份由服务端查库决定，请求体里没有角色或账号 id。
+      "app/api/admin/auth/login/route.ts",
       "app/api/admin/auth/logout/route.ts",
       "app/api/admin/auth/mock-login/route.ts",
+      // 管理员登录后修改**自己的**密码（对象来自会话，不来自请求体）
+      "app/api/admin/auth/password/route.ts",
       "app/api/admin/auth/session/route.ts",
+      "app/api/auth/login/route.ts",
       "app/api/auth/logout/route.ts",
       "app/api/auth/mock-login/route.ts",
+      // 用户注册：账号与密码由服务端创建，不接受角色字段
+      "app/api/auth/register/route.ts",
+      "app/api/staff/auth/login/route.ts",
       "app/api/staff/auth/logout/route.ts",
       "app/api/staff/auth/mock-login/route.ts",
       "app/api/staff/auth/session/route.ts",
     ],
-    "DEV-1 只提供身份切换工具：不得新增任何认证接口",
+    "认证接口清单固定：多一个就要先回答它属于哪套身份、由谁鉴权；打手没有自己的登录接口",
   );
 });
 
-test("§十三.9 没有新会话模型：全仓仍然只有三套会话 Cookie，且没有打手 Cookie", () => {
+test("§十三.9 没有新会话模型：仍然只有三套身份、六枚 Cookie，且没有打手 Cookie", () => {
   const cookieValues = new Set();
 
   for (const full of walk(path.join(ROOT, "lib"))) {
@@ -273,8 +282,18 @@ test("§十三.9 没有新会话模型：全仓仍然只有三套会话 Cookie�
 
   assert.deepEqual(
     [...cookieValues].sort(),
-    ["mock_admin_id", "mock_staff_id", "mock_user_id"],
-    "三套会话（用户 / 管理 / 客服），一个都不能多；打手身份建立在用户会话之上，没有自己的 Cookie",
+    [
+      // PROD-4：三套身份各有一枚不透明令牌的真实会话 Cookie……
+      "chaoge_admin_session",
+      "chaoge_staff_session",
+      "chaoge_user_session",
+      // ……以及一枚只在私有开关下生效的 Mock 会话 Cookie。
+      // 同一身份的两枚名字不同，因此「真实登录覆盖 Mock 登录」是可以被读出来的。
+      "mock_admin_id",
+      "mock_staff_id",
+      "mock_user_id",
+    ],
+    "三套身份、六枚 Cookie，一个都不能多；打手身份建立在用户会话之上，没有自己的 Cookie",
   );
 
   // ⚠️ 上面那条只认「导出常量 + 双引号字面量」这一种写法。DEV-1 交付审查时被
@@ -290,8 +309,24 @@ test("§十三.9 没有新会话模型：全仓仍然只有三套会话 Cookie�
 
   assert.deepEqual(
     callSites.sort(),
-    ["lib/auth/adminSession.ts", "lib/auth/session.ts", "lib/auth/staffSession.ts"],
-    "会话只允许在这三个模块里落地：多出一道调用点就等于多了一套会话；打手复用用户会话，不该有第四套",
+    [
+      "lib/auth/adminSession.ts",
+      // PROD-4：真实会话（不透明令牌）是**三套身份共用的一层**，不是第四套身份：
+      // Cookie 名由调用方按身份传入（`lookupRealSession("admin" | "staff" | "user")`），
+      // 它自己不拥有任何身份或 Cookie 名。
+      "lib/auth/realSession.ts",
+      "lib/auth/session.ts",
+      "lib/auth/staffSession.ts",
+    ],
+    "会话只允许在这三个身份模块 + 一层共用真实会话里落地；打手复用用户会话，不该有第四套",
+  );
+
+  // 共用层不得自己拥有一枚 Cookie 名：名字必须由三套身份模块传入
+  const realSession = stripComments(readFileSync(path.join(ROOT, "lib/auth/realSession.ts"), "utf8"));
+  assert.equal(
+    /export const [A-Z_]*COOKIE[A-Z_]* = "/.test(realSession),
+    false,
+    "真实会话层不该定义 Cookie 名：那会让它变成第四套身份",
   );
 });
 

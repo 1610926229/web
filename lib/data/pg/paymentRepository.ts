@@ -283,13 +283,23 @@ export function createPaymentRepository(db: PgQueryable): PaymentRepository {
 
     // 最多两轮：第二轮只在「冲突命中后、回读之前，那行被并发删掉」时才会发生
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const inserted = await db.query<OrderRow>(
-        `INSERT INTO orders (${ORDER_COLUMNS})
-         VALUES (${placeholders(values.length)})
-         ON CONFLICT (id) DO NOTHING
-         RETURNING ${ORDER_COLUMNS}`,
-        values,
-      );
+      let inserted: OrderRow[];
+      try {
+        inserted = await db.query<OrderRow>(
+          `INSERT INTO orders (${ORDER_COLUMNS})
+           VALUES (${placeholders(values.length)})
+           ON CONFLICT (id) DO NOTHING
+           RETURNING ${ORDER_COLUMNS}`,
+          values,
+        );
+      } catch (error) {
+        // `ON CONFLICT (id)` 只吞主键冲突；订单号撞上唯一索引时数据库仍会报 23505。
+        // 这不是业务错误，而是随机尾号恰好重复——交给事务入口重试（换一个新号）。
+        if (isOrderNoCollision(error)) {
+          throw new OrderNoCollisionError(order.orderNo);
+        }
+        throw error;
+      }
       if (inserted[0]) return;
 
       const existing = await findOrderById(order.id);
@@ -601,6 +611,29 @@ export const pgPaymentRepository: PaymentRepository = createPaymentRepository(la
 /* ─────────────────────── T1 的事务入口（PROD-1D） ─────────────────────── */
 
 /**
+ * 订单号撞上 `orders_order_no_key` 的唯一索引。
+ *
+ * 订单号是「日期 + 6 位随机尾号」，同一天内撞号在概率上会发生（生日问题：
+ * 一天 1000 单时约 0.4%）。这不是业务冲突，订单本身完全可以重建，
+ * 因此事务入口会**换一个新号重试**，而不是把失败暴露给用户。
+ */
+class OrderNoCollisionError extends Error {
+  readonly orderNo: string;
+
+  constructor(orderNo: string) {
+    super(`订单号重复：${orderNo}`);
+    this.name = "OrderNoCollisionError";
+    this.orderNo = orderNo;
+  }
+}
+
+function isOrderNoCollision(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; constraint?: unknown };
+  return candidate.code === "23505" && candidate.constraint === "orders_order_no_key";
+}
+
+/**
  * 内部信号：券在核销那一刻不可用。
  *
  * ⚠️ 它**不是**给上层看的错误——它唯一的职责是「把整个事务掀翻」。用抛错表达
@@ -646,8 +679,15 @@ class CouponUnavailableSignal extends Error {
  * 同一个提交点。**不是**「仓储自己再拿一条连接」——那种写法会让 BEGIN 与 COMMIT
  * 落在两条连接上，事务根本不存在（`TxHandle.connectionId` 正是用来证伪它的探针）。
  *
- * ⚠️ **本轮不激活**：`DATA_SOURCE` 未设置时应用仍走 Mock 伪事务，本函数目前的调用方
- * 只有测试（`tests/pgCheckoutTransactions.test.mjs`）。正式切换留到 activation round。
+ * ⚠️ **PROD-4 起由 `lib/services/checkout.ts` 在 `DATA_SOURCE=postgres` 时直接调用**；
+ * Mock 数据源仍走 Mock 伪事务。此前它只有测试调用方。
+ *
+ * ## 订单号碰撞重试
+ *
+ * `buildOrder` 是纯函数，但订单号里的随机尾号由它现场生成。撞上
+ * `orders_order_no_key` 时整个事务已经回滚（支付请求的认领也一起没了），
+ * 重新调用 `buildOrder` 会得到一个新的随机尾号，因此重试是安全的：
+ * 不会重复建单、不会重复核销券。
  */
 export async function confirmPaymentRequestPg(
   id: string,
@@ -658,21 +698,33 @@ export async function confirmPaymentRequestPg(
   | { kind: "coupon-unavailable"; reason: string }
   | null
 > {
-  try {
-    return await getPgExecutor().withTransaction(async (tx) => {
-      const outcome = await createPaymentRepository(tx).confirmPaymentRequest(
-        id,
-        result,
-        buildOrder,
-      );
-      // 券不可用 → 把结论扔出去触发 ROLLBACK。翻译在事务**之外**做（见 catch）。
-      if (outcome && "kind" in outcome) throw new CouponUnavailableSignal(outcome.reason);
-      return outcome;
-    });
-  } catch (error) {
-    if (error instanceof CouponUnavailableSignal) {
-      return { kind: "coupon-unavailable", reason: error.reason };
+  /** 6 位随机尾号连续撞号 5 次的概率约为 (n/1e6)^5，足够小；超过就说明出了别的问题。 */
+  const MAX_ORDER_NO_ATTEMPTS = 5;
+
+  for (let attempt = 1; attempt <= MAX_ORDER_NO_ATTEMPTS; attempt += 1) {
+    try {
+      return await getPgExecutor().withTransaction(async (tx) => {
+        const outcome = await createPaymentRepository(tx).confirmPaymentRequest(
+          id,
+          result,
+          buildOrder,
+        );
+        // 券不可用 → 把结论扔出去触发 ROLLBACK。翻译在事务**之外**做（见 catch）。
+        if (outcome && "kind" in outcome) throw new CouponUnavailableSignal(outcome.reason);
+        return outcome;
+      });
+    } catch (error) {
+      if (error instanceof CouponUnavailableSignal) {
+        return { kind: "coupon-unavailable", reason: error.reason };
+      }
+      // 订单号撞号：事务已整体回滚，换一个新号重跑（buildOrder 会重新生成尾号）
+      if (error instanceof OrderNoCollisionError && attempt < MAX_ORDER_NO_ATTEMPTS) {
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+
+  // 循环只会由 return / throw 退出，这里仅为类型完整性
+  throw new Error("订单号冲突重试次数耗尽");
 }

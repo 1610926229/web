@@ -19,6 +19,7 @@ import { ORDER_STATUS_LABELS, ORDER_TRANSITIONS } from "../lib/constants/orders.
 import {
   STAFF_ORDER_COMPANION_NOT_FOUND_MESSAGE,
   STAFF_ORDER_COMPANION_UNAVAILABLE_MESSAGE,
+  STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE,
   STAFF_ORDER_NOT_FOUND_MESSAGE,
   STAFF_ORDER_NOT_RELEASABLE_MESSAGE,
   STAFF_ORDER_NOT_REPLACEABLE_MESSAGE,
@@ -415,8 +416,8 @@ test("回池 2：serving → paid，五件事一次完成（清 servingAt、重�
   assert.ok(detail);
   assert.deepEqual(
     detail.allowedActions,
-    { canRelease: false, canReplace: false },
-    "回到 paid 之后这一单不该再有处置动作",
+    { canAssign: true, canRelease: false, canReplace: false },
+    "回到 paid 之后只剩「指派护航」——换人与回池都不该再出现",
   );
 });
 
@@ -1315,21 +1316,25 @@ test("多次换人：A→B→C→回池→再接，每一位都留下自己的�
 
 test("判据 1：allowedActions 的真值表——含「状态说有人在履约、字段却是空」这一格", () => {
   const cases = [
-    { status: "paid", actualCompanionId: null, expect: false },
-    { status: "accepted", actualCompanionId: COMPANION_A, expect: true },
-    { status: "serving", actualCompanionId: COMPANION_A, expect: true },
-    { status: "completed", actualCompanionId: COMPANION_A, expect: false },
-    { status: "refunded", actualCompanionId: null, expect: false },
+    { status: "paid", actualCompanionId: null, assign: true, inService: false },
+    { status: "accepted", actualCompanionId: COMPANION_A, assign: false, inService: true },
+    { status: "serving", actualCompanionId: COMPANION_A, assign: false, inService: true },
+    { status: "completed", actualCompanionId: COMPANION_A, assign: false, inService: false },
+    { status: "refunded", actualCompanionId: null, assign: false, inService: false },
     // 「状态说有人在履约、字段却是空」：必须**不**给按钮，
     // 否则客服点下去拿到的是 500（数据不自洽），而不是 400（这个按钮不该出现）
-    { status: "accepted", actualCompanionId: null, expect: false },
-    { status: "serving", actualCompanionId: null, expect: false },
+    { status: "accepted", actualCompanionId: null, assign: false, inService: false },
+    { status: "serving", actualCompanionId: null, assign: false, inService: false },
   ];
 
   for (const item of cases) {
     assert.deepEqual(
       staffOrderAllowedActions(item),
-      { canRelease: item.expect, canReplace: item.expect },
+      {
+        canAssign: item.assign,
+        canRelease: item.inService,
+        canReplace: item.inService,
+      },
       `status=${item.status} / actualCompanionId=${item.actualCompanionId} 的判据不对`,
     );
   }
@@ -1365,7 +1370,11 @@ test("判据 3：详情接口发出来的 allowedActions 就是服务端算的�
     staffOrderAllowedActions(paymentStore().orders.get(order.id)),
     "详情 DTO 上那份必须与判据函数逐字相同——两处各算一遍就会在某个状态上分叉",
   );
-  assert.deepEqual(detail.allowedActions, { canRelease: true, canReplace: true });
+  assert.deepEqual(detail.allowedActions, {
+    canAssign: false,
+    canRelease: true,
+    canReplace: true,
+  });
 });
 
 // ——————————————————— 八、既有能力不回归 ———————————————————
@@ -1464,13 +1473,15 @@ test("门禁 2：释放原语只有一份定义，三条释放路径共用它", 
   );
 });
 
-test("门禁 3：客服三个新地址都在，且都先 `requireStaff()` 再读请求体", () => {
+test("门禁 3：客服五个处置地址都在，且都先 `requireStaff()` 再读请求体", () => {
   const dir = path.join(ROOT, "app", "api", "staff", "orders", "[id]");
   const found = collectFiles(dir)
     .filter((file) => file.endsWith("route.ts"))
     .map((file) => path.relative(dir, file).replace(/\\/g, "/"))
     .sort();
   assert.deepEqual(found, [
+    "assign-candidates/route.ts",
+    "assign/route.ts",
     "release/route.ts",
     "replace-candidates/route.ts",
     "replace/route.ts",
@@ -1483,6 +1494,8 @@ test("门禁 3：客服三个新地址都在，且都先 `requireStaff()` 再读
     ["release", "route.ts"],
     ["replace", "route.ts"],
     ["replace-candidates", "route.ts"],
+    ["assign", "route.ts"],
+    ["assign-candidates", "route.ts"],
   ]) {
     const source = withoutImports(stripComments(readSource(path.join(dir, ...relative))));
     const guard = source.indexOf("requireStaff");
@@ -1562,6 +1575,8 @@ test("HTTP 身份矩阵：三个处置地址对非客服身份一律 401，护�
   // 与这里要验的「身份门」无关，混在一起会把 405 读成 401 的失败。
   // 方法本身另有断言（见本文件最下面那一条）。
   const endpoints = [
+    { path: `/api/staff/orders/${MISSING_ORDER}/assign`, method: "POST" },
+    { path: `/api/staff/orders/${MISSING_ORDER}/assign-candidates`, method: "GET" },
     { path: `/api/staff/orders/${MISSING_ORDER}/release`, method: "POST" },
     { path: `/api/staff/orders/${MISSING_ORDER}/replace`, method: "POST" },
     { path: `/api/staff/orders/${MISSING_ORDER}/replace-candidates`, method: "GET" },
@@ -1641,12 +1656,33 @@ test("HTTP 404 与 400：不存在的订单 404；缺原因 / 缺人一律 400",
   });
   assert.equal(noCompanion.status, 400, "缺 companionId 必须是 400");
 
+  // 指派与换人同一条参数校验：缺人不得变成 404
+  const noAssignCompanion = await requestWithCookie(
+    `/api/staff/orders/${MISSING_ORDER}/assign`,
+    cookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    },
+  );
+  assert.equal(noAssignCompanion.status, 400, "指派缺 companionId 必须是 400");
+
   const candidates = await requestWithCookie(
     `/api/staff/orders/${MISSING_ORDER}/replace-candidates`,
     cookie,
   );
   assert.equal(candidates.status, 404, "候选名单对不存在的订单同样是 404，不是空名单");
   assert.deepEqual(JSON.parse(candidates.body), {
+    error: { code: "NOT_FOUND", message: STAFF_ORDER_NOT_FOUND_MESSAGE },
+  });
+
+  const assignCandidates = await requestWithCookie(
+    `/api/staff/orders/${MISSING_ORDER}/assign-candidates`,
+    cookie,
+  );
+  assert.equal(assignCandidates.status, 404, "指派名单同样不能拿「空名单」冒充不存在");
+  assert.deepEqual(JSON.parse(assignCandidates.body), {
     error: { code: "NOT_FOUND", message: STAFF_ORDER_NOT_FOUND_MESSAGE },
   });
 });
@@ -1664,6 +1700,8 @@ test("HTTP 405：每个处置地址只认自己那一个方法，别的一律 40
   // （比如「先预览再退回」），那条 GET 会**绕过上一条里所有的 401 / 403 断言**
   // 成为新的匿名入口——所以下面按「地址 × 方法」逐格点名，而不是只抽查两个。
   const allowed = [
+    { path: `/api/staff/orders/${MISSING_ORDER}/assign`, method: "POST", why: "指派只有 POST" },
+    { path: `/api/staff/orders/${MISSING_ORDER}/assign-candidates`, method: "GET", why: "指派候选名单是只读的：多一个 POST 就多了一个没被设计过的写入口" },
     { path: `/api/staff/orders/${MISSING_ORDER}/release`, method: "POST", why: "释放只有 POST：给一个会改状态的地址开放 GET，等于给爬虫与预取留了一个写入口" },
     { path: `/api/staff/orders/${MISSING_ORDER}/replace`, method: "POST", why: "换人只有 POST" },
     { path: `/api/staff/orders/${MISSING_ORDER}/replace-candidates`, method: "GET", why: "候选名单是只读的：多一个 POST 就多了一个没被设计过的写入口" },
@@ -1773,8 +1811,8 @@ function httpSessions() {
   return httpSessionsPromise;
 }
 
-/** 走完整链路造一张「已被打手接单」的订单，返回订单 id。全程 HTTP，不碰预置数据。 */
-async function placeAcceptedOrderOverHttp(sessions) {
+/** 走完整链路造一张「已支付、还没人接」的订单，返回订单 id。全程 HTTP，不碰预置数据。 */
+async function placePaidOrderOverHttp(sessions) {
   const pay = await send("/api/orders/pay", {
     cookie: sessions.order,
     method: "POST",
@@ -1803,6 +1841,12 @@ async function placeAcceptedOrderOverHttp(sessions) {
   );
   const orderId = confirm.json.data.orderId;
   assert.ok(orderId, "支付成功后必须拿到 orderId");
+  return orderId;
+}
+
+/** 走完整链路造一张「已被打手接单」的订单，返回订单 id。 */
+async function placeAcceptedOrderOverHttp(sessions) {
+  const orderId = await placePaidOrderOverHttp(sessions);
 
   const pool = await send("/api/companion/dispatches", { cookie: sessions.companion });
   assert.equal(pool.status, 200, `打手会话必须能读到订单池：${pool.raw}`);
@@ -1830,8 +1874,8 @@ test("HTTP 正例（回池）：客服带原因打过去真的把订单退回公
   assert.equal(before.status, 200, `客服详情必须能读到这一单：${before.raw}`);
   assert.deepEqual(
     before.json.data.allowedActions,
-    { canRelease: true, canReplace: true },
-    "刚被接单的单必须给出两个处置动作",
+    { canAssign: false, canRelease: true, canReplace: true },
+    "刚被接单的单必须给出回池与换人两个处置动作，不能再指派",
   );
 
   const candidates = await send(`/api/staff/orders/${orderId}/replace-candidates`, {
@@ -1859,8 +1903,8 @@ test("HTTP 正例（回池）：客服带原因打过去真的把订单退回公
   assert.equal(after.status, 200);
   assert.deepEqual(
     after.json.data.allowedActions,
-    { canRelease: false, canReplace: false },
-    "回到 paid 之后这一单不该再有处置动作——判据是服务端从订单现算的",
+    { canAssign: true, canRelease: false, canReplace: false },
+    "回到 paid 之后只剩「指派护航」——判据是服务端从订单现算的",
   );
 
   const candidatesAfter = await send(`/api/staff/orders/${orderId}/replace-candidates`, {
@@ -1916,6 +1960,75 @@ test("HTTP 正例（换人）：客服指定新护航真的换成了他——新
     ids.includes(previous),
     true,
     "被换掉的那位已经空闲且仍可接单，应当重新回到名单里——这一格证明订单真的换了人",
+  );
+});
+
+test("HTTP 正例（指派）：客服给还没人接的单指派护航——订单真的进入 accepted，且不能再指派一次", { skip: SKIP_HTTP }, async () => {
+  const sessions = await httpSessions();
+  if (!sessions) return;
+
+  const orderId = await placePaidOrderOverHttp(sessions);
+
+  // 处置之前：服务端算出来的判据说这一单只能指派
+  const before = await send(`/api/staff/orders/${orderId}`, { cookie: sessions.staff });
+  assert.equal(before.status, 200, `客服详情必须能读到这一单：${before.raw}`);
+  assert.deepEqual(
+    before.json.data.allowedActions,
+    { canAssign: true, canRelease: false, canReplace: false },
+    "还没人接的单只能指派——回池 / 换人对一张没有履约人的单没有意义",
+  );
+
+  const candidates = await send(`/api/staff/orders/${orderId}/assign-candidates`, {
+    cookie: sessions.staff,
+  });
+  assert.equal(candidates.status, 200, `指派名单必须能读到：${candidates.raw}`);
+  const target = candidates.json.data.items[0];
+  assert.ok(target, "名单里必须有可接单的护航，否则这一条空转");
+
+  const assigned = await send(`/api/staff/orders/${orderId}/assign`, {
+    cookie: sessions.staff,
+    method: "POST",
+    body: { companionId: target.companionId },
+  });
+  assert.equal(assigned.status, 200, `指派必须成功：${assigned.raw}`);
+  assert.equal(assigned.json.data.orderId, orderId);
+  assert.equal(assigned.json.data.status, "accepted");
+  assert.equal(assigned.json.data.statusLabel, "已接单");
+  assert.equal(assigned.json.data.companionId, target.companionId);
+  assert.equal(assigned.json.data.changed, true);
+  assert.ok(assigned.json.data.orderNo, "接口必须回单号：客服要向用户报的就是它");
+  assert.ok(assigned.json.data.assignedAt, "必须给出这一次指派的时刻");
+
+  // 用服务端自己的只读接口回读：客服看到的状态与用户看到的状态是同一份真相
+  const after = await send(`/api/staff/orders/${orderId}`, { cookie: sessions.staff });
+  assert.equal(after.status, 200);
+  assert.deepEqual(
+    after.json.data.allowedActions,
+    { canAssign: false, canRelease: true, canReplace: true },
+    "指派之后这一单进入履约，处置动作换成回池 / 换人",
+  );
+
+  const userView = await send(`/api/orders/${orderId}`, { cookie: sessions.order });
+  assert.equal(userView.status, 200, `用户必须能读到自己的这一单：${userView.raw}`);
+  assert.equal(userView.json.data.status, "accepted", "用户看到的也必须是「已接单」");
+  assert.equal(userView.json.data.actualCompanionId, target.companionId);
+
+  // 幂等判据是状态本身：第二次点击 → 400，而不是悄悄再写一遍
+  const again = await send(`/api/staff/orders/${orderId}/assign`, {
+    cookie: sessions.staff,
+    method: "POST",
+    body: { companionId: target.companionId },
+  });
+  assert.equal(again.status, 400, "第二次指派必须被状态判据挡住");
+  assert.equal(JSON.parse(again.raw).error.message, STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE);
+
+  const candidatesAfter = await send(`/api/staff/orders/${orderId}/assign-candidates`, {
+    cookie: sessions.staff,
+  });
+  assert.equal(
+    candidatesAfter.status,
+    400,
+    "已经有人接的单不该再给出一份「可以指派」的名单",
   );
 });
 

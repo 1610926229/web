@@ -5,6 +5,7 @@ import {
   DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED,
   DISPATCH_NOTIFICATION_EXCLUSIVE_TIMEOUT,
   DISPATCH_NOTIFICATION_PUBLIC_TIMEOUT,
+  DISPATCH_NOTIFICATION_STAFF_ASSIGNED,
   DISPATCH_NOTIFICATION_STAFF_REASSIGNED,
   DISPATCH_NOTIFICATION_STAFF_REPLACED,
   plusMinutes,
@@ -42,12 +43,15 @@ import type {
   Order,
   OrderCompanionSnapshot,
   OrderStatus,
+  StaffOrderAssignOutcome,
   StaffOrderReleaseOutcome,
   StaffOrderReplaceOutcome,
 } from "@/lib/types/order";
 import type { RefundStatus } from "@/lib/types/refund";
+import { buildAuditEntry } from "../adminWriteSupport";
 import type { DispatchSweepResult } from "../companionDispatchTransaction";
 import type { DirectRefundOutcome } from "../directRefundTransaction";
+import { appendAuditEntryTx } from "./adminAuditRepository";
 import { getPgExecutor, type PgQueryable, type TxHandle } from "./executor";
 import {
   COMPANION_COLUMNS,
@@ -2104,6 +2108,168 @@ export async function replaceOrderCompanionByStaffPg(input: {
       newCompanionId: next.id,
       releaseRecordId: written.releaseId,
       replacedAt: input.at,
+      changed: true,
+    };
+  });
+}
+
+/**
+ * 客服给**还没有人接**的订单（`paid`）直接指派护航（PROD-4）
+ * —— `assignOrderCompanionByStaff` 的 Pg 实现。
+ *
+ * ## 与「换人」的事务边界为什么不同
+ *
+ * 换人要解除一个**存在**的绑定（退出历史 + 作废完成材料 + 订单回 paid），
+ * 本动作没有可解除的东西：派单还在等人、订单没有实际履约人。因此这里没有
+ * `releaseCurrentAssignmentTx`，也不需要那张退出历史表——只写四件事：
+ *
+ * 1. 派单 `→ accepted`，`accepted_via = 'staff'`；
+ * 2. 订单 `→ accepted`，冻结 `acceptedAt` / `actualCompanionId` / `companion` 快照，
+ *    `ever_accepted_at = COALESCE(…)`；
+ * 3. 通知下单用户；
+ * 4. `admin_audit_entries` 写一条 `order.assign`（actorRole = customer_service）。
+ *
+ * ⚠️ **不写 `companion_accept_events`**：指派不是护航主动接单，不计入接单榜
+ * （P1-5 §九-F 产品裁定）。`accepted_via = 'staff'` 让存量派生通道分得清来源。
+ *
+ * ## 锁
+ *
+ * 与 T2（护航自己接单）同序：**先锁订单，再锁派单**。两个并发的「客服指派」
+ * 因此串行化在同一行订单上；后到的那个读到 `accepted`，走 `not-assignable`，
+ * 不会再写任何字节。
+ *
+ * ⚠️ 专属池不能绕过：用户指定了 A、专属期未过时，客服也不能指派 B。
+ * 时限与 `acceptDispatchPg` / `sweepExpiredDispatches` 用同一份
+ * `currentDeadlineAt()`，不另造第二套超时算法。
+ */
+export async function assignOrderCompanionByStaffPg(input: {
+  orderId: string;
+  companionId: string;
+  staffId: string;
+  staffName: string | null;
+  operationId: string;
+  at: string;
+}): Promise<StaffOrderAssignOutcome> {
+  return getPgExecutor().withTransaction(async (tx) => {
+    /* —— 第 1 步：订单存在 —— */
+    const orderRow = await lockOrder(tx, input.orderId);
+    if (!orderRow) return { kind: "not-found" };
+    const order = toOrder(orderRow);
+
+    /* —— 第 2 步：只有「已支付、还没有人接」的订单能指派 —— */
+    if (
+      order.status !== "paid" ||
+      order.actualCompanionId !== null ||
+      !canTransitionOrder(order.status, "accepted")
+    ) {
+      return { kind: "not-assignable", status: order.status };
+    }
+
+    /* —— 第 3 步：这一单对应的派单记录（锁在订单之后）—— */
+    const recordRow = await lockDispatchByOrder(tx, order.id);
+    if (!recordRow) return { kind: "dispatch-missing" };
+    const record = toDispatch(recordRow);
+
+    /* —— 第 4 步：派单还能不能接 —— */
+    if (record.state === "timed_out" || record.state === "accepted") {
+      return { kind: "not-assignable", status: order.status };
+    }
+
+    /* —— 第 5 步：当前池的等待时限 —— */
+    const deadlineAt = currentDeadlineAt(record);
+    if (deadlineAt === null) return { kind: "dispatch-missing" };
+    if (Date.parse(deadlineAt) <= Date.parse(input.at)) return { kind: "expired" };
+
+    /* —— 第 6 步：专属池只能指派给用户指定的那位 —— */
+    if (record.state === "exclusive" && record.exclusiveCompanionId !== input.companionId) {
+      return { kind: "not-eligible" };
+    }
+
+    /* —— 第 7 步：护航记录存在 —— */
+    const next = await readCompanion(tx, input.companionId);
+    if (!next) return { kind: "companion-not-found" };
+
+    /* —— 第 8 步：资格（复用仓库里唯一的那个谓词）—— */
+    if (!isCompanionAcceptingOrders(next)) return { kind: "companion-unavailable" };
+
+    /* —— 第 9 步：禁止自接单（EX-DISPATCH-08）—— */
+    if (next.userId !== null && order.userId === next.userId) return { kind: "self-order" };
+
+    /* —— 第 10 步：写入之前把通知备好（文案非法要在任何写入之前失败）—— */
+    const notification = planNotification({
+      userId: order.userId,
+      kind: "dispatch",
+      content: DISPATCH_NOTIFICATION_STAFF_ASSIGNED,
+      href: `/orders/${order.id}`,
+      at: input.at,
+    });
+
+    /* —— 第 11 步：四件事同一个事务 —— */
+    const acceptedRows = await tx.query<DispatchRow>(
+      `UPDATE dispatch_records
+          SET state = 'accepted',
+              accepted_by_companion_id = $2,
+              accepted_at = $3,
+              accepted_via = 'staff',
+              updated_at = $3
+        WHERE id = $1
+          AND state IN ('exclusive', 'public')
+        RETURNING ${DISPATCH_COLUMNS}`,
+      [record.id, next.id, input.at],
+    );
+    // 行锁已被持有，这一步理论上不会落空；真落空说明数据在此期间被别的路径改过，
+    // 事务回滚，一个字节都不留
+    if (!acceptedRows[0]) return { kind: "inconsistent", orderId: order.id };
+
+    await tx.query(
+      `UPDATE orders
+          SET status = 'accepted',
+              accepted_at = $2,
+              actual_companion_id = $3,
+              companion = $4::jsonb,
+              ever_accepted_at = COALESCE(ever_accepted_at, $2)
+        WHERE id = $1`,
+      [order.id, input.at, next.id, JSON.stringify(toOrderCompanionSnapshot(next))],
+    );
+
+    await appendNotification(tx, notification);
+
+    // 审计与业务写入同一事务：客服的每一次指派都要能回答
+    // 「谁、在什么时候、把这一单给了谁」
+    await appendAuditEntryTx(
+      tx,
+      buildAuditEntry({
+        ctx: {
+          actorId: input.staffId,
+          actorRole: "customer_service",
+          actorName: input.staffName,
+          operationId: input.operationId,
+          at: input.at,
+        },
+        action: "order.assign",
+        targetType: "order",
+        targetId: order.id,
+        before: {
+          status: order.status,
+          actualCompanionId: null,
+          dispatchState: record.state,
+        },
+        after: {
+          status: "accepted",
+          actualCompanionId: next.id,
+          companionName: next.displayName,
+          dispatchState: "accepted",
+          acceptedVia: "staff",
+        },
+      }),
+    );
+
+    return {
+      kind: "ok",
+      orderId: order.id,
+      orderNo: order.orderNo,
+      companionId: next.id,
+      assignedAt: input.at,
       changed: true,
     };
   });

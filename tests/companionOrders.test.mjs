@@ -1073,14 +1073,15 @@ test("§十一.23 两半都在：客服在四个详情页看得到取消历史�
     "客服进不了管理后台：这条规则在 lib/constants/admin.ts 里冻结，本用例只是引用它",
   );
 
-  // 事实二：客服端的订单段有**五个**地址——两个只读（列表 / 详情）与
-  // **三个 P0-11 的处置入口**（退回公共池 / 换人 / 换人候选名单）。
+  // 事实二：客服端的订单段有**七个**地址——两个只读（列表 / 详情）、
+  // **三个 P0-11 的处置入口**（退回公共池 / 换人 / 换人候选名单），以及
+  // **两个 PROD-4 的指派入口**（指派护航 / 指派候选名单）。
   // ⚠️ P0-6 时这里断言的是「一个都没有」（当时的做法是只挂既有详情 DTO）；
-  // P0-10 按要求开了两个只读地址；P0-11 又开了三个写地址。
-  // ⚠️ 那三个写的**不是订单记录**：它们改的是这一单**当前的履约绑定**
-  // （退回公共池 / 指定新护航），不改金额、不改商品、不写退款，也不改订单状态本身
-  // 除「回到 paid」或「回到 accepted」之外的东西。逐条列出而不是只数数量：
-  // 多出任何一个地址都要先回答「它写什么」。
+  // P0-10 按要求开了两个只读地址；P0-11 又开了三个写地址；PROD-4 再开两个。
+  // ⚠️ 那五个写的**不是订单记录**：它们改的是这一单**当前的履约绑定**
+  // （退回公共池 / 指定新护航 / 给还没人接的单指派），不改金额、不改商品、不写退款，
+  // 也不改订单状态本身除「回到 paid / accepted」或「paid → accepted」之外的东西。
+  // 逐条列出而不是只数数量：多出任何一个地址都要先回答「它写什么」。
   const staffOrderRoutes = collectFiles(path.join(ROOT, "app", "api", "staff"))
     .map((file) => path.relative(path.join(ROOT, "app"), file).replace(/\\/g, "/"))
     .filter((route) => route.split("/").includes("orders"))
@@ -1088,13 +1089,15 @@ test("§十一.23 两半都在：客服在四个详情页看得到取消历史�
   assert.deepEqual(
     staffOrderRoutes,
     [
+      "api/staff/orders/[id]/assign-candidates/route.ts",
+      "api/staff/orders/[id]/assign/route.ts",
       "api/staff/orders/[id]/release/route.ts",
       "api/staff/orders/[id]/replace-candidates/route.ts",
       "api/staff/orders/[id]/replace/route.ts",
       "api/staff/orders/[id]/route.ts",
       "api/staff/orders/route.ts",
     ],
-    "客服端订单段只有这五个地址；多出任何一个都要先回答「它写什么」",
+    "客服端订单段只有这七个地址；多出任何一个都要先回答「它写什么」",
   );
 
   // 两个只读的：一个写方法都不许有
@@ -1109,10 +1112,12 @@ test("§十一.23 两半都在：客服在四个详情页看得到取消历史�
     );
   }
 
-  // P0-11 的三个：两个写入的只有 POST，候选名单只有 GET；
-  // 三个都不导出 PATCH / PUT / DELETE——「处置」只有「退回」与「换人」两种动作，
+  // P0-11 / PROD-4 的五个：三个写入的只有 POST，两个候选名单只有 GET；
+  // 五个都不导出 PATCH / PUT / DELETE——「处置」只有「退回」「换人」「指派」三种动作，
   // 没有「改这一单的其它东西」这种入口
   for (const [route, expectedMethod] of [
+    ["api/staff/orders/[id]/assign/route.ts", "POST"],
+    ["api/staff/orders/[id]/assign-candidates/route.ts", "GET"],
     ["api/staff/orders/[id]/release/route.ts", "POST"],
     ["api/staff/orders/[id]/replace/route.ts", "POST"],
     ["api/staff/orders/[id]/replace-candidates/route.ts", "GET"],
@@ -1248,7 +1253,7 @@ function functionBody(code, name) {
 /** 领域 Guard 的**字面**判据：动作必须自己看订单此刻的状态，而不是只问状态机表。 */
 const STATUS_GUARD = 'order.status !== "accepted"';
 
-test("结构约束：打手订单伪事务全程无 await，四个动作路径各自保留领域 Guard，对外只有五个入口", () => {
+test("结构约束：打手订单伪事务全程无 await，五个动作路径各自保留领域 Guard，对外只有六个入口", () => {
   const code = stripComments(readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")));
 
   // 原子性不是靠运气：区段里出现任何一个 `await`，就等于把「读—判断—写」拆到两个 tick 上，
@@ -1270,8 +1275,20 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
     assert.ok(code.includes(writer), `取消必须调用 ${writer}，否则四件事里少了一件`);
   }
 
-  // 幂等走的是 store 级索引，**不是**管理操作审计表（D1）
-  assert.equal(code.includes("adminWriteSupport"), false, "打手取消不是管理行为，不该写进管理审计表");
+  // 幂等走的是 store 级索引，**不是**管理操作审计表（D1）。
+  // ⚠️ PROD-4 的「客服指派」是**管理行为**，它必须写审计；因此判据从全文件级
+  // 收窄到逐函数：打手侧的两条动作路径不得碰审计表，指派路径必须碰。
+  for (const name of ["cancelAcceptedOrderMock", "startCompanionOrderMock"]) {
+    assert.equal(
+      functionBody(code, name).includes("adminWriteSupport"),
+      false,
+      `${name} 不是管理行为，不该写进管理审计表`,
+    );
+  }
+  assert.ok(
+    functionBody(code, "assignOrderCompanionByStaffMock").includes("buildAuditEntry("),
+    "客服指派必须写审计：谁把这一单交给了谁，是事后唯一能查的答案",
+  );
 
   // —— 状态机表只能当**结构校验之一**，不能替代领域 Guard ——
   //
@@ -1318,8 +1335,9 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
   // 没有 Guard 的门」。P0-11 把这两扇门正式装上了，因此那条禁令**不是被删掉**，
   // 而是被换成正面断言：每扇门自己带 Guard，且各自的调用条件能被单独看见。
   //
-  // 五个入口：打手侧两个（取消接单 / 开始服务）+ 客服侧两个（退回公共池 / 指定换人）
-  // + 封禁回池一个（同步）。逐条列出而不是只数数量——多一个就要先回答「它的 Guard 是什么」。
+  // 六个入口：打手侧两个（取消接单 / 开始服务）+ 客服侧三个（退回公共池 / 指定换人 /
+  // 给还没人接的单指派护航）+ 封禁回池一个（同步）。逐条列出而不是只数数量——
+  // 多一个就要先回答「它的 Guard 是什么」。
   //
   // ⚠️ PROD-1E 把四个路由入口的实现改名成 `*Mock`，并在同文件里加了四个同名的薄门面。
   // 「对外只有五个入口」因此变成两条独立的断言：滤掉 `*Mock` 之后**恰好**还是那五个名字
@@ -1331,6 +1349,7 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
     .sort();
   const nonMockExports = exported.filter((name) => !name.endsWith("Mock"));
   assert.deepEqual(nonMockExports, [
+    "assignOrderCompanionByStaff",
     "cancelAcceptedOrder",
     "releaseOrderByStaff",
     "releaseOrdersForCompanion",
@@ -1338,6 +1357,7 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
     "startCompanionOrder",
   ]);
   for (const mockName of [
+    "assignOrderCompanionByStaffMock",
     "cancelAcceptedOrderMock",
     "releaseOrderByStaffMock",
     "replaceOrderCompanionByStaffMock",
@@ -1346,12 +1366,13 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
     assert.ok(exported.includes(mockName), `${mockName} 必须存在：它是 Mock 实现，被整个删掉会让门面静默回落`);
   }
 
-  // 四个**路由门面**必须是纯选择：函数体里既有 `isPostgresDataSourceEnabled()` 判据，
+  // 五个**路由门面**必须是纯选择：函数体里既有 `isPostgresDataSourceEnabled()` 判据，
   // 也有对应的 `*Pg(` 调用——门面是路由，不是实现（实现已经搬到 `*Mock` 名下）。
-  // ⚠️ 第五个入口 `releaseOrdersForCompanion` **不是**门面：它刻意不路由（是
-  // `setCompanionFlags` 原子区段同步调用的原语），因此路由断言只覆盖这四个，
+  // ⚠️ 第六个入口 `releaseOrdersForCompanion` **不是**门面：它刻意不路由（是
+  // `setCompanionFlags` 原子区段同步调用的原语），因此路由断言只覆盖这五个，
   // 而它自己的「不路由」性质由下面的同步断言 + tests/pgRoutingGates.test.mjs (B) 一起守。
   for (const name of [
+    "assignOrderCompanionByStaff",
     "cancelAcceptedOrder",
     "startCompanionOrder",
     "releaseOrderByStaff",
@@ -1382,6 +1403,16 @@ test("结构约束：打手订单伪事务全程无 await，四个动作路径�
       `${name} 缺少直接看 ${STATUS_GUARD} 的领域 Guard：客服也不该照着一张表就把单退回或换人`,
     );
   }
+
+  // 指派的前置条件不是 accepted，而是 **paid 且还没有履约人**：
+  // 指派是「从没人接走到有人接」，对一张已经有人接的单做这件事就是换人，
+  // 那条路径有自己的入口与自己的 Guard。
+  const assignBody = functionBody(code, "assignOrderCompanionByStaffMock");
+  assert.ok(
+    assignBody.includes('order.status !== "paid"') &&
+      assignBody.includes("order.actualCompanionId !== null"),
+    "指派必须自己直接判断「paid 且没有人接」：不能借状态机替它回答",
+  );
 
   // 封禁回池**必须是同步函数**：它被 `setCompanionFlags` 的原子区段直接调用，
   // 写成 `async` 之后正确性就只剩「调用方记得不要 await」这一条口头约定，

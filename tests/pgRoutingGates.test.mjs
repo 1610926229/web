@@ -192,6 +192,9 @@ const EXPECTED_FACADES = {
     ["sweepExpiredDispatches", "sweepExpiredDispatchesPg"],
   ],
   "lib/data/companionOrderTransaction.ts": [
+    // PROD-4：客服给还没人接的单指派护航。它与回池 / 换人是三个门面，
+    // 前置状态不同、审计动作名不同，因此不能合成一个入口。
+    ["assignOrderCompanionByStaff", "assignOrderCompanionByStaffPg"],
     ["cancelAcceptedOrder", "cancelAcceptedOrderPg"],
     ["releaseOrderByStaff", "releaseOrderByStaffPg"],
     ["replaceOrderCompanionByStaff", "replaceOrderCompanionByStaffPg"],

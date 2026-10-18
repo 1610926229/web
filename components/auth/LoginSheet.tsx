@@ -17,12 +17,15 @@ import { PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION } from "@/lib/config/publicPrevi
 export default function LoginSheet({
   open,
   mockAuthEnabled,
+  realAuthEnabled = false,
   publicPreview = false,
   onClose,
   onSuccess,
 }: {
   open: boolean;
   mockAuthEnabled: boolean;
+  /** PROD-4：真实邮箱密码登录是否可用 */
+  realAuthEnabled?: boolean;
   /** 公网只读预览：不提供登录入口，必须明确说明「暂不可用」而不是提示模拟登录。 */
   publicPreview?: boolean;
   onClose: () => void;
@@ -37,11 +40,14 @@ export default function LoginSheet({
       <div className="flex flex-1 flex-col overflow-y-auto">
         <LoginGate
           mockAuthEnabled={mockAuthEnabled}
+          realAuthEnabled={realAuthEnabled && !publicPreview}
           title={publicPreview ? "该功能暂不可用" : "登录后继续"}
           description={
             publicPreview
               ? PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION
-              : "收藏、联系客服与购买都需要先登录。当前为开发阶段的模拟登录，不会调用真实微信接口。"
+              : realAuthEnabled
+                ? "收藏、联系客服与购买都需要先登录。请使用邮箱与密码登录，或先注册一个账号。"
+                : "收藏、联系客服与购买都需要先登录。当前为开发阶段的模拟登录，不会调用真实微信接口。"
           }
           onSuccess={onSuccess}
         />

@@ -5,8 +5,15 @@ import {
   adminRoleLabel,
   canEnterAdminConsole,
 } from "@/lib/constants/admin";
+import { consumePasswordCheckTime, verifyPassword } from "@/lib/auth/password";
+import {
+  createRealSession,
+  destroyRealSession,
+  isRealAuthEnabled,
+} from "@/lib/auth/realSession";
 import { clearSessionAdmin, getSessionAdmin, setSessionAdmin } from "@/lib/auth/adminSession";
 import { isMockAdminEnabled } from "@/lib/config/env";
+import { findAdminCredentialByUsername } from "@/lib/data/pg/authRepository";
 import { getAdminRepository } from "@/lib/data/adminRepository";
 import { MOCK_ADMIN_LOGIN_ID } from "@/lib/mocks/fixtures/adminSeed";
 import type { AdminAccount, AdminSessionUser } from "@/lib/types/admin";
@@ -118,10 +125,66 @@ export async function loginMockAdmin(): Promise<AdminSessionUser> {
  * 没有可登出的对象，按接口不存在返回 404。
  */
 export async function logoutAdmin(): Promise<{ ok: true }> {
+  // PROD-4：真实会话生效时吊销数据库记录并删除两种 Cookie（理由同客服端）。
+  if (isRealAuthEnabled()) {
+    await destroyRealSession("admin");
+    return { ok: true };
+  }
+
   if (!isMockAdminEnabled()) {
     throw new ApiError("NOT_FOUND", ADMIN_MOCK_LOGIN_DISABLED_MESSAGE, 404);
   }
 
   await clearSessionAdmin();
   return { ok: true };
+}
+
+/** 管理员登录失败统一文案：不区分「登录名不存在」与「密码错误」。 */
+export const ADMIN_INVALID_CREDENTIALS_MESSAGE = "登录名或密码不正确";
+export const ADMIN_REAL_LOGIN_DISABLED_MESSAGE = "管理员密码登录尚未开放";
+
+/**
+ * 管理员真实登录：登录名 + 密码。
+ *
+ * 与客服端同一套规则：凭据失败一律 401 + 同一句话；密码正确但账号停用 /
+ * 角色不对才返回 403。会话写入 `chaoge_admin_session`，与另外两端互不相通。
+ *
+ * ⚠️ 本函数不读任何角色字段：角色来自 `admin_accounts`，请求体里没有位置。
+ */
+export async function loginAdminWithPassword(
+  username: unknown,
+  password: unknown,
+): Promise<AdminSessionUser> {
+  if (!isRealAuthEnabled()) {
+    throw new ApiError("NOT_FOUND", ADMIN_REAL_LOGIN_DISABLED_MESSAGE, 404);
+  }
+
+  const usernameText = typeof username === "string" ? username.trim() : "";
+  const passwordText = typeof password === "string" ? password : "";
+
+  if (!usernameText || !passwordText) {
+    await consumePasswordCheckTime("invalid-admin-login");
+    throw new ApiError("UNAUTHORIZED", ADMIN_INVALID_CREDENTIALS_MESSAGE, 401);
+  }
+
+  const credential = await findAdminCredentialByUsername(usernameText);
+  if (!credential) {
+    await consumePasswordCheckTime(passwordText);
+    throw new ApiError("UNAUTHORIZED", ADMIN_INVALID_CREDENTIALS_MESSAGE, 401);
+  }
+
+  const matches = await verifyPassword(passwordText, credential.passwordHash);
+  if (!matches) {
+    throw new ApiError("UNAUTHORIZED", ADMIN_INVALID_CREDENTIALS_MESSAGE, 401);
+  }
+
+  const account = await getAdminRepository().findAdminById(credential.subjectId);
+  if (!account || !account.enabled || !canEnterAdminConsole(account.role)) {
+    throw new ApiError("FORBIDDEN", ADMIN_FORBIDDEN_MESSAGE, 403);
+  }
+
+  await createRealSession("admin", account.id);
+  await getAdminRepository().markLoggedIn(account.id, new Date().toISOString());
+
+  return toAdminSessionUser(account);
 }

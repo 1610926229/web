@@ -1,5 +1,6 @@
 import AdminPageHeading from "@/components/admin/AdminPageHeading";
 import AdminStaffCreateForm from "@/components/admin/AdminStaffCreateForm";
+import { isRealAuthEnabled } from "@/lib/auth/realSession";
 import { ADMIN_STAFF_CREATE_PAGE_TITLE, ADMIN_STAFF_LIST_TITLE } from "@/lib/constants/adminStaff";
 
 /**
@@ -21,7 +22,7 @@ export default function AdminCustomerServiceNewPage() {
         backLabel={ADMIN_STAFF_LIST_TITLE}
       />
 
-      <AdminStaffCreateForm />
+      <AdminStaffCreateForm realAuthEnabled={isRealAuthEnabled()} />
     </div>
   );
 }

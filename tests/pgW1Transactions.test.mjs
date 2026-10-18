@@ -9,6 +9,7 @@ import { seedDatabase } from "../lib/data/pg/seed.ts";
 import {
   acceptDispatchPg,
   approveCompletionPg,
+  assignOrderCompanionByStaffPg,
   cancelAcceptedOrderPg,
   directRefundOrderPg,
   releaseOrderByStaffPg,
@@ -2141,4 +2142,198 @@ test("T7 中途失败 → 订单 / 派单 / 退出历史全部回滚", { skip: S
   assert.equal(dispatch.accepted_by_companion_id, target.actual_companion_id);
   assert.equal(dispatch.accepted_via, "companion", "改绑也一起回滚");
   assert.equal((await readReleases(target.id)).length, 0);
+});
+
+/* ═════════ = T-ASSIGN · 客服给待接单指派护航（PROD-4） ═════════ */
+
+test("PROD-4 指派成功：派单 / 订单 / 通知 / 审计一起落库，**不写接单事件**", { skip: SKIP }, async () => {
+  const target = await findPublicDispatch();
+  const [next] = await findAcceptingCompanions({ excludeUserId: target.user_id, limit: 1 });
+  assert.ok(next, "需要一位不是下单用户本人的可接单护航");
+
+  const operationId = "op_assign_pg_1";
+  const result = await assignOrderCompanionByStaffPg({
+    orderId: target.order_id,
+    companionId: next.id,
+    staffId: STAFF_ID,
+    staffName: "客服小超",
+    operationId,
+    at: AT,
+  });
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.companionId, next.id);
+  assert.equal(result.assignedAt, AT);
+
+  const order = await readOrder(target.order_id);
+  assert.equal(order.status, "accepted");
+  assert.equal(order.actual_companion_id, next.id);
+  assert.equal(order.accepted_at, AT);
+  assert.equal(order.ever_accepted_at, AT, "第一次被承接（哪怕是客服指派）要写下来");
+
+  const dispatch = await readDispatch(target.dispatch_id);
+  assert.equal(dispatch.state, "accepted");
+  assert.equal(dispatch.accepted_by_companion_id, next.id);
+  assert.equal(dispatch.accepted_at, AT);
+  assert.equal(
+    dispatch.accepted_via,
+    "staff",
+    "`accepted_via` 必须写 staff：派生通道靠它分辨「被指派的」与「自己接的」",
+  );
+
+  assert.equal(
+    await countRows("companion_accept_events", "WHERE order_id = $1", [target.order_id]),
+    0,
+    "订单进入 accepted ≠ 产生接单事件：指派不计入接单榜",
+  );
+
+  assert.equal(
+    await countRows("notifications", "WHERE user_id = $1 AND title = $2", [
+      order.user_id,
+      "客服已为你安排护航",
+    ]),
+    1,
+    "下单用户必须收到一条「客服已为你安排护航」",
+  );
+
+  const audits = await executor().query(
+    `SELECT action, actor_id, actor_role, actor_name, target_type, target_id, operation_id,
+            before, after
+       FROM admin_audit_entries
+      WHERE target_id = $1`,
+    [target.order_id],
+  );
+  assert.equal(audits.length, 1, "一次指派写且只写一条审计");
+  assert.equal(audits[0].action, "order.assign");
+  assert.equal(audits[0].actor_id, STAFF_ID);
+  assert.equal(audits[0].actor_role, "customer_service");
+  assert.equal(audits[0].actor_name, "客服小超");
+  assert.equal(audits[0].target_type, "order");
+  assert.equal(audits[0].operation_id, operationId);
+  assert.equal(audits[0].before.status, "paid");
+  assert.equal(audits[0].after.status, "accepted");
+  assert.equal(audits[0].after.actualCompanionId, next.id);
+  assert.equal(audits[0].after.acceptedVia, "staff");
+
+  // 所有写入走同一条连接
+  assert.equal((await writePids()).length, 1, "一次指派必须在同一个事务连接上完成");
+});
+
+test("PROD-4 指派是状态判据：第二次到达 → not-assignable，且一笔不写", { skip: SKIP }, async () => {
+  const target = await findPublicDispatch();
+  const [next] = await findAcceptingCompanions({ excludeUserId: target.user_id, limit: 1 });
+  assert.ok(next);
+
+  const first = await assignOrderCompanionByStaffPg({
+    orderId: target.order_id,
+    companionId: next.id,
+    staffId: STAFF_ID,
+    staffName: "客服小超",
+    operationId: "op_assign_pg_2a",
+    at: AT,
+  });
+  assert.equal(first.kind, "ok");
+  await clearWriteLog();
+
+  const second = await assignOrderCompanionByStaffPg({
+    orderId: target.order_id,
+    companionId: next.id,
+    staffId: STAFF_ID,
+    staffName: "客服小超",
+    operationId: "op_assign_pg_2b",
+    at: AT,
+  });
+  assert.equal(second.kind, "not-assignable");
+  assert.deepEqual(await writePids(), [], "失败的第二次不得写任何字节（包括审计）");
+});
+
+test("PROD-4 专属池不可绕过：指定别人 → not-eligible；指定本人 → 成功", { skip: SKIP }, async () => {
+  const [owner] = await findAcceptingCompanions({ limit: 1 });
+  const target = await makeExclusiveDispatch({ companionId: owner.id });
+  const [other] = await findAcceptingCompanions({ limit: 2 }).then((rows) =>
+    rows.filter((row) => row.id !== owner.id).slice(0, 1),
+  );
+  assert.ok(other, "需要另一位护航");
+  // 造夹具本身会改派单（探针记下那一笔）；这里只关心被测事务写了什么
+  await clearWriteLog();
+
+  const rejected = await assignOrderCompanionByStaffPg({
+    orderId: target.order_id,
+    companionId: other.id,
+    staffId: STAFF_ID,
+    staffName: "客服小超",
+    operationId: "op_assign_pg_3a",
+    at: AT,
+  });
+  assert.equal(rejected.kind, "not-eligible");
+  assert.deepEqual(await writePids(), []);
+  assert.equal((await readOrder(target.order_id)).status, "paid");
+  assert.equal((await readDispatch(target.dispatch_id)).state, "exclusive");
+
+  const assigned = await assignOrderCompanionByStaffPg({
+    orderId: target.order_id,
+    companionId: owner.id,
+    staffId: STAFF_ID,
+    staffName: "客服小超",
+    operationId: "op_assign_pg_3b",
+    at: AT,
+  });
+  assert.equal(assigned.kind, "ok");
+  assert.equal((await readOrder(target.order_id)).status, "accepted");
+});
+
+test("PROD-4 等待时限已过 → expired，且一笔不写", { skip: SKIP }, async () => {
+  const target = await findPublicDispatch();
+  const [next] = await findAcceptingCompanions({ excludeUserId: target.user_id, limit: 1 });
+  assert.ok(next);
+  await executor().query(
+    `UPDATE dispatch_records SET public_deadline_at = $2 WHERE id = $1`,
+    [target.dispatch_id, plusMinutes(AT, -1)],
+  );
+  await clearWriteLog();
+
+  const result = await assignOrderCompanionByStaffPg({
+    orderId: target.order_id,
+    companionId: next.id,
+    staffId: STAFF_ID,
+    staffName: "客服小超",
+    operationId: "op_assign_pg_4",
+    at: AT,
+  });
+  assert.equal(result.kind, "expired");
+  assert.deepEqual(await writePids(), []);
+  assert.equal((await readOrder(target.order_id)).status, "paid");
+});
+
+test("PROD-4 审计写不进去 → 订单 / 派单 / 通知一起回滚", { skip: SKIP }, async () => {
+  const target = await findPublicDispatch();
+  const [next] = await findAcceptingCompanions({ excludeUserId: target.user_id, limit: 1 });
+  assert.ok(next);
+  await failWritesOn("admin_audit_entries");
+
+  await assert.rejects(
+    () =>
+      assignOrderCompanionByStaffPg({
+        orderId: target.order_id,
+        companionId: next.id,
+        staffId: STAFF_ID,
+        staffName: "客服小超",
+        operationId: "op_assign_pg_5",
+        at: AT,
+      }),
+    /w1-probe: 拒绝写入 admin_audit_entries/,
+  );
+
+  const order = await readOrder(target.order_id);
+  assert.equal(order.status, "paid", "订单回到未指派");
+  assert.equal(order.actual_companion_id, null);
+  assert.equal((await readDispatch(target.dispatch_id)).state, "public", "派单也一起回滚");
+  assert.equal(
+    await countRows("notifications", "WHERE user_id = $1 AND title = $2", [
+      order.user_id,
+      "客服已为你安排护航",
+    ]),
+    0,
+    "通知不能单独留下——用户会看到一条根本没发生的指派",
+  );
 });

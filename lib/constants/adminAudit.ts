@@ -85,6 +85,12 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<AdminAuditAction, string> = {
   "staff.enable": "启用客服账号",
   "staff.disable": "停用客服账号",
   "staff.remove": "移除客服账号",
+  // ————— 真实账号凭据（PROD-4）—————
+  // 只记录「密码被重置 / 被修改」这件事本身；快照里仅含更新时间，不含任何密码内容。
+  "staff.reset-password": "重置客服密码",
+  "admin.password-change": "修改管理员密码",
+  // ————— 订单指派（PROD-4）—————
+  "order.assign": "指派订单",
   // ————— 运营内容与协议（P8E-1）—————
   "announcement.create": "新增图片公告",
   "announcement.update": "编辑图片公告",

@@ -1,6 +1,9 @@
 import { ApiError } from "@/lib/api/ApiError";
+import { consumePasswordCheckTime, verifyPassword } from "@/lib/auth/password";
+import { createRealSession, destroyRealSession, isRealAuthEnabled } from "@/lib/auth/realSession";
 import { clearSessionStaff, getSessionStaff, setSessionStaff } from "@/lib/auth/staffSession";
 import { isMockStaffEnabled } from "@/lib/config/env";
+import { findStaffCredentialByUsername } from "@/lib/data/pg/authRepository";
 import { getStaffRepository } from "@/lib/data/staffRepository";
 import {
   STAFF_FORBIDDEN_MESSAGE,
@@ -167,8 +170,68 @@ export async function loginMockStaff(staffId: string): Promise<StaffSessionUser>
  * 没有可登出的对象，按接口不存在返回 404。
  */
 export async function logoutStaff(): Promise<{ ok: true }> {
+  // PROD-4：真实会话生效时吊销数据库里的这一条并删除两种 Cookie；
+  // 只删 Cookie 不吊销，等于给被窃取的令牌留了 7 天可用期。
+  if (isRealAuthEnabled()) {
+    await destroyRealSession("staff");
+    return { ok: true };
+  }
+
   assertMockStaffEnabled();
 
   await clearSessionStaff();
   return { ok: true };
+}
+
+/** 客服登录失败统一文案：不区分「登录名不存在」与「密码错误」。 */
+export const STAFF_INVALID_CREDENTIALS_MESSAGE = "登录名或密码不正确";
+export const STAFF_REAL_LOGIN_DISABLED_MESSAGE = "客服密码登录尚未开放";
+
+/**
+ * 客服真实登录：登录名 + 密码。
+ *
+ * 只有 `customer_service` 且启用、未移除的账号能拿到会话。
+ * 凭据失败一律 401 + 同一句话（账号不存在时也跑一次等成本派生）；
+ * 密码正确但账号不可用时才进入 403——那时调用方已经证明了它是账号持有人，
+ * 给出「不能进工作台」比继续假装密码错误更有用。
+ *
+ * ⚠️ 会话写入 `chaoge_staff_session`，与用户端、管理端是两个 Cookie、两套身份。
+ * 本函数不接受任何角色字段——角色从账号记录读，请求体里没有这个位置。
+ */
+export async function loginStaffWithPassword(
+  username: unknown,
+  password: unknown,
+): Promise<StaffSessionUser> {
+  if (!isRealAuthEnabled()) {
+    throw new ApiError("NOT_FOUND", STAFF_REAL_LOGIN_DISABLED_MESSAGE, 404);
+  }
+
+  const usernameText = typeof username === "string" ? username.trim() : "";
+  const passwordText = typeof password === "string" ? password : "";
+
+  if (!usernameText || !passwordText) {
+    await consumePasswordCheckTime("invalid-staff-login");
+    throw new ApiError("UNAUTHORIZED", STAFF_INVALID_CREDENTIALS_MESSAGE, 401);
+  }
+
+  const credential = await findStaffCredentialByUsername(usernameText);
+  if (!credential) {
+    await consumePasswordCheckTime(passwordText);
+    throw new ApiError("UNAUTHORIZED", STAFF_INVALID_CREDENTIALS_MESSAGE, 401);
+  }
+
+  const matches = await verifyPassword(passwordText, credential.passwordHash);
+  if (!matches) {
+    throw new ApiError("UNAUTHORIZED", STAFF_INVALID_CREDENTIALS_MESSAGE, 401);
+  }
+
+  const account = await getStaffRepository().findStaffById(credential.subjectId);
+  if (!account || !canStaffSignIn(account)) {
+    throw new ApiError("FORBIDDEN", STAFF_FORBIDDEN_MESSAGE, 403);
+  }
+
+  await createRealSession("staff", account.id);
+  await getStaffRepository().markLoggedIn(account.id, new Date().toISOString());
+
+  return toStaffSessionUser(account);
 }

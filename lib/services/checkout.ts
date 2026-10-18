@@ -16,6 +16,8 @@ import { IDEMPOTENCY_KEY_MISSING_MESSAGE, readIdempotencyKey } from "@/lib/const
 import { getCouponRepository } from "@/lib/data/couponRepository";
 import { getPaymentRepository } from "@/lib/data/paymentRepository";
 import { getDataSource } from "@/lib/data/source";
+import { isPostgresDataSourceEnabled } from "@/lib/data/pg/config";
+import { confirmPaymentRequestPg } from "@/lib/data/pg/paymentRepository";
 import { loadCheckoutCoupons } from "@/lib/services/coupons";
 import { withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { Addon, Game } from "@/lib/types/catalog";
@@ -676,11 +678,12 @@ export async function confirmPaymentRequest(
   const lookup = await getPaymentRequestForUser(requestId, userId);
   if (!lookup.ok) return lookup;
 
-  const settled = await getPaymentRepository().confirmPaymentRequest(
-    requestId,
-    result,
-    buildOrderFromRequest,
-  );
+  // T1「确认支付 → 建单 → 支付记录 → 派单 → 券核销 → 回填 order_id」必须在**一个**
+  // 数据库事务里。进程级 `pgPaymentRepository` 的每条语句自动提交，用它承载这条链
+  // 会留下「支付成功、没有订单」之类的半成品，因此 PostgreSQL 下必须走事务入口。
+  const settled = isPostgresDataSourceEnabled()
+    ? await confirmPaymentRequestPg(requestId, result, buildOrderFromRequest)
+    : await getPaymentRepository().confirmPaymentRequest(requestId, result, buildOrderFromRequest);
   if (!settled) return { ok: false, reason: "not_found" };
   // 券在核销那一刻不可用（已用 / 停用 / 过期 / 未达门槛 / 不属于本人）。
   // 仓储已经在**它自己的原子提交里整体回滚**（Mock 是一个字节都没写、Pg 是 ROLLBACK），

@@ -97,6 +97,9 @@ const ALL_VERSIONS = [
   "0014",
   "0015",
   "0016",
+  // PROD-4：三套身份各一张凭据表（用户 / 客服 / 管理员）+ 一张不透明会话表。
+  // 密码只存 scrypt 派生值，会话只存令牌的 SHA-256——两张表都不回传明文（续号，不改旧迁移）。
+  "0017",
 ];
 
 /**
@@ -108,6 +111,10 @@ const ALL_VERSIONS = [
 const ALL_TABLES = [
   "admin_accounts",
   "admin_audit_entries",
+  // PROD-4：三张凭据表与一张会话表。它们不是业务域表，但同样必须被迁出来——
+  // 漏掉任何一张，真实登录就会在运行期以「表不存在」的方式失败。
+  "admin_credentials",
+  "auth_sessions",
   "agreements",
   "announcements",
   "banners",
@@ -141,9 +148,11 @@ const ALL_TABLES = [
   "refund_requests",
   MIGRATION_TABLE,
   "staff_accounts",
+  "staff_credentials",
   "staff_reads",
   "suggestions",
   "tip_records",
+  "user_credentials",
   "user_qualifications",
   "users",
 ];

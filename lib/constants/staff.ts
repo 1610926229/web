@@ -805,7 +805,10 @@ export function toStaffOrderDispatchSummary(record: DispatchRecord): StaffOrderD
 export function staffOrderAllowedActions(order: Order): StaffOrderAllowedActions {
   const inService = order.status === "accepted" || order.status === "serving";
   const releasable = inService && order.actualCompanionId !== null;
-  return { canRelease: releasable, canReplace: releasable };
+  // 指派只发生在「订单已支付、还没人接」。`actualCompanionId` 是事实字段：
+  // 状态说 paid、字段却挂着人时，这一单不该出现指派按钮（服务端同样会挡）
+  const assignable = order.status === "paid" && order.actualCompanionId === null;
+  return { canAssign: assignable, canRelease: releasable, canReplace: releasable };
 }
 
 /** 退回公共池的原因必填。**只有「必填」，没有长度要求**（与打手取消同一条裁决）。 */
@@ -814,6 +817,12 @@ export const STAFF_ORDER_RELEASE_REASON_REQUIRED_MESSAGE = "请填写退回公�
 /** 是这一单，但此刻没有人在履约（400）。与 404 分开：订单确实存在，只是这个按钮不该出现。 */
 export const STAFF_ORDER_NOT_RELEASABLE_MESSAGE = "当前订单状态不允许退回公共池";
 export const STAFF_ORDER_NOT_REPLACEABLE_MESSAGE = "当前订单状态不允许更换护航";
+export const STAFF_ORDER_NOT_ASSIGNABLE_MESSAGE = "当前订单状态不允许指派护航";
+/** 派单的等待时限已过：这一单该走超时流程，而不是被客服直接指派。 */
+export const STAFF_ORDER_ASSIGN_EXPIRED_MESSAGE = "该订单已超过接单等待时限，不能直接指派护航";
+/** 专属池：用户指定了护航，客服不能把这一单改派给别人。 */
+export const STAFF_ORDER_ASSIGN_NOT_ELIGIBLE_MESSAGE =
+  "该订单正在等待用户指定的护航接单，暂时不能指派给其他护航";
 
 /** 换人没选人 / 选了一个不存在的人（400）。两种都是「这次请求本身不完整」。 */
 export const STAFF_ORDER_REPLACE_COMPANION_REQUIRED_MESSAGE = "请选择要指定的护航";
@@ -865,12 +874,48 @@ export const STAFF_ORDER_ACTIONS_TITLE = "订单处置";
  * 而本轮换人不涉及任何金额（退款是另一个动作）。
  */
 export const STAFF_ORDER_ACTIONS_NOTICE =
-  "更换护航与退回公共池都会通知下单用户。两个动作都不改变订单金额，也不产生退款；" +
-  "已完成的订单与还没有人接单的订单不提供这两个动作。";
+  "指派护航、更换护航与退回公共池都会通知下单用户。三个动作都不改变订单金额，也不产生退款；" +
+  "「已支付、还没有人接」的订单可以指派护航，只有「已接单」与「护航中」的订单可以更换护航或退回公共池。";
 
-/** 订单上没有可执行动作时替代面板的那一句（`canRelease === false`）。 */
+/** 订单上没有可执行动作时替代面板的那一句（三个 `can*` 都为 false）。 */
 export const STAFF_ORDER_ACTIONS_UNAVAILABLE_NOTICE =
-  "当前订单没有可执行的处置：只有「已接单」与「护航中」的订单可以更换护航或退回公共池。";
+  "当前订单没有可执行的处置：只有「已支付、还没有人接」的订单可以指派护航，" +
+  "只有「已接单」与「护航中」的订单可以更换护航或退回公共池。";
+
+export const STAFF_ORDER_ASSIGN_LABEL = "指派护航";
+export const STAFF_ORDER_ASSIGN_CONFIRM_LABEL = "确认指派护航";
+export const STAFF_ORDER_ASSIGN_SELECT_LABEL = "选择要指派的护航";
+
+/**
+ * 指派确认区的那段说明。
+ *
+ * ⚠️ 必须点明「新护航拿到的只是已接单」与「订单金额不变」；
+ * 还要点明**不计入接单榜**——客服会拿这个数字理解平台数据，
+ * 一次指派被误当成一次打手主动接单，会让榜单和客服的认知各说各话。
+ */
+export const STAFF_ORDER_ASSIGN_CONFIRM_NOTICE =
+  "指派后订单直接进入「已接单」，由被指派的护航联系用户并自己点「开始服务」。订单金额不变，" +
+  "下单用户会收到一条通知。这次指派不算作护航主动接单，不计入接单榜。";
+
+export const STAFF_ORDER_ASSIGN_SUCCESS_LABEL =
+  "已指派护航。订单已进入已接单，下单用户已收到通知。";
+
+/** 公共池里可指派的名单口径。 */
+export const STAFF_ORDER_ASSIGN_CANDIDATES_NOTICE =
+  "以下护航此刻都可以接单（已排除停用、已移除、暂停接单与下单用户本人），可以直接指派，无需管理员审批。";
+
+/** 专属池：用户指定了护航，专属期内客服也只能指派这一位。 */
+export const STAFF_ORDER_ASSIGN_EXCLUSIVE_NOTICE =
+  "该订单还在用户指定护航的专属等待期内，只能指派用户指定的那位护航；专属期结束后会进入公共池。";
+
+/** 与换人候选同一列数字，口径相同（`accepted` + `serving`）。 */
+export const STAFF_ORDER_ASSIGN_CANDIDATES_COUNT_LABEL = "在履约订单数";
+
+/** 指派候选为空时的说明。 */
+export const STAFF_ORDER_ASSIGN_EMPTY_TITLE = "当前没有可指派的护航";
+export const STAFF_ORDER_ASSIGN_EMPTY_DESCRIPTION =
+  "此刻没有可指派的护航：护航都处于停用、已移除或暂停接单状态，或只剩下单用户本人；" +
+  "若订单在专属等待期内，则只能指派用户指定的那位护航。";
 
 export const STAFF_ORDER_RELEASE_LABEL = "重新进入公共池";
 export const STAFF_ORDER_RELEASE_CONFIRM_LABEL = "确认退回公共池";

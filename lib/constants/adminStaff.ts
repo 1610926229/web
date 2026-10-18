@@ -48,6 +48,15 @@ export const ADMIN_STAFF_LIST_NOTICE =
 export const ADMIN_STAFF_CREDENTIAL_NOTICE =
   "本阶段为 Mock 认证：不保存任何真实密码，也没有密码输入框。新增后请到 /staff/login 的测试账号列表里选择它进入工作台。";
 
+/**
+ * 真实凭据模式的说明（PROD-4，`DATA_SOURCE=postgres`）。
+ *
+ * 密码只以 scrypt 加盐哈希保存，后台**没有任何读取入口**；管理员能做的只有「重置」。
+ * 新增账号后必须回到详情页设置初始密码，否则该客服无法登录。
+ */
+export const ADMIN_STAFF_CREDENTIAL_NOTICE_REAL =
+  "客服使用真实登录名与密码登录，密码以加盐哈希保存，后台只能重置、不能查看。新增账号后请在详情页设置初始密码；重置密码会让该客服已登录的会话立即失效。";
+
 export const ADMIN_STAFF_LIST_FIELDS_NOTE =
   "列表不含 Cookie、密码或任何会话标识——这些数据在客服账号里根本不存在。";
 

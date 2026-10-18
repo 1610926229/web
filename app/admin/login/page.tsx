@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import AdminLoginPanel from "@/components/admin/AdminLoginPanel";
+import { isRealAuthEnabled } from "@/lib/auth/realSession";
 import { isMockAdminEnabled } from "@/lib/config/env";
 import { getAdminSession } from "@/lib/services/adminAuth";
 
@@ -21,5 +22,12 @@ export default async function AdminLoginPage() {
   const admin = await getAdminSession();
   if (admin) redirect("/admin");
 
-  return <AdminLoginPanel mockAdminEnabled={isMockAdminEnabled()} />;
+  const realAuthEnabled = isRealAuthEnabled();
+
+  return (
+    <AdminLoginPanel
+      mockAdminEnabled={isMockAdminEnabled() && !realAuthEnabled}
+      realAuthEnabled={realAuthEnabled}
+    />
+  );
 }

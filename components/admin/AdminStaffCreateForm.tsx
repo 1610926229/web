@@ -11,6 +11,7 @@ import {
   ADMIN_STAFF_CREATE_LABEL,
   ADMIN_STAFF_CREATE_TITLE,
   ADMIN_STAFF_CREDENTIAL_NOTICE,
+  ADMIN_STAFF_CREDENTIAL_NOTICE_REAL,
   ADMIN_STAFF_DISPLAY_NAME_MAX_LENGTH,
   ADMIN_STAFF_PROFILE_FIELD_LABELS,
   ADMIN_STAFF_USERNAME_MAX_LENGTH,
@@ -39,7 +40,12 @@ import { countCharacters } from "@/lib/utils/text";
  * 校验、错误关联与「第一条错误自动聚焦」的做法与编辑表单完全一致，
  * 两份表单调的是同一组校验函数（`lib/constants/adminStaff.ts`）。
  */
-export default function AdminStaffCreateForm() {
+export default function AdminStaffCreateForm({
+  realAuthEnabled = false,
+}: {
+  /** PROD-4：开启后说明真实密码流程（新增后到详情页设置初始密码）。 */
+  realAuthEnabled?: boolean;
+}) {
   const router = useRouter();
 
   const [username, setUsername] = useState("");
@@ -218,7 +224,7 @@ export default function AdminStaffCreateForm() {
 
       {/* 角色与密码：**没有输入框**，这里明说为什么 */}
       <p className="rounded-xl border border-admin-line bg-page px-4 py-3 text-[12px] leading-5 text-ink-3">
-        {ADMIN_STAFF_CREDENTIAL_NOTICE}
+        {realAuthEnabled ? ADMIN_STAFF_CREDENTIAL_NOTICE_REAL : ADMIN_STAFF_CREDENTIAL_NOTICE}
         <br />
         角色由服务端固定为「客服」，页面上没有角色选择器，也没有启用开关——新账号一律启用。
       </p>

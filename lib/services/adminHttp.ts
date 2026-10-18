@@ -142,6 +142,41 @@ export function mockLoginAdmin(): Promise<AdminLoginResult> {
   return apiPost<AdminLoginResult>("/api/admin/auth/mock-login");
 }
 
+/**
+ * 管理员密码登录（PROD-4）。
+ *
+ * 请求体只有登录名与密码，角色字段没有可传的位置——角色来自账号记录。
+ * 仅在 `DATA_SOURCE=postgres` 时存在，否则服务端 404。
+ */
+export function loginAdminWithPassword(input: {
+  username: string;
+  password: string;
+}): Promise<AdminLoginResult> {
+  return apiPost<AdminLoginResult>("/api/admin/auth/login", input);
+}
+
+/**
+ * 设置 / 修改**本人**密码。
+ *
+ * 首次设置（staging 引导）不需要 `currentPassword`；已有密码时必须提供。
+ * 成功会吊销该管理员的全部会话，响应 `reLoginRequired: true`——
+ * 调用方必须回登录页，而不是留在后台继续操作。
+ */
+export function setOwnAdminPassword(input: {
+  currentPassword?: string;
+  newPassword: string;
+}): Promise<{ ok: true; reLoginRequired: true }> {
+  return apiPost("/api/admin/auth/password", input);
+}
+
+/** 管理员重置某位客服的登录密码。成功后该客服的全部真实会话被吊销。 */
+export function resetAdminStaffPassword(
+  staffId: string,
+  password: string,
+): Promise<{ ok: true }> {
+  return apiPost(`/api/admin/staff/${encodeURIComponent(staffId)}/password`, { password });
+}
+
 /** 退出登录：服务端删除管理端 Cookie。 */
 export function logoutAdmin(): Promise<{ ok: true }> {
   return apiPost<{ ok: true }>("/api/admin/auth/logout");

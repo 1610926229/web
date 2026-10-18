@@ -162,12 +162,18 @@ function staffAuthSource() {
   return stripComments(readSource(path.join(ROOT, "lib", "services", "staffAuth.ts")));
 }
 
-/** 从三个会话模块里取出 Cookie 名：它们同样因为 `next/headers` 而不能被 import。 */
-function sessionCookieName(relative) {
-  const match = readSource(path.join(ROOT, relative)).match(
-    /export const \w*SESSION_COOKIE = "([^"]+)"/,
+/**
+ * 从 `lib/auth/cookieNames.ts` 取出 Cookie 名。
+ *
+ * PROD-4 起三套身份各有**两个** Cookie（真实会话 + Mock 会话），名字集中在这个文件；
+ * 会话模块本身只 import 常量，源码里不再有字面量。测试同样读唯一真值源，
+ * 而不是把名字在测试里再抄一遍。
+ */
+function sessionCookieName(exportName) {
+  const match = readSource(path.join(ROOT, "lib", "auth", "cookieNames.ts")).match(
+    new RegExp(`export const ${exportName} = "([^"]+)"`),
   );
-  assert.ok(match, `${relative} 里找不到会话 Cookie 常量`);
+  assert.ok(match, `cookieNames.ts 里找不到 ${exportName}`);
   return match[1];
 }
 
@@ -723,14 +729,26 @@ test("三个开关各管各的：客服端开关不读另外两个变量，也�
 });
 
 test("三套 Cookie 的取值域不相交", () => {
-  const names = [
-    sessionCookieName("lib/auth/staffSession.ts"),
-    sessionCookieName("lib/auth/adminSession.ts"),
-    sessionCookieName("lib/auth/session.ts"),
+  const mockNames = [
+    sessionCookieName("MOCK_STAFF_SESSION_COOKIE"),
+    sessionCookieName("MOCK_ADMIN_SESSION_COOKIE"),
+    sessionCookieName("MOCK_USER_SESSION_COOKIE"),
+  ];
+  const realNames = [
+    sessionCookieName("REAL_STAFF_SESSION_COOKIE"),
+    sessionCookieName("REAL_ADMIN_SESSION_COOKIE"),
+    sessionCookieName("REAL_USER_SESSION_COOKIE"),
   ];
 
-  assert.deepEqual(names, ["mock_staff_id", "mock_admin_id", "mock_user_id"]);
-  assert.equal(new Set(names).size, 3, "三个 Cookie 名必须互不相同");
+  assert.deepEqual(mockNames, ["mock_staff_id", "mock_admin_id", "mock_user_id"]);
+  assert.deepEqual(realNames, [
+    "chaoge_staff_session",
+    "chaoge_admin_session",
+    "chaoge_user_session",
+  ]);
+  // 六个名字两两不同：同一身份的真实 / Mock 会话也不共用一个名字，
+  // 否则「真实登录覆盖 Mock 登录」会变成两条路径争同一个 Cookie
+  assert.equal(new Set([...mockNames, ...realNames]).size, 6, "六个 Cookie 名必须互不相同");
 
   // 客服端只读自己的那个 Cookie
   const staffSession = stripComments(readSource(path.join(ROOT, "lib", "auth", "staffSession.ts")));
@@ -1279,7 +1297,7 @@ test("客服账号不进用户名单，也不参与消费：它是独立的第�
 
 // ——————————————————————————— 六、源码门禁 ———————————————————————————
 
-test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + 退款四件 + 投诉五件 + 完成材料四件", () => {
+test("客服接口清单固定：认证四件 + 订单七件 + 会话四件 + 退款四件 + 投诉五件 + 完成材料四件", () => {
   const routeFiles = collectFiles(STAFF_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -1292,7 +1310,12 @@ test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + �
   //    一个只读（`replace-candidates` 候选名单）。它们**不是**「改订单」——
   //    改的是**当前履约人**：`release` 把订单退回 `paid` 并重进公共池，`replace` 换成另一位护航，
   //    两者都不改金额、不改商品、不退款。金额与商品仍然没有写地址。
-  // ⚠️ 订单因此是**五个**地址：列表、详情、回池、换人、候选名单。
+  // ⚠️ PROD-4 在订单段下又加了**两个地址**：`assign`（给还没人接的单指派护航）
+  //    与 `assign-candidates`（它的只读名单）。指派把订单从 `paid` 推到 `accepted`，
+  //    写入的是「谁来做」；金额、商品、退款仍然没有写地址。
+  //    它与回池 / 换人是三件事，因此没有合并成一个 `{ action }` 地址：
+  //    三者的前置状态不同（paid vs accepted/serving），审计动作名也不同（`order.assign`）。
+  // ⚠️ 订单因此是**七个**地址：列表、详情、指派、指派名单、回池、换人、换人名单。
   //    **没有**「退款」「售后」「改金额」的地址——它们属于后续 Round 或别的动作，边界到这里为止。
   // ⚠️ 候选名单是 GET 而不是塞进详情 DTO：详情每次翻页都会取，而候选名单只在客服按下
   //    「更换护航」时才需要（要读全部护航再筛一遍）。塞进去等于给每次详情读取都加一次全表扫描。
@@ -1308,6 +1331,9 @@ test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + �
   assert.deepEqual(
     routeFiles.map((file) => path.relative(STAFF_API_DIR, file).replace(/\\/g, "/")).sort(),
     [
+      // PROD-4：真实账号密码登录。与 `/api/admin/auth/login` 是两套身份、两个服务、
+      // 两个 Cookie；客服不能借它进管理后台，管理员也不能借管理端登录进客服工作台。
+      "auth/login/route.ts",
       "auth/logout/route.ts",
       "auth/mock-login/route.ts",
       "auth/session/route.ts",
@@ -1327,6 +1353,9 @@ test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + �
       "conversations/route.ts",
       // 全量订单查询（P0-10）：列表与详情两个只读地址
       // 订单处置（P0-11）：退回公共池 + 直接换人 + 换人候选名单
+      // 指派（PROD-4）：给还没有人接的单指定护航 + 它的只读候选名单
+      "orders/[id]/assign-candidates/route.ts",
+      "orders/[id]/assign/route.ts",
       "orders/[id]/release/route.ts",
       "orders/[id]/replace-candidates/route.ts",
       "orders/[id]/replace/route.ts",
@@ -1354,7 +1383,14 @@ test("客服接口清单固定：认证三件 + 订单五件 + 会话四件 + �
     const relative = path.relative(STAFF_API_DIR, file).replace(/\\/g, "/");
     // ⚠️ 登录与退出**没有**守卫，而且这是对的：它们要回答的正是「现在是谁」，
     //    在还没登录的时候也必须能调（退出还得能被重复调用以清掉一个过期的 Cookie）。
-    if (relative === "auth/mock-login/route.ts" || relative === "auth/logout/route.ts") continue;
+    //    真实登录（PROD-4）同理：它正是获得会话的那一步。
+    if (
+      relative === "auth/login/route.ts" ||
+      relative === "auth/mock-login/route.ts" ||
+      relative === "auth/logout/route.ts"
+    ) {
+      continue;
+    }
 
     const source = withoutImports(stripComments(readSource(file)));
     const guard = source.indexOf("requireStaff");

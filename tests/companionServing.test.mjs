@@ -1028,7 +1028,7 @@ test("开始 11：写入口门禁——`orders/**` 下恰好三个，且 start �
   );
 });
 
-test("开始 12：start 路径上不引用任何通知常量；通知常量集合共七条，每条都有自己的主人（P0-11 起）", () => {
+test("开始 12：start 路径上不引用任何通知常量；通知常量集合共八条，每条都有自己的主人（PROD-4 起）", () => {
   const txCode = stripComments(
     readSource(path.join(ROOT, "lib", "data", "companionOrderTransaction.ts")),
   );
@@ -1075,6 +1075,10 @@ test("开始 12：start 路径上不引用任何通知常量；通知常量集�
     "DISPATCH_NOTIFICATION_EXCLUSIVE_TIMEOUT",
     // P0-7：公共池无人接单超时
     "DISPATCH_NOTIFICATION_PUBLIC_TIMEOUT",
+    // PROD-4：客服给还没人接的单指派护航 → 告诉下单用户「为你安排了护航」。
+    // 它与下面两条同属「客服替用户决定了履约人」，但前置状态不同：
+    // 这一条发生在 paid（还没人接），那两条发生在 accepted / serving（已经有人接）。
+    "DISPATCH_NOTIFICATION_STAFF_ASSIGNED",
     // P0-11：客服退回公共池 / 客服指定换人 → 都告诉下单用户「你的护航换了」
     "DISPATCH_NOTIFICATION_STAFF_REASSIGNED",
     "DISPATCH_NOTIFICATION_STAFF_REPLACED",

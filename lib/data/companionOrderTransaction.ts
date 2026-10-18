@@ -1,6 +1,7 @@
 import {
   DISPATCH_NOTIFICATION_ACCEPTANCE_RELEASED,
   DISPATCH_NOTIFICATION_COMPANION_DISABLED,
+  DISPATCH_NOTIFICATION_STAFF_ASSIGNED,
   DISPATCH_NOTIFICATION_STAFF_REASSIGNED,
   DISPATCH_NOTIFICATION_STAFF_REPLACED,
 } from "@/lib/constants/dispatch";
@@ -16,9 +17,12 @@ import type {
   CompanionStartOutcome,
   Order,
   OrderCompanionSnapshot,
+  StaffOrderAssignOutcome,
   StaffOrderReleaseOutcome,
   StaffOrderReplaceOutcome,
 } from "@/lib/types/order";
+import { buildAuditEntry } from "./adminWriteSupport";
+import { appendAuditEntry } from "./mockAdminAuditRepository";
 import {
   appendCompanionRelease,
   bindCompanionReleaseKey,
@@ -46,6 +50,7 @@ import {
 } from "./completionTransaction";
 import { isPostgresDataSourceEnabled } from "./pg/config";
 import {
+  assignOrderCompanionByStaffPg,
   cancelAcceptedOrderPg,
   releaseOrderByStaffPg,
   replaceOrderCompanionByStaffPg,
@@ -805,6 +810,155 @@ export async function replaceOrderCompanionByStaffMock(input: {
 }
 
 /**
+ * 客服给**还没有人接**的订单（`paid`）直接指派护航（PROD-4）。
+ *
+ * 与 `replaceOrderCompanionByStaff` 刻意分开：那一单**有**履约人（要解除、要写退出历史、
+ * 要作废完成材料），这一单**没有**（只有派单还在等人）。共用写入器会让一份
+ * 「解除一个不存在的绑定」的调用出现在代码里，读起来像在假装这一单曾经有人接。
+ *
+ * ## 判定顺序
+ *
+ * ```
+ * 1. 订单不存在                                  → not-found（404）
+ * 2. 不是 paid 或已经挂着履约人                   → not-assignable（400）
+ * 3. 派单索引 / 记录不在                          → dispatch-missing（500）
+ * 4. 派单已 timed_out / accepted                  → not-assignable（400）
+ * 5. 当前池的等待时限已过                         → expired（400）
+ * 6. 专属池且要指定的人不是用户指定的那位         → not-eligible（400）
+ * 7. 护航记录不存在                               → companion-not-found（400）
+ * 8. 资格：复用 isCompanionAcceptingOrders        → companion-unavailable（400）
+ * 9. 指定的人是下单用户本人                       → self-order（400）
+ * 10. 区段之外备好通知
+ * 11. 原子区段：派单改绑 + 订单 accepted + 通知 + 审计（**不写接单事件**）
+ * ```
+ *
+ * ⚠️ **专属池不能绕过**：用户指定了 A、专属期还没过时，客服也不能把这一单给 B。
+ * 那一层是用户在下单时做出的选择，客服的指派能力不是用来覆盖它的。
+ *
+ * ⚠️ **不写 `companion_accept_events`**：指派不是护航主动接单，不计入接单榜
+ * （P1-5 §九-F 产品裁定）。派单写 `acceptedVia: "staff"`，让存量派生通道分得清来源。
+ *
+ * ⚠️ 与换人一样**没有幂等键**：第二次点击时订单已经是 `accepted`，
+ * 走 `not-assignable` 的 400——那正好回答了「这一单现在是什么状态」。
+ * 审计里的 `operationId` 由服务层为每次请求生成，只用于记账，不做重放判定。
+ */
+export async function assignOrderCompanionByStaffMock(input: {
+  orderId: string;
+  companionId: string;
+  staffId: string;
+  staffName: string | null;
+  operationId: string;
+  at: string;
+}): Promise<StaffOrderAssignOutcome> {
+  // 句柄在写之前取好。测试里的 resetMockStore() 会换掉整份存储，因此每次都现取
+  const payments = paymentStore();
+  const dispatches = dispatchStore();
+
+  /* —— 第 1 步：订单存在 —— */
+  const order = payments.orders.get(input.orderId);
+  if (!order) return { kind: "not-found" };
+
+  /* —— 第 2 步：只有「已支付、还没有人接」的订单能指派 —— */
+  if (
+    order.status !== "paid" ||
+    order.actualCompanionId !== null ||
+    !canTransitionOrder(order.status, "accepted")
+  ) {
+    return { kind: "not-assignable", status: order.status };
+  }
+
+  /* —— 第 3 步：这一单对应的派单记录 —— */
+  const dispatchId = dispatches.dispatchIdByOrder.get(order.id);
+  const record = dispatchId ? dispatches.dispatches.get(dispatchId) : undefined;
+  if (!dispatchId || !record) return { kind: "dispatch-missing" };
+
+  /* —— 第 4 步：派单还能不能接 —— */
+  if (record.state === "timed_out" || record.state === "accepted") {
+    return { kind: "not-assignable", status: order.status };
+  }
+
+  /* —— 第 5 步：当前池的等待时限 —— */
+  const deadlineAt =
+    record.state === "exclusive" ? record.exclusiveDeadlineAt : record.publicDeadlineAt;
+  if (deadlineAt === null) return { kind: "dispatch-missing" };
+  if (Date.parse(deadlineAt) <= Date.parse(input.at)) return { kind: "expired" };
+
+  /* —— 第 6 步：专属池只能指派给用户指定的那位 —— */
+  if (record.state === "exclusive" && record.exclusiveCompanionId !== input.companionId) {
+    return { kind: "not-eligible" };
+  }
+
+  /* —— 第 7 步：护航记录存在 —— */
+  const next = readCompanionRecord(input.companionId);
+  if (!next) return { kind: "companion-not-found" };
+
+  /* —— 第 8 步：资格（复用仓库里唯一的那个谓词）—— */
+  if (!isCompanionAcceptingOrders(next)) return { kind: "companion-unavailable" };
+
+  /* —— 第 9 步：禁止自接单（EX-DISPATCH-08）—— */
+  if (next.userId !== null && order.userId === next.userId) return { kind: "self-order" };
+
+  /* —— 第 10 步：区段之外把通知备好 —— */
+  const notification = planNotification({
+    userId: order.userId,
+    orderId: order.id,
+    content: DISPATCH_NOTIFICATION_STAFF_ASSIGNED,
+    at: input.at,
+  });
+
+  /* —— 第 11 步：原子区段（无 await）—— */
+  const acceptedDispatch = applyDispatchAccepted(dispatchId, next.id, input.at, "staff");
+  if (!acceptedDispatch) return { kind: "inconsistent", orderId: order.id };
+
+  const acceptedOrder = applyOrderAccepted(order.id, {
+    companionId: next.id,
+    companion: toOrderCompanionSnapshot(next),
+    at: input.at,
+  });
+  if (!acceptedOrder) return { kind: "inconsistent", orderId: order.id };
+
+  appendNotification(notification);
+
+  // 审计与业务写入同段：客服的每一次指派都要能回答「谁、在什么时候、把这一单给了谁」
+  appendAuditEntry(
+    buildAuditEntry({
+      ctx: {
+        actorId: input.staffId,
+        // 触发者来自 `requireStaff()` 的会话，不来自请求体
+        actorRole: "customer_service",
+        actorName: input.staffName,
+        operationId: input.operationId,
+        at: input.at,
+      },
+      action: "order.assign",
+      targetType: "order",
+      targetId: order.id,
+      before: {
+        status: order.status,
+        actualCompanionId: null,
+        dispatchState: record.state,
+      },
+      after: {
+        status: "accepted",
+        actualCompanionId: next.id,
+        companionName: next.displayName,
+        dispatchState: "accepted",
+        acceptedVia: "staff",
+      },
+    }),
+  );
+
+  return {
+    kind: "ok",
+    orderId: order.id,
+    orderNo: order.orderNo,
+    companionId: next.id,
+    assignedAt: input.at,
+    changed: true,
+  };
+}
+
+/**
  * 打手**资格被下架**时，把他手上所有还在履约的订单退回公共池（**同步**，P0-11）。
  *
  * ## 为什么是同步函数，而不是 `async`
@@ -968,4 +1122,18 @@ export async function replaceOrderCompanionByStaff(input: {
   return isPostgresDataSourceEnabled()
     ? replaceOrderCompanionByStaffPg(input)
     : replaceOrderCompanionByStaffMock(input);
+}
+
+/** 客服给还没有人接的订单直接指派护航。 */
+export async function assignOrderCompanionByStaff(input: {
+  orderId: string;
+  companionId: string;
+  staffId: string;
+  staffName: string | null;
+  operationId: string;
+  at: string;
+}): Promise<StaffOrderAssignOutcome> {
+  return isPostgresDataSourceEnabled()
+    ? assignOrderCompanionByStaffPg(input)
+    : assignOrderCompanionByStaffMock(input);
 }

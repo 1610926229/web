@@ -10,6 +10,14 @@ import {
   STAFF_ORDER_ACTIONS_NOTICE,
   STAFF_ORDER_ACTIONS_TITLE,
   STAFF_ORDER_ACTIONS_UNAVAILABLE_NOTICE,
+  STAFF_ORDER_ASSIGN_CANDIDATES_COUNT_LABEL,
+  STAFF_ORDER_ASSIGN_CANDIDATES_NOTICE,
+  STAFF_ORDER_ASSIGN_CONFIRM_LABEL,
+  STAFF_ORDER_ASSIGN_CONFIRM_NOTICE,
+  STAFF_ORDER_ASSIGN_EMPTY_TITLE,
+  STAFF_ORDER_ASSIGN_LABEL,
+  STAFF_ORDER_ASSIGN_SELECT_LABEL,
+  STAFF_ORDER_ASSIGN_SUCCESS_LABEL,
   STAFF_ORDER_RELEASE_CONFIRM_LABEL,
   STAFF_ORDER_RELEASE_CONFIRM_NOTICE,
   STAFF_ORDER_RELEASE_LABEL,
@@ -28,6 +36,8 @@ import {
   STAFF_ORDER_REPLACE_SUCCESS_LABEL,
 } from "@/lib/constants/staff";
 import {
+  assignStaffOrderCompanion,
+  fetchStaffOrderAssignCandidates,
   fetchStaffOrderReplaceCandidates,
   releaseStaffOrder,
   replaceStaffOrderCompanion,
@@ -39,7 +49,10 @@ import type {
 } from "@/lib/types/staff";
 
 /** 当前打开的确认框对应哪个动作；`null` 表示没有确认框。 */
-type PendingAction = "release" | "replace" | null;
+type PendingAction = "assign" | "release" | "replace" | null;
+
+/** 两个都要先取候选名单的动作。 */
+type CandidateAction = "assign" | "replace";
 
 /**
  * 客服订单详情的**唯一写入口**（P0-11）：换人 / 退回公共池。
@@ -93,10 +106,11 @@ export default function StaffOrderActionsConsole({
   const [candidatesError, setCandidatesError] = useState<string | null>(null);
   const [selectedCompanionId, setSelectedCompanionId] = useState("");
 
-  const hasAction = allowedActions.canRelease || allowedActions.canReplace;
+  const hasAction = allowedActions.canAssign || allowedActions.canRelease || allowedActions.canReplace;
+  const inService = allowedActions.canRelease || allowedActions.canReplace;
 
   /**
-   * 打开确认框。换人时要先取候选名单——**名单由服务端筛过**，
+   * 打开确认框。指派与换人时要先取候选名单——**名单由服务端筛过**，
    * 本组件不拿「全部护航」自己过滤（那等于把资格规则抄进浏览器）。
    */
   function openIntent(action: Exclude<PendingAction, null>) {
@@ -110,7 +124,7 @@ export default function StaffOrderActionsConsole({
       setCandidates(null);
       setCandidatesError(null);
       setSelectedCompanionId("");
-      void loadCandidates();
+      void loadCandidates(action);
     }
 
     setPendingAction(action);
@@ -123,11 +137,15 @@ export default function StaffOrderActionsConsole({
     setReasonError(null);
   }
 
-  async function loadCandidates() {
+  async function loadCandidates(action: CandidateAction) {
     try {
-      setCandidates(await fetchStaffOrderReplaceCandidates(orderId));
+      setCandidates(
+        await (action === "assign"
+          ? fetchStaffOrderAssignCandidates(orderId)
+          : fetchStaffOrderReplaceCandidates(orderId)),
+      );
     } catch (cause) {
-      // 这一句说的是「名单没取到」，不是「你不能换人」——两者对客服的下一步不同：
+      // 这一句说的是「名单没取到」，不是「你不能指派 / 换人」——两者对客服的下一步不同：
       // 前者重试即可，后者要去看这一单的状态
       setCandidatesError(cause instanceof Error ? cause.message : "候选名单加载失败，请重试。");
     }
@@ -147,6 +165,7 @@ export default function StaffOrderActionsConsole({
       const call = {
         release: () => releaseStaffOrder(orderId, { reason: reason.trim() }),
         replace: () => replaceStaffOrderCompanion(orderId, { companionId: selectedCompanionId }),
+        assign: () => assignStaffOrderCompanion(orderId, { companionId: selectedCompanionId }),
       }[action];
 
       await call();
@@ -154,7 +173,13 @@ export default function StaffOrderActionsConsole({
       setPendingAction(null);
       // 服务端重新渲染这一页：状态、时间轴、派单与按钮一起更新
       router.refresh();
-      setFlash(action === "release" ? STAFF_ORDER_RELEASE_SUCCESS_LABEL : STAFF_ORDER_REPLACE_SUCCESS_LABEL);
+      setFlash(
+        action === "release"
+          ? STAFF_ORDER_RELEASE_SUCCESS_LABEL
+          : action === "assign"
+            ? STAFF_ORDER_ASSIGN_SUCCESS_LABEL
+            : STAFF_ORDER_REPLACE_SUCCESS_LABEL,
+      );
     } catch (cause) {
       setConfirmError(cause instanceof Error ? cause.message : "操作失败，请稍后重试。");
     } finally {
@@ -181,7 +206,7 @@ export default function StaffOrderActionsConsole({
       setConfirmError(STAFF_ORDER_REPLACE_COMPANION_REQUIRED_MESSAGE);
       return;
     }
-    void runWrite("replace");
+    void runWrite(pendingAction);
   }
 
   return (
@@ -192,22 +217,35 @@ export default function StaffOrderActionsConsole({
         <>
           <p className="mt-2 text-[12px] leading-5 text-ink-3">{STAFF_ORDER_ACTIONS_NOTICE}</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => openIntent("release")}
-              disabled={!allowedActions.canRelease}
-              className="rounded-lg border border-admin-line px-4 py-2 text-[13px] text-ink hover:bg-page disabled:opacity-40"
-            >
-              {STAFF_ORDER_RELEASE_LABEL}
-            </button>
-            <button
-              type="button"
-              onClick={() => openIntent("replace")}
-              disabled={!allowedActions.canReplace}
-              className="rounded-lg bg-admin-accent px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-40"
-            >
-              {STAFF_ORDER_REPLACE_LABEL}
-            </button>
+            {allowedActions.canAssign ? (
+              <button
+                type="button"
+                onClick={() => openIntent("assign")}
+                className="rounded-lg bg-admin-accent px-4 py-2 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                {STAFF_ORDER_ASSIGN_LABEL}
+              </button>
+            ) : null}
+            {inService ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => openIntent("release")}
+                  disabled={!allowedActions.canRelease}
+                  className="rounded-lg border border-admin-line px-4 py-2 text-[13px] text-ink hover:bg-page disabled:opacity-40"
+                >
+                  {STAFF_ORDER_RELEASE_LABEL}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openIntent("replace")}
+                  disabled={!allowedActions.canReplace}
+                  className="rounded-lg bg-admin-accent px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-40"
+                >
+                  {STAFF_ORDER_REPLACE_LABEL}
+                </button>
+              </>
+            ) : null}
           </div>
         </>
       ) : (
@@ -224,16 +262,26 @@ export default function StaffOrderActionsConsole({
 
       <AdminConfirmDialog
         open={pendingAction !== null}
-        title={pendingAction === "release" ? STAFF_ORDER_RELEASE_LABEL : STAFF_ORDER_REPLACE_LABEL}
+        title={
+          pendingAction === "release"
+            ? STAFF_ORDER_RELEASE_LABEL
+            : pendingAction === "assign"
+              ? STAFF_ORDER_ASSIGN_LABEL
+              : STAFF_ORDER_REPLACE_LABEL
+        }
         description={
           pendingAction === "release"
             ? STAFF_ORDER_RELEASE_CONFIRM_NOTICE
-            : STAFF_ORDER_REPLACE_CONFIRM_NOTICE
+            : pendingAction === "assign"
+              ? STAFF_ORDER_ASSIGN_CONFIRM_NOTICE
+              : STAFF_ORDER_REPLACE_CONFIRM_NOTICE
         }
         confirmLabel={
           pendingAction === "release"
             ? STAFF_ORDER_RELEASE_CONFIRM_LABEL
-            : STAFF_ORDER_REPLACE_CONFIRM_LABEL
+            : pendingAction === "assign"
+              ? STAFF_ORDER_ASSIGN_CONFIRM_LABEL
+              : STAFF_ORDER_REPLACE_CONFIRM_LABEL
         }
         // 两个动作都不销毁数据，因此都不是 danger：退回公共池会立刻换掉履约人，
         // 但它**不取消订单、不退款**，用红色确认键会把这件事说得比实际重
@@ -277,9 +325,13 @@ export default function StaffOrderActionsConsole({
           </label>
         ) : null}
 
-        {pendingAction === "replace" ? (
+        {pendingAction !== null && pendingAction !== "release" ? (
           <div className="flex flex-col gap-2">
-            <span className="text-[12px] text-ink-3">{STAFF_ORDER_REPLACE_SELECT_LABEL}</span>
+            <span className="text-[12px] text-ink-3">
+              {pendingAction === "assign"
+                ? STAFF_ORDER_ASSIGN_SELECT_LABEL
+                : STAFF_ORDER_REPLACE_SELECT_LABEL}
+            </span>
 
             {candidatesError ? (
               <p role="alert" className="text-[12px] leading-5 text-status-danger">
@@ -293,7 +345,11 @@ export default function StaffOrderActionsConsole({
 
             {candidates && candidates.items.length === 0 ? (
               <div className="text-[12px] leading-5 text-ink-3">
-                <p className="font-medium text-ink-2">{STAFF_ORDER_REPLACE_EMPTY_TITLE}</p>
+                <p className="font-medium text-ink-2">
+                  {pendingAction === "assign"
+                    ? STAFF_ORDER_ASSIGN_EMPTY_TITLE
+                    : STAFF_ORDER_REPLACE_EMPTY_TITLE}
+                </p>
                 <p>{candidates.notice}</p>
               </div>
             ) : null}
@@ -307,7 +363,7 @@ export default function StaffOrderActionsConsole({
                       <label className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-page">
                         <input
                           type="radio"
-                          name="staff-order-replace-candidate"
+                          name="staff-order-action-candidate"
                           value={candidate.companionId}
                           checked={selectedCompanionId === candidate.companionId}
                           onChange={() => {
@@ -330,7 +386,9 @@ export default function StaffOrderActionsConsole({
                           {/* 这一列数字不是装饰：把一单换给已经压了五单的人，
                               是把问题从一位护航挪到另一位身上 */}
                           <span className="block text-[12px] text-ink-3">
-                            {STAFF_ORDER_REPLACE_CANDIDATES_COUNT_LABEL}
+                            {pendingAction === "assign"
+                              ? STAFF_ORDER_ASSIGN_CANDIDATES_COUNT_LABEL
+                              : STAFF_ORDER_REPLACE_CANDIDATES_COUNT_LABEL}
                             {candidate.activeOrderCount}
                           </span>
                         </span>
@@ -339,7 +397,9 @@ export default function StaffOrderActionsConsole({
                   ))}
                 </ul>
                 <p className="text-[12px] leading-5 text-ink-3">
-                  {STAFF_ORDER_REPLACE_CANDIDATES_NOTICE}
+                  {pendingAction === "assign"
+                    ? STAFF_ORDER_ASSIGN_CANDIDATES_NOTICE
+                    : STAFF_ORDER_REPLACE_CANDIDATES_NOTICE}
                 </p>
               </>
             ) : null}

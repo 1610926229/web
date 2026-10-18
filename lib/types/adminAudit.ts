@@ -153,7 +153,17 @@ export type AdminAuditAction =
   | "review.approve"
   | "review.reject"
   | "review.hide"
-  | "review.unhide";
+  | "review.unhide"
+  // ————— 真实业务闭环（PROD-4）—————
+  // 客服把一张 `paid` 订单指派给某位护航接单。这是新增的客服写动作，
+  // 它改的是派单与订单两行，因此在 `admin_audit_entries` 留下一条平台侧记录。
+  // `accepted_via = 'staff'` 写在派单记录上，回答「这次接单不是护航自己点的」；
+  // 审计行回答「是哪位客服做的、什么时候、指派了谁」。
+  | "order.assign"
+  // 管理员 / 客服的凭据变更。**不记录任何密码内容**：
+  // before/after 只写 `passwordUpdatedAt` 这类时间事实。
+  | "staff.reset-password"
+  | "admin.password-change";
 
 /** 被操作对象的类型。与 `targetId` 一起指向具体记录。 */
 export type AdminAuditTargetType =
@@ -205,7 +215,12 @@ export type AdminAuditTargetType =
    * ⚠️ 隐藏与恢复公开记的是**同一个 `targetId`**：这正是 `D11` 要求可逆的落点——
    * 一条评价的完整审核历史，是同一目标上按时间排列的若干条审计。
    */
-  | "review";
+  | "review"
+  // ————— 真实业务闭环（PROD-4）—————
+  /** 订单。`targetId` 是 `Order.id`。PROD-4 起用于「客服指派接单」。 */
+  | "order"
+  /** 管理员账号。`targetId` 是 `AdminAccount.id`。 */
+  | "admin";
 
 /**
  * 精简快照。
