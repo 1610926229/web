@@ -35,9 +35,12 @@ import { fileURLToPath } from "node:url";
 import {
   PUBLIC_PREVIEW_HEADER,
   PUBLIC_PREVIEW_HEADER_VALUE,
+  PUBLIC_PREVIEW_UNAVAILABLE_REASON,
   isPublicPreviewMethod,
   isPublicPreviewPath,
   normalizePublicPreviewPath,
+  publicPreviewSafeHref,
+  publicPreviewUnavailableHref,
 } from "../lib/config/publicPreview.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -206,6 +209,79 @@ test("公网预览只允许 GET / HEAD", () => {
   }
 });
 
+test("公网预览把受保护入口改写到「暂不可用」占位页", () => {
+  // 公开路径原样保留（含查询串），不改变正常导航。
+  for (const [href, label] of [
+    ["/", "首页"],
+    ["/category?tab=all", "分类"],
+    ["/product/p-400w", "商品"],
+    ["/companions/cp-demo#reviews", "陪玩"],
+    ["/placeholder", "占位"],
+  ]) {
+    assert.equal(publicPreviewSafeHref(href, label), href, `不应改写 ${href}`);
+  }
+
+  // 外链与非本站协议原样返回，不误改。
+  for (const href of [
+    "https://example.com/orders",
+    "weixin://dl/business",
+    "tel:10086",
+    "#top",
+  ]) {
+    assert.equal(publicPreviewSafeHref(href, "外部"), href, `不应改写外链 ${href}`);
+  }
+
+  // 受保护页面改写到占位页，并带上可读标题与原因。
+  for (const [href, label] of [
+    ["/orders", "订单"],
+    ["/service", "客服"],
+    ["/mine", "我的"],
+    ["/join", "考核入驻"],
+    ["/complaints", "投诉客服专区"],
+    ["/coupons?tab=valid", "优惠券"],
+  ]) {
+    const rewritten = publicPreviewSafeHref(href, label);
+    const url = new URL(rewritten, "https://public-preview.invalid");
+    assert.equal(url.pathname, "/placeholder", `${href} 应改写到占位页`);
+    assert.equal(url.searchParams.get("title"), label);
+    assert.equal(url.searchParams.get("reason"), PUBLIC_PREVIEW_UNAVAILABLE_REASON);
+  }
+
+  const encoded = publicPreviewUnavailableHref("  ");
+  assert.equal(new URL(encoded, "https://public-preview.invalid").searchParams.get("title"), "该功能");
+});
+
+test("导航 / 快捷入口 / 占位页都接入公网落点改写", () => {
+  const tabBar = read("components/common/TabBar.tsx");
+  assert.match(tabBar, /publicPreviewSafeHref\(href, label\)/);
+  assert.match(tabBar, /publicPreview \? publicPreviewSafeHref\(href, label\) : href/);
+
+  const layout = read("app/(mobile)/(tabs)/layout.tsx");
+  assert.match(layout, /isPublicPreviewRequest\(\)/);
+  assert.match(layout, /<TabBar publicPreview=\{publicPreview\}/);
+
+  const home = read("app/(mobile)/(tabs)/page.tsx");
+  assert.match(home, /isPublicPreviewRequest\(\)/);
+  assert.match(home, /publicPreviewSafeHref\(shortcut\.href, shortcut\.label\)/);
+
+  const placeholder = read("components/common/PlaceholderPage.tsx");
+  assert.match(placeholder, /PUBLIC_PREVIEW_UNAVAILABLE_REASON/);
+  assert.match(placeholder, /暂不可用/);
+  assert.match(placeholder, /PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION/);
+
+  const route = read("app/(mobile)/placeholder/page.tsx");
+  assert.match(route, /params\.reason/);
+  assert.match(route, /reason=\{reason\}/);
+});
+
+test("协议页签改为可换行布局，390px 下不横向裁切", () => {
+  const source = read("components/agreements/AgreementTabs.tsx");
+  assert.match(source, /role="tablist"/);
+  assert.match(source, /flex flex-wrap gap-1/);
+  assert.doesNotMatch(source, /overflow-x-auto/, "页签不应再依赖横向滚动");
+  assert.match(source, /rounded-full px-2 /);
+});
+
 // ── 2. 应用守卫 ───────────────────────────────────────────────────────────────
 
 test("proxy.ts 只在 Nginx 标记公网请求时生效", () => {
@@ -297,6 +373,20 @@ test("Nginx 只代理公开页面，其余路径兜底 404", () => {
   }
 
   assert.match(nginx, /location\s+\/\s*\{\s*return\s+404;/);
+});
+
+test("Nginx 用精确匹配承接 /companions，避免 301/308 重定向环", () => {
+  const exact = nginxCode.match(/location\s*=\s*\/companions\s*\{([^}]*)\}/);
+  assert.ok(exact, "缺少 location = /companions，前缀 location 会把无斜杠地址 301 到带斜杠");
+  assert.match(
+    exact[1],
+    /proxy_pass\s+http:\/\/127\.0\.0\.1:3000;/,
+    "/companions 必须直接代理到上游，而不是 redirect",
+  );
+  assert.ok(
+    exact.index < nginxCode.indexOf("location ^~ /companions/"),
+    "精确匹配必须写在前缀匹配之前，便于阅读（Nginx 的 = 本就优先，但顺序仍需明确）",
+  );
 });
 
 test("Nginx 配置基础防护：安全头、限流、请求体上限", () => {

@@ -361,7 +361,13 @@ SELECT 8 AS section, 'bootstrap data' AS check_name,
        EXISTS (SELECT 1 FROM products
                 WHERE id = 'p-400w' AND status = 'on' AND removed_at IS NULL) AS product_400w,
        EXISTS (SELECT 1 FROM product_specs
-                WHERE id = 's-400w' AND product_id = 'p-400w') AS spec_400w;
+                WHERE id = 's-400w' AND product_id = 'p-400w') AS spec_400w,
+       EXISTS (SELECT 1 FROM platform_config
+                WHERE id = 1
+                  AND exclusive_pool_timeout_minutes BETWEEN 1 AND 1440
+                  AND public_pool_timeout_minutes BETWEEN 1 AND 1440
+                  AND completion_auto_approval_minutes BETWEEN 1 AND 1440
+                  AND complaint_window_minutes BETWEEN 60 AND 10080) AS platform_config_1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 9. 违规汇总与总体判定
@@ -467,6 +473,7 @@ WITH v AS (
       AND EXISTS (SELECT 1 FROM products
                    WHERE id = 'p-400w' AND status = 'on' AND removed_at IS NULL)
       AND EXISTS (SELECT 1 FROM product_specs WHERE id = 's-400w' AND product_id = 'p-400w')
+      AND EXISTS (SELECT 1 FROM platform_config WHERE id = 1)
                                                                             AS bootstrap_ok
 )
 SELECT 9 AS section, 'OVERALL' AS check_name,

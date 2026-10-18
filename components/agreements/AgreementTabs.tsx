@@ -36,7 +36,8 @@ export default function AgreementTabs({ dto }: { dto: AgreementsDto }) {
   return (
     <div className="flex flex-1 flex-col bg-surface">
       <div className="shrink-0 border-b border-line px-3 py-2">
-        <div className="flex gap-1.5 overflow-x-auto" role="tablist" aria-label="协议类型">
+        {/* 五个页签在 390px 视口内放得下（px-2 + flex-wrap），更窄的屏幕换行而不是横向裁切 */}
+        <div className="flex flex-wrap gap-1" role="tablist" aria-label="协议类型">
           {dto.tabs.map((tab) => {
             const selected = tab.type === active;
             return (
@@ -48,7 +49,7 @@ export default function AgreementTabs({ dto }: { dto: AgreementsDto }) {
                 aria-selected={selected}
                 aria-controls={`${panelId}-panel`}
                 onClick={() => setActive(tab.type)}
-                className={`shrink-0 rounded-full px-3 py-1 text-[12px] leading-5 ${
+                className={`shrink-0 rounded-full px-2 py-1 text-[12px] leading-5 ${
                   selected ? "seg-tab-active font-medium" : "bg-page text-ink-2"
                 }`}
               >

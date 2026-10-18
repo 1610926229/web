@@ -3,6 +3,8 @@ import EmptyState from "@/components/common/EmptyState";
 import AnnouncementCarousel from "@/components/home/AnnouncementCarousel";
 import HomeShortcutGrid from "@/components/home/HomeShortcutGrid";
 import ProductSection from "@/components/home/ProductSection";
+import { isPublicPreviewRequest } from "@/lib/auth/publicPreviewRequest";
+import { publicPreviewSafeHref } from "@/lib/config/publicPreview";
 import { getHomeData } from "@/lib/services/home";
 import type { HomeData } from "@/lib/types/content";
 import { toSearchParams } from "@/lib/utils/query";
@@ -25,8 +27,9 @@ export default async function HomePage({ searchParams }: PageProps<"/">) {
   // 查询参数原样交给 service，页面不判断开关、也不关心哪些参数有意义；
   // 与 /api/home 的处理方式完全一致，两处行为不会分叉。
   const data = await getHomeData(toSearchParams(await searchParams), "server");
+  const publicPreview = await isPublicPreviewRequest();
 
-  return <HomeModules data={data} />;
+  return <HomeModules data={data} publicPreview={publicPreview} />;
 }
 
 /**
@@ -36,11 +39,20 @@ export default async function HomePage({ searchParams }: PageProps<"/">) {
  * 替换掉整页内容——公告、活动图、快捷入口、商品四者彼此独立。
  * 只有四者同时为空，才轮到整页空态。
  */
-function HomeModules({ data }: { data: HomeData }) {
+function HomeModules({ data, publicPreview }: { data: HomeData; publicPreview: boolean }) {
   const hasAnnouncements = data.announcements.length > 0;
   const hasActivity = data.activityImageUrl.length > 0;
   const hasShortcuts = data.shortcuts.length > 0;
   const hasProducts = data.sections.length > 0;
+
+  // 快捷入口里有「联系客服/点单权益/考核入驻/投诉客服专区」，公网白名单不含这些
+  // 受保护页面。公网预览下只改展示落点，受保护路由本身仍然 404。
+  const shortcuts = publicPreview
+    ? data.shortcuts.map((shortcut) => ({
+        ...shortcut,
+        href: publicPreviewSafeHref(shortcut.href, shortcut.label),
+      }))
+    : data.shortcuts;
 
   if (!hasAnnouncements && !hasActivity && !hasShortcuts && !hasProducts) {
     return (
@@ -69,7 +81,7 @@ function HomeModules({ data }: { data: HomeData }) {
         </section>
       ) : null}
 
-      {hasShortcuts ? <HomeShortcutGrid shortcuts={data.shortcuts} /> : null}
+      {hasShortcuts ? <HomeShortcutGrid shortcuts={shortcuts} /> : null}
 
       {/* 商品分组：仅有商品为空时，只让这一段进入空态 */}
       {hasProducts ? (

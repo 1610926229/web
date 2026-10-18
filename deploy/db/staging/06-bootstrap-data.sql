@@ -76,6 +76,11 @@ BEGIN
       'schema_migrations 不存在 —— 还没有执行迁移。请先 `pnpm db:migrate` 指向 chaoge_staging。';
   END IF;
 
+  IF to_regclass('public.platform_config') IS NULL THEN
+    RAISE EXCEPTION
+      'platform_config 不存在 —— 迁移 0008 尚未执行，订单派单/自动完成会直接报错。';
+  END IF;
+
   IF to_regclass('public.users') IS NULL
      OR to_regclass('public.admin_accounts') IS NULL
      OR to_regclass('public.staff_accounts') IS NULL
@@ -164,7 +169,29 @@ INSERT INTO product_specs (id, product_id, name, price, sort_order, enabled, rem
   ('s-400w', 'p-400w', '机密400万', 2990, 10, true, NULL)
 ON CONFLICT DO NOTHING;
 
--- ── 6. 自检：最小集合确实存在 ──────────────────────────────────────────────────
+-- ── 6. 平台参数（单行表 id = 1）───────────────────────────────────────────────
+--
+-- ⚠️ 这不是「可选配置」：派单超时扫描（sweepExpiredDispatches）与完成材料
+-- 自动通过（sweepCompletionAutoApprovals）在事务里 `SELECT ... WHERE id = 1`，
+-- 读不到就直接抛错。缺失时表现为订单页 / 客服页 / `/api/orders` 整页 500，
+-- 而首页与商品页因为不跑这两条扫描仍然正常——正是 staging 上出现过的故障形态。
+--
+-- 取值与 `lib/mocks/fixtures/platformConfigSeed.ts` 一致（专属池 10 / 公共池 60 /
+-- 完成材料 10 / 投诉窗口 1440）。这里写数字是刻意的：SQL 无法 import TS 常量，
+-- 而 staging 最小数据集需要一份**能独立执行**的种子；对应关系由
+-- tests/stagingDatabase.test.mjs 的断言守住，改常量时必须同步改这里。
+--
+-- ON CONFLICT DO NOTHING：管理员在 staging 上调过的值不会被重跑覆盖。
+
+INSERT INTO platform_config
+  (id, exclusive_pool_timeout_minutes, public_pool_timeout_minutes,
+   completion_auto_approval_minutes, complaint_window_minutes,
+   updated_at, updated_by_admin_id)
+VALUES
+  (1, 10, 60, 10, 1440, '2026-01-01T00:00:00.000Z', NULL)
+ON CONFLICT DO NOTHING;
+
+-- ── 7. 自检：最小集合确实存在 ──────────────────────────────────────────────────
 
 DO $assert$
 DECLARE
@@ -193,11 +220,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM product_specs WHERE id = 's-400w' AND product_id = 'p-400w') THEN
     missing := missing || 'product_specs.s-400w';
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM platform_config WHERE id = 1) THEN
+    missing := missing || 'platform_config.id=1';
+  END IF;
 
   IF array_length(missing, 1) > 0 THEN
     RAISE EXCEPTION 'staging 最小数据集不完整：%', array_to_string(missing, ', ');
   END IF;
 
-  RAISE NOTICE '[staging-06] 自检通过：登录所需的用户 / 管理员 / 客服 / 护航资料与最小目录已就位';
+  RAISE NOTICE '[staging-06] 自检通过：登录所需的用户 / 管理员 / 客服 / 护航资料、最小目录与平台参数已就位';
 END
 $assert$;

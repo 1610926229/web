@@ -130,3 +130,46 @@ export function isPublicPreviewPath(pathname: string): boolean {
 export function isPublicPreviewMethod(method: string): boolean {
   return method === "GET" || method === "HEAD";
 }
+
+/**
+ * 公网预览里「该入口需要登录」的占位原因。
+ *
+ * 与真正「尚未开发」的占位页区分开：公网访客点到底部导航的「订单/客服/我的」
+ * 或首页快捷入口里的「联系客服/点单权益/考核入驻/投诉客服专区」时，看到的是
+ * 「暂不可用 · 该功能仅对已登录用户开放」，而不是误导性的「页面待实现」。
+ */
+export const PUBLIC_PREVIEW_UNAVAILABLE_REASON = "public-preview";
+
+export const PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION =
+  "该功能仅对已登录用户开放，公网预览暂不提供。请通过微信小程序访问完整功能。";
+
+/**
+ * 为「公网不可达」的入口生成占位页地址。
+ *
+ * 只改**展示层**的落点：Nginx 与应用内的白名单都不动，受保护路由照旧 404。
+ * 这样公网访客不会撞上裸 404，也无法借占位页拿到任何能力。
+ */
+export function publicPreviewUnavailableHref(label: string): string {
+  const title = label.trim() || "该功能";
+  return `/placeholder?title=${encodeURIComponent(title)}&reason=${PUBLIC_PREVIEW_UNAVAILABLE_REASON}`;
+}
+
+/**
+ * 公网预览下的链接改写：公开路径原样返回，其余换成「暂不可用」占位页。
+ *
+ * 只处理站内绝对路径；外链、`tel:`/`weixin:` 等协议、纯锚点原样返回——
+ * 它们不经过本应用的路由，改写反而会破坏原有行为。
+ *
+ * ⚠️ 这是**导航可达性**的修复，不是权限判断。真正的拒绝仍在 Nginx 与
+ * `proxy.ts`；即使有人手工输入 `/orders`，结果依然是 404。
+ */
+export function publicPreviewSafeHref(href: string, label: string): string {
+  try {
+    const url = new URL(href, "https://public-preview.invalid");
+    if (url.origin !== "https://public-preview.invalid") return href;
+    if (isPublicPreviewPath(url.pathname)) return href;
+    return publicPreviewUnavailableHref(label);
+  } catch {
+    return href;
+  }
+}

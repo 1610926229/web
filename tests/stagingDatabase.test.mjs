@@ -196,7 +196,42 @@ test("06 在插入前断言 schema_migrations 与业务表存在", () => {
   const src = sql["06-bootstrap-data.sql"];
   assert.match(src, /to_regclass\('public\.schema_migrations'\) IS NULL/);
   assert.match(src, /to_regclass\('public\.users'\) IS NULL/);
+  assert.match(src, /to_regclass\('public\.platform_config'\) IS NULL/);
   assert.match(src, /业务表不完整/);
+});
+
+test("06 播种 platform_config 单行，否则订单派单/自动完成会抛错", () => {
+  const src = sql["06-bootstrap-data.sql"];
+  const insert = src.match(
+    /INSERT INTO platform_config\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)\s*ON CONFLICT DO NOTHING/,
+  );
+  assert.ok(insert, "缺少 platform_config 的幂等 INSERT");
+
+  const columns = insert[1].split(",").map((column) => column.trim());
+  const values = insert[2].split(",").map((value) => value.trim());
+  const row = Object.fromEntries(columns.map((column, index) => [column, values[index]]));
+
+  // 与 lib/mocks/fixtures/platformConfigSeed.ts 的预置值一致。
+  assert.equal(row.id, "1");
+  assert.equal(row.exclusive_pool_timeout_minutes, "10");
+  assert.equal(row.public_pool_timeout_minutes, "60");
+  assert.equal(row.completion_auto_approval_minutes, "10");
+  assert.equal(row.complaint_window_minutes, "1440");
+  assert.equal(row.updated_at, "'2026-01-01T00:00:00.000Z'");
+  assert.equal(row.updated_by_admin_id, "NULL");
+
+  // 自检必须覆盖这一行，避免「脚本写了但没生效」时静默通过。
+  assert.match(src, /missing := missing \|\| 'platform_config\.id=1'/);
+});
+
+test("99-verify 把 platform_config 纳入最小数据与总体判定", () => {
+  const src = sql["99-verify.sql"];
+  assert.match(src, /AS platform_config_1/);
+  assert.match(
+    src,
+    /EXISTS \(SELECT 1 FROM platform_config WHERE id = 1\)\s*\n\s*AS bootstrap_ok/,
+    "总判定必须要求 platform_config.id = 1 存在",
+  );
 });
 
 // ── 4b. 首页演示数据：独立、幂等、不覆盖人工修改 ─────────────────────────────
