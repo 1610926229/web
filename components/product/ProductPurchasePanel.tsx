@@ -33,11 +33,14 @@ export default function ProductPurchasePanel({
   loggedIn,
   initialFavorited,
   mockAuthEnabled,
+  publicPreview = false,
 }: {
   product: ProductDetail;
   loggedIn: boolean;
   initialFavorited: boolean;
   mockAuthEnabled: boolean;
+  /** 公网只读预览：受限操作只说明「暂不可用」，不展示模拟登录文案。 */
+  publicPreview?: boolean;
 }) {
   // 单组规格、单选：默认选中第一项。种子保证至少一项，取不到时回落到商品自身价格。
   const [specId, setSpecId] = useState<string | null>(product.specs[0]?.id ?? null);
@@ -266,6 +269,7 @@ export default function ProductPurchasePanel({
       <LoginSheet
         open={sheetOpen}
         mockAuthEnabled={mockAuthEnabled}
+        publicPreview={publicPreview}
         onClose={() => {
           setSheetOpen(false);
           setPendingAction(null);

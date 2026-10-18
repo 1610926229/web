@@ -30,6 +30,7 @@ export default async function ProductDetailPage({
   const { id } = await params;
   // 查询参数原样交给 service（Mock 调试参数由此生效），页面不判断开关
   const query = toSearchParams(await searchParams);
+  const publicPreview = await isPublicPreviewRequest();
 
   const [product, user] = await Promise.all([
     getProductDetail(id, query, "server"),
@@ -56,9 +57,8 @@ export default async function ProductDetailPage({
           product={product}
           loggedIn={user !== null}
           initialFavorited={favorited}
-          mockAuthEnabled={
-            isMockAuthEnabled() && !(await isPublicPreviewRequest())
-          }
+          mockAuthEnabled={isMockAuthEnabled() && !publicPreview}
+          publicPreview={publicPreview}
         />
         {/* 公开评分聚合由服务层贴在 `ProductDetailView.reviews` 上，页面只负责渲染 */}
         <ProductReviews reviews={product.reviews} />

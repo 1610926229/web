@@ -274,6 +274,27 @@ test("导航 / 快捷入口 / 占位页都接入公网落点改写", () => {
   assert.match(route, /reason=\{reason\}/);
 });
 
+test("商品详情的受限操作在公网预览下说明「暂不可用」，不展示模拟登录文案", () => {
+  const page = read("app/(mobile)/product/[id]/page.tsx");
+  assert.match(page, /const publicPreview = await isPublicPreviewRequest\(\)/);
+  assert.match(page, /mockAuthEnabled=\{isMockAuthEnabled\(\) && !publicPreview\}/);
+  assert.match(page, /<ProductPurchasePanel[\s\S]*publicPreview=\{publicPreview\}/);
+
+  const panel = read("components/product/ProductPurchasePanel.tsx");
+  assert.match(panel, /publicPreview\?: boolean/);
+  assert.match(panel, /<LoginSheet[\s\S]*publicPreview=\{publicPreview\}/);
+
+  const sheet = read("components/auth/LoginSheet.tsx");
+  assert.match(sheet, /PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION/);
+  assert.match(sheet, /publicPreview \? "该功能暂不可用" : "登录后继续"/);
+  assert.match(
+    sheet,
+    /publicPreview\s*\n?\s*\? PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION/,
+    "公网预览必须使用统一说明，而不是模拟登录文案",
+  );
+  assert.match(sheet, /publicPreview \? "返回" : "暂不登录"/);
+});
+
 test("协议页签改为可换行布局，390px 下不横向裁切", () => {
   const source = read("components/agreements/AgreementTabs.tsx");
   assert.match(source, /role="tablist"/);

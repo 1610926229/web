@@ -2,6 +2,7 @@
 
 import LoginGate from "@/lib/auth/LoginGate";
 import NavBar from "@/components/common/NavBar";
+import { PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION } from "@/lib/config/publicPreview";
 
 /**
  * 受限操作的登录浮层。
@@ -16,11 +17,14 @@ import NavBar from "@/components/common/NavBar";
 export default function LoginSheet({
   open,
   mockAuthEnabled,
+  publicPreview = false,
   onClose,
   onSuccess,
 }: {
   open: boolean;
   mockAuthEnabled: boolean;
+  /** 公网只读预览：不提供登录入口，必须明确说明「暂不可用」而不是提示模拟登录。 */
+  publicPreview?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -29,12 +33,16 @@ export default function LoginSheet({
   return (
     // 覆盖整个视口，避免被详情页底部操作栏盖住
     <div className="fixed inset-0 z-50 flex flex-col bg-surface">
-      <NavBar title="登录" showBack />
+      <NavBar title={publicPreview ? "暂不可用" : "登录"} showBack />
       <div className="flex flex-1 flex-col overflow-y-auto">
         <LoginGate
           mockAuthEnabled={mockAuthEnabled}
-          title="登录后继续"
-          description="收藏、联系客服与购买都需要先登录。当前为开发阶段的模拟登录，不会调用真实微信接口。"
+          title={publicPreview ? "该功能暂不可用" : "登录后继续"}
+          description={
+            publicPreview
+              ? PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION
+              : "收藏、联系客服与购买都需要先登录。当前为开发阶段的模拟登录，不会调用真实微信接口。"
+          }
           onSuccess={onSuccess}
         />
       </div>
@@ -45,7 +53,7 @@ export default function LoginSheet({
           onClick={onClose}
           className="w-full rounded-full border border-line py-3 text-[14px] text-ink-2"
         >
-          暂不登录
+          {publicPreview ? "返回" : "暂不登录"}
         </button>
       </div>
     </div>
