@@ -481,8 +481,8 @@ sudo -n /usr/local/sbin/chaoge-deploy deploy \
 |---|---|---|
 | HTTP 非 200 | 2（`/companion/exclusive`、`/companion/pool` 500） | **0** |
 | 页面出现 #441 / 加载失败 | 4（用户订单、用户客服、管理订单、客服订单） | **0** |
-| console error（不含 COOP 已知提示） | 9 | **0** |
-| pageerror | 0 | **0** |
+| console error（不含 COOP 已知提示） | 10 | **0** |
+| pageerror（未捕获异常） | 3 | **0** |
 | 资源 4xx/5xx | 0 | **0** |
 
 订单详情（用户 / 管理 / 客服）、客服会话、专属池、订单池、平台参数页均逐一
