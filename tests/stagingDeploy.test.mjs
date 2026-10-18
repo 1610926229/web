@@ -623,7 +623,7 @@ test(
       // 旧表达式会把符号链接也标记 —— 这正是 Staging 首次执行失败的原因。
       const old = runFind("\\( -perm -0020 -o -perm -0002 \\)");
       assert.equal(old.status, 0, old.stderr);
-      assert.match(old.stdout, /link$/, "旧写法应能复现符号链接误报");
+      assert.match(old.stdout, /\/link$/m, "旧写法应能复现符号链接误报");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
