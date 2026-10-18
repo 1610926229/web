@@ -238,7 +238,7 @@ test("§十三.4 面板不自带用户名单：名单只有 lib/constants/mockUs
   assert.ok(panel.includes("<MockUserPicker"), "面板必须复用登录界面那份选择器，而不是自己再画一份列表");
 });
 
-test("§十三.9 认证接口清单固定：app/api/**/auth/** 恰好这十三个（PROD-4 起）", () => {
+test("§十三.9 认证接口清单固定：app/api/**/auth/** 恰好这十七个（PROD-5 起）", () => {
   const found = [];
   for (const full of walk(path.join(ROOT, "app", "api"))) {
     const relative = relativeOf(full);
@@ -261,6 +261,12 @@ test("§十三.9 认证接口清单固定：app/api/**/auth/** 恰好这十三�
       "app/api/auth/mock-login/route.ts",
       // 用户注册：账号与密码由服务端创建，不接受角色字段
       "app/api/auth/register/route.ts",
+      // PROD-5：微信网页登录只创建**普通用户**会话（真实扫码 / 私有 Staging 模拟）。
+      // 没有客服或管理员版本，也没有「打手微信登录」——打手仍复用用户会话 + 入驻审核。
+      "app/api/auth/wechat/callback/route.ts",
+      "app/api/auth/wechat/mock/complete/route.ts",
+      "app/api/auth/wechat/start/route.ts",
+      "app/api/auth/wechat/status/route.ts",
       "app/api/staff/auth/login/route.ts",
       "app/api/staff/auth/logout/route.ts",
       "app/api/staff/auth/mock-login/route.ts",
@@ -287,13 +293,16 @@ test("§十三.9 没有新会话模型：仍然只有三套身份、六枚 Cooki
       "chaoge_admin_session",
       "chaoge_staff_session",
       "chaoge_user_session",
+      // PROD-5：OAuth state **不是会话**——它不指向任何身份，成功回调后立刻清除。
+      // 它必须留在浏览器里完成「发起登录的浏览器」与回调之间的绑定（防登录 CSRF）。
+      "chaoge_wechat_state",
       // ……以及一枚只在私有开关下生效的 Mock 会话 Cookie。
       // 同一身份的两枚名字不同，因此「真实登录覆盖 Mock 登录」是可以被读出来的。
       "mock_admin_id",
       "mock_staff_id",
       "mock_user_id",
     ],
-    "三套身份、六枚 Cookie，一个都不能多；打手身份建立在用户会话之上，没有自己的 Cookie",
+    "三套身份、六枚会话 Cookie；微信 state 只是 OAuth 防伪参数，不是第四套身份",
   );
 
   // ⚠️ 上面那条只认「导出常量 + 双引号字面量」这一种写法。DEV-1 交付审查时被
@@ -317,6 +326,9 @@ test("§十三.9 没有新会话模型：仍然只有三套身份、六枚 Cooki
       "lib/auth/realSession.ts",
       "lib/auth/session.ts",
       "lib/auth/staffSession.ts",
+      // PROD-5：这里写的是 OAuth state Cookie（一次性、不含身份），
+      // 不是第四套会话；微信登录成功后仍由 realSession 写用户会话。
+      "lib/auth/wechat/state.ts",
     ],
     "会话只允许在这三个身份模块 + 一层共用真实会话里落地；打手复用用户会话，不该有第四套",
   );

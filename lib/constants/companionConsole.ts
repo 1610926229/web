@@ -89,6 +89,16 @@ export const COMPANION_NOT_A_COMPANION_MESSAGE = "你还不是护航，无法进
 export const COMPANION_NOT_A_COMPANION_DESCRIPTION =
   "护航工作台只对已通过入驻审核的护航开放。提交入驻申请并通过审核后，用现在这个账号就能直接进入。";
 
+/**
+ * PROD-5：微信登录与打手身份的边界。
+ *
+ * 微信网页登录只确认「你是哪个用户」，不是「你是打手」。这条必须写在页面上：
+ * 否则用微信登录后直接打开工作台的人会以为登录方式决定了角色，
+ * 进而怀疑是系统没认出来。
+ */
+export const COMPANION_WECHAT_BINDING_NOTICE =
+  "微信登录只确认你的用户身份，不会自动获得护航资格。成为护航需要在入驻申请中提交资料，并由平台审核通过后绑定到当前账号。";
+
 /** 资格已下架（有资料，但被管理员下架）。**不是**「没有资格」。 */
 export const COMPANION_DISABLED_TITLE = "护航资格已下架";
 export const COMPANION_DISABLED_MESSAGE = "你的护航资格已下架，请联系管理员";

@@ -100,6 +100,9 @@ const ALL_VERSIONS = [
   // PROD-4：三套身份各一张凭据表（用户 / 客服 / 管理员）+ 一张不透明会话表。
   // 密码只存 scrypt 派生值，会话只存令牌的 SHA-256——两张表都不回传明文（续号，不改旧迁移）。
   "0017",
+  // PROD-5：微信外部身份（openid / unionid → 平台用户）与 OAuth 一次性 state。
+  // 只存身份键与 state 的 SHA-256，不存 access_token（续号，不改旧迁移）。
+  "0018",
 ];
 
 /**
@@ -115,6 +118,9 @@ const ALL_TABLES = [
   // 漏掉任何一张，真实登录就会在运行期以「表不存在」的方式失败。
   "admin_credentials",
   "auth_sessions",
+  // PROD-5：微信外部身份与 OAuth 一次性 state。缺任一张，微信登录会在运行期失败。
+  "auth_oauth_states",
+  "external_identities",
   "agreements",
   "announcements",
   "banners",

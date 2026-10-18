@@ -212,6 +212,8 @@ test("迁移顺序固定：按版本号数字升序，且与目录里的文件�
     "0016",
     // PROD-4 +真实认证：三张身份凭据表 + 一张不透明会话表（续号，不改旧迁移）
     "0017",
+    // PROD-5 +微信外部身份与 OAuth 一次性 state（续号，不改旧迁移）
+    "0018",
   ]);
   assert.equal(new Set(versions).size, versions.length, "版本号不能重复");
 

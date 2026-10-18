@@ -8,6 +8,7 @@ import {
   COMPANION_JOIN_LABEL,
   COMPANION_NOT_A_COMPANION_DESCRIPTION,
   COMPANION_NOT_A_COMPANION_TITLE,
+  COMPANION_WECHAT_BINDING_NOTICE,
 } from "@/lib/constants/companionConsole";
 import type { CompanionAccessState } from "@/lib/types/companionWorkspace";
 
@@ -38,6 +39,12 @@ export default function CompanionAccessNotice({
         title={disabled ? COMPANION_DISABLED_TITLE : COMPANION_NOT_A_COMPANION_TITLE}
         description={disabled ? COMPANION_DISABLED_DESCRIPTION : COMPANION_NOT_A_COMPANION_DESCRIPTION}
       />
+
+      {disabled ? null : (
+        <p className="max-w-sm text-center text-[12px] leading-5 text-ink-3">
+          {COMPANION_WECHAT_BINDING_NOTICE}
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center justify-center gap-3">
         <Link

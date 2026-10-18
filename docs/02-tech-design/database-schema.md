@@ -11,16 +11,31 @@
 >
 > **选型已裁定（PROD-1A）**：数据库 `PostgreSQL`，驱动 `node-postgres (pg)`，**不使用 ORM**，结构变更走**版本化 SQL 迁移文件**（`db/migrations/`）。裁定与理由见 `docs/03-dev/rounds/PROD-1A/02-decisions.md`、`tech-stack.md` §11.1。
 >
-> **已经有真实表结构的实体（仅此两个）：**
+> **已经有真实表结构的实体：**
 >
 > | 实体 | 迁移文件 | 仓储实现 |
 > |---|---|---|
 > | `Favorite`（收藏） | `db/migrations/0001_favorites.sql` | `lib/data/pg/favoriteRepository.ts` |
 > | `Suggestion`（反馈） | `db/migrations/0002_suggestions.sql` | `lib/data/pg/suggestionRepository.ts` |
+> | 订单 / 支付 / 结算 / 券（PROD-1E 及后续） | `0003`–`0008` | `lib/data/pg/*Repository.ts` |
+> | 管理员审计（PROD-1C） | `0009_admin_audit_entries.sql` | `lib/data/pg/adminAuditRepository.ts` |
+> | 身份 / 目录 / 运营 / 入驻 / 权益 / 评价 / 会话（PROD-1E） | `0010`–`0016` | `lib/data/pg/*Repository.ts` |
+> | 真实账号凭据与会话（PROD-4） | `0017_real_auth.sql` | `lib/data/pg/authRepository.ts` |
+> | 微信外部身份与 OAuth state（PROD-5） | `0018_wechat_identity.sql` | `lib/data/pg/wechatRepository.ts` |
 >
-> 这两个是 **PROD-1A 的竖切片**，选取标准是「不参与跨域资金事务、有真实读写、能验证唯一约束」。**其余实体仍未迁移**，本文件后续章节对它们仍然只描述逻辑模型。
+> 真实 DDL **以 `db/migrations/*.sql` 为准**；本文件不重复表结构（避免两份真值源）。
 >
-> **⚠️ 对未迁移的实体，本文件依旧不设计 SQL 类型、表名、FK cascade 与 index。** 已迁移的两个例外，其真实 DDL 以 `db/migrations/*.sql` 为准，本文件不重复（避免两份真值源）。
+> **PROD-5 · `external_identities` / `auth_oauth_states`：**
+>
+> - `external_identities(provider, app_id, open_id, union_id, user_id, 昵称/头像快照)`——
+>   `UNIQUE(provider, app_id, open_id)` 是「一个应用内一个 openid 只属于一个用户」的最终判据；
+>   `UNIQUE(provider, union_id) WHERE union_id IS NOT NULL` 让同一开放平台主体跨应用复用同一用户。
+>   **unionid 只写在链接的第一行**，后续应用的 openid 行 `union_id = NULL`（唯一索引不允许重复），
+>   跨应用解析由 `lib/data/pg/wechatRepository.ts` 完成。
+> - `auth_oauth_states(state_hash UNIQUE, redirect_to, expires_at, consumed_at)`——
+>   只存 state 的 SHA-256，10 分钟有效；消费是单条 `UPDATE … WHERE consumed_at IS NULL AND expires_at > now RETURNING`，
+>   并发/重放回调只有一个能成功。`redirect_to` 有 CHECK 限制为站内路径。
+> - provider 取值 `wechat`（真实）与 `mock`（Staging 模拟），两者身份行永不互认。
 
 > **2026-09-23 需求重校准说明**：第一部分 CURRENT 继续描述当前源码；第二部分 TARGET 已按需求 V0.3 更新。旧状态机、固定 48h 结算与“客服是唯一完成审核来源”等只能作为 CURRENT/历史事实，不能继续当作未来最终规则。
 

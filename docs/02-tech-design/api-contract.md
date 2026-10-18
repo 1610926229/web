@@ -56,10 +56,28 @@
 
 | Method | URL | Guard | Service | 作用 |
 |---|---|---|---|---|
+| POST | `/api/auth/register` | — | `realUserAuth` | 邮箱 + 密码注册（PROD-4）。仅 `DATA_SOURCE=postgres` 时存在，否则 404；成功后直接建立 `chaoge_user_session` |
+| POST | `/api/auth/login` | — | `realUserAuth` | 邮箱 + 密码登录（PROD-4）。仅 `DATA_SOURCE=postgres` 时存在；所有凭据失败统一 401，不区分「账号不存在」与「密码错误」 |
 | POST | `/api/auth/mock-login` | — | `lib/auth/session` + `lib/data/userRepository` ⚠️ | 模拟登录，写 Mock 会话 Cookie。由 `ENABLE_MOCK_AUTH` 控制，关闭时 404。可用 `{"userId":"u-1002"}` 切换身份：接口层（自动化 / curl）一直可以，**DEV-1 起用户端也有一个开发环境专用的悬浮面板**（`lib/auth/MockIdentityPanel.tsx`，服务端开关控制、关闭时整块不渲染）。切换 = **替换**当前会话，不是第二套登录态 |
-| POST | `/api/auth/logout` | — | `lib/auth/session` | 清除会话 Cookie。`ENABLE_MOCK_AUTH` 关闭时 404 |
+| POST | `/api/auth/logout` | — | `lib/auth/session` + `realSession` | 退出登录，幂等。`DATA_SOURCE=postgres` 时吊销 `auth_sessions` 中当前令牌并清除真实/Mock Cookie（PROD-4）；Mock 数据源下由 `ENABLE_MOCK_AUTH` 控制，关闭时 404 |
 
 ⚠️ `/api/auth/mock-login` 的 Route Handler **直接调用 `lib/data/userRepository`**，未经过 service 层。这是 Observed Current，见 §API Conventions 的说明。
+
+### 微信扫码登录（PROD-5）
+
+微信登录**只建立普通用户会话**（`chaoge_user_session`），不产生客服 / 管理员 / 打手身份。
+客服、管理员继续使用各自的密码登录接口；打手资格仍由既有入驻审核流程决定。
+
+| Method | URL | Guard | Service | 作用 |
+|---|---|---|---|---|
+| GET | `/api/auth/wechat/status` | — | `wechatLogin` | 能力探测：`{ realConfigured, mockAvailable }` 两个布尔值，`no-store`，不泄露 AppID / Secret / 回调地址 |
+| GET | `/api/auth/wechat/start` | — | `wechatLogin` | 真实微信登录入口：创建一次性 state 后 302 到开放平台扫码页。三项 `WECHAT_*` 未配齐时 302 到 `/wechat-login?error=not-configured`，绝不降级到 Mock |
+| GET | `/api/auth/wechat/callback` | — | `wechatLogin` | 真实微信回调：校验 Cookie + 数据库 state → 服务端换 code → 解析身份 → 建立用户会话。错误统一跳 `/wechat-login?error=<code>`，不回显 code / token / secret |
+| POST | `/api/auth/wechat/mock/complete` | — | `mockWechatLogin` | **仅 Staging**：`DATA_SOURCE=postgres` 且 `ENABLE_MOCK_AUTH=true` 时可用，按服务端名单完成模拟微信登录；未开启时 404。身份只来自 `lib/auth/wechat/mockProvider.ts`，请求体中的 `role` / `userId` / `openId` 一律忽略 |
+
+Mock 与真实 provider 完全分离：真实回调路径不 import Mock provider；两套身份以
+`external_identities.provider`（`wechat` / `mock`）隔离，同一 openid 字符串不会串成同一用户。
+
 
 ### 管理端
 

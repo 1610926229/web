@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { loginRealUser, registerRealUser } from "@/lib/services/realAuthHttp";
+import WechatLoginButton from "./WechatLoginButton";
 
 /**
  * 用户注册 / 登录表单（真实邮箱密码）。
@@ -62,6 +63,14 @@ export default function RealAuthForm({
 
   return (
     <form onSubmit={submit} className="flex w-full max-w-sm flex-col gap-3">
+      <WechatLoginButton />
+
+      <div className="flex items-center gap-3 text-[12px] text-ink-3">
+        <span className="h-px flex-1 bg-line" />
+        或使用邮箱密码
+        <span className="h-px flex-1 bg-line" />
+      </div>
+
       <div className="flex rounded-lg border border-line bg-page p-1">
         {(
           [
