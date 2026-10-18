@@ -1,9 +1,9 @@
 # PROD-3 · 交付记录
 
-**Status:** 应用侧守卫已发布并验证；Nginx 已在服务器安装并通过回环 + 公网全量验收；TCP 80 已可达
-**Release:** `20261017T172639Z-aa1c966`
-**App Git SHA:** `aa1c9663b0d6cc1b33add82f68a68dd35dd8ad2b`
-**Artifact SHA-256:** `b2da92ffbec258246f51774511f23d88ce83a4574e638904c5a4d138d002d741`
+**Status:** 全站巡检修复批次已发布并公网复验；两处需 root 的配置仍待人工授权
+**Release:** `20261018T021719Z-1674765`
+**App Git SHA:** `1674765eb7ab80625e34d9611d68fec40f2af538`
+**Artifact SHA-256:** `5b0bf95de21246eb0898fd1021de0e7b73fa83ead0c862d9d954d749c008d2f4`
 **Database:** `chaoge_staging`（PostgreSQL），`chaoge_prod` 未触碰
 
 ## 已发布
@@ -321,3 +321,139 @@ sudo bash /home/deploy/chaoge-proxy/rollback-public-proxy.sh
 4. 公网可见的是 Staging 演示数据；不包含真实用户敏感数据。
 5. 例行的受控脚本/SQL 更新仍需重跑 root 安装器（迁移快照固定绑定
    `APP_GIT_SHA`）。普通应用更新不需要。
+
+## 全站巡检与修复批次（2026-10-18）
+
+本轮用真实浏览器（Playwright 驱动本机 Edge，移动 390×844 / 桌面 1440×900）
+巡检公网与私有隧道，并完成代码修复、CI、受控部署与公网复验。
+
+### 发布
+
+| 项 | 值 |
+|---|---|
+| Git 提交（应用） | `1674765eb7ab80625e34d9611d68fec40f2af538` |
+| GitHub Actions | run `39088862203` · success |
+| 产物 | `staging-standalone-1674765….tar.gz` |
+| Artifact SHA-256 | `5b0bf95de21246eb0898fd1021de0e7b73fa83ead0c862d9d954d749c008d2f4` |
+| Release | `20261018T021719Z-1674765` |
+| 受控入口 | `sudo -n /usr/local/sbin/chaoge-deploy deploy` 通过；`BUILD_INFO` SHA 一致 |
+| 服务/监听 | `chaoge-staging` active/enabled；仅 `127.0.0.1:3000`；PostgreSQL 仅回环 |
+| 数据库隔离 | 部署自带 99-verify `OVERALL=PASS`；`chaoge_prod` 未触碰，`chaoge_staging` 未重置 |
+
+### 分类结论
+
+- **A 真实 Bug（已修）**：公网底部导航「订单/客服/我的」与首页快捷入口指向受保护
+  路由，点击后 404。改为展示「暂不可用」占位页，安全白名单不放宽。
+- **A 真实 Bug（已修）**：协议页五个页签在 390px 溢出（`overflow-x-auto`）。
+  改为 `flex flex-wrap` 后实测 `scrollWidth == clientWidth == 366`。
+- **B 预期安全阻断（保持）**：`/orders`、`/service`、`/mine`、`/join`、
+  `/complaints` 及 `/api/orders`、`/api/me`、admin/staff/companion/payments/auth
+  相关接口在公网一律 404。伪造 Cookie 不会获得身份。
+- **C 缺失功能（明确提示）**：`/help`、`/placeholder` 显示「页面待实现」，
+  不再用 404 伪装成故障。
+- **D 数据问题（已核对）**：商品 id 为 `p-400w` 等连字符格式；护航 id 为
+  `cp-demo`。此前巡检使用本地 Mock 的下划线 id，属于巡检脚本错误，不是站点 Bug。
+- **待修（需 root 授权）**：`/companions` 301↔308 重定向环；订单/客服/打手
+  专属池与订单池 React #441（`platform_config` 单行配置缺失）。
+
+### 公网真实浏览器复验
+
+| 范围 | 结果 |
+|---|---|
+| 公开页面 12 条（首页、分类、榜单、陪玩列表/详情、商品详情、协议、帮助、活动、占位） | 全部 200；0 console error、0 pageerror、0 资源 4xx/5xx、0 破图 |
+| 底部导航 5 项 + 快捷入口 4 项 | 首页/分类正常；其余落到「暂不可用」占位；点单权益为「页面待实现」 |
+| 受保护页面直接访问 6 条 | 全部 404（安全边界保持） |
+| 刷新、后退、前进、深链 `/product/p-400w` | 均正常 |
+| 移动端/桌面端 | 无横向溢出；协议页签 390px 实测不溢出 |
+| 公网 HTTP 矩阵 50 条 | 50/50 通过（公开页面/API 200；危险接口 404；`POST /` 405；静态资源 200） |
+
+> 巡检时本机 Edge 走了系统代理，曾出现偶发 502；使用 `--no-proxy-server`
+> 后 12/12 稳定 200，Nginx 访问日志也无 502。这是本机网络代理问题，不是站点缺陷。
+
+### 私有 Staging 真实浏览器复验（SSH 隧道 13000）
+
+| 端 | 结果 |
+|---|---|
+| 用户端（18 条） | 我的、入驻、投诉、优惠券、收藏、评价、设置、资料、鸡腿、建议、榜单、分类、商品、陪玩列表/详情均 200；**订单、客服** 为 #441 |
+| 管理后台（14 条） | 概览、商品、护航、入驻、退款、投诉、售后、类目、内容、评价、客服账号、优惠券、平台参数均 200；**订单** 为 #441 |
+| 客服工作台（6 条） | 工作台、会话、退款、投诉、完成材料均 200；**订单** 为 #441 |
+| 打手工作台（6 条） | 工作台、我的订单、收益、聊天均 200；**专属池、订单池** 返回 500（服务端 #441） |
+
+`#441` 的共同根因是 `platform_config` 缺少 `id = 1` 的单行配置；派单超时扫描与
+完成材料自动通过会在事务中读取该行并抛错。修复已在 `06-bootstrap-data.sql`
+与 `99-verify.sql` 中完成并通过本地回归，但服务器上的 `/usr/local/lib/chaoge`
+是 root 快照，需一次性重装受控入口才能让下一次 `deploy` 的 bootstrap 生效。
+
+### 待人工授权的一次性 root 操作
+
+以下两条命令均使用已上传、哈希固定的文件；**未执行**。完成后 Claude 可继续
+自动部署与复验，无需再输入密码。
+
+1. **重装 Nginx 配置（修复 `/companions` 重定向环）**
+
+```bash
+ssh deploy@43.128.13.181
+sudo bash -c '
+set -euo pipefail
+TMP="$(mktemp -d)"
+trap "rm -rf -- \"$TMP\"" EXIT
+install -o root -g root -m 0600 /home/deploy/chaoge-proxy/install-public-proxy.sh "$TMP/install-public-proxy.sh"
+install -o root -g root -m 0600 /home/deploy/chaoge-proxy/chaoge-public.conf "$TMP/chaoge-public.conf"
+[[ "$(sha256sum "$TMP/install-public-proxy.sh" | cut -d" " -f1)" == "2a1a2bde392ba95aeac1063dfef29f7429acea04b0e7633ffa0a4d2cbb4b0551" ]]
+[[ "$(sha256sum "$TMP/chaoge-public.conf" | cut -d" " -f1)" == "40a0449d6e8e186748167585f4d4bea7a94981477d9bfb6304b58d16079deed4" ]]
+bash "$TMP/install-public-proxy.sh"
+'
+```
+
+2. **重装受控入口（让新的 06 bootstrap 生效，修复 #441）**
+
+```bash
+sudo bash -c '
+set -euo pipefail
+BUNDLE=/home/deploy/prod2-deploy-bundle-1674765.tar.gz
+EXPECTED=41f80ffb61dc430653ef45ec190c9d8b24a0dc6c009a1da9c4f25644955b6709
+TMP="$(mktemp -d)"
+trap "rm -rf -- \"$TMP\"" EXIT
+install -o root -g root -m 0600 -- "$BUNDLE" "$TMP/bundle.tar.gz"
+[[ "$(sha256sum "$TMP/bundle.tar.gz" | cut -d" " -f1)" == "$EXPECTED" ]]
+tar -tzf "$TMP/bundle.tar.gz" | awk "/^\// || /(^|\/)\.\.(\/|$)/ { print \"unsafe: \" \$0; bad=1 } END { exit bad }"
+tar -tvzf "$TMP/bundle.tar.gz" | awk "\$1 !~ /^[-d]/ { print \"unsafe type: \" \$0; bad=1 } END { exit bad }"
+mkdir -m 0700 "$TMP/root"
+tar -xzf "$TMP/bundle.tar.gz" -C "$TMP/root" --no-same-owner --no-same-permissions
+bash "$TMP/root/deploy/entry/install.sh" --bundle-dir "$TMP/root"
+'
+```
+
+两处都完成后，Claude 继续执行：
+
+```bash
+sudo -n /usr/local/sbin/chaoge-deploy deploy \
+  /home/deploy/incoming/staging-standalone-1674765eb7ab80625e34d9611d68fec40f2af538.tar.gz \
+  5b0bf95de21246eb0898fd1021de0e7b73fa83ead0c862d9d954d749c008d2f4 \
+  1674765eb7ab80625e34d9611d68fec40f2af538
+```
+
+该命令会以新快照中的 06 执行 bootstrap（幂等插入 `platform_config.id=1`），
+再用同一产物完成发布与 99-verify。
+
+### 本轮质量门禁
+
+| 命令 | 结果 |
+|---|---|
+| `pnpm test` | 2313 tests · 1897 pass · 0 fail · 416 skipped |
+| `pnpm typecheck` | 通过 |
+| `pnpm lint` | 通过 |
+| GitHub Actions | `39088862203` success |
+| 公网 HTTP 矩阵 | 50/50 |
+| 公网真实浏览器 | 12 页面 + 15 导航/快捷入口 + 6 受保护探测 + 5 桌面路由，无应用错误 |
+| 私有真实浏览器 | 44 条路由访问；仅 #441 相关 5 条失败 |
+
+### 其他残余项
+
+1. **Staging Mock 登录名单与 Postgres 数据不一致**：登录页列出 `u-1022` 等
+   账号，但 `chaoge_staging` 只有 `u-1001`；点选不存在的账号会静默留在登录页。
+   这是 staging 演示数据/UI 提示问题，不影响公网只读入口；建议后续在数据种子
+   中补齐账号或在登录失败时给出提示。
+2. **纯 HTTP**：公网匿名只读，不传凭据；HTTPS 另行设计。
+3. 纯 HTTP 下浏览器会忽略 `Cross-Origin-Opener-Policy`，控制台出现一条
+   Chromium 提示；这是协议限制，不是应用错误。
