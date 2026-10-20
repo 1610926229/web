@@ -64,6 +64,13 @@ Database: `chaoge_staging`（18 个迁移 / 46 张表）；`chaoge_prod` 未触�
 - [x] 服务器临时目录 + 自签证书 + 非特权端口执行真实 `nginx -t` → successful
 - [x] 未修改系统 Nginx、未 reload、未安装 certbot
 
+### A8. 跨端会话隔离
+
+- [x] 私有 Mock 客服登录 → 200
+- [x] 客服会话访问 `/api/staff/orders` → 200
+- [x] 客服会话访问 `/api/admin/dashboard` → 401
+- [x] 客服会话访问 `/api/me` → 401
+
 ---
 
 ## B. 公网 HTTPS 人工验收（PENDING）

@@ -130,7 +130,21 @@ X-Forwarded-For 使用 `$remote_addr` **覆盖**，避免客户端伪造首段�
 | 公网 `/api/auth/wechat/status` | `{"realConfigured":false,"mockAvailable":false}` |
 | 私有 `/api/auth/wechat/status` | `{"realConfigured":false,"mockAvailable":true}` |
 
-### 3. Nginx 模板验证
+### 3. 跨端会话隔离
+
+在 Staging 进程内用私有 Mock 客服登录（`ENABLE_MOCK_STAFF`）取得客服会话：
+
+| 请求 | 结果 |
+|---|---|
+| `POST /api/staff/auth/mock-login`（`staff-1`） | 200 |
+| 客服会话 → `GET /api/staff/orders` | 200 |
+| 客服会话 → `GET /api/admin/dashboard` | **401** |
+| 客服会话 → `GET /api/me` | **401** |
+
+即：客服会话只能进入客服端，不能换成管理员或普通用户身份。
+真实客服口令登录仍受 `kefu-xiaoyu` 口令不一致影响（见 §五）。
+
+### 4. Nginx 模板验证
 
 在服务器 `/tmp` 下使用自签证书、非特权端口（18080 / 18443）运行真实 `nginx -t`：
 
@@ -139,7 +153,7 @@ X-Forwarded-For 使用 `$remote_addr` **覆盖**，避免客户端伪造首段�
 
 未修改系统 Nginx、未 reload、未写 `/etc/nginx`、未安装 certbot。
 
-### 4. 现有公网边界
+### 5. 现有公网边界
 
 从开发机直接访问 `http://43.128.13.181`：
 
