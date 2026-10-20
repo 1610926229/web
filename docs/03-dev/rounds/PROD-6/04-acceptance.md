@@ -190,6 +190,11 @@ ssh -i ~/.ssh/chaoge_deploy deploy@43.128.13.181 \
 - [x] 未输出任何明文密码、数据库连接串或会话令牌
 - [x] Mock 管理员 / 客服 / 身份冒用 / 支付接口未进入公网
 - [x] `DATA_SOURCE` 仍为 `postgres`，未回退到 mock
+- [x] 公网请求在会话解析层拒绝 `mock_*` 身份 Cookie；`proxy.ts` 在保留 Cookie 的路径上先剥离 `mock_*`
+- [x] 登录限流 IP 优先取可信代理写入的 `X-Real-IP`，否则取 `X-Forwarded-For` 最后一段；第一段伪造不再影响限流
+- [x] 新增路由清单门禁：`/api/staff/**`、`/api/admin/**` 下除登录 / 退出 / Mock 登录外的路由必须调用角色守卫
+- [x] 正式会话 Cookie 为 `HttpOnly` + `SameSite=Lax` + `Secure`（生产）
+- [ ] **公网开放阻断项**：正式登录当前仍接触 Staging 演示数据；须先建立独立生产环境并关闭 Mock 开关
 
 ---
 

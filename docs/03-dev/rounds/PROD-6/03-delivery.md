@@ -168,6 +168,20 @@ X-Forwarded-For 使用 `$remote_addr` **覆盖**，避免客户端伪造首段�
 
 即：**在 HTTPS 安装获得授权前，公网仍保持匿名只读，登录能力没有提前暴露。**
 
+### 6. 公网开放前安全复核（2026-10-20）
+
+只读检查 + 必要低风险修复；未开放公网真实登录，未修改 Nginx / 防火墙。
+
+| 检查项 | 结论 | 处置 |
+|---|---|---|
+| 伪造公网标记头 | Nginx 在 server 级 / snippet 级用固定值覆盖写入；应用内标记只会**收窄**权限；3000 仅监听回环，公网无法绕过 Nginx 直连 | 通过。保留“伪造标记只会更受限”的不变量 |
+| Mock 身份 Cookie 冒充 | **发现缺陷**：Staging 的 `ENABLE_MOCK_*` 为 true，登录 / 工作台路径又保留 Cookie；真实会话缺席时，`getSession*()` 会回落到 `mock_admin_id` / `mock_staff_id` / `mock_user_id`，公网可手工写 Cookie 冒充演示账号 | **已修复**：① 三个会话解析模块在公网请求上一律拒绝 Mock；② `proxy.ts` 在保留 Cookie 的公网路径剥离全部 `mock_*`；③ 新增静态门禁测试 |
+| 限流 IP 来源 | 原实现取 `X-Forwarded-For` 第一段；现有公网配置用 `$proxy_add_x_forwarded_for`，第一段可由客户端伪造 | **已修复**：优先 `X-Real-IP`（Nginx 用 `$remote_addr` 覆盖），否则取 XFF **最后一段**；新增伪造场景单测 |
+| Origin / Referer 覆盖 | `proxy.ts` 对所有带标记头的非安全方法统一校验，覆盖登录、退出与两端全部写接口；`SameSite=Lax` 为第二道 | 通过。`GET /api/auth/wechat/start` 只创建一次性 state，回调仍需 Cookie + 数据库 state 双匹配 |
+| 公网 API 前缀过宽 | `/api/staff/**`、`/api/admin/**` 按前缀放行；逐一核对全部路由：除 `auth/login`、`auth/logout`、`auth/mock-login` 外均调用 `requireStaff()` / `requireAdmin()` | 通过，并新增路由清单门禁：前缀下出现未鉴权新路由会让测试失败 |
+| 正式 Cookie 属性 | 真实会话与微信 state 均为 `HttpOnly` + `SameSite=Lax` + `Secure`（`NODE_ENV=production`），`path=/`，7 天 / state 短 TTL | 通过 |
+| 生产与 Staging 数据隔离 | 当前正式登录仍落在 Staging 进程与 `chaoge_staging` 演示数据上，Mock 开关为 true | **公网开放前阻断项**：先建立独立生产环境（独立 systemd / 目录 / 数据库 / 账号），关闭四个 `ENABLE_MOCK_*`，再开放公网登录 |
+
 ## 四、部署记录
 
 - 受控入口：`sudo -n /usr/local/sbin/chaoge-deploy deploy <artifact> <sha256> <git-sha>`

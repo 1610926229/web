@@ -5,6 +5,7 @@ import { getDataSource } from "@/lib/data/source";
 import type { User } from "@/lib/types/user";
 import { MOCK_USER_SESSION_COOKIE } from "./cookieNames";
 import { lookupRealSession } from "./realSession";
+import { isPublicPreviewRequest } from "./publicPreviewRequest";
 
 /**
  * 服务端会话（仅服务端使用）。
@@ -45,6 +46,11 @@ export const getSessionUser = cache(async function getSessionUser(): Promise<Use
   if (real.kind === "invalid") return null;
 
   if (!isMockAuthEnabled()) return null;
+
+  // PROD-6：公网请求永不接受 Mock 身份 Cookie。Mock 开关在 Staging 上默认开启，
+  // 而公网登录 / 工作台路径会保留 Cookie——不挡住这一步，任何人手工写一个
+  // `mock_user_id` 就能在公网上变成任意演示账号。真实会话在上面已经返回。
+  if (await isPublicPreviewRequest()) return null;
 
   const userId = jar.get(MOCK_SESSION_COOKIE)?.value;
   if (!userId) return null;

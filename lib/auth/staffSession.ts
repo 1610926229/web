@@ -4,6 +4,7 @@ import { getStaffRepository } from "@/lib/data/staffRepository";
 import type { StaffAccount } from "@/lib/types/staff";
 import { MOCK_STAFF_SESSION_COOKIE as MOCK_STAFF_SESSION_COOKIE_NAME } from "./cookieNames";
 import { lookupRealSession } from "./realSession";
+import { isPublicPreviewRequest } from "./publicPreviewRequest";
 
 /**
  * 客服端会话（仅服务端使用）。
@@ -81,6 +82,9 @@ export async function getSessionStaff(): Promise<StaffAccount | null> {
   if (real.kind === "invalid") return null;
 
   if (!isMockStaffEnabled()) return null;
+
+  // PROD-6：公网请求永不接受 Mock 身份 Cookie（理由见 session.ts 同一处注释）。
+  if (await isPublicPreviewRequest()) return null;
 
   const staffId = jar.get(MOCK_STAFF_SESSION_COOKIE)?.value;
   if (!staffId) return null;

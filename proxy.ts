@@ -11,6 +11,7 @@ import {
   isPublicAccessPath,
   isSameOriginPublicRequest,
   shouldStripPublicCookies,
+  stripMockIdentityCookies,
 } from "@/lib/config/publicAccess";
 
 /**
@@ -91,6 +92,17 @@ export function proxy(request: NextRequest) {
   if (shouldStripPublicCookies(pathname)) {
     headers.delete("cookie");
     headers.delete("authorization");
+  } else {
+    // 登录 / 工作台需要保留真实会话 Cookie，但 Mock 身份 Cookie 一律不进应用。
+    // Mock 开关在 Staging 默认开启，且 `mock_*` 没有签名——公网携带
+    // `mock_admin_id=admin-1` 就等价于冒充管理员。这里先剥掉，再由
+    // `getSession*()` 内部的「公网不吃 Mock」兜底。
+    const cookie = headers.get("cookie");
+    if (cookie) {
+      const stripped = stripMockIdentityCookies(cookie);
+      if (stripped) headers.set("cookie", stripped);
+      else headers.delete("cookie");
+    }
   }
 
   return NextResponse.next({ request: { headers } });

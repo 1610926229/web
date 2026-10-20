@@ -183,14 +183,60 @@ export function shouldStripPublicCookies(pathname: string): boolean {
   return isPublicPreviewPath(normalizePublicPreviewPath(pathname));
 }
 
-/** 从代理头解析客户端 IP；仅用于应用层限流，Nginx 限流不依赖它。 */
+/**
+ * 从代理头解析客户端 IP；仅用于应用层限流，Nginx 限流不依赖它。
+ *
+ * ⚠️ **只信任最靠近应用的那一跳**：
+ *
+ * - `X-Real-IP` 由 Nginx 用 `$remote_addr` 覆盖写入，客户端无法伪造，优先使用；
+ * - `X-Forwarded-For` 退而取**最后一段**。客户端可以随意在请求里自带一段
+ *   `X-Forwarded-For: 1.2.3.4`，现有公网配置又用 `$proxy_add_x_forwarded_for`
+ *   追加真实地址——第一段完全由客户端控制，拿它当限流 IP 等于没有限流。
+ *   最后一段是最近一跳代理写入的地址；新的 HTTPS 模板则直接把整条头覆盖成
+ *   `$remote_addr`，两种配置下都正确。
+ *
+ * 取不到任何可信地址时返回 `"unknown"`，限流仍会按这个桶生效。
+ */
 export function publicClientIp(headers: Headers): string {
+  const realIp = headers.get("x-real-ip")?.trim();
+  if (realIp) return realIp;
+
   const forwarded = headers.get("x-forwarded-for");
   if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = forwarded
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const trusted = parts[parts.length - 1];
+    if (trusted) return trusted;
   }
-  return headers.get("x-real-ip")?.trim() || "unknown";
+
+  return "unknown";
+}
+
+/** Mock 身份 Cookie 的公共前缀；它们只属于私有验收环境，公网一律丢弃。 */
+const MOCK_IDENTITY_COOKIE_PREFIX = "mock_";
+
+/**
+ * 从 `Cookie` 头中删除所有 `mock_*` 身份 Cookie，保留真实会话 Cookie。
+ *
+ * 公网登录 / 工作台需要保留 `chaoge_*_session`，但 Mock 身份 Cookie 没有签名、
+ * 没有凭据，任何人手工写一个 `mock_admin_id=admin-1` 就能冒充账号。
+ * `proxy.ts` 在公网请求进入应用前统一剥掉它们，作为 `getSession*()` 内部
+ * 「公网不吃 Mock」之外的第二道防线。
+ *
+ * 私有 Staging / 本地开发不带公网标记头，不走这条路径，Mock 登录照常可用。
+ */
+export function stripMockIdentityCookies(cookieHeader: string): string {
+  return cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => {
+      if (!part) return false;
+      const name = part.slice(0, part.indexOf("=") === -1 ? part.length : part.indexOf("="));
+      return !name.trim().startsWith(MOCK_IDENTITY_COOKIE_PREFIX);
+    })
+    .join("; ");
 }
 
 function safeMethod(method: string): boolean {

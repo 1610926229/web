@@ -11,7 +11,7 @@
  * 纯单元测试：不启动服务器、不连数据库。
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,7 @@ import {
   isSameOriginPublicRequest,
   publicClientIp,
   shouldStripPublicCookies,
+  stripMockIdentityCookies,
 } from "../lib/config/publicAccess.ts";
 import { publicPreviewSafeHref } from "../lib/config/publicPreview.ts";
 import {
@@ -38,6 +39,21 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relative) => readFileSync(path.join(REPO_ROOT, relative), "utf8");
+
+/** 去掉注释后再断言，避免「注释里写了 requireAdmin」被当成守卫。 */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function collectRouteFiles(relativeDir) {
+  const files = [];
+  for (const entry of readdirSync(path.join(REPO_ROOT, relativeDir), { withFileTypes: true })) {
+    const relative = path.posix.join(relativeDir, entry.name);
+    if (entry.isDirectory()) files.push(...collectRouteFiles(relative));
+    else if (entry.name === "route.ts") files.push(relative);
+  }
+  return files.sort();
+}
 
 // ── 1. 路径矩阵 ───────────────────────────────────────────────────────────────
 
@@ -306,13 +322,34 @@ test("CSRF：X-Forwarded-Host 优先于 Host", () => {
 
 // ── 5. 客户端 IP ──────────────────────────────────────────────────────────────
 
-test("客户端 IP 取 X-Forwarded-For 第一段，其次 X-Real-IP", () => {
+test("客户端 IP 优先取可信代理写入的 X-Real-IP，其次 X-Forwarded-For 最后一段", () => {
+  // 客户端可以自带第一段；Nginx 追加的真实地址在最后，第一段不可信。
   assert.equal(
-    publicClientIp(headersOf({ "x-forwarded-for": "203.0.113.7, 10.0.0.1" })),
+    publicClientIp(headersOf({ "x-forwarded-for": "1.2.3.4, 203.0.113.7" })),
     "203.0.113.7",
   );
-  assert.equal(publicClientIp(headersOf({ "x-real-ip": "203.0.113.9" })), "203.0.113.9");
+  // X-Real-IP 由 Nginx 用 $remote_addr 覆盖写入，优先于任何 XFF 内容。
+  assert.equal(
+    publicClientIp(
+      headersOf({ "x-real-ip": "203.0.113.9", "x-forwarded-for": "1.2.3.4, 10.0.0.1" }),
+    ),
+    "203.0.113.9",
+  );
+  assert.equal(publicClientIp(headersOf({ "x-forwarded-for": " , 10.0.0.1 , " })), "10.0.0.1");
   assert.equal(publicClientIp(headersOf({})), "unknown");
+});
+
+test("公网 Cookie 剥离只删除 mock_* 身份 Cookie，保留真实会话", () => {
+  assert.equal(
+    stripMockIdentityCookies("chaoge_admin_session=tok; mock_admin_id=admin-1"),
+    "chaoge_admin_session=tok",
+  );
+  assert.equal(
+    stripMockIdentityCookies("mock_staff_id=staff-1; chaoge_staff_session=a=b; theme=dark"),
+    "chaoge_staff_session=a=b; theme=dark",
+  );
+  assert.equal(stripMockIdentityCookies("mock_user_id=u-1"), "");
+  assert.equal(stripMockIdentityCookies("chaoge_user_session=x"), "chaoge_user_session=x");
 });
 
 // ── 6. 登录失败限流 ───────────────────────────────────────────────────────────
@@ -480,4 +517,61 @@ test("TOO_MANY_REQUESTS 进入统一错误码与 429 映射", () => {
 
   const route = read("lib/api/route.ts");
   assert.match(route, /retry-after/);
+});
+
+test("公网请求在会话解析层拒绝 Mock 身份 Cookie", () => {
+  for (const [file, cookieName] of [
+    ["lib/auth/session.ts", "MOCK_SESSION_COOKIE"],
+    ["lib/auth/staffSession.ts", "MOCK_STAFF_SESSION_COOKIE"],
+    ["lib/auth/adminSession.ts", "MOCK_ADMIN_SESSION_COOKIE"],
+  ]) {
+    const source = stripComments(read(file));
+    const guardAt = source.indexOf("await isPublicPreviewRequest()");
+    const mockReadAt = source.indexOf(`jar.get(${cookieName})`);
+
+    assert.ok(guardAt !== -1, `${file} 必须在 Mock 分支判断公网请求`);
+    assert.ok(mockReadAt !== -1, `${file} 必须读取 ${cookieName}`);
+    assert.ok(
+      guardAt < mockReadAt,
+      `${file} 必须在读取 Mock Cookie 之前返回 null，而不是读出来再判断`,
+    );
+    assert.match(
+      source.slice(guardAt, guardAt + 80),
+      /return null/,
+      `${file} 的公网分支必须返回匿名`,
+    );
+  }
+});
+
+test("proxy.ts 在保留 Cookie 的公网路径上剥掉 mock_* 身份 Cookie", () => {
+  const proxy = read("proxy.ts");
+  assert.ok(
+    proxy.includes("stripMockIdentityCookies(cookie)"),
+    "proxy.ts 必须调用 stripMockIdentityCookies",
+  );
+  assert.ok(
+    proxy.indexOf("shouldStripPublicCookies(pathname)") <
+      proxy.indexOf("stripMockIdentityCookies(cookie)"),
+    "只读预览仍然整条清空 Cookie，其余路径再按 mock_* 前缀剥离",
+  );
+});
+
+test("客服 / 管理端 API 前缀下除登录 / 退出 / Mock 登录外全部有角色守卫", () => {
+  // 公网放行的是 `/api/staff/**` 与 `/api/admin/**` 前缀，因此这个前缀下
+  // 任何一个新路由只要忘了守卫，就会直接暴露在公网。用清单把边界钉死。
+  const allowedWithoutGuard = ["auth/login/route.ts", "auth/logout/route.ts", "auth/mock-login/route.ts"];
+
+  for (const [directory, guard] of [
+    ["app/api/staff", "requireStaff"],
+    ["app/api/admin", "requireAdmin"],
+  ]) {
+    const unguarded = [];
+    for (const file of collectRouteFiles(directory)) {
+      const source = stripComments(read(file));
+      if (!source.includes(`${guard}(`)) {
+        unguarded.push(path.posix.relative(directory, file));
+      }
+    }
+    assert.deepEqual(unguarded.sort(), allowedWithoutGuard, `${directory} 存在未鉴权路由`);
+  }
 });

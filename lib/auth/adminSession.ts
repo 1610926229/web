@@ -4,6 +4,7 @@ import { getAdminRepository } from "@/lib/data/adminRepository";
 import type { AdminAccount } from "@/lib/types/admin";
 import { MOCK_ADMIN_SESSION_COOKIE as MOCK_ADMIN_SESSION_COOKIE_NAME } from "./cookieNames";
 import { lookupRealSession } from "./realSession";
+import { isPublicPreviewRequest } from "./publicPreviewRequest";
 
 /**
  * 管理端会话（仅服务端使用）。
@@ -74,6 +75,9 @@ export async function getSessionAdmin(): Promise<AdminAccount | null> {
   if (real.kind === "invalid") return null;
 
   if (!isMockAdminEnabled()) return null;
+
+  // PROD-6：公网请求永不接受 Mock 身份 Cookie（理由见 session.ts 同一处注释）。
+  if (await isPublicPreviewRequest()) return null;
 
   const adminId = jar.get(MOCK_ADMIN_SESSION_COOKIE)?.value;
   if (!adminId) return null;
