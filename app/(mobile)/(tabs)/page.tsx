@@ -4,6 +4,7 @@ import AnnouncementCarousel from "@/components/home/AnnouncementCarousel";
 import HomeShortcutGrid from "@/components/home/HomeShortcutGrid";
 import ProductSection from "@/components/home/ProductSection";
 import { isPublicPreviewRequest } from "@/lib/auth/publicPreviewRequest";
+import { isPublicAccessPath } from "@/lib/config/publicAccess";
 import { publicPreviewSafeHref } from "@/lib/config/publicPreview";
 import { getHomeData } from "@/lib/services/home";
 import type { HomeData } from "@/lib/types/content";
@@ -50,7 +51,7 @@ function HomeModules({ data, publicPreview }: { data: HomeData; publicPreview: b
   const shortcuts = publicPreview
     ? data.shortcuts.map((shortcut) => ({
         ...shortcut,
-        href: publicPreviewSafeHref(shortcut.href, shortcut.label),
+        href: publicPreviewSafeHref(shortcut.href, shortcut.label, isPublicAccessPath),
       }))
     : data.shortcuts;
 

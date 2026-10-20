@@ -14,6 +14,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   UNAUTHORIZED: 401,
   FORBIDDEN: 403,
   NOT_FOUND: 404,
+  TOO_MANY_REQUESTS: 429,
   SERVER_ERROR: 500,
   // 只在浏览器侧产生（请求没能到达服务端），不参与 HTTP 状态映射
   NETWORK_ERROR: 0,
@@ -33,11 +34,14 @@ export class ApiError extends Error {
   readonly code: ApiErrorCode;
   /** HTTP 状态码；非 HTTP 来源（网络层失败）时为 0 */
   readonly status: number;
+  /** 仅 429 使用：客户端最早可以在多少秒后重试。 */
+  readonly retryAfterSeconds?: number;
 
-  constructor(code: ApiErrorCode, message: string, status?: number) {
+  constructor(code: ApiErrorCode, message: string, status?: number, retryAfterSeconds?: number) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status ?? STATUS_BY_CODE[code];
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }

@@ -6,9 +6,15 @@ import {
   isPublicPreviewMethod,
   isPublicPreviewPath,
 } from "@/lib/config/publicPreview";
+import {
+  isPublicAccessMethod,
+  isPublicAccessPath,
+  isSameOriginPublicRequest,
+  shouldStripPublicCookies,
+} from "@/lib/config/publicAccess";
 
 /**
- * 公网只读预览的应用内守卫（Next.js 16 的 `proxy` 文件约定）。
+ * 公网访问的应用内守卫（Next.js 16 的 `proxy` 文件约定）。
  *
  * ## 它只在「公网请求」上生效
  *
@@ -16,25 +22,29 @@ import {
  * （SSH 隧道直连 `127.0.0.1:3000`、本地开发、自动化测试）**完全不受影响**，
  * 管理端、客服端、打手端、Mock 登录与模拟支付照常可用。
  *
- * ## 为什么不能只靠 Nginx
+ * ## 两层白名单
  *
- * Staging 的公网访问与私有验收访问进入**同一个进程**，来源地址都是回环，
- * 进程无法用 IP 区分。Nginx 的路径白名单是主防线，但一份被改松的配置、
- * 一条新加的反代 location、或未来换一个前置代理，都会让请求直接落到路由。
- * 因此应用层再按同一份白名单判一次：**两层同时失效才会暴露 Mock 权限**。
+ * - `publicPreview.ts`：匿名只读预览（公开页面 + 6 个只读 API）；
+ * - `publicAccess.ts`：在预览之上增加登录页、客服 / 管理端工作台与其 API、
+ *   用户微信登录入口，并显式拒绝 Mock / 调试 / 模拟支付路径。
  *
- * ## Cookie 也必须清掉
+ * 路径与方法都必须命中；任何一层单独失效都不足以把危险能力暴露到公网。
  *
- * 公网访客可以手工写任意 `mock_user_id` / `mock_admin_id` / `mock_staff_id`
- * Cookie。即使路径白名单正确，SSR 页面仍会读会话。Nginx 已经用
- * `proxy_set_header Cookie ""` 清过一次；这里再删一次，确保「公网请求 =
- * 无身份」不依赖前置代理的配置细节。
+ * ## Cookie 不是一律清除
+ *
+ * 只读预览继续 `Cookie ""`（Nginx）与应用内删除，保持「公网访客 = 无身份」。
+ * 登录页、工作台、用户登录入口必须保留 Cookie，否则登录永远无法建立会话。
+ * Nginx 对这些 location 使用 `proxy_set_header Cookie $http_cookie;`，
+ * 应用层按路径决定删不删。
+ *
+ * ## CSRF
+ *
+ * 公网非安全方法必须同源（Origin / Referer 与 Host 一致），
+ * `Sec-Fetch-Site: cross-site` 直接拒绝。SameSite=Lax 仍是第二道。
  *
  * ## 静态资源
  *
  * `matcher` 排除 `/_next/static`、`/_next/image`、`/mock/` 与 `favicon.ico`。
- * 它们不含会话判断，由 Next 直接返回；把它们排除也避免给每个 JS/CSS 请求
- * 增加一次代理函数调用。
  */
 export function proxy(request: NextRequest) {
   if (
@@ -43,23 +53,45 @@ export function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (!isPublicPreviewMethod(request.method)) {
-    return NextResponse.json(
-      { error: { code: "METHOD_NOT_ALLOWED", message: "公网预览只允许浏览" } },
-      { status: 405, headers: { allow: "GET, HEAD" } },
-    );
-  }
+  const pathname = request.nextUrl.pathname;
 
-  if (!isPublicPreviewPath(request.nextUrl.pathname)) {
+  if (!isPublicAccessPath(pathname)) {
     return NextResponse.json(
       { error: { code: "NOT_FOUND", message: "页面不存在" } },
       { status: 404 },
     );
   }
 
+  // 只读预览沿用原来的方法规则：只允许 GET / HEAD。
+  // 登录 / 工作台 / 用户登录 API 的方法规则见 isPublicAccessMethod()。
+  const previewPath = isPublicPreviewPath(request.nextUrl.pathname);
+  if (!isPublicPreviewMethod(request.method) && previewPath) {
+    return NextResponse.json(
+      { error: { code: "METHOD_NOT_ALLOWED", message: "公网预览只允许浏览" } },
+      { status: 405, headers: { allow: "GET, HEAD" } },
+    );
+  }
+
+  if (!isPublicAccessMethod(pathname, request.method)) {
+    return NextResponse.json(
+      { error: { code: "METHOD_NOT_ALLOWED", message: "不支持该公网请求方法" } },
+      { status: 405, headers: { allow: "GET, HEAD, POST" } },
+    );
+  }
+
+  if (!isSameOriginPublicRequest(request.headers, request.method)) {
+    return NextResponse.json(
+      { error: { code: "FORBIDDEN", message: "跨站请求被拒绝" } },
+      { status: 403 },
+    );
+  }
+
   const headers = new Headers(request.headers);
-  headers.delete("cookie");
-  headers.delete("authorization");
+
+  if (shouldStripPublicCookies(pathname)) {
+    headers.delete("cookie");
+    headers.delete("authorization");
+  }
 
   return NextResponse.next({ request: { headers } });
 }

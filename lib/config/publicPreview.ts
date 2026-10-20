@@ -155,19 +155,27 @@ export function publicPreviewUnavailableHref(label: string): string {
 }
 
 /**
- * 公网预览下的链接改写：公开路径原样返回，其余换成「暂不可用」占位页。
+ * 公网预览下的链接改写：可达路径原样返回，其余换成「暂不可用」占位页。
  *
  * 只处理站内绝对路径；外链、`tel:`/`weixin:` 等协议、纯锚点原样返回——
  * 它们不经过本应用的路由，改写反而会破坏原有行为。
  *
+ * `isReachable` 默认是只读预览白名单。PROD-6 起，公网还开放了登录页与
+ * 工作台，调用方传入 `isPublicAccessPath`，让「我的」等登录入口保持可达；
+ * 订单、客服、支付等交易面仍改写到占位页。
+ *
  * ⚠️ 这是**导航可达性**的修复，不是权限判断。真正的拒绝仍在 Nginx 与
  * `proxy.ts`；即使有人手工输入 `/orders`，结果依然是 404。
  */
-export function publicPreviewSafeHref(href: string, label: string): string {
+export function publicPreviewSafeHref(
+  href: string,
+  label: string,
+  isReachable: (pathname: string) => boolean = isPublicPreviewPath,
+): string {
   try {
     const url = new URL(href, "https://public-preview.invalid");
     if (url.origin !== "https://public-preview.invalid") return href;
-    if (isPublicPreviewPath(url.pathname)) return href;
+    if (isReachable(url.pathname)) return href;
     return publicPreviewUnavailableHref(label);
   } catch {
     return href;

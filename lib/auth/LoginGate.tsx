@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import EmptyState from "@/components/common/EmptyState";
 import RealAuthForm from "@/components/auth/RealAuthForm";
+import WechatLoginButton from "@/components/auth/WechatLoginButton";
 import { authAdapter } from "./MockAuthAdapter";
 import MockUserPicker from "./MockUserPicker";
 
@@ -30,6 +31,7 @@ import MockUserPicker from "./MockUserPicker";
 export default function LoginGate({
   mockAuthEnabled,
   realAuthEnabled = false,
+  publicRequest = false,
   title = "需要登录",
   description,
   onSuccess,
@@ -37,6 +39,12 @@ export default function LoginGate({
   mockAuthEnabled: boolean;
   /** PROD-4：真实邮箱密码登录是否可用（服务端读环境后传入） */
   realAuthEnabled?: boolean;
+  /**
+   * PROD-6：公网请求。普通用户只允许微信登录；邮箱密码 / 注册接口不在公网
+   * 白名单里，因此这里只渲染微信入口（未配置时显示「尚未配置」）。
+   * Mock 入口永远不进入这个分支。
+   */
+  publicRequest?: boolean;
   title?: string;
   description?: string;
   onSuccess?: () => void;
@@ -66,15 +74,21 @@ export default function LoginGate({
         title={title}
         description={
           description ??
-          (realAuthEnabled
-            ? "登录后即可查看订单、联系客服与个人中心。请使用邮箱与密码登录，或先注册一个账号。"
-            : mockAuthEnabled
-              ? "登录后即可查看订单、联系客服与个人中心。当前为开发阶段的模拟登录，不会调用真实微信接口。"
-              : "登录后即可查看订单、联系客服与个人中心。登录功能正在接入中，敬请期待。")
+          (publicRequest
+            ? "登录后即可查看订单、联系客服与个人中心。请使用微信登录。"
+            : realAuthEnabled
+              ? "登录后即可查看订单、联系客服与个人中心。请使用邮箱与密码登录，或先注册一个账号。"
+              : mockAuthEnabled
+                ? "登录后即可查看订单、联系客服与个人中心。当前为开发阶段的模拟登录，不会调用真实微信接口。"
+                : "登录后即可查看订单、联系客服与个人中心。登录功能正在接入中，敬请期待。")
         }
       />
 
-      {realAuthEnabled ? (
+      {publicRequest ? (
+        <div className="w-full max-w-sm">
+          <WechatLoginButton />
+        </div>
+      ) : realAuthEnabled ? (
         <RealAuthForm onSuccess={() => onSuccess?.()} />
       ) : mockAuthEnabled ? (
         <MockUserPicker busyId={pendingId} onPick={(userId) => void handleLogin(userId)} />

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactElement } from "react";
+import { isPublicAccessPath } from "@/lib/config/publicAccess";
 import { publicPreviewSafeHref } from "@/lib/config/publicPreview";
 import SafeAreaContainer from "./SafeAreaContainer";
 
@@ -25,9 +26,12 @@ const TABS: TabItem[] = [
  * 底部主导航。使用 sticky 保持在文档流内，
  * 因此不会遮挡页面内容，也无需为内容额外预留高度。
  *
- * `publicPreview`：公网只读预览下，「订单/客服/我的」不在公网白名单里，
- * 直链会得到 404（安全行为，保留）。这里只把**展示落点**改到「暂不可用」占位页，
+ * `publicPreview`：公网下「订单/客服」仍不在白名单里，直链会得到 404
+ * （安全行为，保留）。这里只把**展示落点**改到「暂不可用」占位页，
  * 既不让访客撞裸 404，也不提前 prefetch 一串注定 404 的 RSC 请求。
+ *
+ * 「我的」在 PROD-6 起公网可达（微信登录入口），因此用
+ * `isPublicAccessPath` 判断，避免把登录入口也改写到占位页。
  */
 export default function TabBar({ publicPreview = false }: { publicPreview?: boolean }) {
   const pathname = usePathname();
@@ -37,7 +41,9 @@ export default function TabBar({ publicPreview = false }: { publicPreview?: bool
       <nav aria-label="主导航" className="flex h-[var(--tabbar-height)] items-stretch">
         {TABS.map(({ href, label, Icon }) => {
           const active = href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
-          const safeHref = publicPreview ? publicPreviewSafeHref(href, label) : href;
+          const safeHref = publicPreview
+            ? publicPreviewSafeHref(href, label, isPublicAccessPath)
+            : href;
 
           return (
             <Link

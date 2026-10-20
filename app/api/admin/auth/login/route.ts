@@ -1,6 +1,7 @@
 import { ApiError } from "@/lib/api/ApiError";
 import { fail, ok, readJsonBody, toApiError } from "@/lib/api/route";
 import { isRealAuthEnabled } from "@/lib/auth/realSession";
+import { beginPublicLogin } from "@/lib/auth/publicLoginGuard";
 import {
   ADMIN_REAL_LOGIN_DISABLED_MESSAGE,
   loginAdminWithPassword,
@@ -22,9 +23,17 @@ export async function POST(request: Request) {
     }
 
     const body = await readJsonBody(request);
-    const admin = await loginAdminWithPassword(body.username, body.password);
+    const username = typeof body.username === "string" ? body.username : "";
+    const guard = await beginPublicLogin("admin", username);
 
-    return ok({ admin });
+    try {
+      const admin = await loginAdminWithPassword(body.username, body.password);
+      guard.succeeded();
+      return ok({ admin });
+    } catch (cause) {
+      guard.failed(cause);
+      throw cause;
+    }
   } catch (cause) {
     return fail(toApiError(cause));
   }

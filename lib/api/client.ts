@@ -22,6 +22,7 @@ function normalizeCode(code: string | undefined, status: number): ApiErrorCode {
     "UNAUTHORIZED",
     "FORBIDDEN",
     "NOT_FOUND",
+    "TOO_MANY_REQUESTS",
     "SERVER_ERROR",
     "NETWORK_ERROR",
   ];
@@ -30,6 +31,7 @@ function normalizeCode(code: string | undefined, status: number): ApiErrorCode {
   if (status === 401) return "UNAUTHORIZED";
   if (status === 403) return "FORBIDDEN";
   if (status === 404) return "NOT_FOUND";
+  if (status === 429) return "TOO_MANY_REQUESTS";
   return "SERVER_ERROR";
 }
 

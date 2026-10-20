@@ -1,0 +1,436 @@
+# 超哥电竞 · Staging 公网 HTTPS（Nginx 模板，PROD-6）
+#
+#   Internet :80  -> 301 -> :443 -> Nginx -> 127.0.0.1:3000 (Next.js)
+#
+# ⚠️ 这是**模板**，不是可直接 include 的配置：
+#    `deploy/proxy/install-public-https.sh` 会把 `__SERVER_NAME__` 替换为真实域名后
+#    安装到 `/etc/nginx/sites-available/chaoge-public.conf`。
+#
+# ## 安全模型
+#
+# 公网与私有 SSH 隧道共用同一个 Next.js 进程。本文件是第一层：
+#   · 只把「公开只读 + 登录页 / 工作台 + 必要登录 API」代理到上游；
+#   · Mock 登录、Mock 支付、调试接口显式 404；
+#   · 登录 API 独立限流；
+#   · 只读路径清空 Cookie，登录 / 工作台保留 Cookie。
+# 应用层 `proxy.ts` + `lib/config/publicAccess.ts` 用同一份策略再判一次。
+#
+# ## 明确不做的事
+#
+#   · 不监听 3000 / 5432；
+#   · 不修改 UFW、iptables、安全组、SSH、sudoers；
+#   · 不在 80 上代理任何登录 / 工作台请求（只做 301 与 ACME）。
+
+# ── http 级限流区 ─────────────────────────────────────────────────────────────
+limit_req_zone $binary_remote_addr zone=chaoge_public_req:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=chaoge_public_conn:10m;
+# 登录专用：10 次/分钟，burst 5。应用层还会按身份与 IP 统计失败次数。
+limit_req_zone $binary_remote_addr zone=chaoge_login:10m rate=10r/m;
+
+# ── HTTP：仅 ACME 与 301 ─────────────────────────────────────────────────────
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name __SERVER_NAME__;
+
+    server_tokens off;
+    client_max_body_size 4k;
+
+    # Let's Encrypt webroot 验证（如果使用 standalone 签发，此 location 不会被用到）。
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type text/plain;
+        access_log off;
+    }
+
+    # 固定跳到配置里的域名，不使用 $host，避免 Host 头注入造成开放重定向。
+    location / {
+        return 301 https://__SERVER_NAME__$request_uri;
+    }
+}
+
+# ── HTTPS：公网入口 ──────────────────────────────────────────────────────────
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name __SERVER_NAME__;
+
+    ssl_certificate     /etc/letsencrypt/live/__SERVER_NAME__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__SERVER_NAME__/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:chaoge_ssl:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    server_tokens off;
+
+    # 只接受配置里的域名。否则任意 Host 都能命中 default_server 被代理进来，
+    # 应用层 CSRF 的「Origin host == Host」判断就会被伪造 Host 绕过。
+    if ($host != __SERVER_NAME__) {
+        return 444;
+    }
+
+    # 公网请求体很小；登录表单也远低于这个上限。
+    client_max_body_size 64k;
+    client_body_buffer_size 16k;
+    client_body_timeout 10s;
+    send_timeout 30s;
+
+    limit_req zone=chaoge_public_req burst=60 nodelay;
+    limit_req_status 429;
+    limit_conn chaoge_public_conn 20;
+    limit_conn_status 429;
+
+    # 安全响应头。location 里不再写 add_header，避免覆盖这一组。
+    add_header X-Chaoge-Public-Proxy "1" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'; base-uri 'self'; object-src 'none'" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+
+    access_log /var/log/nginx/chaoge-public.access.log;
+    error_log  /var/log/nginx/chaoge-public.error.log warn;
+
+    # ── 显式拒绝：Mock / 调试 / 模拟支付 ─────────────────────────────────
+    # 即使路径落在下面的 /api/admin/、/api/staff/ 前缀里，也先被精确匹配拦住。
+    location = /wechat-mock {
+        return 404;
+    }
+
+    location = /api/auth/mock-login {
+        return 404;
+    }
+
+    location = /api/auth/wechat/mock/complete {
+        return 404;
+    }
+
+    location = /api/staff/auth/mock-login {
+        return 404;
+    }
+
+    location = /api/admin/auth/mock-login {
+        return 404;
+    }
+
+    location = /api/payments/mock-confirm {
+        return 404;
+    }
+
+    location ^~ /api/debug/ {
+        return 404;
+    }
+
+    # ── 登录 API（POST only，独立限流）───────────────────────────────────
+    location = /api/staff/auth/login {
+        limit_req zone=chaoge_login burst=5 nodelay;
+        limit_req_status 429;
+        if ($request_method !~ ^(POST)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/admin/auth/login {
+        limit_req zone=chaoge_login burst=5 nodelay;
+        limit_req_status 429;
+        if ($request_method !~ ^(POST)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/staff/auth/logout {
+        if ($request_method !~ ^(POST)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/admin/auth/logout {
+        if ($request_method !~ ^(POST)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # ── 登录页 / 工作台（GET / HEAD only，保留 Cookie）────────────────────
+    location = /staff/login {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /staff {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location ^~ /staff/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /admin/login {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /admin {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location ^~ /admin/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # ── 用户微信登录入口（保留 Cookie）────────────────────────────────────
+    location = /mine {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /wechat-login {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # ── 用户登录 / 会话必要 API（保留 Cookie）─────────────────────────────
+    location = /api/me {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/auth/logout {
+        if ($request_method !~ ^(POST)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/auth/wechat/status {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/auth/wechat/start {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/auth/wechat/callback {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # ── 客服 / 管理端 API（保留 Cookie；逐接口仍由服务端 Guard 鉴权）──────
+    location ^~ /api/staff/ {
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location ^~ /api/admin/ {
+        include snippets/chaoge-proxy-session.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # ── 公开只读页面（清空 Cookie）────────────────────────────────────────
+    location = / {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location ~ ^/(category|rank|rank/companions|companions|agreements|activities|help|placeholder)/?$ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /companions {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location ^~ /product/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location ^~ /companions/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # ── 公开只读接口（精确路径，清空 Cookie）──────────────────────────────
+    location = /api/home {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/catalog/products {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/companions {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/agreements {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/rankings/consumption {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/rankings/companions {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # 其余 API 一律不代理。注意：/api/staff/ 与 /api/admin/ 的 ^~ 前缀在上面
+    # 已经优先匹配；它们内部每个接口仍必须通过 requireStaff / requireAdmin。
+    location /api/ {
+        return 404;
+    }
+
+    # ── 静态资源 ──────────────────────────────────────────────────────────
+    location = /favicon.ico {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+        access_log off;
+        expires 1h;
+    }
+
+    location = /next.svg {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+        access_log off;
+        expires 1h;
+    }
+
+    location ^~ /_next/static/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+        access_log off;
+        expires 1y;
+    }
+
+    location ^~ /_next/image {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+        access_log off;
+        expires 1h;
+    }
+
+    location ^~ /mock/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include snippets/chaoge-proxy-public.inc;
+        proxy_pass http://127.0.0.1:3000;
+        access_log off;
+        expires 1h;
+    }
+
+    # ── 其它一切：404（白名单兜底）────────────────────────────────────────
+    location / {
+        return 404;
+    }
+}

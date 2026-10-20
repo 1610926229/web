@@ -61,7 +61,7 @@ export default async function WechatLoginResultPage({
 
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Link
-            href="/orders"
+            href="/mine"
             className="flex h-11 items-center justify-center rounded-full bg-brand-red px-6 text-[15px] font-medium text-white"
           >
             返回登录

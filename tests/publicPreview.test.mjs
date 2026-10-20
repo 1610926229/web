@@ -253,8 +253,11 @@ test("公网预览把受保护入口改写到「暂不可用」占位页", () =>
 
 test("导航 / 快捷入口 / 占位页都接入公网落点改写", () => {
   const tabBar = read("components/common/TabBar.tsx");
-  assert.match(tabBar, /publicPreviewSafeHref\(href, label\)/);
-  assert.match(tabBar, /publicPreview \? publicPreviewSafeHref\(href, label\) : href/);
+  assert.match(tabBar, /publicPreviewSafeHref\(href, label, isPublicAccessPath\)/);
+  assert.match(
+    tabBar,
+    /publicPreview[\s\S]*?publicPreviewSafeHref\(href, label, isPublicAccessPath\)[\s\S]*?: href/,
+  );
 
   const layout = read("app/(mobile)/(tabs)/layout.tsx");
   assert.match(layout, /isPublicPreviewRequest\(\)/);
@@ -262,7 +265,10 @@ test("导航 / 快捷入口 / 占位页都接入公网落点改写", () => {
 
   const home = read("app/(mobile)/(tabs)/page.tsx");
   assert.match(home, /isPublicPreviewRequest\(\)/);
-  assert.match(home, /publicPreviewSafeHref\(shortcut\.href, shortcut\.label\)/);
+  assert.match(
+    home,
+    /publicPreviewSafeHref\(shortcut\.href, shortcut\.label, isPublicAccessPath\)/,
+  );
 
   const placeholder = read("components/common/PlaceholderPage.tsx");
   assert.match(placeholder, /PUBLIC_PREVIEW_UNAVAILABLE_REASON/);

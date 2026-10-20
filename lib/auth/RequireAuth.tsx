@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { isMockAuthEnabled } from "@/lib/config/env";
+import { isPublicPreviewRequest } from "./publicPreviewRequest";
 import { isRealAuthEnabled } from "./realSession";
 import type { User } from "@/lib/types/user";
 import { getSessionUser } from "./session";
@@ -29,10 +30,15 @@ export default async function RequireAuth({
   const user = await getSessionUser();
 
   if (!user) {
+    // 公网用户只能走微信：邮箱密码登录 / 注册接口不在公网白名单里，
+    // 渲染出来也只会得到一个 404，而且与「普通用户使用微信登录」的规则不符。
+    const publicRequest = await isPublicPreviewRequest();
+
     return (
       <LoginGate
-        mockAuthEnabled={isMockAuthEnabled()}
-        realAuthEnabled={isRealAuthEnabled()}
+        mockAuthEnabled={isMockAuthEnabled() && !publicRequest}
+        realAuthEnabled={isRealAuthEnabled() && !publicRequest}
+        publicRequest={publicRequest}
       />
     );
   }
