@@ -1,10 +1,10 @@
 # PROD-6 · 交付记录
 
-**Status:** 代码、测试与私有 Staging 部署完成；真实公网 HTTPS **未开放**（等待域名 / DNS / 443 / root 授权）；真实微信登录未配置
+**Status:** 代码、测试与私有 Staging 部署完成；安全修复版本已重部署；真实公网 HTTPS **未开放**（等待域名 / DNS / 443 / root 授权）；真实微信登录未配置
 **Round:** PROD-6 · 公网 HTTPS 登录：客服 / 管理员密码登录、用户微信登录入口与公网边界重构
-**Release:** `20261020T123422Z-2b06b77`
-**App Git SHA:** `2b06b77272ae5eed36388f5603c4e4ce94ad4ae1`
-**Artifact SHA-256:** `12c704607fc83d82f664050a0b767a34f99886076477985f978380769e2bc57c`
+**Release:** `20261020T132016Z-3768cb5`（安全修复重部署；上一版本 `20261020T123422Z-2b06b77`）
+**App Git SHA:** `3768cb5f5036e68ac7137a8d454ee0db594daf84`
+**Artifact SHA-256:** `648729c9fd78ff82c2a2d3724e6f4ff0b616dd175d01fe737a654829644701c4`
 **Database:** `chaoge_staging`（未新增迁移；仍为 18 个迁移 / 46 张表）；`chaoge_prod` 未触碰
 **Public boundary:** 现有 `http://43.128.13.181` 仍是匿名只读；443 未开放；登录 / 工作台 / 后台接口尚未通过公网 Nginx 暴露
 
@@ -182,6 +182,26 @@ X-Forwarded-For 使用 `$remote_addr` **覆盖**，避免客户端伪造首段�
 | 正式 Cookie 属性 | 真实会话与微信 state 均为 `HttpOnly` + `SameSite=Lax` + `Secure`（`NODE_ENV=production`），`path=/`，7 天 / state 短 TTL | 通过 |
 | 生产与 Staging 数据隔离 | 当前正式登录仍落在 Staging 进程与 `chaoge_staging` 演示数据上，Mock 开关为 true | **公网开放前阻断项**：先建立独立生产环境（独立 systemd / 目录 / 数据库 / 账号），关闭四个 `ENABLE_MOCK_*`，再开放公网登录 |
 
+### 7. 安全修复重部署后的复验（2026-10-20）
+
+| 检查 | 结果 |
+|---|---|
+| `pnpm typecheck` / `pnpm lint` | PASS |
+| `pnpm test` | **2454 tests / 1988 pass / 466 skipped / 0 fail** |
+| 公网标记头 + `mock_admin_id=admin-1` → `/api/admin/dashboard` | **401** |
+| 公网标记头 + `mock_admin_id=admin-1` → `/admin` | **307 → `/admin/login`** |
+| 公网标记头 + `mock_staff_id=staff-1` → `/api/staff/orders` | **401** |
+| 公网标记头 + `mock_staff_id=staff-1` → `/staff/orders` | **307 → `/staff/login`** |
+| 公网标记头 + `mock_user_id=u-1001` → `/api/me` | **401** |
+| 私有对照（无标记头）三个接口 | **200**（Mock 未被误伤） |
+| 模拟可信代理下轮换伪造 `X-Real-IP` / XFF，第 21 次 | **429，`Retry-After: 900`** |
+| 直接请求轮换 XFF 第一段、固定最后一段，第 21 次 | **429** |
+| 同一登录名轮换 IP，第 6 次 | **429**（身份维度） |
+| Edge 真实浏览器验收 | **25/25 PASS**（Mock 拒绝、管理员登录/退出、Cookie 属性、公网只读） |
+| 公网 `http://43.128.13.181` | 仍匿名只读；登录/管理/客服/Mock/调试路径 404 |
+
+浏览器验收使用 `playwright-core@1.51.1` + 本机 Edge，通过 SSH 隧道执行；测试代理仅监听临时回环端口，测试后已停止并删除；**未修改系统 Nginx**。
+
 ## 四、部署记录
 
 - 受控入口：`sudo -n /usr/local/sbin/chaoge-deploy deploy <artifact> <sha256> <git-sha>`
@@ -191,6 +211,23 @@ X-Forwarded-For 使用 `$remote_addr` **覆盖**，避免客户端伪造首段�
 - 服务：`enabled` / `active`，仅监听 `127.0.0.1:3000`
 - 数据库隔离验收：OVERALL PASS
 - `chaoge_prod` 未读取、未写入；`chaoge_staging` 未删除、未重置、未清空
+
+### 4.1 2026-10-20 安全修复重部署
+
+将包含 Mock Cookie 身份冒用修复、登录限流 IP 修复的 `3768cb5` 重新部署到私有 Staging：
+
+| 项目 | 值 |
+|---|---|
+| 新 release | `20261020T132016Z-3768cb5` |
+| 上一版本 | `20261020T123422Z-2b06b77` |
+| 产物 | `staging-standalone-3768cb5f5036e68ac7137a8d454ee0db594daf84.tar.gz`（6.7 MB） |
+| SHA-256 | `648729c9fd78ff82c2a2d3724e6f4ff0b616dd175d01fe737a654829644701c4` |
+| 状态 | `enabled` / `active`，仅 `127.0.0.1:3000` |
+| 数据库隔离验收 | OVERALL PASS（18 个迁移 / 46 张表） |
+
+- `2b06b77..3768cb5` 之间 `deploy/**` 与 `db/migrations/**` 无改动，因此**无需更新 root 信任快照**，未绕过任何授权。
+- 本机没有 `gh` CLI / `GITHUB_TOKEN`，无法触发 GitHub Actions；使用与 CI 相同的 `deploy/app/build-standalone.sh` 本地构建，产物仍经受控入口独立校验 SHA-256、Git SHA、结构与权限。
+- 部署后复验见 §三.7。
 
 ## 五、已知限制
 

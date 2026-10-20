@@ -10,7 +10,7 @@ Primary State Transition: 无业务状态机变更
 Started At: 2026-10-20
 Development Completed At: 2026-10-20
 Accepted At:
-Git Commit: 2b06b77272ae5eed36388f5603c4e4ce94ad4ae1（实现与清单提交；部署 release `20261020T123422Z-2b06b77`）
+Git Commit: 3768cb5f5036e68ac7137a8d454ee0db594daf84（安全修复与清单提交；部署 release `20261020T132016Z-3768cb5`；实现提交 `2b06b77`，release `20261020T123422Z-2b06b77`）
 
 ## 文档
 
@@ -27,6 +27,7 @@ Git Commit: 2b06b77272ae5eed36388f5603c4e4ce94ad4ae1（实现与清单提交；�
 - ⚠️ `kefu-xiaoyu` 现有口令复验 401，账号未重置；需有效口令或新建测试账号。
 - ⛔ 真实微信登录未配置（`realConfigured:false`），不标记为可用。
 - ✅ 公网开放前安全复核已完成：公网拒绝 Mock 身份 Cookie、限流 IP 只信可信代理、API 前缀路由清单门禁通过、正式 Cookie 属性正确。
+- ✅ 安全修复已重部署到 `20261020T132016Z-3768cb5`，并通过 Edge 真实浏览器 25/25 验收。
 - ⛔ **公网开放阻断项**：正式登录仍接触 Staging 演示数据；须先建立独立生产环境并关闭 `ENABLE_MOCK_*`。
 
 ## 关键约束

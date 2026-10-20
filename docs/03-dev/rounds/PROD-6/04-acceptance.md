@@ -7,7 +7,7 @@ Status: **PARTIAL**
 - 微信真实平台授权登录：**NOT CONFIGURED**
 
 Round: PROD-6 · 公网 HTTPS 登录
-Deployed release: `20261020T123422Z-2b06b77`（App Git SHA `2b06b77272ae5eed36388f5603c4e4ce94ad4ae1`）
+Deployed release: `20261020T132016Z-3768cb5`（App Git SHA `3768cb5f5036e68ac7137a8d454ee0db594daf84`；上一版本 `20261020T123422Z-2b06b77`）
 Private entry: SSH 隧道 `127.0.0.1:3101` → Staging `127.0.0.1:3000`
 Public entry: `http://43.128.13.181`（仍为匿名只读；443 未开放）
 Database: `chaoge_staging`（18 个迁移 / 46 张表）；`chaoge_prod` 未触碰
@@ -70,6 +70,19 @@ Database: `chaoge_staging`（18 个迁移 / 46 张表）；`chaoge_prod` 未触�
 - [x] 客服会话访问 `/api/staff/orders` → 200
 - [x] 客服会话访问 `/api/admin/dashboard` → 401
 - [x] 客服会话访问 `/api/me` → 401
+
+### A9. 安全修复重部署复验（2026-10-20，PASS）
+
+- [x] release `20261020T132016Z-3768cb5`，仅监听 `127.0.0.1:3000`
+- [x] `pnpm typecheck` / `pnpm lint` PASS；`pnpm test` 2454 / 1988 pass / 0 fail / 466 skipped
+- [x] 公网标记头 + `mock_admin_id` → `/api/admin/dashboard` 401、`/admin` 307 登录页
+- [x] 公网标记头 + `mock_staff_id` → `/api/staff/orders` 401、`/staff/orders` 307 登录页
+- [x] 公网标记头 + `mock_user_id` → `/api/me` 401
+- [x] 私有对照（无标记头）三个接口 200
+- [x] 模拟可信代理 / 轮换 XFF 第一段 / 身份维度限流：第 21 次、第 6 次均 429
+- [x] Edge 真实浏览器 25/25：管理员登录/退出、会话 Cookie 属性、Mock 拒绝、公网只读
+- [x] 公网 `http://43.128.13.181` 登录 / 管理 / 客服 / Mock / 调试路径仍 404
+- [x] 未修改系统 Nginx / 安全组；测试代理已清理
 
 ---
 
