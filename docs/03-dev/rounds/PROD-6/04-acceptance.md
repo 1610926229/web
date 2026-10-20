@@ -78,31 +78,43 @@ Database: `chaoge_staging`（18 个迁移 / 46 张表）；`chaoge_prod` 未触�
 安装命令（**需 root 授权后执行**）：
 
 ```bash
-# 1. 将安装器与模板上传到服务器（普通部署账号）
+# 1. 将安装器与模板上传到服务器（普通部署账号；只是暂存，不执行）
 scp -i ~/.ssh/chaoge_deploy \
   deploy/proxy/chaoge-public-https.conf.template \
   deploy/proxy/chaoge-proxy-public.inc \
   deploy/proxy/chaoge-proxy-session.inc \
   deploy/proxy/install-public-https.sh \
   deploy/proxy/rollback-public-https.sh \
-  deploy@43.128.13.181:/home/deploy/public-https/
+  deploy@43.128.13.181:/home/deploy/incoming/prod6-https/
 
 # 2. 预检（不需要 root，不会改配置）
 ssh -i ~/.ssh/chaoge_deploy deploy@43.128.13.181 \
-  'bash /home/deploy/public-https/install-public-https.sh \
+  'bash /home/deploy/incoming/prod6-https/install-public-https.sh \
      --server-name <域名> --email <证书通知邮箱>'
 
-# 3. 经批准后执行（会安装 certbot、短暂停止 Nginx 签发证书、安装配置并 reload）
-ssh -i ~/.ssh/chaoge_deploy deploy@43.128.13.181 \
-  'sudo bash /home/deploy/public-https/install-public-https.sh \
-     --server-name <域名> --email <证书通知邮箱> --apply'
+# 3. 经批准后，先把脚本复制到 root 拥有的目录，再执行
+#    （避免 root 直接执行 deploy 账号可写的文件）
+ssh -i ~/.ssh/chaoge_deploy deploy@43.128.13.181 '
+  sudo install -d -o root -g root -m 0755 /etc/chaoge/public-https &&
+  sudo install -o root -g root -m 0644 \
+    /home/deploy/incoming/prod6-https/chaoge-public-https.conf.template \
+    /home/deploy/incoming/prod6-https/chaoge-proxy-public.inc \
+    /home/deploy/incoming/prod6-https/chaoge-proxy-session.inc \
+    /etc/chaoge/public-https/ &&
+  sudo install -o root -g root -m 0755 \
+    /home/deploy/incoming/prod6-https/install-public-https.sh \
+    /home/deploy/incoming/prod6-https/rollback-public-https.sh \
+    /etc/chaoge/public-https/ &&
+  sudo /etc/chaoge/public-https/install-public-https.sh \
+    --server-name <域名> --email <证书通知邮箱> --apply
+'
 ```
 
-回滚：
+回滚（同样从 root 拥有的目录执行）：
 
 ```bash
 ssh -i ~/.ssh/chaoge_deploy deploy@43.128.13.181 \
-  'sudo bash /home/deploy/public-https/rollback-public-https.sh'
+  'sudo /etc/chaoge/public-https/rollback-public-https.sh'
 ```
 
 ### B1. 无 SSH 隧道的普通设备
