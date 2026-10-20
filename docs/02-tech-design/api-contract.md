@@ -717,6 +717,7 @@ P0-11 开处置三个）：
 | **401 `UNAUTHORIZED`** | 未登录 / 会话失效 | 去登录页 |
 | **403 `FORBIDDEN`** | 已登录，但没有该权限（换账号也没用） | 换账号 |
 | **404 `NOT_FOUND`** | 资源不存在；**或用于刻意隐藏存在性**；**或功能未启用** | 视场景 |
+| **429 `TOO_MANY_REQUESTS`** | 公网登录失败次数超出限流窗口 | 按 `Retry-After` 秒数后重试 |
 
 **两个刻意使用 404 的场景**：
 
@@ -736,7 +737,9 @@ P0-11 开处置三个）：
 { error: { code: ApiErrorCode; message: string } }
 ```
 
-`ApiErrorCode`（`lib/types/common.ts`）= `BAD_REQUEST` | `UNAUTHORIZED` | `FORBIDDEN` | `NOT_FOUND` | `SERVER_ERROR` | `NETWORK_ERROR`。
+`ApiErrorCode`（`lib/types/common.ts`）= `BAD_REQUEST` | `UNAUTHORIZED` | `FORBIDDEN` | `NOT_FOUND` | `TOO_MANY_REQUESTS` | `SERVER_ERROR` | `NETWORK_ERROR`。
+
+**`TOO_MANY_REQUESTS` 目前只由公网登录限流产生**（`lib/auth/publicLoginGuard.ts`），响应带 `Retry-After`；普通业务接口不使用该状态码。
 
 **⚠️ `NETWORK_ERROR` 只在浏览器侧产生**，不参与 HTTP 状态映射（`STATUS_BY_CODE` 里为 0）。
 
