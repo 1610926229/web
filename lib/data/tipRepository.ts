@@ -1,6 +1,8 @@
 import type { PageResult } from "@/lib/types/common";
 import type { TipRecord, TipStatusFilter } from "@/lib/types/tip";
 import { mockTipRepository } from "./mockTipRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgTipRepository } from "./pg/tipRepository";
 
 /**
  * 鸡腿记录的可替换仓储 —— **只读**。
@@ -32,6 +34,16 @@ export type TipRepository = {
   countTipsByStatus(userId: string): Promise<Record<TipStatusFilter, number>>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const tipRepositoryBacking: RepositoryBacking<TipRepository> = {
+  name: "tip",
+  mock: mockTipRepository,
+  pg: pgTipRepository,
+};
+
 export function getTipRepository(): TipRepository {
-  return mockTipRepository;
+  return pickRepository(tipRepositoryBacking);
 }

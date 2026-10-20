@@ -1,0 +1,39 @@
+{
+  "checkedAt": "2026-10-18T17:53:00.000Z",
+  "base": "http://127.0.0.1:3101",
+  "method": "同产物幂等重新部署（受控入口唯一的重启路径）",
+  "release": "20261018T175352Z-7fdf185",
+  "results": [
+    {
+      "step": "重启后用户会话仍有效",
+      "ok": true,
+      "detail": "/api/me = 200，user.id 与重启前一致（beta）"
+    },
+    {
+      "step": "重启后订单仍存在",
+      "ok": true,
+      "detail": "订单列表仍可查 YM20261018703439"
+    },
+    {
+      "step": "重启后订单状态仍为已付款",
+      "ok": true,
+      "detail": "状态=已付款"
+    },
+    {
+      "step": "重启后同一 Mock 微信身份仍是同一用户",
+      "ok": true,
+      "detail": "重新登录后 user.id 仍为 beta 的同一 id"
+    },
+    {
+      "step": "重启后护航审核结果仍在",
+      "ok": true,
+      "detail": "gamma 仍可进入护航工作台"
+    },
+    {
+      "step": "重启后匿名访问仍需登录",
+      "ok": true,
+      "detail": "/mine 显示「需要登录」"
+    }
+  ],
+  "summary": "POST-RESTART PASS — 6 / 6"
+}

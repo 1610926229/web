@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import {
   ADMIN_LOGIN_PAGE_TITLE,
@@ -8,7 +8,7 @@ import {
   ADMIN_MOCK_LOGIN_LABEL,
   ADMIN_MOCK_NOTICE,
 } from "@/lib/constants/admin";
-import { mockLoginAdmin } from "@/lib/services/adminHttp";
+import { loginAdminWithPassword, mockLoginAdmin } from "@/lib/services/adminHttp";
 
 /**
  * 管理后台登录面板。
@@ -24,10 +24,34 @@ import { mockLoginAdmin } from "@/lib/services/adminHttp";
  * 既不渲染按钮，也不渲染「登录失败」这类假动作，只如实说明该能力未启用。
  * 客户端因此不需要（也不应该）知道任何环境变量。
  */
-export default function AdminLoginPanel({ mockAdminEnabled }: { mockAdminEnabled: boolean }) {
+export default function AdminLoginPanel({
+  mockAdminEnabled,
+  realAuthEnabled = false,
+}: {
+  mockAdminEnabled: boolean;
+  /** PROD-4：真实管理员账号密码登录是否可用；开启后不再展示模拟登录入口。 */
+  realAuthEnabled?: boolean;
+}) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const handlePasswordLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await loginAdminWithPassword({ username: username.trim(), password });
+      router.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "登录失败，请重试");
+      setPending(false);
+    }
+  };
 
   const handleLogin = async () => {
     if (pending) return;
@@ -49,9 +73,49 @@ export default function AdminLoginPanel({ mockAdminEnabled }: { mockAdminEnabled
     <main className="flex min-h-dvh flex-col items-center justify-center gap-6 bg-page px-4 py-12">
       <div className="w-full max-w-sm rounded-2xl border border-admin-line bg-surface p-8">
         <h1 className="text-[18px] font-semibold text-ink">{ADMIN_LOGIN_PAGE_TITLE}</h1>
-        <p className="mt-3 text-[13px] leading-5 text-ink-3">{ADMIN_MOCK_NOTICE}</p>
+        <p className="mt-3 text-[13px] leading-5 text-ink-3">
+          {realAuthEnabled
+            ? "请使用管理员账号与密码登录。账号由部署时初始化，密码可由管理员登录后自行修改。"
+            : ADMIN_MOCK_NOTICE}
+        </p>
 
-        {mockAdminEnabled ? (
+        {realAuthEnabled ? (
+          <form onSubmit={handlePasswordLogin} className="mt-6 flex flex-col gap-3">
+            <label className="flex flex-col gap-1 text-[13px] text-ink-2">
+              登录名
+              <input
+                type="text"
+                name="username"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                autoComplete="username"
+                required
+                className="rounded-lg border border-admin-line bg-surface px-3 py-2.5 text-[15px] text-ink outline-none focus:border-admin-accent"
+              />
+            </label>
+
+            <label className="flex flex-col gap-1 text-[13px] text-ink-2">
+              密码
+              <input
+                type="password"
+                name="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+                className="rounded-lg border border-admin-line bg-surface px-3 py-2.5 text-[15px] text-ink outline-none focus:border-admin-accent"
+              />
+            </label>
+
+            <button
+              type="submit"
+              disabled={pending}
+              className="mt-2 w-full rounded-lg bg-ink px-6 py-3 text-[15px] font-medium text-white disabled:opacity-60"
+            >
+              {pending ? "登录中…" : "登录"}
+            </button>
+          </form>
+        ) : mockAdminEnabled ? (
           <button
             type="button"
             onClick={handleLogin}

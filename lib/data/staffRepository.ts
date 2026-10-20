@@ -1,5 +1,7 @@
 import type { StaffAccount } from "@/lib/types/staff";
 import { mockStaffRepository } from "./mockStaffRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgStaffRepository } from "./pg/staffRepository";
 
 /**
  * 客服账号的可替换仓储。
@@ -42,6 +44,16 @@ export type StaffRepository = {
   markLoggedIn(id: string, at: string): Promise<StaffAccount | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const staffRepositoryBacking: RepositoryBacking<StaffRepository> = {
+  name: "staff",
+  mock: mockStaffRepository,
+  pg: pgStaffRepository,
+};
+
 export function getStaffRepository(): StaffRepository {
-  return mockStaffRepository;
+  return pickRepository(staffRepositoryBacking);
 }

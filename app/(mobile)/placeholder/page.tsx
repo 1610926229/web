@@ -13,6 +13,7 @@ export default async function PlaceholderRoute({
   const params = await searchParams;
   const raw = params.title;
   const title = typeof raw === "string" && raw.trim() ? raw.trim() : "功能";
+  const reason = typeof params.reason === "string" ? params.reason : undefined;
 
-  return <PlaceholderPage title={title} />;
+  return <PlaceholderPage title={title} reason={reason} />;
 }

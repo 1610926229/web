@@ -1,3 +1,4 @@
+import type { AdminApplicationStatusFilter } from "@/lib/constants/adminApplications";
 import { PLATFORM_NAME } from "@/lib/constants/site";
 import type { AdminRole } from "@/lib/types/admin";
 import type { Companion } from "@/lib/types/companion";
@@ -58,9 +59,69 @@ export const ADMIN_APPLICATIONS_PAGE_TITLE = "入驻审核";
 export const ADMIN_COMPANIONS_PAGE_TITLE = "护航管理";
 export const ADMIN_CATEGORIES_PAGE_TITLE = "类目管理";
 export const ADMIN_PRODUCTS_PAGE_TITLE = "商品管理";
+/**
+ * 运营内容（首页素材）。
+ *
+ * ⚠️ 这是一个**模块**而不是四个：图片公告 / 活动 Banner / 快捷入口 / 协议
+ * 都是「首页与协议页上用户看到的那点内容」，四个扁平入口会让侧栏长出一截
+ * 彼此看不出关系的菜单项。四个子模块做成 `/admin/content/*` 下的子页签
+ * （见 `components/admin/AdminContentTabs.tsx`）。
+ */
+export const ADMIN_CONTENT_PAGE_TITLE = "运营内容";
 export const ADMIN_ORDERS_PAGE_TITLE = "订单管理";
 export const ADMIN_REFUNDS_PAGE_TITLE = "退款审核";
 export const ADMIN_COMPLAINTS_PAGE_TITLE = "投诉处理";
+/**
+ * 评价审核（P1-8）。
+ *
+ * ⚠️ 它是一张**公开闸**，不是数据删除（`R2`）：管理员只能改「这条内容能不能被公开看到」，
+ * 四个动作（通过 / 驳回 / 隐藏 / 恢复公开）里**没有**任何「改星级 / 改正文」的位置（`D12`）。
+ * 页面的标题与口径说明都从这里取，前后台不各写一份。
+ */
+export const ADMIN_REVIEWS_PAGE_TITLE = "评价审核";
+export const ADMIN_REVIEWS_DETAIL_TITLE = "评价审核详情";
+/**
+ * 售后工作台（P1-3）。
+ *
+ * ⚠️ 它是一个**聚合入口**，不是把退款与投诉合成一个模块——
+ * 两个专用入口与它们各自的处置动作都原样保留，详见 `ADMIN_NAV_ITEMS` 上的注释。
+ */
+export const ADMIN_AFTERSALES_PAGE_TITLE = "售后工作台";
+/**
+ * 优惠券模块（P1-6 起是一个**模块**，不再只是「发放」一页）。
+ *
+ * ⚠️ 这条侧栏入口的落点是 `/admin/coupons`，它是**模板列表**（这个模块的首页）：
+ * 「平台上有哪些券、它们现在是什么状态」。
+ * **发放**是它的一个子页 `/admin/coupons/grant`——两件事的读者与后果都不同：
+ *
+ * | 页面 | 回答的问题 | 写的是什么 |
+ * |---|---|---|
+ * | `/admin/coupons` | 平台上有哪些券、要不要兑现 | `Coupon` **模板本身** |
+ * | `/admin/coupons/grant` | 把哪张券发给哪个人 | `CouponClaim`（用户的资产） |
+ *
+ * P1-4 时这一页只有发放，标签也叫「优惠券发放」；P1-6 补上了模板管理之后，
+ * 标签改成模块名「优惠券管理」，否则从侧栏点进去会以为走错了地方。
+ */
+export const ADMIN_COUPONS_PAGE_TITLE = "优惠券管理";
+/**
+ * 优惠券发放子页（`/admin/coupons/grant`）的标题与口径说明。
+ *
+ * 两件事必须说出来，否则管理员会按别处的直觉猜错：
+ *
+ * 1. **发出去的券就在用户自己的列表里**。它与用户自己领的落在同一份记录上，
+ *    对方在「我的优惠券」中立刻能看到，不需要任何同步动作。
+ * 2. **可以重复发**。发放不受「同一用户对同一模板只能领一次」的限制：
+ *    同一个人可以收到同一模板的多张券，每张各自核销一次。
+ *    因此页面上刻意**不做**「他已经领过了」这类拦截，而是在挑人时把
+ *    已持有的张数显示出来，让人自己判断。
+ */
+export const ADMIN_COUPON_GRANT_PAGE_TITLE = "优惠券发放";
+export const ADMIN_COUPONS_NOTICE =
+  "向指定用户发放优惠券。发出去的券与用户自己领取的落在同一份记录里，" +
+  "对方可在自己的「我的优惠券」中立即看到，不需要任何同步动作。" +
+  "发放不受「同一用户对同一模板只能领一次」的限制：可以对同一个人重复发放同一模板的多张券，" +
+  "每张各自核销一次。" +
+  "可发放的券只有启用中的满减券：折扣券与无门槛券不参与结算，发出去也核销不了。";
 /**
  * 侧栏与页头的模块名。
  *
@@ -69,6 +130,15 @@ export const ADMIN_COMPLAINTS_PAGE_TITLE = "投诉处理";
  * 客服本人在 `/staff` 工作，运营在这里管的是**谁能进那个工作台**。
  */
 export const ADMIN_CUSTOMER_SERVICE_PAGE_TITLE = "客服账号";
+/**
+ * 平台参数（公共订单池超时等）。
+ *
+ * ⚠️ 这里是**规则**不是**数据**：这一页改的是「此后新发生的业务按什么走」。
+ * 已经进入公共池的订单不受影响——它们在进入那一刻就把当时的参数值冻结成了快照。
+ * 页面文案（`PLATFORM_CONFIG_NOTICE`）必须把这一点说出来，否则管理员改完
+ * 看到在途订单没变化，会以为没保存成功然后再改一次。
+ */
+export const ADMIN_PLATFORM_CONFIG_PAGE_TITLE = "平台参数";
 export const ADMIN_LOGOUT_LABEL = "退出登录";
 export const ADMIN_MOCK_LOGIN_LABEL = "模拟管理员登录";
 
@@ -96,16 +166,34 @@ export const ADMIN_FORBIDDEN_MESSAGE = "当前账号没有管理后台权限";
 export const ADMIN_UNAUTHORIZED_MESSAGE = "请先登录管理后台";
 
 /**
- * 概览页的数据口径说明。
+ * 概览页（经营首页）的数据口径说明。
  *
- * ⚠️ 订单、退款与投诉已经各有页面（订单管理 / 退款审核 / 投诉处理），
- * 但**本页仍然只汇总入驻申请与护航规模**：那三块的数字按「状态 × 时间」切片才有意义，
- * 塞进这两排卡片里会变成一堆看不出趋势的数字。这句话必须跟着事实改——
- * 说「属于后续阶段」会让人以为侧栏里那三个入口是摆设。
+ * ⚠️ 本页的形状在 **P1-1** 变过：从「入口页」升级为**经营首页**——顶部是
+ * 「今日经营」与「当前待办」（当天的、需要管理员动作的），底部才是原来那七个
+ * **全量累计**数字。这句话必须跟着事实改：它此前写着「本页只汇总入驻申请与护航规模」，
+ * 而 `docs/03-dev/需求功能点进度表.md` 正是拿这句话当作「首页没有经营数据」的证据。
+ *
+ * ⚠️ 升级后仍要**明确写出底部那一排是全量累计**：否则「待审核申请 12」
+ * 会被读成「今天新增 12」，而它其实是所有历史申请里仍未审完的总数。
+ *
+ * ⚠️ 这段文字由 `<p>{…}</p>` **原样渲染**，React 不解析 Markdown——
+ * 写 `**加粗**` 只会让页面上出现四个星号。要用「」强调。
+ *
+ * ⚠️ 上面两块原本是**两段叠在一起的注释**（P1-1 留下的），JSDoc 只认最后一块，
+ * 于是「本页形状变过」那段说明对编辑器与文档工具都不可见。这里是合并，不是新增内容。
  */
 export const ADMIN_OVERVIEW_NOTICE =
-  "数字从本地 Mock 仓储实时聚合，不是写死的展示值；本页只汇总入驻申请与护航规模，" +
-  "订单、退款与投诉在各自的页面里查看。";
+  "数字全部从本地 Mock 仓储实时聚合，不是写死的展示值。" +
+  "顶部「今日经营」与「当前待办」按当天北京时间与待处理状态统计；" +
+  "底部那一排是入驻申请与护航规模的「全量累计」，与日期无关。";
+
+/**
+ * 底部那排累计卡片的标题。
+ *
+ * ⚠️ 「（全量累计）」四个字不是装饰：它在同一屏里与上面的「今日订单」并排出现，
+ * 不加这个词就分不清哪些数字按天、哪些数字从来如此。
+ */
+export const ADMIN_OVERVIEW_CUMULATIVE_TITLE = "申请与护航规模（全量累计）";
 
 // ——————————————————————————— 导航 ———————————————————————————
 
@@ -149,8 +237,31 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     label: ADMIN_PRODUCTS_PAGE_TITLE,
     description: "商品图文、上下架与单组规格",
   },
+  // P8E-1：首页运营内容。放在商品管理之后，因为两者是同一类东西——
+  // 都是「用户端看得到的素材」，改完刷新前台就会变；而它下面的订单 / 退款 / 投诉
+  // 是交易与售后，与素材不是一回事。
+  {
+    key: "content",
+    href: "/admin/content",
+    label: ADMIN_CONTENT_PAGE_TITLE,
+    description: "首页公告、活动图、快捷入口与协议正文",
+  },
   // P8C：订单只读查询、退款审核与投诉处理。**退款与投诉是两个模块**，
   // 不是一个「售后」模块——一边动订单与金额，一边只写平台侧结论，合成的入口会让人分不清。
+  //
+  // ⚠️ P1-3 在此之上加了第三个**聚合入口**（「售后工作台」，`/admin/aftersales`），
+  // 它**不推翻**上面这句判断，理由逐条记在这里：
+  //
+  // - 原判断针对的是「把两种**处置动作**合成一个」：一边动订单与金额
+  //   （批准要写订单状态、退款额与打手收益冲回），一边只写平台侧结论、一分钱都不动。
+  //   把这两件事做进同一个控制台，操作的人迟早分不清自己按下去的是哪一种。
+  // - 工作台改的不是这件事。它是**只读的分流队列**：回答「现在有哪些案件等着人处理」，
+  //   按视图（未完结 / 处理中 / 已结束）分桶、按案件编号 / 订单号 / 昵称搜，
+  //   一行都不写；**没有任何一个处置动作被搬进来**。
+  // - 点进去之后渲染的正是既有的 `AdminRefundConsole` / `AdminComplaintConsole`——
+  //   两种处置动作仍然各在各的详情页里，边界一步都没挪。
+  // - 上面两条原有入口（`/admin/refunds`、`/admin/complaints`）**原样保留**：
+  //   工作台是「从哪开始找」的入口，不是「在哪操作」的替代。
   {
     key: "orders",
     href: "/admin/orders",
@@ -169,6 +280,24 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     label: ADMIN_COMPLAINTS_PAGE_TITLE,
     description: "核实并记录平台侧处理结果",
   },
+  // P1-3：售后工作台（退款与投诉的**混合待办队列**，只读）。
+  // ⚠️ 它为什么不与上面那句「两个模块不是一个售后模块」冲突，见本数组开头的说明。
+  {
+    key: "aftersales",
+    href: "/admin/aftersales",
+    label: ADMIN_AFTERSALES_PAGE_TITLE,
+    description: "退款与投诉的混合待办队列",
+  },
+  // P1-8：评价审核。它是**内容公开闸**，不是售后动作——不改任何订单、不产生退款，
+  // 只决定一条用户评价能不能出现在商品页与打手页上。因此排在售后工作台之后、
+  // 客服账号之前：它与「售后」相邻是因为两者都是「平台对用户提交的东西做一次判定」，
+  // 但它不属于售后流程（`D20`：退款与评价审核是两条互不干涉的线）。
+  {
+    key: "reviews",
+    href: "/admin/reviews",
+    label: ADMIN_REVIEWS_PAGE_TITLE,
+    description: "用户评价的公开审核：通过、驳回、隐藏与恢复",
+  },
   // P8D-1：客服账号。**独立于用户与管理员**的第三类身份，
   // 只管「谁可以登录 /staff 的客服工作台」，与用户端名单、排行榜没有交集。
   {
@@ -176,6 +305,37 @@ export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
     href: "/admin/customer-service",
     label: ADMIN_CUSTOMER_SERVICE_PAGE_TITLE,
     description: "客服账号的新增、启停与软删除",
+  },
+  // P1-4 验收整改轮 §四引入、P1-6 扩为模块：优惠券。它是**运营动作**，不是售后动作——
+  // 不碰任何订单、不产生退款，只是配置券模板、并以另一种来源**产生**一张新券
+  // （与用户自己领的落在同一份数据里）。因此它排在订单 / 退款 / 投诉 / 售后工作台
+  // 这一组之后，而不是挨着它们中间。
+  //
+  // ⚠️ 它排在 `platform-config` **之前**，而不是最末：下面那条「平台参数放在最后」的
+  // 理由（它是**全局规则本身**，上面每一条都是「业务对象与账号」）在这里仍然要成立。
+  // 券是对一个业务对象做增删改，属于「业务对象与账号」这一侧；
+  // 把它插到平台参数后面，反而会让「规则类排在最后」这条读法失效。
+  //
+  // ⚠️ **href 没有变**（P1-6）：`/admin/coupons` 从「发放页」变成了「模板列表」，
+  // 发放挪到 `/admin/coupons/grant`。改动落点而不是改动地址，
+  // 是为了让已经存在的侧栏链接与书签继续指向同一个模块。
+  //
+  // ⚠️ `tests/admin.test.mjs` 里有一条按顺序逐项比对的导航断言。
+  {
+    key: "coupons",
+    href: "/admin/coupons",
+    label: ADMIN_COUPONS_PAGE_TITLE,
+    description: "优惠券模板的配置与向指定用户发放",
+  },
+  // P0-1：平台参数。**放在最后**，因为它与上面每一条都不是一类东西——
+  // 上面那些是「业务对象与账号」，这一条是**全局规则本身**：
+  // 改它不动任何一条已有记录，只改变此后新发生的业务按什么规则走。
+  // 放在中间会让人以为它属于相邻那个模块。
+  {
+    key: "platform-config",
+    href: "/admin/platform-config",
+    label: ADMIN_PLATFORM_CONFIG_PAGE_TITLE,
+    description: "公共订单池超时等平台级规则",
   },
 ];
 
@@ -189,8 +349,12 @@ export const ADMIN_UPCOMING_MODULES: readonly string[] = [
   // ⚠️ P8D-1 时这里的第一项是「客服处理退款与投诉」，P8D-2 把它做出来了，因此删掉。
   // 这张表的每一项都是「点了会失望」的东西，做完一项就必须删一项——
   // 留着会让这份清单慢慢变成一份历史记录，而它唯一的作用是回答「现在还没有什么」。
-  "公告与协议管理",
-  "消费等级与优惠券配置",
+  // P8E-1 因此删掉了「公告与协议管理」：公告、活动图、快捷入口与协议正文
+  // 现在都在 `/admin/content` 里，留着它等于在侧栏上写一句已经不成立的话。
+  // ⚠️ P1-6 把原条目「消费等级与优惠券配置」**收窄**成「消费等级」：
+  // 后半截（优惠券配置）已经做出来了，留着它就等于在侧栏上写一句不成立的话。
+  // 前半截（消费等级）没有做，因此**不能整条删掉**——那会变成另一句假话。
+  "消费等级",
   "鸡腿结算",
   "数据统计图表",
 ];
@@ -281,8 +445,18 @@ export function countCompanionStates(companions: readonly Companion[]): {
   return { enabled, disabled, unavailable, total: companions.length };
 }
 
-/** 概览卡片点进去之后的列表筛选地址。参数名与服务端读的一致。 */
-export const ADMIN_APPLICATION_LIST_HREF = (status: CompanionApplicationStatus): string =>
+/**
+ * 概览卡片点进去之后的列表筛选地址。参数名与服务端读的一致。
+ *
+ * ⚠️ 参数类型是**该模块的筛选联合**（含查询层虚拟值 `open`），不是领域状态：
+ * 经营首页的「打手申请」卡就落在 `?status=open` 上（P1-1 的 R6 裁定——
+ * 卡上的数必须与点进去的列表条数一致）。用 `type` 导入，因此本文件与
+ * `adminApplications.ts` 之间不存在运行时依赖。
+ *
+ * ⚠️ 该卡片的显示文案是「**打手申请**」（P1-1 人工验收把原来的「待处理申请」改了：
+ * 后者不说明是什么申请）。**改的只是文案**——这里的状态集合、计数口径与地址都没动。
+ */
+export const ADMIN_APPLICATION_LIST_HREF = (status: AdminApplicationStatusFilter): string =>
   `/admin/applications?status=${status}`;
 
 export const ADMIN_COMPANION_LIST_HREF = (filter: "enabled" | "disabled" | "unavailable"): string =>

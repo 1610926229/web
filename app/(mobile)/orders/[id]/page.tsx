@@ -4,6 +4,7 @@ import Link from "next/link";
 import EmptyState from "@/components/common/EmptyState";
 import NavBar from "@/components/common/NavBar";
 import PriceText from "@/components/common/PriceText";
+import DirectRefundButton from "@/components/refunds/DirectRefundButton";
 import RequireAuth from "@/lib/auth/RequireAuth";
 import { COMPLAINT_STATUS_CLASS } from "@/lib/constants/complaints";
 import {
@@ -12,9 +13,10 @@ import {
   ORDER_STATUS_LABELS,
 } from "@/lib/constants/orders";
 import { REFUND_STATUS_CLASS, REFUND_STATUS_LABELS } from "@/lib/constants/refunds";
+import { CONVERSATION_ENTRY_HINT } from "@/lib/constants/service";
 import { getOrderDetailForUser } from "@/lib/services/orders";
 import type { OrderDetail } from "@/lib/types/order";
-import { formatDateTime } from "@/lib/utils/format";
+import { formatDateTime, formatYuan } from "@/lib/utils/format";
 
 /**
  * 订单详情页（需登录，只读 + 售后入口）。
@@ -108,9 +110,41 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
           ) : null}
         </div>
 
+        {/*
+          金额域（P0-3）：下单那一刻冻结在订单上的账。
+          「原价」是优惠前的应付总额，「实付」是实际付掉的钱，两者在有满减券时会**不再相等**
+          （P1-4）；「护航收益」是这一单按冻结比例分给打手的钱——增值服务由打手履约，
+          因此也参与分账（R3 已确认，见 lib/constants/orderAmount.ts）。
+        */}
+        <div className="mt-2 border-t border-line pt-1">
+          <MoneyRow label="原价" cents={detail.originalAmount} />
+          {/* 优惠行只在**真的减了钱**时出现：券恒不减时渲染一行「−¥0.00」
+              既没有信息量，也会让人以为券生效了。
+              券面文案取自订单上的**券快照**，因此后台之后改券不影响这一行。
+
+              ⚠️ 减号写在 ¥ **前面**，因此不走 `MoneyRow` / `PriceText`：
+              那两个组件把负号交给 `formatYuan`，渲染出来是「¥-10.00」。
+              这一行是「抵扣」而不是一笔负的交易，读作「−¥10.00」才对 */}
+          {detail.coupon && detail.couponDiscountAmount > 0 ? (
+            <div className="flex gap-3 border-b border-line py-2 text-[13px]">
+              <span className="min-w-0 flex-1 break-words text-ink-3">
+                优惠券 · {detail.coupon.valueLabel}
+              </span>
+              <span className="shrink-0 font-semibold text-brand-red">
+                −¥{formatYuan(detail.couponDiscountAmount)}
+              </span>
+            </div>
+          ) : null}
+          <MoneyRow label="实付" cents={detail.actualPaidAmount} />
+          <MoneyRow label="护航收益" cents={detail.companionBaseIncome} />
+        </div>
+
         <div className="mt-2 flex items-baseline justify-end gap-2 border-t border-line pt-2">
+          {/* 用户实际付掉的钱。有满减券时它**小于**上面的「原价」——这是正确的，
+              不是差异。读的是金额域的 `actualPaidAmount`，不是
+              `totalAmount`（后者是优惠前的应付总额，不是渠道实收） */}
           <span className="text-[13px] text-ink-2">实付金额</span>
-          <PriceText cents={detail.totalAmount} className="text-[18px] text-brand-red" />
+          <PriceText cents={detail.actualPaidAmount} className="text-[18px] text-brand-red" />
         </div>
       </section>
 
@@ -140,6 +174,20 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
         ) : (
           <p className="mt-2 text-[13px] text-ink-3">等待接单</p>
         )}
+
+        {/*
+          派单进度（P0-5）：还在等人接的时候，说清「这一单现在在哪个池子里等人接、还剩多久」。
+          没有这一行，用户在下单后到接单前这段时间里看到的只是一句「等待接单」——
+          指定了人也一样，看不出平台到底有没有在推进。
+
+          ⚠️ 剩余时间是**服务端在这一刻算好的一个数**，不是页面上的倒计时：
+          到没到点由服务端判定，页面上的数字不参与任何决定。
+        */}
+        {detail.dispatchProgress ? (
+          <p className="mt-2 rounded-lg bg-page px-3 py-2 text-[12px] leading-5 text-ink-3">
+            {detail.dispatchProgress.poolLabel} · 剩余 {formatRemaining(detail.dispatchProgress.remainingSeconds)}
+          </p>
+        ) : null}
       </section>
 
       {/* 状态时间轴：只列出已经发生的节点 */}
@@ -170,12 +218,15 @@ async function OrderDetailBody({ orderId, userId }: { orderId: string; userId: s
  *
  * 每一项都由**服务端给出的值**决定显不显示：
  * - `allowedActions.canRequestRefund` —— 能不能申请退款（订单状态 + 有没有退款记录）；
+ * - `allowedActions.canDirectRefund` —— 能不能**直接全额退款**（P0-12，`paid` / `accepted`
+ *   当场退钱、免审批）。它与上一项由服务端的两个不相交状态集合保证**不会同时为真**，
+ *   因此这里也不需要 `else`：两者都在同一处规则里算好；
  * - `refundSummary` —— 已经申请过就引到退款详情，看进度或撤销；
  * - `allowedActions.canOpenConversation` —— 订单沟通入口，带未读数；
  * - `allowedActions.canSubmitComplaint` —— 提交投诉（带上订单 id，自动关联这一单）；
  * - `complaintSummary` —— 投诉过就引到最近一条投诉的详情；
  * - `allowedActions.canReview` —— 评价服务（已完成、未评价、且没有进行中 / 已通过的退款）；
- * - `reviewSummary` —— 评价过就显示星级，并引到我的评价。
+ * - `reviewSummary` —— 评价过就显示**状态**（不显示星级），被驳回时额外给重提入口。
  *
  * 前端只读这些值，不拿 `status` 自己推断——写接口那边还会再校验一次，按钮只是提示，不是权限。
  */
@@ -190,7 +241,27 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
 
       <div className="mt-1">
         {allowedActions.canRequestRefund ? (
-          <ActionRow href={`/orders/${detail.id}/refund`} label="申请退款" hint="整单退款" />
+          // 提示语刻意不说「整单退款」：P0-13 起申请是整单、**批下来可以是部分**，
+          // 「整单」两个字会让用户以为申请多少就退多少（实际退款金额在退款详情页显示）
+          <ActionRow href={`/orders/${detail.id}/refund`} label="申请退款" hint="按实付金额申请" />
+        ) : null}
+
+        {/*
+          直接全额退款（P0-12）：`paid` / `accepted` 这两档「尚未开始服务」的订单当场退钱，
+          免审批，因此它是**一个按钮**而不是一条引到表单页的链接——没有原因要填、
+          没有金额要确认（就是全额），多一跳只会让人以为还要等谁批。
+          与上面的「申请退款」由服务端保证不会同时出现（两个状态集合不相交）。
+        */}
+        {allowedActions.canDirectRefund ? (
+          <DirectRefundButton
+            orderId={detail.id}
+            // 两个金额都取自服务端（P0-13 整改）：这条路退的是**剩余可退额**，
+            // 不是订单实付——部分退款过的订单仍停在 paid / accepted 上。
+            // ⚠️ 这里的 `?? 0` 只是给类型收口：`canDirectRefund` 为真时
+            //    `directRefundAmountCents` 必定是数（同一个服务端函数一起给的）
+            amountCents={allowedActions.directRefundAmountCents ?? 0}
+            alreadyRefundedCents={allowedActions.alreadyRefundedAmountCents ?? 0}
+          />
         ) : null}
 
         {refundSummary ? (
@@ -206,7 +277,7 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
           <ActionRow
             href={`/service/chat/${detail.id}`}
             label="订单沟通"
-            hint={unread > 0 ? `未读 ${unread} 条` : "与客服 / 打手沟通"}
+            hint={unread > 0 ? `未读 ${unread} 条` : CONVERSATION_ENTRY_HINT}
             hintClass={unread > 0 ? "text-brand-red" : undefined}
           />
         ) : null}
@@ -224,16 +295,25 @@ function AfterSalesSection({ detail }: { detail: OrderDetail }) {
           />
         ) : null}
 
-        {/* 已完成且还没评价：给一个入口；评价过之后换成「我的评价」，不会两个同时出现 */}
+        {/* 已完成且还没评价：给一个入口；评价过之后换成状态入口，不会两个同时出现 */}
         {allowedActions.canReview ? (
           <ActionRow href={`/reviews/new/${detail.id}`} label="评价服务" hint="已完成，可以评价" />
         ) : null}
 
+        {/*
+          评价摘要：**只有状态，没有星级**。一条评价最多有两个星级（商品 / 打手），
+          在订单详情上挑一个显示，等于替用户决定「哪个星级代表这次消费」——
+          那是评价页要回答的问题。这里只回答「评价这件事走到哪一步了」。
+          文案一律用服务端给的 `statusLabel`（审核中 / 已通过 / 已驳回 / 已被管理员隐藏），
+          页面不自己拿 `status` 拼状态名。
+        */}
         {reviewSummary ? (
           <ActionRow
-            href="/reviews"
-            label="我的评价"
-            hint={`已评价 · ${reviewSummary.rating} 星`}
+            // 被驳回时**直接回到表单**（D9 / D14）：这是唯一还能改这条评价的入口。
+            // 其余状态下订单详情不提供任何修改入口，链到「我的评价」。
+            href={reviewSummary.canResubmit ? `/reviews/new/${detail.id}` : "/reviews"}
+            label={reviewSummary.canResubmit ? "重新提交评价" : "我的评价"}
+            hint={reviewSummary.statusLabel}
           />
         ) : null}
       </div>
@@ -265,6 +345,20 @@ function ActionRow({
       </span>
     </Link>
   );
+}
+
+/**
+ * 剩余时间：只在这个页面上格式化，不引入「倒计时」这种会自己走的组件。
+ *
+ * 秒数已经由服务端算好（`remainingSeconds`），这里只做单位换算：
+ * 超过一分钟说「X 分」，不足一分钟说「不到 1 分钟」——
+ * 「剩余 0 分 12 秒」这种写法看着像在倒数，而它其实不会再变。
+ * 已过点时为 0（服务端保证不为负），显示成「即将结束」而不是「剩余 -3 分钟」。
+ */
+function formatRemaining(seconds: number): string {
+  if (seconds <= 0) return "即将结束";
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes} 分钟` : "不到 1 分钟";
 }
 
 /** 明细行：左标签右内容，长内容换行而不是把卡片撑宽。 */

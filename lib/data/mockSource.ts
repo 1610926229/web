@@ -4,10 +4,15 @@ import {
   toProductDetail,
   toPublicGame,
 } from "@/lib/constants/catalog";
+import {
+  selectActivityImageUrl,
+  selectPublicAnnouncements,
+  selectPublicShortcuts,
+} from "@/lib/constants/homeContent";
 import { addonSeed, homeSectionSeed } from "@/lib/mocks/fixtures/catalogSeed";
-import { homeSeed } from "@/lib/mocks/fixtures/seed";
 import { getCatalogRepository } from "./catalogRepository";
 import { getCompanionRepository } from "./companionRepository";
+import { getContentRepository } from "./contentRepository";
 import type { DataSource } from "./source";
 import { getUserRepository, toSessionUser } from "./userRepository";
 
@@ -37,12 +42,18 @@ export const mockDataSource: DataSource = {
   /**
    * 首页数据。
    *
-   * ⚠️ 商品分组**每次请求现拼**：种子 `homeSectionSeed` 里存的是商品 id，
-   * 这里拿 id 去商品仓储取当下的记录。
+   * ⚠️ **两部分都是每次请求现取的**，本文件不持有任何首页内容：
+   *
+   * - 商品分组：种子 `homeSectionSeed` 里存的是商品 id，这里拿 id 去商品仓储取当下的记录；
+   * - 公告 / 活动图 / 快捷入口：全部委派给 `contentRepository`（P8E-1）。
    *
    * 为什么不把商品直接写进种子：写进去的话，首页拿到的是「种子被复制那一刻」的价格与封面，
    * 后台改价之后首页还显示旧价。不这么做的话还有一个更糟的后果——后台把一件商品下架或
    * 软删除之后，首页那天晚上还在推它，而这是用户一眼就能看到的。
+   *
+   * 公告 / 活动图 / 快捷入口是**同一个理由的另一半**：P8E-1 之前它们就是写在这里的
+   * 静态数据（`...homeSeed`），后台没有能力改动；现在后台能改了，静态数据必须消失，
+   * 否则「后台改了公告、用户端没变」——管理员会以为自己没保存成功。
    *
    * 取不到的商品（已下架 / 已移除 / 挂在不可见类目下）**直接跳过**，
    * 不占位、不留空卡片：首页出现一张点不进去的图比少一张更糟。
@@ -51,8 +62,20 @@ export const mockDataSource: DataSource = {
     const listed = await getCatalogRepository().listPublicProducts();
     const byId = new Map(listed.map((record) => [record.id, record]));
 
+    // 三组运营内容各取一次：仓储返回**全部**记录（含停用与已移除），
+    // 「哪些用户端看得到」由 `lib/constants/homeContent.ts` 的纯函数回答——
+    // 那是业务规则，不该随存储实现改变。
+    const content = getContentRepository();
+    const [announcements, banners, quickEntries] = await Promise.all([
+      content.listAnnouncementRecords(),
+      content.listBannerRecords(),
+      content.listQuickEntryRecords(),
+    ]);
+
     return {
-      ...homeSeed,
+      announcements: selectPublicAnnouncements(announcements),
+      activityImageUrl: selectActivityImageUrl(banners),
+      shortcuts: selectPublicShortcuts(quickEntries),
       sections: homeSectionSeed.map((section) => ({
         id: section.id,
         title: section.title,

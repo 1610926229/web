@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 import {
   ADMIN_APPLICATION_TRANSITIONS,
   ADMIN_REVIEW_NOTE_EMPTY_MESSAGE,
@@ -37,6 +39,7 @@ import { getDataSource } from "../lib/data/source.ts";
 import { companionApplicationSeed } from "../lib/mocks/fixtures/companionApplicationSeed.ts";
 import { companionSeed, userSeed } from "../lib/mocks/fixtures/seed.ts";
 import { getConsumptionRanking } from "../lib/services/rankings.ts";
+import { loadReviewAggregate } from "../lib/services/reviewAggregates.ts";
 import { createPaymentRequest, getCompanions, previewCheckout } from "../lib/services/checkout.ts";
 import {
   getCompanionDetail,
@@ -81,6 +84,9 @@ import {
  */
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP_HTTP = BASE
   ? false
   : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过 P8A 的 HTTP 用例";
@@ -416,11 +422,19 @@ test("通过 = 四件事同时成立：改状态、发资格、建护航、写�
   assert.equal(companion.available, false);
   assert.equal(companion.unavailableReason, NEW_COMPANION_UNAVAILABLE_REASON);
   assert.equal(companion.removedAt, null);
-  assert.equal(companion.rating, null, "新护航没有评分：null 与 0 分是两件事");
+  // ⚠️ P1-8 起评分与评价数**不存在护航实体上**（`D17`）：实体只有业务归属与资料，
+  // 「几分、几条」是读的时候由 approved 评价聚合出来的。因此这里断言实体的字段
+  // **不存在**，再断言聚合结果——保留的是原来那条不变式：
+  // 「新护航没有评分」是 `null`（暂无评分），不是 `0.0`（真的被打了 0 分）。
+  for (const removed of ["rating", "reviewCount", "reviews"]) {
+    assert.equal(removed in companion, false, `护航实体不该再带 ${removed}：评分由聚合给出`);
+  }
+  const fresh = await loadReviewAggregate("companion", companion.id);
+  assert.equal(fresh.averageRating, null, "新护航没有评分：null 与 0 分是两件事");
+  assert.equal(fresh.reviewCount, 0);
+  assert.deepEqual(fresh.reviews, []);
   assert.equal(companion.completedOrderCount, 0);
-  assert.equal(companion.reviewCount, 0);
   assert.equal(companion.tipsCount, 0);
-  assert.deepEqual(companion.reviews, []);
   assert.equal(companion.avatarUrl, COMPANION_AVATAR_OPTIONS[0]);
 
   // 新 id 不能与预置记录撞车
@@ -806,7 +820,7 @@ test("编辑立刻反映到前台：后台、用户端列表、详情页、结�
   assert.equal(fromCheckout.displayName, "改过的名字（占位）");
 
   // 结算页真的能用这条记录下单（可接单时）：试算通过，且正式下单把它写进快照
-  await previewCheckout(checkoutSelection("cp-1"), undefined, "server");
+  await previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server");
   const { request } = await createPaymentRequest(
     { ...checkoutSelection("cp-1"), idempotencyKey: uniqueKey() },
     "u-1001",
@@ -947,7 +961,7 @@ test("暂停接单：仍在名单与详情里，但结算时不可选", async ()
 
   // 结算页拒绝：详情页能打开不等于可以下单
   await expectApiError(
-    previewCheckout(checkoutSelection("cp-1"), undefined, "server"),
+    previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server"),
     "BAD_REQUEST",
     "该陪玩当前不可选，请重新选择",
   );
@@ -978,7 +992,7 @@ test("停用：从用户端列表与结算页消失，直链详情是只读的�
   assert.equal(detail.selectable, false);
 
   await expectApiError(
-    previewCheckout(checkoutSelection("cp-1"), undefined, "server"),
+    previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server"),
     "BAD_REQUEST",
     "该陪玩当前不可选，请重新选择",
   );
@@ -1025,7 +1039,7 @@ test("移除是软删除：不物理删除、用户端不可见、后台仍可�
   const list = await publicCompanions();
   assert.equal(list.items.some((item) => item.id === "cp-1"), false);
   await expectApiError(
-    previewCheckout(checkoutSelection("cp-1"), undefined, "server"),
+    previewCheckout(checkoutSelection("cp-1"), "u-1001", undefined, "server"),
     "BAD_REQUEST",
     "该陪玩当前不可选，请重新选择",
   );

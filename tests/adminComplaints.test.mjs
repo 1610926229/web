@@ -753,8 +753,17 @@ test("详情：不关联订单是合法状态，不是数据缺失", async () =>
   const withOrder = await getAdminComplaintDetail(PENDING_COMPLAINT, undefined, SURFACE);
   assert.ok(withOrder?.orderSummary);
   assert.equal(withOrder.orderSummary.id, withOrder.orderId);
-  assert.equal(typeof withOrder.orderSummary.totalAmount, "number");
+  assert.equal(typeof withOrder.orderSummary.actualPaidAmount, "number");
   assert.ok(withOrder.orderSummary.orderNo.length > 0);
+  // 收敛口径（P1-4）：投诉订单摘要**不带**「优惠前原价」的第二个名字。
+  // 一个没人读的 `totalAmount` 就是「拿原价充实付」的入口——同一处错误已经
+  // 在用户端与客服端各出现过一次（见 tests/couponCheckoutChain.test.mjs 的退款详情用例）。
+  // 要显示原价时请加 `originalAmount` 这个统一名字，而不是把这个字段加回来。
+  assert.equal(
+    "totalAmount" in withOrder.orderSummary,
+    false,
+    "投诉订单摘要不应再带 totalAmount（优惠前原价只叫 originalAmount）",
+  );
 
   assert.equal(await getAdminComplaintDetail("cmp-nope", undefined, SURFACE), null);
   assert.equal(await getAdminComplaintDetail("", undefined, SURFACE), null);

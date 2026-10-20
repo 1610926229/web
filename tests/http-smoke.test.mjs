@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 
 /**
  * HTTP 冒烟测试：需要已经跑起来的服务，未提供地址时自动跳过。
@@ -14,9 +16,18 @@ import test from "node:test";
  * `routes.test.mjs` 检查路由表与入口地址，数据层测试检查业务规则，三者互补。
  *
  * 不设 `APP_BASE_URL` 时整组跳过，因此 `pnpm test` 在没有任何服务时依然全绿。
+ *
+ * ⚠️ **这组用例假定服务端的预置数据没被手工改过**。用例自身可以重复跑：文件头的
+ * `await resetServerStores()` 会先把**服务端**存储丢回预置（DEV-2）——「跑门禁要重启服务」
+ * 那条旧约定已经**被这个机制取代**，不再需要人工重启。但如果你通过**浏览器**在后台
+ * 通过 / 驳回了某条**预置**的入驻申请，那一步不经过本文件的代码，重置的时点之后仍会被改，
+ * 入驻那一组就会因为找不到「待查看 / 审核中」的申请而失败——那是数据被改过，不是回归。
  */
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过 HTTP 冒烟测试";
 
 /** 登录拦截页的固定文案，用来判断「打开了受保护页面」而不是「404」。 */
@@ -49,8 +60,10 @@ const SKIP_SESSION = SKIP || (SESSION ? false : "服务端未开启 ENABLE_MOCK_
 /**
  * P7B 用的额外 Mock 身份。
  *
- * 账号切换只发生在接口层（`/api/auth/mock-login` 的请求体里），**用户端页面没有任何
- * 切换入口**；这里用它来覆盖「预置里有申请」的几种状态，以及一条不与其他用例争抢的
+ * 账号切换只发生在接口层（`/api/auth/mock-login` 的请求体里）。**用户端页面上唯一的
+ * 切换途径是「退出登录 → 在登录界面选下一个账号」**（P0-5 起，登录界面在 Mock 环境下
+ * 提供测试账号名单）；已登录的页面里没有任何「换个身份」的开关。
+ * 这里用它来覆盖「预置里有申请」的几种状态，以及一条不与其他用例争抢的
  * 申请人身份（`u-1008`：预置里没有申请、也没有任何有效消费，写进去不会影响排行榜）。
  */
 const SESSION_JOIN_PENDING = BASE ? await loginAs("u-1002") : null; // 预置「待查看」
@@ -59,16 +72,22 @@ const SESSION_JOIN_APPROVED = BASE ? await loginAs("u-1004") : null; // 预置�
 const SESSION_JOIN_APPLICANT = BASE ? await loginAs("u-1008") : null; // 预置没有申请
 
 /**
- * 去掉 `<script>` 标签后再做「页面上不该出现某段文字」的断言。
+ * 去掉构建产物标签后再做「页面上看得见的文字」的断言。
  *
- * 理由：Next 的 HTML 里有两段**不是页面内容**的东西——RSC 的 flight 载荷与
- * Turbopack 的分块文件名（`/_next/static/chunks/05w-twpn2bx9w.js`）。
- * 它们由构建产物决定，会随任何一次改动变化，且长相随机：
+ * 理由：Next 的 HTML 里有两类**不是页面内容**的东西——RSC 的 flight 载荷与
+ * Turbopack 的分块文件名。分块文件名是内容哈希，长得随机，且**同时**出现在
+ * `<script src>`、`<link rel="stylesheet">` 与 `<link rel="preload">` 里：
+ * - JS 分块形如 `/_next/static/chunks/05w-twpn2bx9w.js`，天然命中 `\d+w\b`；
+ * - CSS 分块形如 `/_next/static/chunks/3k-j_e9-s-66i.css`，天然命中 `\d+k\b`。
+ * 它们由构建产物决定，会随任何一次改动变化：
  * 「金额不该用 k / w 缩写」这类断言扫到它们就会红，而且红得与断言的本意毫无关系。
- * 因此凡是判断**页面上看得见的文字**的断言，都应当先过一遍这里。
+ * 因此凡是判断**页面上看得见的文字**的断言，都应当先过一遍这里——
+ * 只剥 `<script>` 是不够的：chunk 文件名同样住在 `<link>` 里，换一次构建哈希就会红。
  */
-function stripScripts(html) {
-  return html.replace(/<script[\s\S]*?<\/script>/g, "");
+function stripBuildArtifacts(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/g, "")
+    .replace(/<link\b[^>]*>/g, "");
 }
 
 async function get(path, cookie) {
@@ -103,9 +122,41 @@ test("游客可以打开 /rank 与 /agreements：本次改动不牵连它们", {
   }
 });
 
-test("/companion（单数）不再是正式页面", { skip: SKIP }, async () => {
-  const { status } = await get("/companion");
-  assert.equal(status, 404);
+/**
+ * ⚠️ 这条断言在 P0-4 被**反转**过，反转本身是有意的。
+ *
+ * 原先断言 `/companion`（单数）不是正式页面，理由是当时它只是一个未被采用的占位路由。
+ * P0-4 把 `/companion` 定为**打手工作台**之后，这条断言就变成了一条「钉住旧结论」的
+ * 谎言：它会要求一个已经上线的东西继续 404。这里改成断言它现在的真实契约——
+ * 游客拿到的是**统一登录引导**（与 `/join` 同一条守卫），而不是 404，也不是工作台内容。
+ *
+ * ⚠️ 未登录时**不断言**工作台的任何内容：`.includes()` 扫的是整份 HTML，
+ * 而登录引导页与工作台共用同一套文案常量，断言「不该出现」很容易扫到同名片段而假红。
+ * 「登录后不是打手会被挡下」由 `companionAccess.test.mjs` 与页面结构约束覆盖。
+ */
+test("游客打开 /companion 命中统一登录引导，而不是 404", { skip: SKIP }, async () => {
+  const { status, html } = await get("/companion");
+
+  assert.equal(status, 200, "/companion 不该 404：它是打手工作台（P0-4）");
+  assert.ok(html.includes(LOGIN_GATE_TEXT), "未登录时应显示统一登录引导");
+});
+
+/**
+ * P0-5 手工验收要靠「换个身份登录」跑完整链路，因此这里断言**名单真的渲染出来了**。
+ *
+ * 只在开了 `ENABLE_MOCK_AUTH` 时才有这份名单（`skip` 条件正是「模拟登录没开」），
+ * 所以这条断言同时也是「开关关闭时不出现测试账号」的反面证据：
+ * 关闭时整组跳过，而不是断言它不存在——那种「不存在」的断言在本地永远绿，
+ * 什么也证明不了。真正钉住开关的断言是源码结构约束（见 `tests/mockUsers.test.mjs`）。
+ */
+test("游客打开受保护页面：登录界面提供测试账号名单（仅 Mock 环境）", { skip: SKIP_SESSION }, async () => {
+  const { status, html } = await get("/settings");
+
+  assert.equal(status, 200);
+  assert.ok(html.includes(LOGIN_GATE_TEXT), "未登录应停在统一登录引导");
+  assert.ok(html.includes("老板A（占位）"), "缺少测试账号名单");
+  assert.ok(html.includes("u-1001"), "名单应显示 userId，便于与 Seed 对照");
+  assert.ok(html.includes("小满（占位）"), "缺少「需要先提交入驻申请」的候选账号");
 });
 
 test("游客打开 /join 命中统一登录引导（不是 404，也不是占位内容）", { skip: SKIP }, async () => {
@@ -525,11 +576,12 @@ test("游客可以打开 /rank：拿到完整榜单，但没有「我的排名�
   assert.equal(html.includes(TABBAR_TEXT), false, "/rank 不该显示底部 TabBar");
 
   // 榜单金额是完整两位小数，没有 k / w 缩写。
-  // ⚠️ 这一条必须**排除 script 标签**再判断：Turbopack 的分块文件名是内容哈希，
-  // 形如 `/_next/static/chunks/05w-twpn2bx9w.js`，天然会命中 `\d+w\b`。
-  // 早先直接扫整页 HTML，是因为当时的哈希恰好没有撞上——那属于运气，不是保证：
-  // 换一次构建产物就会红，而且红得跟金额毫无关系。
-  const visible = stripScripts(html);
+  // ⚠️ 这一条必须**排除构建产物标签**再判断：Turbopack 的分块文件名是内容哈希，
+  // 形如 `/_next/static/chunks/05w-twpn2bx9w.js`（命中 `\d+w\b`）与
+  // `/_next/static/chunks/3k-j_e9-s-66i.css`（命中 `\d+k\b`），分别住在
+  // `<script>` 与 `<link>` 里。早先直接扫整页 HTML 没红，是因为当时的哈希恰好
+  // 没有撞上——那属于运气，不是保证：换一次构建产物就会红，而且红得跟金额毫无关系。
+  const visible = stripBuildArtifacts(html);
   assert.ok(/¥\d+\.\d{2}/.test(visible), "榜单金额应保留两位小数");
   assert.equal(/\d+k\b|\d+w\b/.test(visible), false, "榜单金额不该使用 k / w 缩写");
 });
@@ -776,12 +828,13 @@ test("排行榜接口不接受客户端提交的名次或金额", { skip: SKIP }
   assert.ok(data.items.every((item) => item.effectiveSpendAmount < 99999999));
 });
 
-test("游客可以打开 /agreements：四类内容齐全，正文不是条款占位", { skip: SKIP }, async () => {
+test("游客可以打开 /agreements：五类内容齐全，正文不是条款占位", { skip: SKIP }, async () => {
   const { status, html } = await get("/agreements");
 
   assert.equal(status, 200, "/agreements 不该 404");
   assert.equal(html.includes(LOGIN_GATE_TEXT), false, "/agreements 不该要求登录");
-  for (const label of ["用户协议", "陪玩协议", "平台协议", "版本介绍"]) {
+  // P8E-1 起页签是五类（新增「隐私协议」，插在用户协议之后）
+  for (const label of ["用户协议", "隐私协议", "陪玩协议", "平台协议", "版本介绍"]) {
     assert.ok(html.includes(label), `缺少页签「${label}」`);
   }
   // 示例性质与占位主体必须在页面上明确写出
@@ -797,10 +850,20 @@ test("协议接口游客可访问，且不返回 enabled 与历史版本", { ski
   assert.equal(response.status, 200);
 
   const { data } = await response.json();
-  assert.equal(data.tabs.length, 4);
+  // 五类页签：顺序即页签顺序，隐私协议插在用户协议之后
+  assert.equal(data.tabs.length, 5);
+  assert.deepEqual(
+    data.tabs.map((tab) => tab.type),
+    ["user", "privacy", "companion", "platform", "version"],
+    "页签类型或顺序变了——AGREEMENT_TYPES 是页签顺序的唯一来源",
+  );
   for (const tab of data.tabs) {
     assert.ok(tab.agreement, `${tab.type} 应当有内容`);
     assert.equal("enabled" in tab.agreement, false);
+    // 公开 DTO 不带后台字段：正文可被后台编辑之后，这一条**一个字都不许放宽**
+    for (const internal of ["enabled", "removedAt", "createdAt"]) {
+      assert.equal(internal in tab.agreement, false, `公开协议 DTO 里出现了 ${internal}`);
+    }
   }
 
   // 较早版本与被停用的版本都不出现
@@ -1323,3 +1386,110 @@ test("P7B 在调试参数下也不 500：空名单是空态，不是错误", { s
   assert.ok(html.includes("当前可接单"), "空态不该把筛选栏一起隐藏");
 });
 
+
+// ————————————————— P1-5：打手排行榜（三张榜） —————————————————
+
+test("P1-5 打手榜接口游客可访问，三张榜都返回，且条目只有六项", { skip: SKIP }, async () => {
+  for (const board of ["dispatch", "completion", "income"]) {
+    const response = await fetch(new URL(`/api/rankings/companions?board=${board}`, BASE));
+    assert.equal(response.status, 200, `${board} 榜是公开数据，不该 401`);
+
+    const { data } = await response.json();
+    assert.equal(data.board, board);
+    assert.equal(typeof data.boardLabel, "string");
+    assert.equal(typeof data.metricName, "string");
+    // 打分榜**没有**「我的排名」：接口不读会话，因此连这个字段都不存在
+    assert.equal("me" in data, false);
+    assert.equal("viewerLoggedIn" in data, false);
+
+    for (const item of data.items) {
+      assert.deepEqual(Object.keys(item).sort(), [
+        "avatarUrl",
+        "companionId",
+        "metricLabel",
+        "metricValue",
+        "nickname",
+        "rank",
+      ]);
+      assert.equal(Number.isInteger(item.metricValue), true);
+      assert.ok(item.rank >= 1);
+    }
+
+    // 名次是竞赛排名：同值并列，因此**不要求** rank === index+1
+    for (let index = 1; index < data.items.length; index += 1) {
+      assert.ok(
+        data.items[index - 1].metricValue >= data.items[index].metricValue,
+        `${board} 榜的指标必须降序`,
+      );
+    }
+
+    const serialized = JSON.stringify(data);
+    for (const forbidden of [
+      "userId",
+      "realName",
+      "phone",
+      "wechat",
+      "companionRate",
+      "RateBp",
+      "intro",
+      "applicationId",
+      "removedAt",
+      "banReason",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `${board} 榜响应不该出现 ${forbidden}`);
+    }
+  }
+});
+
+test("P1-5 打手榜：非法 board / period 回 400，不传则用默认值", { skip: SKIP }, async () => {
+  const bare = await fetch(new URL("/api/rankings/companions", BASE));
+  assert.equal(bare.status, 200);
+  assert.equal((await bare.json()).data.board, "dispatch", "不传 board 应当落到默认的接单榜");
+
+  const badBoard = await fetch(new URL("/api/rankings/companions?board=revenue", BASE));
+  assert.equal(badBoard.status, 400);
+  assert.equal((await badBoard.json()).error.code, "BAD_REQUEST");
+
+  const badPeriod = await fetch(new URL("/api/rankings/companions?period=lastWeek", BASE));
+  assert.equal(badPeriod.status, 400);
+});
+
+test("P1-5 打手榜：客户端传指标或名次都不影响结果（服务端重算）", { skip: SKIP }, async () => {
+  const response = await fetch(
+    new URL("/api/rankings/companions?metricValue=999999&rank=1&nickname=hack", BASE),
+  );
+  assert.equal(response.status, 200);
+
+  const { data } = await response.json();
+  for (const item of data.items) {
+    assert.ok(item.metricValue < 999999, "指标必须由服务端按事件 / 订单 / 收益重算");
+    assert.equal(item.nickname.includes("hack"), false);
+  }
+});
+
+test("P1-5 两页都在：打手榜自带标题与切换条，消费榜不受影响", { skip: SKIP }, async () => {
+  const companion = await get("/rank/companions");
+  assert.equal(companion.status, 200, "/rank/companions 不该 404");
+  assert.equal(companion.html.includes(LOGIN_GATE_TEXT), false, "打手榜不该要求登录");
+  assert.ok(companion.html.includes("打手排行榜"));
+  assert.ok(companion.html.includes("接单榜"));
+  // 两页之间互相跳得过去
+  assert.ok(companion.html.includes("/rank"), "缺少回消费榜的切换条");
+
+  const consumption = await get("/rank");
+  assert.equal(consumption.status, 200, "消费榜必须保持原样可访问");
+  assert.ok(consumption.html.includes("消费排行榜"));
+  assert.ok(consumption.html.includes("/rank/companions"), "消费榜顶部应有去打手榜的切换条");
+});
+
+test("P1-5 打手榜空态：?mockEmpty=companionRankings 只清打手榜，不动消费榜", { skip: SKIP_SESSION }, async () => {
+  const empty = await get("/rank/companions?mockEmpty=companionRankings&mockDelay=0", SESSION);
+  assert.equal(empty.status, 200, "空榜不该 500");
+  assert.equal(empty.html.includes("__next_error__"), false);
+  assert.ok(empty.html.includes("暂无"), "缺少空态文案");
+
+  // 反向：打手榜的空榜键不该把消费榜也清空
+  const consumption = await get("/rank?mockEmpty=companionRankings&mockDelay=0", SESSION);
+  assert.equal(consumption.status, 200);
+  assert.equal(consumption.html.includes("本周暂无有效消费"), false, "两个空榜键必须互不影响");
+});

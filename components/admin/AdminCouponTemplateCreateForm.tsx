@@ -1,0 +1,27 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import AdminCouponTemplateForm from "@/components/admin/AdminCouponTemplateForm";
+
+/**
+ * 新建优惠券模板的客户端包装。
+ *
+ * 存在的理由只有一条：新建成功后要**跳到这张新券的详情页**。
+ * 跳转是客户端行为（`router.push`），而表单本身是纯「填表 → 提交 → 把结果交给父组件」，
+ * 两种职责分开之后，编辑页可以复用同一个表单而不必关心自己是新建还是编辑。
+ *
+ * ⚠️ 跳转用的是**服务端返回的 `couponId`**，不是「列表里最后一条」之类的前端猜测：
+ * 幂等键重放时服务端会把第一次建出来的 id 返回回来，因此重复提交不会跳到别处去。
+ */
+export default function AdminCouponTemplateCreateForm() {
+  const router = useRouter();
+
+  return (
+    <AdminCouponTemplateForm
+      record={null}
+      onSaved={(result) => {
+        router.push(`/admin/coupons/${result.couponId}`);
+      }}
+    />
+  );
+}

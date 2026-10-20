@@ -1,0 +1,188 @@
+import { createHash } from "node:crypto";
+
+/**
+ * 公网登录失败限流（应用层，PROD-6 D5）。
+ *
+ * ## 限的是什么
+ *
+ * 只统计**失败**的登录尝试（401）。成功登录不占额度；密码正确但账号被停用
+ * （403）也不计为暴力破解——对方已经证明持有密码，继续锁 IP 只会伤到本人。
+ *
+ * | 维度 | 窗口 | 上限 |
+ * |---|---|---|
+ * | 同一身份（登录名哈希） | 15 分钟 | 5 次失败 |
+ * | 同一 IP | 15 分钟 | 20 次失败 |
+ *
+ * 身份键用 SHA-256(登录名) 而不是明文：限流表是进程内存，但日志、堆转储、
+ * 未来的调试输出都可能把它带出去，登录名没有理由以明文停留。
+ *
+ * ## 为什么成功只清身份、不清 IP
+ *
+ * 若成功登录把 IP 计数清零，攻击者只要控制任意一个有效账号，就能在每次
+ * 猜口令前先成功登录一次，把 IP 额度永久重置。因此成功只清该登录名的计数，
+ * IP 计数按窗口自然过期。
+ *
+ * ## 单实例限制
+ *
+ * 计数在进程内存。当前 Staging 是单进程（`127.0.0.1:3000`），够用；一旦
+ * 多实例部署，同一 IP 的失败会被分散到不同进程，20 次上限就不再准确。
+ * 多实例前必须换成共享存储（Redis / PostgreSQL），这一条写入交付文档的已知限制。
+ *
+ * ## Nginx 是第一道
+ *
+ * HTTPS 配置对登录 API 有独立的 `limit_req`（10r/m，burst 5），先把请求速率
+ * 压下来；本模块负责「猜错多少次」——两者互补，不能互相替代。
+ */
+
+export const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+export const LOGIN_IDENTITY_MAX_FAILURES = 5;
+export const LOGIN_IP_MAX_FAILURES = 20;
+
+export type LoginRateLimitScope = "staff" | "admin";
+export type LoginRateLimitDimension = "identity" | "ip";
+
+export type LoginRateLimitDecision = {
+  allowed: boolean;
+  /** 最早可重试的秒数；未限流时为 0。 */
+  retryAfterSeconds: number;
+  /** 被哪个维度拦住；未限流时为 null。 */
+  limitedBy: LoginRateLimitDimension | null;
+};
+
+type Bucket = {
+  failures: number;
+  resetAt: number;
+};
+
+const buckets = new Map<string, Bucket>();
+
+/**
+ * 限流表上限，防止攻击者用海量不同 IP / 登录名把进程内存撑爆。
+ * 超出时按插入顺序淘汰最旧的桶；IP 维度因此变成近似值，
+ * 但 Nginx 的 `limit_req` 仍是硬上限。50k × 约 100 字节 ≈ 5MB。
+ */
+const MAX_BUCKETS = 50_000;
+
+function normalizeUsername(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function hashIdentity(scope: LoginRateLimitScope, username: string): string {
+  return createHash("sha256")
+    .update(`${scope}\u0000${normalizeUsername(username)}`)
+    .digest("hex");
+}
+
+function identityKey(scope: LoginRateLimitScope, username: string): string {
+  return `${scope}:identity:${hashIdentity(scope, username)}`;
+}
+
+function ipKey(scope: LoginRateLimitScope, ip: string): string {
+  // IP 由 Nginx 的 X-Forwarded-For 解析而来，长度有限；直接当键便于运维排查。
+  return `${scope}:ip:${ip}`;
+}
+
+function sweep(now: number): void {
+  for (const [key, bucket] of buckets) {
+    if (bucket.resetAt <= now) buckets.delete(key);
+  }
+}
+
+function current(bucket: Bucket | undefined, now: number): Bucket | undefined {
+  if (!bucket) return undefined;
+  return bucket.resetAt > now ? bucket : undefined;
+}
+
+function decisionFor(
+  identity: Bucket | undefined,
+  identityLimit: number,
+  ip: Bucket | undefined,
+  ipLimit: number,
+  now: number,
+): LoginRateLimitDecision {
+  const limitedBy: LoginRateLimitDimension[] = [];
+  let retryAt = 0;
+
+  if (identity && identity.failures >= identityLimit) {
+    limitedBy.push("identity");
+    retryAt = Math.max(retryAt, identity.resetAt);
+  }
+  if (ip && ip.failures >= ipLimit) {
+    limitedBy.push("ip");
+    retryAt = Math.max(retryAt, ip.resetAt);
+  }
+
+  if (limitedBy.length === 0) {
+    return { allowed: true, retryAfterSeconds: 0, limitedBy: null };
+  }
+
+  return {
+    allowed: false,
+    retryAfterSeconds: Math.max(1, Math.ceil((retryAt - now) / 1000)),
+    // IP 维度更严重，优先报告；两个都超时文案一致，仅用于测试与诊断。
+    limitedBy: limitedBy.includes("ip") ? "ip" : "identity",
+  };
+}
+
+/**
+ * 是否允许这次登录尝试。只读，不增加计数。
+ *
+ * 应在读取请求体之后、校验密码之前调用：登录名来自请求体，没有登录名就
+ * 无法判断身份维度。
+ */
+export function checkLoginRateLimit(
+  scope: LoginRateLimitScope,
+  ip: string,
+  username: string,
+  now: number = Date.now(),
+): LoginRateLimitDecision {
+  sweep(now);
+  return decisionFor(
+    current(buckets.get(identityKey(scope, username)), now),
+    LOGIN_IDENTITY_MAX_FAILURES,
+    current(buckets.get(ipKey(scope, ip)), now),
+    LOGIN_IP_MAX_FAILURES,
+    now,
+  );
+}
+
+/** 记录一次失败（401）。 */
+export function noteLoginFailure(
+  scope: LoginRateLimitScope,
+  ip: string,
+  username: string,
+  now: number = Date.now(),
+): void {
+  sweep(now);
+  bump(identityKey(scope, username), now);
+  bump(ipKey(scope, ip), now);
+}
+
+function bump(key: string, now: number): void {
+  const existing = current(buckets.get(key), now);
+  if (existing) {
+    existing.failures += 1;
+    return;
+  }
+
+  while (buckets.size >= MAX_BUCKETS) {
+    const oldest = buckets.keys().next().value;
+    if (oldest === undefined) break;
+    buckets.delete(oldest);
+  }
+
+  buckets.set(key, { failures: 1, resetAt: now + LOGIN_RATE_LIMIT_WINDOW_MS });
+}
+
+/** 登录成功后清掉该身份维度的失败计数；IP 维度按设计保留到窗口结束。 */
+export function clearLoginIdentityFailures(
+  scope: LoginRateLimitScope,
+  username: string,
+): void {
+  buckets.delete(identityKey(scope, username));
+}
+
+/** 仅测试使用：清空内存计数，避免用例之间互相影响。 */
+export function resetLoginRateLimitStore(): void {
+  buckets.clear();
+}

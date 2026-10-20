@@ -17,9 +17,13 @@ export function ok<T>(data: T): Response {
 
 /** 失败响应：`{ error: { code, message } }`，状态码取 ApiError 自带的。 */
 export function fail(error: ApiError): Response {
+  const headers = new Headers();
+  if (error.retryAfterSeconds && error.retryAfterSeconds > 0) {
+    headers.set("retry-after", String(Math.ceil(error.retryAfterSeconds)));
+  }
   return Response.json(
     { error: { code: error.code, message: error.message } },
-    { status: error.status > 0 ? error.status : 500 },
+    { status: error.status > 0 ? error.status : 500, headers },
   );
 }
 

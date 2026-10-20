@@ -63,8 +63,13 @@ const SURFACE = "server";
 const ORDER_FOR_COMPLAINT = "ord-seed-1001-02";
 /** 归属 u-1001、**有**沟通记录的订单（会话入口必须能通向这条投诉的订单）。 */
 const ORDER_WITH_CONVERSATION = "ord-seed-1001-04";
-/** 归属 u-1001、状态可退、且**没有**预置退款记录的订单。 */
-const ORDER_FOR_REFUND = "ord-seed-1001-11";
+/**
+ * 归属 u-1001、**走申请路径**可退（护航中 / 已完成）、且没有预置退款记录的订单。
+ *
+ * ⚠️ P0-12 起已付款 / 已接单不能申请退款（那两档走免审批直接全额退款），
+ * 因此这里必须是一张**已开始服务**的单，否则「用户提交退款」这一步根本走不通。
+ */
+const ORDER_FOR_REFUND = "ord-seed-1001-10";
 
 function key() {
   return crypto.randomUUID();

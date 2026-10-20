@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import StaffComplaintConsole from "@/components/staff/StaffComplaintConsole";
+import StaffReleaseHistory from "@/components/staff/StaffReleaseHistory";
 import { formatAuditActorLabel } from "@/lib/constants/adminAudit";
 import { COMPLAINT_STATUS_CLASS } from "@/lib/constants/complaints";
 import { EVIDENCE_KIND_LABELS } from "@/lib/constants/evidence";
@@ -68,6 +69,15 @@ export default async function StaffComplaintDetailPage({
       <UserSection complaint={complaint} />
       <ContentSection complaint={complaint} />
       <OrderSection complaint={complaint} />
+      {/* 履约退出历史紧跟在「关联订单」下面：它描述的正是这一单的履约经过
+          （打手接单后又退出），离开订单上下文单独看没有意义。
+
+          ⚠️ `orderSummary` 可能是 `null`（未关联订单，或订单查不到）——那时连订单号都没有，
+          退出历史自然也读不出来，因此**整段不渲染**，也绝不让这一页因此报错。
+          空数组的情形由 `StaffReleaseHistory` 自己处理（返回 null，不留占位）。 */}
+      {complaint.orderSummary ? (
+        <StaffReleaseHistory entries={complaint.orderSummary.releaseHistory} />
+      ) : null}
       <HandlingSection complaint={complaint} />
       <TimelineSection complaint={complaint} />
 
@@ -232,7 +242,8 @@ function OrderSection({ complaint }: { complaint: StaffComplaintDetail }) {
         </div>
         <Row label="订单号" value={order.orderNo} mono />
         <Row label="商品" value={order.productTitle} />
-        <Row label="实付金额" value={`¥${formatYuan(order.totalAmount)}`} />
+        {/* 「实付金额」读实付（P1-4）：`totalAmount` 是**优惠前**应付总额 */}
+        <Row label="实付金额" value={`¥${formatYuan(order.actualPaidAmount)}`} />
       </div>
 
       <div className="mt-2 flex flex-wrap gap-3 text-[13px]">

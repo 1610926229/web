@@ -9,6 +9,7 @@ import AdminStatusBadge, {
   REFUND_STATUS_TONE,
 } from "@/components/admin/AdminStatusBadge";
 import StaffRefundConsole from "@/components/staff/StaffRefundConsole";
+import StaffReleaseHistory from "@/components/staff/StaffReleaseHistory";
 import { formatAuditActorLabel } from "@/lib/constants/adminAudit";
 import { EVIDENCE_KIND_LABELS } from "@/lib/constants/evidence";
 import { STAFF_REFUNDS_PAGE_TITLE } from "@/lib/constants/staff";
@@ -61,6 +62,11 @@ export default async function StaffRefundDetailPage({
       </div>
 
       <SummarySection refund={refund} />
+      {/* 履约退出历史紧跟在「退款申请」下面（那一块里就是订单号、商品与订单状态）。
+          退款理由常常就是「接单的打手走了」——原打手、退出方式与退出时间
+          是客服判断这一笔该不该退时要先看的上下文，因此放在订单信息旁边而不是页尾。
+          没有退出记录时整段不渲染（组件自己返回 null），本页其余部分不受影响。 */}
+      <StaffReleaseHistory entries={refund.releaseHistory} />
       <AmountSection refund={refund} />
       <UserSection refund={refund} />
       <ContentSection refund={refund} />
@@ -129,18 +135,32 @@ function SummarySection({ refund }: { refund: StaffRefundDetail }) {
 /**
  * 退款金额。**只读**。
  *
- * 本阶段退款一律整单退款，因此 `amount`（申请退多少）与 `orderTotalAmount`
- * （这一单原价多少）在构造上相等。两个都写出来，是让读者确认它们本来就是一回事。
+ * ⚠️ **P0-13 起退款可以是部分的**，「申请金额」与「实际退款金额」因此不再必然相等，
+ * 两块都必须写出来：只给申请金额，客服会照着它回答用户「退了多少」；
+ * 只给实退金额，又答不出用户问的「我申请的是多少、为什么只退了这些」。
+ *
+ * ⚠️ **只给金额，不给责任归属与平台承担额**（产品裁定 D13）：公司内部怎么分摊
+ * 与用户无关，客服也不需要它来履职——那是管理端的决策记录。
  */
 function AmountSection({ refund }: { refund: StaffRefundDetail }) {
   return (
     <Section title="退款金额">
       <div className="flex items-baseline justify-between">
-        <span className="text-[13px] text-ink-3">整单退款金额</span>
+        <span className="text-[13px] text-ink-3">申请金额（申请时的订单实付快照）</span>
         <span className="text-[20px] font-semibold tabular-nums text-ink">
           ¥{formatYuan(refund.amount)}
         </span>
       </div>
+
+      {refund.decidedAmount === null ? null : (
+        <div className="mt-4 flex items-baseline justify-between border-t border-admin-line pt-3">
+          <span className="text-[13px] text-ink-3">实际退款金额</span>
+          <span className="text-[20px] font-semibold tabular-nums text-ink">
+            ¥{formatYuan(refund.decidedAmount)}
+          </span>
+        </div>
+      )}
+
       <div className="mt-2 flex items-baseline justify-between">
         <span className="text-[13px] text-ink-3">原订单实付金额</span>
         <span className="text-[13px] tabular-nums text-ink-2">

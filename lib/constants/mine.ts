@@ -43,14 +43,40 @@ export const MINE_PRIMARY_ENTRIES: readonly MineEntry[] = [
  */
 export const EXTERNAL_LINK_NOT_CONFIGURED_MESSAGE = "链接暂未配置";
 
-/** 小宫格入口：顺序与原型一致（4 / 4 / 3）。 */
+/** 小宫格入口：顺序与原型一致（4 / 4 / 3），末尾另有 P0-4 新增的打手工作台。 */
 export const MINE_GRID_ENTRIES: readonly MineEntry[] = [
   { id: "rank", label: "消费排行榜", kind: "link", href: "/rank", notice: "", icon: "rank", tile: "" },
+  /*
+   * 打手排行榜（P1-5）。
+   *
+   * ⚠️ 与「打手工作台」一样，这一条**不在原型里**（原型抓的是一个普通用户账号的宫格）。
+   * 加它的理由：三张打手榜（接单 / 完成 / 收入）是本轮新增的**公开内容**，
+   * 而它们与消费榜**是两个独立业务维度**（产品裁定 §10），因此在「我的」页占一格，
+   * 而不是塞进消费榜那一页里去。
+   *
+   * ⚠️ 它与「消费排行榜」是**两个入口、两个地址**：点进去之后再想换榜，
+   * 由页面顶部的 `RankBoardSwitch` 负责。入口分开放，是为了让「排行榜」这四个字
+   * 在宫格里不至于被读成同一个东西。
+   */
+  { id: "companion-rank", label: "打手排行榜", kind: "link", href: "/rank/companions", notice: "", icon: "rank", tile: "" },
   { id: "coupon", label: "我的优惠券", kind: "link", href: "/coupons", notice: "", icon: "coupon", tile: "" },
   { id: "review", label: "我的评价", kind: "link", href: "/reviews", notice: "", icon: "review", tile: "" },
   { id: "agreement", label: "相关协议", kind: "link", href: "/agreements", notice: "", icon: "agreement", tile: "" },
   // 陪玩列表的正式路由是**复数** /companions（不是单数 /companion）
   { id: "companion", label: "寻找陪玩", kind: "link", href: "/companions", notice: "", icon: "companion", tile: "" },
+  /*
+   * 打手工作台（P0-4）。
+   *
+   * ⚠️ 这一条**不在原型里**（原型抓的是一个普通用户账号，宫格是 4 / 4 / 3）。
+   * 加它的理由是：打手没有第二个账号，工作台也就没有第二个入口——不加这一条，
+   * 一位已是打手的用户在自己的小程序里根本走不到 `/companion`。
+   *
+   * ⚠️ 只有**一条链接**：不带任何参数、不判断身份、不加登录入口。不是打手的人点进去
+   * 会看到「你还不是护航」的提示页（见 `app/companion/(console)/layout.tsx`），
+   * 那是**有意为之**——「成为护航」与「工作台」是同一个身份的两端，
+   * 把入口藏起来只会让申请过的人找不到自己通过没有。
+   */
+  { id: "companion-console", label: "打手工作台", kind: "link", href: "/companion", notice: "", icon: "console", tile: "" },
   { id: "tips", label: "鸡腿记录", kind: "link", href: "/tips", notice: "", icon: "tips", tile: "" },
   { id: "suggestion", label: "功能建议", kind: "link", href: "/suggestions", notice: "", icon: "suggestion", tile: "" },
   { id: "activity", label: "福利活动", kind: "link", href: "/activities", notice: "", icon: "gift", tile: "" },

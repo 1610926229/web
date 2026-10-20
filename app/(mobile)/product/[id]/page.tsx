@@ -3,6 +3,9 @@ import NavBar from "@/components/common/NavBar";
 import ComplianceNotice from "@/components/product/ComplianceNotice";
 import ProductMainImage from "@/components/product/ProductMainImage";
 import ProductPurchasePanel from "@/components/product/ProductPurchasePanel";
+import ProductReviews from "@/components/product/ProductReviews";
+import { isPublicPreviewRequest } from "@/lib/auth/publicPreviewRequest";
+import { isRealAuthEnabled } from "@/lib/auth/realSession";
 import { getSessionUser } from "@/lib/auth/session";
 import { isMockAuthEnabled } from "@/lib/config/env";
 import { getProductDetail } from "@/lib/services/catalog";
@@ -28,6 +31,7 @@ export default async function ProductDetailPage({
   const { id } = await params;
   // 查询参数原样交给 service（Mock 调试参数由此生效），页面不判断开关
   const query = toSearchParams(await searchParams);
+  const publicPreview = await isPublicPreviewRequest();
 
   const [product, user] = await Promise.all([
     getProductDetail(id, query, "server"),
@@ -54,8 +58,12 @@ export default async function ProductDetailPage({
           product={product}
           loggedIn={user !== null}
           initialFavorited={favorited}
-          mockAuthEnabled={isMockAuthEnabled()}
+          mockAuthEnabled={isMockAuthEnabled() && !publicPreview}
+          realAuthEnabled={isRealAuthEnabled() && !publicPreview}
+          publicPreview={publicPreview}
         />
+        {/* 公开评分聚合由服务层贴在 `ProductDetailView.reviews` 上，页面只负责渲染 */}
+        <ProductReviews reviews={product.reviews} />
       </div>
     </>
   );

@@ -11,9 +11,9 @@ import type { AgreementType, AgreementsDto } from "@/lib/types/agreement";
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
- * 协议与版本介绍（四类内容用页签切换）。
+ * 协议与版本介绍（五类内容用页签切换）。
  *
- * 四类内容**一次全部取回**，页签切换纯客户端完成：协议正文是少量文本，
+ * 五类内容**一次全部取回**，页签切换纯客户端完成：协议正文是少量文本，
  * 每切一次就发一次请求既没有必要，也会让「切页签」变成一个可能失败的异步动作。
  *
  * 正文渲染方式：`sections` → 小标题 + 若干段落。**没有**富文本编辑器、没有
@@ -26,7 +26,7 @@ import { formatDateTime } from "@/lib/utils/format";
  * 普通用户只能查看。
  */
 export default function AgreementTabs({ dto }: { dto: AgreementsDto }) {
-  // 默认停在第一个**有内容**的类型：四类都缺时退回第一类，由内容区说明未配置
+  // 默认停在第一个**有内容**的类型：五类都缺时退回第一类，由内容区说明未配置
   const firstAvailable = dto.tabs.find((tab) => tab.agreement)?.type ?? dto.tabs[0]?.type ?? "user";
   const [active, setActive] = useState<AgreementType>(firstAvailable);
   const panelId = useId();
@@ -36,7 +36,8 @@ export default function AgreementTabs({ dto }: { dto: AgreementsDto }) {
   return (
     <div className="flex flex-1 flex-col bg-surface">
       <div className="shrink-0 border-b border-line px-3 py-2">
-        <div className="flex gap-1.5 overflow-x-auto" role="tablist" aria-label="协议类型">
+        {/* 五个页签在 390px 视口内放得下（px-2 + flex-wrap），更窄的屏幕换行而不是横向裁切 */}
+        <div className="flex flex-wrap gap-1" role="tablist" aria-label="协议类型">
           {dto.tabs.map((tab) => {
             const selected = tab.type === active;
             return (
@@ -48,7 +49,7 @@ export default function AgreementTabs({ dto }: { dto: AgreementsDto }) {
                 aria-selected={selected}
                 aria-controls={`${panelId}-panel`}
                 onClick={() => setActive(tab.type)}
-                className={`shrink-0 rounded-full px-3 py-1 text-[12px] leading-5 ${
+                className={`shrink-0 rounded-full px-2 py-1 text-[12px] leading-5 ${
                   selected ? "seg-tab-active font-medium" : "bg-page text-ink-2"
                 }`}
               >
@@ -65,7 +66,7 @@ export default function AgreementTabs({ dto }: { dto: AgreementsDto }) {
         aria-labelledby={`${panelId}-tab-${active}`}
         className="flex flex-1 flex-col px-4 py-4"
       >
-        {/* 内容性质说明：示例文案，不是正式生效的法律协议。这句话在四类内容上都出现 */}
+        {/* 内容性质说明：示例文案，不是正式生效的法律协议。这句话在五类内容上都出现 */}
         <p className="rounded-[10px] bg-page px-3 py-2 text-[12px] leading-5 text-ink-3">
           {dto.notice}
         </p>

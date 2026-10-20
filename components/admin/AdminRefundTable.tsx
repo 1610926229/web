@@ -16,6 +16,7 @@ import {
   ADMIN_REFUND_STATUS_FILTER_LABELS,
   type AdminRefundStatusFilter,
 } from "@/lib/constants/adminRefunds";
+import { OPEN_REFUND_STATUSES } from "@/lib/constants/refunds";
 import { fetchAdminRefunds } from "@/lib/services/adminHttp";
 import type { AdminRefundListData } from "@/lib/types/refund";
 import { formatDateTime, formatYuan } from "@/lib/utils/format";
@@ -235,7 +236,15 @@ export default function AdminRefundTable({
                     </td>
                     <td className="px-4 py-3 text-ink-2">{item.productTitle}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-ink">
-                      ¥{formatYuan(item.amount)}
+                      {/* 第一行是**申请金额**（申请时的实付快照），第二行才是**实退金额**。
+                          P0-13 起两者在部分退款下不相等，只给前者会把一笔退了一半的申请
+                          显示成它实际不是的样子（下方 `ADMIN_REFUND_LIST_FIELDS_NOTE` 说明了口径） */}
+                      <span className="block tabular-nums">¥{formatYuan(item.amount)}</span>
+                      {item.decidedAmount === null ? null : (
+                        <span className="block text-[12px] text-ink-3">
+                          实退 ¥{formatYuan(item.decidedAmount)}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <AdminStatusBadge
@@ -257,9 +266,10 @@ export default function AdminRefundTable({
                         href={`/admin/refunds/${item.id}`}
                         className="text-[13px] text-admin-accent underline-offset-2 hover:underline"
                       >
-                        {item.status === "pending" || item.status === "reviewing"
-                          ? "去审核"
-                          : "查看详情"}
+                        {/* ⚠️ 判据取自 `OPEN_REFUND_STATUSES`，不在这里再写一遍
+                            「pending || reviewing」：这行决定操作员要不要点进去，
+                            与待办卡 / `?status=open` 必须是同一组状态。 */}
+                        {OPEN_REFUND_STATUSES.includes(item.status) ? "去审核" : "查看详情"}
                       </Link>
                     </td>
                   </tr>

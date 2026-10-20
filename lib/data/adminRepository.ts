@@ -1,5 +1,7 @@
 import type { AdminAccount } from "@/lib/types/admin";
 import { mockAdminRepository } from "./mockAdminRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgAdminRepository } from "./pg/adminRepository";
 
 /**
  * 管理端账号的可替换仓储。
@@ -28,6 +30,16 @@ export type AdminRepository = {
   markLoggedIn(id: string, at: string): Promise<AdminAccount | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const adminRepositoryBacking: RepositoryBacking<AdminRepository> = {
+  name: "admin",
+  mock: mockAdminRepository,
+  pg: pgAdminRepository,
+};
+
 export function getAdminRepository(): AdminRepository {
-  return mockAdminRepository;
+  return pickRepository(adminRepositoryBacking);
 }

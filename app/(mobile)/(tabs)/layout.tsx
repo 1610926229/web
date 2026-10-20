@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import TabBar from "@/components/common/TabBar";
+import { isPublicPreviewRequest } from "@/lib/auth/publicPreviewRequest";
 
 /**
  * 一级 Tab 页面共用布局。
@@ -17,11 +18,13 @@ import TabBar from "@/components/common/TabBar";
  *
  * 需要隐藏底部导航的页面（如商品详情）不放在本路由组内。
  */
-export default function TabsLayout({ children }: { children: ReactNode }) {
+export default async function TabsLayout({ children }: { children: ReactNode }) {
+  const publicPreview = await isPublicPreviewRequest();
+
   return (
     <>
       <main className="flex flex-1 flex-col overflow-x-clip bg-page">{children}</main>
-      <TabBar />
+      <TabBar publicPreview={publicPreview} />
     </>
   );
 }

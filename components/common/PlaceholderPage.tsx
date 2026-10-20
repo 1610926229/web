@@ -1,5 +1,9 @@
 import EmptyState from "./EmptyState";
 import NavBar from "./NavBar";
+import {
+  PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION,
+  PUBLIC_PREVIEW_UNAVAILABLE_REASON,
+} from "@/lib/config/publicPreview";
 import { PLATFORM_NAME, PLACEHOLDER_NOTICE } from "@/lib/constants/site";
 
 /**
@@ -15,19 +19,29 @@ import { PLATFORM_NAME, PLACEHOLDER_NOTICE } from "@/lib/constants/site";
 export default function PlaceholderPage({
   title,
   description,
+  reason,
   showNav = true,
 }: {
   title: string;
   description?: string;
+  /** 为 `public-preview` 时说明「需登录」，而不是误导性的「页面待实现」。 */
+  reason?: string;
   showNav?: boolean;
 }) {
+  const unavailable = reason === PUBLIC_PREVIEW_UNAVAILABLE_REASON;
+
   return (
     <>
       {showNav ? <NavBar title={title} showBack /> : null}
       <div className="flex flex-1 items-center justify-center px-4 py-16">
         <EmptyState
-          title={`${title} · 页面待实现`}
-          description={description ?? `${PLACEHOLDER_NOTICE}。该页面尚未开发，当前由 ${PLATFORM_NAME} 统一占位页承接。`}
+          title={unavailable ? `${title} · 暂不可用` : `${title} · 页面待实现`}
+          description={
+            description ??
+            (unavailable
+              ? PUBLIC_PREVIEW_UNAVAILABLE_DESCRIPTION
+              : `${PLACEHOLDER_NOTICE}。该页面尚未开发，当前由 ${PLATFORM_NAME} 统一占位页承接。`)
+          }
         />
       </div>
     </>

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
+// 本文件带 HTTP 用例：开跑前把**服务端**存储丢回预置，保证「从刚重启的服务出发」。理由见 tests/httpReset.mjs
+import { resetServerStores } from "./httpReset.mjs";
 import { fileURLToPath } from "node:url";
 import { findAppFile } from "./app-path.mjs";
 import {
@@ -15,6 +17,10 @@ import {
   canEnterAdminConsole,
   countCompanionStates,
 } from "../lib/constants/admin.ts";
+import {
+  MOCK_ADMIN_SESSION_COOKIE,
+  MOCK_USER_SESSION_COOKIE,
+} from "../lib/auth/cookieNames.ts";
 import { getAdminRepository } from "../lib/data/adminRepository.ts";
 import { getCompanionApplicationRepository } from "../lib/data/companionApplicationRepository.ts";
 import { resetMockStore } from "../lib/data/mockStore.ts";
@@ -50,6 +56,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ADMIN_API_DIR = path.join(ROOT, "app", "api", "admin");
 
 const BASE = process.env.APP_BASE_URL;
+
+// ⚠️ 必须在**发起任何请求之前**执行——这一行加上 --test-concurrency=1，才是「本文件的断言读到的是预置状态」的保证。
+await resetServerStores();
 const SKIP_HTTP = BASE ? false : "未设置 APP_BASE_URL（例如 http://localhost:3105），跳过管理端 HTTP 用例";
 
 /** 去掉注释后再做「源码里不该出现某标识」的断言：文档注释里说明「本页没有 X」不算出现 X。 */
@@ -186,8 +195,16 @@ test("每个管理接口都自己鉴权：只有登录与退出可以不要管�
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
   assert.ok(routeFiles.length >= 3, "管理端认证接口至少有三个");
 
-  /** 登录与退出发生在「还没有会话」的时候，不可能要求管理者身份。 */
-  const anonymousRoutes = new Set(["auth/mock-login", "auth/logout"]);
+  /**
+   * 登录与退出发生在「还没有会话」的时候，不可能要求管理者身份。
+   *
+   * PROD-4 起有三条：`auth/login`（真实账号密码）与 `auth/mock-login`
+   * （私有 staging 首次凭据引导）都是**换会话**的入口，`auth/logout` 是丢弃会话。
+   * 它们都不接受身份声明（角色 / id 没有可传的位置），登录对象由服务端查库决定。
+   * 除这三条之外，**每一条**管理接口都必须自己 `requireAdmin()`——
+   * 包括 `auth/password`（改自己的密码）与 `auth/session`（读自己的会话）。
+   */
+  const anonymousRoutes = new Set(["auth/login", "auth/mock-login", "auth/logout"]);
 
   for (const file of routeFiles) {
     const relative = path.relative(ADMIN_API_DIR, file).replace(/\\/g, "/");
@@ -231,15 +248,27 @@ test("模拟登录接口不接受任何身份输入：没有请求体、没有�
     readSource(path.join(ROOT, "components", "admin", "AdminLoginPanel.tsx")),
   );
   assert.equal(panel.includes("userId"), false, "登录面板不该出现可以指定的身份");
-  assert.equal(/<input\b/.test(panel), false, "登录面板不该有输入框（没有账号密码可填）");
+  // PROD-4：模拟入口仍然**不带参数**——身份由服务端固定
+  assert.ok(panel.includes("mockLoginAdmin()"), "模拟登录不得携带任何身份参数");
+  assert.equal(/mockLoginAdmin\(\s*\{/.test(panel), false);
+
+  // 输入框只属于真实账号密码登录，且只有这两个字段：
+  // 没有角色、账号 id、身份切换器可填
+  const inputNames = [...panel.matchAll(/name="([^"]+)"/g)].map((match) => match[1]).sort();
+  assert.deepEqual(inputNames, ["password", "username"], "登录表单不得接受身份声明");
 });
 
-test("登录页与登录面板只有一个固定的模拟入口", () => {
+test("登录页与登录面板：真实密码登录与模拟登录互斥，不存在身份切换器", () => {
   const source = readSource(path.join(ROOT, "components", "admin", "AdminLoginPanel.tsx"));
 
-  // 唯一的按钮就是「模拟管理员登录」，且随 ENABLE_MOCK_ADMIN 开关出现或消失
-  const buttons = source.match(/<button[\s\S]*?>/g) ?? [];
-  assert.equal(buttons.length, 1, "登录面板只该有一个按钮");
+  // PROD-4：真实认证开着一律走账号密码；只有它没开时才回落到固定的模拟入口
+  assert.ok(source.includes("loginAdminWithPassword"), "真实认证开启后必须渲染密码登录表单");
+  const realBranch = source.indexOf("realAuthEnabled ?");
+  const mockBranch = source.indexOf("mockAdminEnabled ?");
+  assert.notEqual(realBranch, -1);
+  assert.notEqual(mockBranch, -1);
+  assert.ok(realBranch < mockBranch, "真实登录必须优先于模拟登录");
+
   assert.ok(source.includes("ADMIN_MOCK_LOGIN_LABEL"));
   assert.ok(source.includes("mockAdminEnabled"));
   // 未启用时不渲染按钮，而是如实说明该能力未启用
@@ -252,10 +281,13 @@ test("管理端与用户端是两个 Cookie、两个仓储：没有互相转换�
   const adminSession = stripComments(readSource(path.join(ROOT, "lib", "auth", "adminSession.ts")));
   const userSession = stripComments(readSource(path.join(ROOT, "lib", "auth", "session.ts")));
 
-  // 两个不同的 Cookie 名
-  assert.ok(adminSession.includes('"mock_admin_id"'));
-  assert.ok(userSession.includes('"mock_user_id"'));
-  assert.equal(userSession.includes("mock_admin_id"), false, "用户端会话不该认得管理端 Cookie");
+  // 两个不同的 Cookie 名（PROD-4 起名字集中在 cookieNames.ts，三套身份各两个）
+  assert.ok(adminSession.includes("MOCK_ADMIN_SESSION_COOKIE"));
+  assert.ok(userSession.includes("MOCK_USER_SESSION_COOKIE"));
+  assert.equal(userSession.includes("MOCK_ADMIN_SESSION_COOKIE"), false, "用户端会话不该认得管理端 Cookie");
+  assert.equal(adminSession.includes("MOCK_USER_SESSION_COOKIE"), false, "管理端会话不该认得用户端 Cookie");
+  assert.equal(MOCK_ADMIN_SESSION_COOKIE, "mock_admin_id");
+  assert.equal(MOCK_USER_SESSION_COOKIE, "mock_user_id");
 
   // 两条链路各自查各自的仓储
   assert.ok(adminSession.includes("getAdminRepository"));
@@ -553,6 +585,8 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/orders/page.tsx",
     "admin/refunds/page.tsx",
     "admin/complaints/page.tsx",
+    // P1-3：售后统一工作台（退款 + 投诉的混合待办队列）
+    "admin/aftersales/page.tsx",
   ]) {
     const file = findAppFile(route);
     assert.ok(file.length > 0, `缺少 ${route}`);
@@ -589,6 +623,10 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/orders/page.tsx",
     "admin/refunds/page.tsx",
     "admin/complaints/page.tsx",
+    "admin/aftersales/page.tsx",
+    // P1-6：券模板列表。它与 `coupons/[id]`、`coupons/new`、`coupons/grant`
+    // 是同级的三条兄弟路由，加载边界**只能**收在 `(list)` 这一段里
+    "admin/coupons/page.tsx",
   ]) {
     const file = findAppFile(route);
     assert.ok(file.includes("(list)"), `${route} 应当待在 (list) 里，加载边界才收得住`);
@@ -599,6 +637,12 @@ test("管理端页面都在 /admin 下，登录页不套后台壳层", () => {
     "admin/orders/[id]/page.tsx",
     "admin/refunds/[id]/page.tsx",
     "admin/complaints/[id]/page.tsx",
+    // P1-3：售后工作台的详情页是**两级动态段**（案件类型 + id），仍然一个 loading.tsx 都不许有
+    "admin/aftersales/[caseType]/[id]/page.tsx",
+    // P1-6：券详情与新建页。详情页会 `notFound()`，新建成功后会 `router.push`，
+    // 两种情况下先发出的 200 都改不回来
+    "admin/coupons/[id]/page.tsx",
+    "admin/coupons/new/page.tsx",
   ]) {
     const dir = path.dirname(findAppFile(route));
     assert.equal(
@@ -654,15 +698,36 @@ test("用户端不出现任何管理后台入口", () => {
   }
 });
 
-test("后台导航覆盖九个已开放模块，未开放模块没有入口", () => {
+test("后台导航覆盖十四个已开放模块，未开放模块没有入口", () => {
   // P8B 把「商品与类目」从 `ADMIN_UPCOMING_MODULES` 里搬进了导航，
-  // P8C 又把「订单 / 退款 / 投诉」搬了进来，P8D-1 再搬进来「客服账号」：
+  // P8C 又把「订单 / 退款 / 投诉」搬了进来，P8D-1 再搬进来「客服账号」，
+  // P8E-1 再搬进来「运营内容」，P0-1 再搬进来「平台参数」，P1-3 再搬进来「售后工作台」：
   // 它们的页面已经存在，侧栏再挂一条「后续开放」就会与真实入口并存，运营点哪个都不对。
   // 这条断言守的是「导航与已建成的页面一一对应」。
   //
   // ⚠️ 退款与投诉是**两条**导航项，不是一个「售后」：一边会写订单，一边只写平台侧结论。
+  // **P1-3 之后这句话仍然成立，而导航里也确实多了一条「售后工作台」——两者不矛盾**：
+  // 原判断针对的是「把两种**处置动作**合成一个入口」，而工作台不改这个分工。
+  // 它是一个**只读的分流队列**（退款与投诉混合、按未完结/处理中/已结束分视图），
+  // 点进去之后渲染的正是各自既有的 `AdminRefundConsole` / `AdminComplaintConsole`，
+  // 处置动作仍然只在各自的工作面上发生。两个原有入口**一条都没有删**。
+  // ⚠️ 它排在 `/admin/complaints` 之后、`/admin/customer-service` 之前：它与订单/退款/投诉
+  // 是同一簇（都是「这一单出了什么事」），而客服账号与平台参数是另外两类东西。
   // ⚠️ 「客服账号」（地址 `/admin/customer-service`）管的是**谁能登录 /staff 工作台**，
   // 与客服在工作台里能看什么是两件事；它也不与用户端名单、排行榜发生任何关系。
+  // ⚠️ 「运营内容」（地址 `/admin/content`）是**一条**导航项而不是四类内容各一条：
+  // 图片公告 / 活动 Banner / 协议 / 首页快捷入口共用同一套「保存即影响用户端」的规则，
+  // 拆成四条只会让侧栏变长而运营仍然要在它们之间来回切换。
+  // ⚠️ 「平台参数」（地址 `/admin/platform-config`）排在**最后**：上面每一条都是
+  // 「业务对象与账号」，它是**全局规则**本身——改它不动任何一条已有记录，
+  // 只决定此后新发生的业务按什么走。插在中间会让人以为它属于相邻那个模块。
+  // ⚠️ P1-4 验收整改轮加了「优惠券发放」（`/admin/coupons`），它排在平台参数**之前**、
+  // 客服账号**之后**：发券是对一个业务对象做一次动作，属于「业务对象与账号」这一侧，
+  // 而**不是**全局规则。放在平台参数后面会让上面那条读法失效。
+  // ⚠️ P1-8 加了「评价审核」（`/admin/reviews`），排在售后工作台**之后**、客服账号**之前**：
+  // 与售后工作台同簇——都是「这一单出了什么事」的后续处置。它与售后工作台是**两条**
+  // 导航项而不是一条：售后决定钱退不退，评价决定话说不说得出口，两者互不触发
+  // （`D20` 明确要求退款不得自动撤下评价），合成一个入口会让「点进去是哪种处置」说不清。
   assert.deepEqual(
     ADMIN_NAV_ITEMS.map((item) => item.href),
     [
@@ -671,10 +736,15 @@ test("后台导航覆盖九个已开放模块，未开放模块没有入口", ()
       "/admin/companions",
       "/admin/categories",
       "/admin/products",
+      "/admin/content",
       "/admin/orders",
       "/admin/refunds",
       "/admin/complaints",
+      "/admin/aftersales",
+      "/admin/reviews",
       "/admin/customer-service",
+      "/admin/coupons",
+      "/admin/platform-config",
     ],
   );
   for (const item of ADMIN_NAV_ITEMS) {
@@ -702,7 +772,7 @@ test("后台页面不引用 lib/mocks，也不使用不受控 HTML", () => {
   }
 });
 
-test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 投诉五件 + 客服五件", () => {
+test("管理接口清单固定：认证五件 + 申请审核四件 + 护航管理七件 + 类目五件 + 商品五件 + 订单两件 + 退款五件 + 评价审核六件 + 投诉五件 + 客服六件 + 运营内容十九件 + 券模板四件 + 发券三件 + 平台参数一件 + 经营首页一件 + 售后聚合一件", () => {
   const routeFiles = collectFiles(ADMIN_API_DIR).filter((file) => file.endsWith("route.ts"));
 
   // 逐个写出来而不是只断言数量：少一个、多一个、被改名都会在这里现形。
@@ -710,8 +780,18 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
   assert.deepEqual(
     routeFiles.map((file) => path.relative(ADMIN_API_DIR, file).replace(/\\/g, "/")).sort(),
     [
+      // P1-3：售后统一工作台的**只读聚合列表**。⚠️ 只有列表这一个地址，**没有**详情地址与动作地址：
+      // 详情是服务端组件直接调服务（不经过 HTTP），而三个处置动作（开始审核 / 通过 / 驳回、
+      // 开始处理 / 解决 / 关闭）仍然只挂在各自的 `/api/admin/refunds/**`、`/api/admin/complaints/**` 上。
+      // 工作台再开一套动作地址，就等于给同一份事务逻辑开了第二个入口。
+      "aftersales/route.ts",
+      // PROD-4：真实管理员账号密码登录 + 登录后修改自己的密码。
+      // ⚠️ 密码**只属于当前登录者**：`auth/password` 从会话取人，请求体里没有账号 id；
+      // 管理员不能借它改别人的密码（那是 `staff/[id]/password`，作用对象是客服账号）。
+      "auth/login/route.ts",
       "auth/logout/route.ts",
       "auth/mock-login/route.ts",
+      "auth/password/route.ts",
       "auth/session/route.ts",
       // P8B：类目（列表 / 新建、详情 / 编辑、启用、停用、移除）
       "categories/[id]/disable/route.ts",
@@ -739,11 +819,74 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "complaints/[id]/route.ts",
       "complaints/[id]/start-processing/route.ts",
       "complaints/route.ts",
+      // P8E-1：运营内容（协议四件 + 图片公告五件 + 活动 Banner 五件 + 快捷入口五件）
+      // ⚠️ 协议**没有**「移除」地址，公告 / Banner / 快捷入口都有。这不是漏写：
+      // 协议是五类固定内容（用户 / 隐私 / 陪玩 / 平台 / 版本），每类永远只有一份当前生效的
+      // 正文——「移除了用户协议」这件事在业务上不存在，只有「停用」。
+      // 素材类内容则是可以下架不要的，因此它们的 `remove` 是软删除（记录留档）。
+      // ⚠️ 没有「排序」地址：排序是 `PATCH` 里的一个字段，单独开一个改排序接口
+      // 会绕过「一次原子写入」，让「改排序 + 改文案」变成一个可以被拆开的两步。
+      // ⚠️ 没有「上传图片」地址：本阶段不做真实上传（见 §三），图片地址是手填的站内路径。
+      "content/agreements/[id]/disable/route.ts",
+      "content/agreements/[id]/enable/route.ts",
+      "content/agreements/[id]/route.ts",
+      "content/agreements/route.ts",
+      "content/announcements/[id]/disable/route.ts",
+      "content/announcements/[id]/enable/route.ts",
+      "content/announcements/[id]/remove/route.ts",
+      "content/announcements/[id]/route.ts",
+      "content/announcements/route.ts",
+      "content/banners/[id]/disable/route.ts",
+      "content/banners/[id]/enable/route.ts",
+      "content/banners/[id]/remove/route.ts",
+      "content/banners/[id]/route.ts",
+      "content/banners/route.ts",
+      "content/quick-entries/[id]/disable/route.ts",
+      "content/quick-entries/[id]/enable/route.ts",
+      "content/quick-entries/[id]/remove/route.ts",
+      "content/quick-entries/[id]/route.ts",
+      "content/quick-entries/route.ts",
+      // P1-6：优惠券**模板**管理（列表 / 新建、详情 / 编辑、启用、停用）
+      // ⚠️ 四个地址，**没有**第五个 `remove`：§6 明文不提供硬删除，
+      // 停用就是 `enabled = false`。开一个删除地址等于把「已发出的券」的归属抽走。
+      // ⚠️ 也没有「改券面文案」地址：`valueLabel` / `conditionLabel` 是按金额**派生**的，
+      // 请求体里没有这两个字段，界面也没有输入框（§3）。
+      // ⚠️ 主键是 `coupon-templates` 而不是复用 `coupons`：`/api/admin/coupons`
+      // 已经被「可发放的模板」占了（P1-4），两者回答的问题不同——
+      // 那一个只回 enabled 的满减券，这一个回**全部**模板含已停用的历史券。
+      "coupon-templates/[id]/disable/route.ts",
+      "coupon-templates/[id]/enable/route.ts",
+      "coupon-templates/[id]/route.ts",
+      "coupon-templates/route.ts",
+      // P1-4 验收整改轮：管理员向指定用户发放优惠券
+      // ⚠️ 三个地址各有分工，**没有**「撤销发放」「编辑已发的券」：
+      // 券一旦发出去就是用户的资产，管理端不能悄悄改它或收回它
+      // （要收回只能等它过期或停用模板——那是「以后不能用」，不是「抹掉这一张」）。
+      // - `coupons`（GET）：可发的模板，只含 enabled 的
+      // - `coupons/grant-targets`（GET）：按关键词找用户，空关键词返回空列表
+      // - `coupons/grant`（POST）：发放
+      // ⚠️ 发放人只取 `requireAdmin()` 的会话身份，请求体里没有这个字段——
+      // 「谁发的」这条审计如果能让调用方自己声明，它就不再是审计。
+      // ⚠️ 也没有「列出某人已持有的券」地址：那是用户端「我的优惠券」的事，
+      // 管理端在挑人时只需要知道他手上**有几张**（`grant-targets` 的 `ownedCount`）。
+      "coupons/grant-targets/route.ts",
+      "coupons/grant/route.ts",
+      "coupons/route.ts",
+      // P1-1：经营首页（只读聚合）
+      // ⚠️ **只有一个地址，只有 GET**：经营首页不做任何业务动作
+      // （不审批、不退款、不换人、不改申请状态），因此没有 POST / PATCH / DELETE。
+      // 明细与处置都在各自的模块页里，这里只负责聚合、展示与跳转。
+      "dashboard/route.ts",
       // P8C：订单（全量查询，**只读**）
       // ⚠️ 这里没有「改订单状态」「分配护航」「改金额」这类地址：本阶段的订单详情只读，
       // 订单唯一会被改动的地方是「退款审核通过」，它的主语是退款申请，入口在退款模块
       "orders/[id]/route.ts",
       "orders/route.ts",
+      // P0-1：平台参数（只读一处 + 改一处，同一个地址上的 GET 与 PATCH）
+      // ⚠️ 只有**一个**地址：平台参数是单例，没有「列表」也没有「详情」——
+      // 开一个 `/platform-config/[id]` 等于宣称「参数可以有多条」。
+      // ⚠️ 也没有「启用 / 停用」地址：参数只有取值，没有上架下架。
+      "platform-config/route.ts",
       // P8B：商品（列表 / 新建、详情 / 编辑、上架、下架、移除）
       // ⚠️ 这里没有「改价」「改规格」这类地址：价格与规格是商品资料的一部分，
       // 它们随整体保存一起写入，单独开一个改价接口只会绕过「一次原子写入」
@@ -760,13 +903,33 @@ test("管理接口清单固定：认证三件 + 申请审核四件 + 护航管�
       "refunds/[id]/route.ts",
       "refunds/[id]/start-review/route.ts",
       "refunds/route.ts",
+      // P1-8：评价审核（列表、详情 + 通过、驳回、隐藏、恢复公开四个动作）
+      // ⚠️ **没有 `PATCH`**（这里也就没有编辑地址）：`D12` 明文「管理员不能修改
+      // 星级与正文」。少一个地址比留一个必然返回 400 的地址更好——后者读起来像
+      // 「本来能改、被拦住了」，而规则其实是「这件事不存在」。
+      // ⚠️ 四个动作各占一个地址而不是一个 `PATCH { action }`：动作不同则
+      // **审计动作名不同**（`review.approve` / `.reject` / `.hide` / `.unhide`，
+      // `D22`），而 `D22` 要求审计能回答「做了什么」。合成一个地址后，审计里的
+      // 动作要从请求体里读，而请求体是可以被伪造的部分。
+      // ⚠️ 也没有「删除评价」地址：`R2` 明文审核是**公开闸不是删除**，
+      // 不公开就是 `hidden`，而且它可以被恢复（`D11`）。
+      "reviews/[id]/approve/route.ts",
+      "reviews/[id]/hide/route.ts",
+      "reviews/[id]/reject/route.ts",
+      "reviews/[id]/route.ts",
+      "reviews/[id]/unhide/route.ts",
+      "reviews/route.ts",
       // P8D-1：客服账号（列表 / 新建、详情 / 编辑、启用、停用、移除）
-      // ⚠️ 这里没有「重置密码」地址：本阶段是 Mock 认证，客服账号里根本没有密码字段。
-      // ⚠️ 也没有「登录 / 退出」地址：那是**客服端**的接口（`/api/staff/auth/**`），
+      // ⚠️ PROD-4 起多了一个「设置密码」地址（`staff/[id]/password`）：
+      // 真实认证需要客服能用账号密码登录，而密码不得出现在创建 / 编辑的请求体里——
+      // 否则同一次写入会既改资料又改凭据，审计也分不清发生了什么。
+      // 它只写密码，不启用 / 不改变角色；管理员也不能用它改**自己**的密码（那是 `auth/password`）。
+      // ⚠️ 仍然没有「登录 / 退出」地址：那是**客服端**的接口（`/api/staff/auth/**`），
       // 管理员不能替客服登录，客服的会话也不能由管理端接口发放。
       // ⚠️ 没有「删除」地址——移除是软删除，`remove` 就是它。
       "staff/[id]/disable/route.ts",
       "staff/[id]/enable/route.ts",
+      "staff/[id]/password/route.ts",
       "staff/[id]/remove/route.ts",
       "staff/[id]/route.ts",
       "staff/route.ts",

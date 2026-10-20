@@ -3,6 +3,8 @@ import type {
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
 import { mockCompanionApplicationRepository } from "./mockCompanionApplicationRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCompanionApplicationRepository } from "./pg/companionApplicationRepository";
 
 /**
  * 护航入驻申请的可替换仓储（读写）。
@@ -34,8 +36,16 @@ export type CompanionApplicationCreateOutcome =
  * 排序不是条件——后台列表的排序只有一种，见 `compareApplicationsForAdmin()`。
  */
 export type AdminApplicationFilter = {
-  /** null 表示不限状态 */
-  status: CompanionApplicationStatus | null;
+  /**
+   * 命中的**真实领域状态集合**；`null` 表示不限状态。
+   *
+   * ⚠️ 这里只接受 `CompanionApplicationStatus`：地址栏上的虚拟筛选值
+   * `all` / `open` **不得**出现在数据层，服务层在调用前就用
+   * `applicationStatusesForFilter()` 把它们解析成了真实状态。
+   * 空数组表示「一个状态都不命中」（与 `null` 的「不限」是两件事），
+   * 因此调用方不该传空数组。
+   */
+  statuses: readonly CompanionApplicationStatus[] | null;
   /** 空串表示不搜索 */
   keyword: string;
   /** 空串表示全部游戏 */
@@ -99,6 +109,16 @@ export type CompanionApplicationRepository = {
   ): Promise<{ application: CompanionApplication; withdrawn: boolean } | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const companionApplicationRepositoryBacking: RepositoryBacking<CompanionApplicationRepository> = {
+  name: "companionApplication",
+  mock: mockCompanionApplicationRepository,
+  pg: pgCompanionApplicationRepository,
+};
+
 export function getCompanionApplicationRepository(): CompanionApplicationRepository {
-  return mockCompanionApplicationRepository;
+  return pickRepository(companionApplicationRepositoryBacking);
 }

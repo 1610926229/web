@@ -1,0 +1,19 @@
+先完成当前正在执行的任务；如果已结束，再执行下面批次。
+
+按顺序读取并执行：
+1. P1-1 文案整改：面向管理员的「待处理申请」统一改为「打手申请」，只改展示文案。
+2. `docs/03-dev/rounds/cmd_p1-6.md`
+3. `docs/03-dev/rounds/cmd_dev-2.md`
+4. `docs/03-dev/rounds/cmd_audit-122.md`
+5. `docs/03-dev/rounds/cmd_p1-next.md`
+
+规则：
+- 中途不要等待人工回复。
+- 遇到未冻结产品规则：不猜，标 BLOCKED，继续下一项。
+- 每个开发 Round 完成后跑其文档规定的门禁和 reviewer。
+- 禁止任何 Git 写操作。
+- 不启动真数据库 / 微信 OAuth / 真支付 / 钱包 / Scheduler。
+- 保留当前所有未提交工作区内容。
+
+最终一次性汇报：
+P1-1 文案、P1-6、DEV-2、122 项审计、P1-7、P1-8、最终门禁、git status、明日人工验收最短路径。

@@ -12,6 +12,7 @@ import {
 import { getDataSource } from "@/lib/data/source";
 import { mockEmptyApplies, withMockDebug, type MockSurface } from "@/lib/mocks/debug";
 import type { CompanionDetail, CompanionGameTag, CompanionPage } from "@/lib/types/companion";
+import { loadReviewAggregate, loadReviewStatsFor } from "./reviewAggregates";
 
 /**
  * 陪玩服务 —— 公开列表与陪玩详情共用的唯一入口。
@@ -95,7 +96,18 @@ export async function queryCompanionPage(
 
     const [page, names] = await Promise.all([getDataSource().queryCompanions(query), gameNameById()]);
 
-    return { ...page, items: page.items.map((companion) => toCompanionListItem(companion, names)) };
+    // 评分与评价数是**算出来的**，不是实体上的字段（D17）：一次取整页的聚合，
+    // 避免每张卡片各查一遍用户表
+    const rows = await loadReviewStatsFor(
+      "companion",
+      page.items.map((companion) => ({ item: companion, id: companion.id })),
+    );
+
+    return {
+      ...page,
+      // 配对返回，所以这里不需要「查不到聚合结果」的兜底分支
+      items: rows.map(({ item, stats }) => toCompanionListItem(item, names, stats)),
+    };
   });
 }
 
@@ -117,6 +129,10 @@ export async function getCompanionDetail(
       gameNameById(),
     ]);
 
-    return companion ? toCompanionDetail(companion, names) : null;
+    // 不存在就直接返回：不必为一个不会渲染的页面去算聚合结果
+    if (!companion) return null;
+
+    const stats = await loadReviewAggregate("companion", companion.id);
+    return toCompanionDetail(companion, names, stats);
   });
 }

@@ -13,15 +13,17 @@ import { parseSelectionInput, previewCheckout } from "@/lib/services/checkout";
  */
 export async function POST(request: Request) {
   try {
-    // 未登录直接拒绝：试算也要知道是谁，才对得上后续的支付请求
-    await requireUser();
+    // 未登录直接拒绝：试算也要知道是谁，才对得上后续的支付请求。
+    // 这个 `user` 现在是**必需的输入**，不再只是守卫——券有归属，
+    // 判「这张券能不能用在这一单上」必须先知道券是谁的（P1-4）
+    const user = await requireUser();
     const body = await readJsonBody(request);
     const selection = parseSelectionInput(body);
 
     if (!selection.productId) throw new ApiError("BAD_REQUEST", "缺少商品信息");
 
     const { searchParams } = new URL(request.url);
-    return ok(await previewCheckout(selection, searchParams, "http"));
+    return ok(await previewCheckout(selection, user.id, searchParams, "http"));
   } catch (cause) {
     return fail(toApiError(cause));
   }

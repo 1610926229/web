@@ -215,7 +215,7 @@ test("列表 DTO 只带摘要：没有游戏账号、备注、增值明细、售
     "productTitle",
     "specName",
     "quantity",
-    "totalAmount",
+    "actualPaidAmount",
     "user",
   ]);
 
@@ -264,7 +264,7 @@ test("列表里只有支付成功之后的订单：内部支付请求不进普�
   assert.equal(ORDER_STATUSES.includes("pending"), false);
 });
 
-test("订单详情的金额快照自洽：单价×数量=小计，小计+增值=实付", async () => {
+test("订单详情的金额快照自洽：单价×数量=小计，小计+增值=原价，原价−券抵扣=实付", async () => {
   const orders = await allOrders();
 
   for (const order of orders.slice(0, 12)) {
@@ -276,17 +276,39 @@ test("订单详情的金额快照自洽：单价×数量=小计，小计+增值=
       detail.itemsAmount,
       `${order.id} 的单价×数量与商品小计对不上`,
     );
+    // ⚠️ P1-4 起「小计 + 增值」等于的是**原价**（优惠前应付），不再是实付。
+    // 这条恒等式在这个文件里是最容易悄悄失效的一条：接了券之后
+    // `itemsAmount + addonsAmount !== actualPaidAmount`，继续拿实付去比就会红。
     assert.equal(
       detail.itemsAmount + detail.addonsAmount,
-      detail.totalAmount,
-      `${order.id} 的商品小计+增值与实付对不上`,
+      detail.originalAmount,
+      `${order.id} 的商品小计+增值与优惠前应付对不上`,
     );
     assert.equal(
       detail.addons.reduce((sum, addon) => sum + addon.price, 0),
       detail.addonsAmount,
       `${order.id} 的增值明细之和与增值合计对不上`,
     );
-    assert.equal(detail.totalAmount, order.totalAmount, "详情不该改掉订单自己的实付金额");
+    // 金额域恒等式：实付 = 原价 − 券抵扣（裁定 §10）。没用券时抵扣为 0，两者相等。
+    assert.equal(
+      detail.originalAmount - detail.couponDiscountAmount,
+      detail.actualPaidAmount,
+      `${order.id} 的实付与「原价 − 券抵扣」对不上`,
+    );
+    assert.equal(detail.actualPaidAmount, order.actualPaidAmount, "详情不该改掉订单自己的实付金额");
+    assert.ok(
+      Number.isInteger(detail.originalAmount) &&
+        Number.isInteger(detail.couponDiscountAmount) &&
+        Number.isInteger(detail.actualPaidAmount),
+      `${order.id} 的三个金额都必须是整数分`,
+    );
+    assert.ok(detail.actualPaidAmount >= 0, `${order.id} 的实付不得为负`);
+    // 券快照与抵扣额必须同进同出：给了抵扣就一定有券，没券就一定没有抵扣
+    assert.equal(
+      detail.coupon === null,
+      detail.couponDiscountAmount === 0,
+      `${order.id} 的券快照与抵扣额不一致（有抵扣却无券，或反之）`,
+    );
   }
 });
 

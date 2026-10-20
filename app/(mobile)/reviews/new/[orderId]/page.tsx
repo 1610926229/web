@@ -4,16 +4,23 @@ import NavBar from "@/components/common/NavBar";
 import ReviewForm from "@/components/reviews/ReviewForm";
 import RequireAuth from "@/lib/auth/RequireAuth";
 import { ORDER_STATUS_LABELS } from "@/lib/constants/orders";
-import { REVIEW_RATING_LABELS } from "@/lib/constants/reviews";
+import { REVIEW_ALREADY_REVIEWED_MESSAGE } from "@/lib/constants/reviews";
 import { getReviewTargetForUser } from "@/lib/services/reviews";
 import { formatDateTime } from "@/lib/utils/format";
 
 /**
- * 发表评价页（需登录）。
+ * 发表 / 重新提交评价页（需登录）。
  *
  * **这一页不判断「能不能评价」**：判定只在服务端做一次（`getReviewTargetForUser`），
- * 页面照着它给出的四种结果显示表单或说明。理由是「能不能评价」既看订单状态、
- * 也看这一单有没有评价记录、有没有进行中 / 已通过的退款，前端只看状态一定算错。
+ * 页面照着它的**五种**结果显示表单或说明。理由是「能不能评价」看的是这一单
+ * 有没有真实的完成时间（`D19`），以及有没有评价记录，前端拿订单状态自己推断一定算错。
+ *
+ * 五种结果各自落到哪一块：
+ * - `missing`  → 「订单不存在」说明页；
+ * - `reviewed` → 「该订单已评价过」（作者看得见状态，`D8`）；
+ * - `rejected` → **重新提交模式**的表单（用原内容预填，`D9` 的唯一回表单入口）；
+ * - `blocked`  → 「当前不可评价」说明页（原因由服务端给出）；
+ * - `ready`    → 新建模式的表单。
  *
  * 即使有人绕过这一页直接调接口，服务端也会再校验一次；这个页面只是把结果如实呈现出来。
  *
@@ -47,20 +54,32 @@ async function ReviewCreateBody({ orderId, userId }: { orderId: string; userId: 
     );
   }
 
-  // 已经评价过：把用户引到评价列表，而不是给一句「不可评价」就结束
+  // 已经评价过：把用户引到评价列表，而不是给一句「不可评价」就结束。
+  // ⚠️ 这里只说**状态**（`statusLabel`，由服务端给），不再引用单个星级——
+  // 一条评价最多有两个星级，挑一个显示等于替用户决定哪个更代表这次消费。
   if (target.status === "reviewed") {
     const { review } = target;
     return (
       <Notice
-        title="该订单已评价过"
-        description={`一笔订单只能评价一次。当前评价：${REVIEW_RATING_LABELS[review.rating]}，${formatDateTime(review.createdAt)}。`}
+        title={REVIEW_ALREADY_REVIEWED_MESSAGE}
+        description={`一笔订单只能评价一次。当前评价：${review.statusLabel}，提交于 ${formatDateTime(review.createdAt)}。`}
         href="/reviews"
         linkLabel="查看我的评价"
       />
     );
   }
 
-  // 订单状态本身不可评价（未完成 / 退款中 / 已退款），原因由服务端给出
+  // 被驳回：这是**唯一**能回到表单的状态（D9）。页面把原内容预填进表单，
+  // 用户改完重提，落点仍是同一条评价（不会变成「第二条」）。
+  if (target.status === "rejected") {
+    return (
+      <div className="flex flex-1 flex-col overflow-x-clip">
+        <ReviewForm mode="resubmit" review={target.review} />
+      </div>
+    );
+  }
+
+  // 订单本身不可评价（还没完成过服务），原因由服务端给出
   if (target.status === "blocked") {
     return (
       <Notice
@@ -74,7 +93,7 @@ async function ReviewCreateBody({ orderId, userId }: { orderId: string; userId: 
 
   return (
     <div className="flex flex-1 flex-col overflow-x-clip">
-      <ReviewForm order={target.order} />
+      <ReviewForm mode="create" order={target.order} />
     </div>
   );
 }

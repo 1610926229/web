@@ -3,6 +3,7 @@ import NavBar from "@/components/common/NavBar";
 import EmptyState from "@/components/common/EmptyState";
 import CheckoutForm from "@/components/checkout/CheckoutForm";
 import RequireAuth from "@/lib/auth/RequireAuth";
+import { getSessionUser } from "@/lib/auth/session";
 import { getProductDetail } from "@/lib/services/catalog";
 import { getAddons, getCompanions, getGame, previewCheckout } from "@/lib/services/checkout";
 import { toSearchParams } from "@/lib/utils/query";
@@ -97,6 +98,22 @@ async function CheckoutBody({
     );
   }
 
+  // 会话用户：券有归属，试算与「可选券列表」都要用它。
+  // `getSessionUser` 是 `cache()` 过的，`RequireAuth` 刚读过一次，这里不会二次查询
+  const user = await getSessionUser();
+  // `RequireAuth` 已经保证了登录，这里为 null 属于不可能状态；真要出现，
+  // 说明外层守卫被拿掉了——那就按未登录处理，不猜一个用户出来
+  if (!user) {
+    return (
+      <NotPayable
+        title="请先登录"
+        description="登录后才能进入结算。"
+        backHref={`/product/${product.id}`}
+        backLabel="返回商品"
+      />
+    );
+  }
+
   const [game, addons, companions] = await Promise.all([
     getGame(product.gameId),
     getAddons(),
@@ -130,7 +147,11 @@ async function CheckoutBody({
         gameAccountId: "",
         remark: "",
         companionId: null,
+        // 首屏还没选券。券列表在下面按「首屏那个金额」算出来，用户选了之后
+        // 由表单自己重新试算（判定会跟着新的原价走）
+        couponClaimId: null,
       },
+      user.id,
       query,
       "http",
     );

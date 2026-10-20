@@ -1,4 +1,6 @@
 import type { Companion, CompanionDetail, CompanionListItem } from "@/lib/types/companion";
+import type { OrderCompanionSnapshot } from "@/lib/types/order";
+import type { ReviewAggregate } from "@/lib/types/review";
 import { clampPage, clampPageSize } from "./pagination";
 
 /**
@@ -31,8 +33,14 @@ export const COMPANION_MAX_PAGE = 1000;
 /** 列表卡片上自我介绍截断到多少个字符。完整内容在详情页。 */
 export const COMPANION_INTRO_BRIEF_LENGTH = 40;
 
-/** 详情页最多展示多少条评价摘要。 */
-export const COMPANION_DETAIL_REVIEW_LIMIT = 3;
+/**
+ * 详情页最多展示多少条评价摘要。
+ *
+ * ⚠️ **本常量已在 P1-8 删除**。它一度是这里写死的 `3`，而商品详情也要显示「最近 3 条」；
+ * 两个各自写死的 3 迟早会有一个被改成 5，而另一个不会。
+ * 现在两侧都用 `REVIEW_AGGREGATE_LIMIT`（`lib/constants/reviews.ts`）——
+ * 那是 `D15`「最近最多 3 条」的唯一定义处，也是 `buildReviewAggregate()` 切片的依据。
+ */
 
 /**
  * 列表顶部的 Mock 标注。
@@ -186,6 +194,38 @@ export function isCompanionListed(
 }
 
 /**
+ * 这位护航**此刻能不能接新的单**（P0-5 手工验收时冻结的语义）。
+ *
+ * ## 为什么它与 `isCompanionListed()` 是两件事
+ *
+ * | 字段 | 回答的问题 | 关掉之后 |
+ * |---|---|---|
+ * | `enabled` | 这个 User 还有没有**打手工作资格** | 进不去工作台（`disabled`） |
+ * | `available` | 现在**允不允许接新的订单** | 进得去，但接不了单 |
+ *
+ * ⚠️ **禁止把 `available` 并进 `isCompanionListed()`**，也**禁止**并进
+ * `resolveCompanionAccess()`（`lib/services/companionAccess.ts`）。
+ * 并进去等于说「暂停接单 = 被取消打手资格」：一位想歇两天的护航会连自己的工作台
+ * 都进不去、看不到自己的资料，以为资格没了，转头去重新提交入驻申请——
+ * 而他要的只是暂时不接单。**资格与接单能力必须分开。**
+ *
+ * ## 谁该用它
+ *
+ * 一切「这个人现在能不能接新单」的判断：
+ * - 结算页指定护航（`lib/services/checkout.ts` 里同一条规则的既有写法）；
+ * - 公共池列表是否给他返回可接订单（`lib/services/companionDispatch.ts`）；
+ * - 原子接单区段的最后一道检查（`lib/data/companionDispatchTransaction.ts`）。
+ *
+ * ⚠️ 历史事实**不因它改变**：已经被他接下的单、用户指定给他的专属派单，
+ * 都不会因为 `available` 变成 false 而被改写或隐藏。它只回答「**新的**单能不能接」。
+ */
+export function isCompanionAcceptingOrders(
+  companion: Pick<Companion, "enabled" | "available" | "removedAt">,
+): boolean {
+  return isCompanionListed(companion) && companion.available;
+}
+
+/**
  * 默认排序：`sortOrder` 升序，相等时按 id 兜底。
  *
  * 兜底那一层不是可有可无的：顺序不确定时，同一条陪玩可能在第一页出现过、
@@ -225,6 +265,25 @@ export function toCompanionIntroBrief(intro: string): string {
 }
 
 /**
+ * 护航资料 → **订单上的护航公开信息快照**（P0-5）。
+ *
+ * 两个写入点共用这一处转换：**接单那一刻**写进订单
+ * （`companionDispatchTransaction.acceptDispatch`），以及管理端回看
+ * 「用户当初指定的是谁」（`lib/services/adminOrders.ts`）。
+ * 各写一遍的话，两边迟早会对「哪些字段算公开信息」给出不同答案——
+ * 而其中一边一旦多带一个 `userId`，那位护航的账号就会出现在后台订单详情里。
+ *
+ * ⚠️ 只有 id / 昵称 / 头像：`enabled` / `removedAt` / `rankLabel` 与任何身份字段都不进快照。
+ */
+export function toOrderCompanionSnapshot(companion: Companion): OrderCompanionSnapshot {
+  return {
+    id: companion.id,
+    name: companion.displayName,
+    avatarUrl: companion.avatarUrl,
+  };
+}
+
+/**
  * 列表项与详情**共有**的那部分字段。
  *
  * 显式列举，**不是** `{ ...companion }` 再删几个：新增内部字段时默认不会外流，
@@ -233,9 +292,18 @@ export function toCompanionIntroBrief(intro: string): string {
  * 列表项与详情的差别只有两处（前者的自我介绍是截断的、后者是完整的，且多一段评价摘要），
  * 因此两份 DTO 从这一份共有字段出发，不会出现「同一个字段在两张表里写法不一样」。
  */
+/**
+ * ⚠️ `stats` 是**必填参数**，不是可选参数——这是刻意的。
+ *
+ * 评分不再来自实体（`D17`），而是由 `lib/services/reviewAggregates.ts` 从评价仓储算出来。
+ * 把它做成可选参数，会立刻出现两种调用方式：查了聚合的、和没查的（于是默认成「暂无评分」）。
+ * 后者不会报错，只会让某条链路悄悄显示「暂无评分」——而这种「少了个参数」的 bug
+ * 在页面上看起来完全正常。必填参数把这件事变成编译错误。
+ */
 function toCompanionBase(
   companion: Companion,
   gameNameById: Readonly<Record<string, string>>,
+  stats: ReviewAggregate,
 ): Omit<CompanionListItem, "introBrief"> {
   return {
     id: companion.id,
@@ -244,10 +312,12 @@ function toCompanionBase(
     games: companion.gameIds.map((id) => ({ id, name: gameNameById[id] ?? id })),
     regions: [...companion.regions],
     serviceTags: [...companion.serviceTags],
-    rating: companion.rating,
+    // 评分与评价数来自**同一份**聚合结果（R3）：不可能出现「4.8 分 / 3 条评价」
+    // 里那个 3 是另一个时刻算出来的
+    rating: stats.averageRating,
     completedOrderCount: companion.completedOrderCount,
     tipsCount: companion.tipsCount,
-    reviewCount: companion.reviewCount,
+    reviewCount: stats.reviewCount,
     available: companion.available,
     unavailableReason: companion.available ? "" : companion.unavailableReason,
   };
@@ -257,9 +327,10 @@ function toCompanionBase(
 export function toCompanionListItem(
   companion: Companion,
   gameNameById: Readonly<Record<string, string>>,
+  stats: ReviewAggregate,
 ): CompanionListItem {
   return {
-    ...toCompanionBase(companion, gameNameById),
+    ...toCompanionBase(companion, gameNameById, stats),
     introBrief: toCompanionIntroBrief(companion.intro),
   };
 }
@@ -268,19 +339,16 @@ export function toCompanionListItem(
 export function toCompanionDetail(
   companion: Companion,
   gameNameById: Readonly<Record<string, string>>,
+  stats: ReviewAggregate,
 ): CompanionDetail {
   return {
-    ...toCompanionBase(companion, gameNameById),
+    ...toCompanionBase(companion, gameNameById, stats),
     intro: companion.intro,
-    // 评价只给前若干条，且只带昵称 / 星级 / 正文 / 时间四项
-    reviews: companion.reviews.slice(0, COMPANION_DETAIL_REVIEW_LIMIT).map((review) => ({
-      id: review.id,
-      nickname: review.nickname,
-      rating: review.rating,
-      content: review.content,
-      createdAt: review.createdAt,
-    })),
-    reviewsTruncated: companion.reviews.length > COMPANION_DETAIL_REVIEW_LIMIT,
+    // 评价只给前若干条（由聚合按 approved + 时间倒序切好），
+    // 每条只带 id / 脱敏昵称 / 星级 / 正文 / 时间五项
+    reviews: stats.reviews,
+    // 是否还有更多，由聚合如实给出（D16：本阶段不做完整列表页，但必须说明被截断了）
+    reviewsTruncated: stats.reviewsTruncated,
     // 是否在公开名单里：下架与被移除的陪玩都不进列表，直链打开只有一页只读资料。
     // 「不在名单里」与「在名单里但暂不可用」对用户是两件事，而 `available` 在两种情况下
     // 都是 false，因此这一项必须单独给出——页面不能靠 available 去猜是哪一种。

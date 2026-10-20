@@ -1,7 +1,7 @@
 import type { ActorRole } from "./actor";
 import type { SupportEvidence } from "./evidence";
 import type { OrderStatus } from "./order";
-import type { StaffUserSummary } from "./staff";
+import type { StaffCompanionReleaseEntry, StaffUserSummary } from "./staff";
 import type { AdminUserSummary } from "./user";
 
 /**
@@ -181,8 +181,17 @@ export type AdminComplaintOrderSummary = {
   status: OrderStatus;
   statusLabel: string;
   productTitle: string;
-  /** 单位：分 */
-  totalAmount: number;
+  /**
+   * 单位：分。**用户实付**（P1-4）。
+   *
+   * ⚠️ 投诉页上写的是「实付金额」，读的就是这个字段。
+   *
+   * ⚠️ 本摘要**刻意不带**「优惠前原价」。全仓库对原价只保留一个名字 `originalAmount`，
+   * 而这里既不需要展示优惠明细，也没有任何消费方——留一个没人读的 `totalAmount`
+   * 在 DTO 里，只会让下一个人把它当成实付（历史上 `totalAmount` 确实曾是展示金额）。
+   * 将来真要在投诉页显示原价，请加 `originalAmount` 这个统一名字。
+   */
+  actualPaidAmount: number;
 };
 
 /**
@@ -285,8 +294,23 @@ export type StaffComplaintOrderSummary = {
   status: OrderStatus;
   statusLabel: string;
   productTitle: string;
-  /** 单位：分。只读展示，客服不能改 */
-  totalAmount: number;
+  /**
+   * 单位：分。**用户实付**（P1-4）。投诉页写的「实付金额」读的是它，只读展示，客服不能改。
+   *
+   * ⚠️ 与管理端摘要同理：这里**不带**「优惠前原价」，见 `AdminComplaintOrderSummary`
+   * 上那段说明——原价只叫 `originalAmount`，且本摘要没有消费优惠明细的需求。
+   */
+  actualPaidAmount: number;
+  /**
+   * 这一单的履约退出历史（P0-6），按退出时间正序；没有退出过是**空数组**。
+   *
+   * ⚠️ 投诉详情**有自己的订单区**，但它的「进入会话」入口在订单没有沟通记录时
+   * 是 `null`——只把退出历史挂在会话页上，这一类投诉就会漏掉「上一任护航为什么走」，
+   * 而投诉正文经常正是在问这件事。因此它随订单摘要一起给。
+   *
+   * 仍然是只读展示：这里没有任何修改退出记录的路径，退出历史本身也**只增不改**。
+   */
+  releaseHistory: StaffCompanionReleaseEntry[];
 };
 
 /**

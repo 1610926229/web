@@ -18,6 +18,11 @@ import { getMessagesForUser } from "@/lib/services/conversations";
  *
  * 订单是自己的但还没有会话时，服务端会**顺手建立会话**：这正是「发起沟通」这个动作，
  * 因此不需要额外的接口。之后从客服首页进来就能看到这条会话。
+ *
+ * ⚠️ P0-14 起这里可能同时有**客服会话**与**若干段履约会话**（每一段对应一次履约）。
+ * 传下去的是 `segments`（分段视图）而不是扁平的消息数组：页面必须按段渲染，
+ * 否则「这句话是谁说的、还能不能回」在两段之间就分不出来。扁平的 `messages`
+ * 仍在载荷里，但那是给「整单时间线」这类用途的，本页不用。
  */
 export default async function OrderChatPage({ params }: PageProps<"/service/chat/[orderId]">) {
   const { orderId } = await params;
@@ -53,7 +58,7 @@ async function OrderChatBody({ orderId, userId }: { orderId: string; userId: str
     );
   }
 
-  const { conversation, messages } = payload;
+  const { conversation, segments } = payload;
 
   return (
     <div className="flex flex-1 flex-col overflow-x-clip">
@@ -85,7 +90,7 @@ async function OrderChatBody({ orderId, userId }: { orderId: string; userId: str
       <OrderChat
         orderId={conversation.orderId}
         currentUserId={userId}
-        initialMessages={messages}
+        initialSegments={segments}
       />
     </div>
   );

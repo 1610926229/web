@@ -1,10 +1,13 @@
 import EmptyState from "@/components/common/EmptyState";
+import BossStatsPanel from "@/components/mine/BossStatsPanel";
 import LevelSummaryPanel from "@/components/mine/LevelSummaryPanel";
 import MineMenu from "@/components/mine/MineMenu";
 import ProfileCard from "@/components/mine/ProfileCard";
 import RequireAuth from "@/lib/auth/RequireAuth";
+import { getBossStatsForUser } from "@/lib/services/bossStats";
 import { getConsumptionLevelForUser } from "@/lib/services/levels";
 import { getUserProfile } from "@/lib/services/profile";
+import type { BossStatsSummary } from "@/lib/types/bossStats";
 import type { ConsumptionLevelSummary } from "@/lib/types/level";
 import { toSearchParams } from "@/lib/utils/query";
 
@@ -53,6 +56,11 @@ async function MineBody({ userId, params }: { userId: string; params: URLSearchP
   // 订单、投诉、优惠券等入口都不依赖它，整页必须照常可用。
   const levelSummary = await loadLevelSummary(userId, params);
 
+  // 老板数据面板同理，且**与等级摘要分开取数**：两者口径相关（都读订单），
+  // 但一个是「我是什么等级」、一个是「我一共花了多少」，其中一块失败
+  // 不应该连累另一块。取数都在服务端完成，页面上没有订单数据。
+  const bossStats = await loadBossStats(userId);
+
   return (
     <>
       <ProfileCard profile={profile}>
@@ -65,6 +73,15 @@ async function MineBody({ userId, params }: { userId: string; params: URLSearchP
       {/* 圆角白纸上浮，压住信息卡下沿，形成原型里「纸张盖在背景上」的分层 */}
       <div className="-mt-6 flex-1 rounded-t-[24px] bg-surface px-4 pb-8 pt-2">
         <SheetHandle />
+
+        {/* 老板数据面板放在白纸**最上方**：它紧挨着上面那张信息卡里的消费等级摘要，
+            两块「我的消费数据」因此相邻；而深色信息卡内部已经没有容纳
+            「三个数值 + 两个 Top3 榜单 + 三句口径说明」的余地。
+            产品裁定 `D11`：本轮放 `/mine` 页内、不新增二级页、不可点击。 */}
+        <div className="pb-3">
+          <BossStatsPanel initialSummary={bossStats.summary} initialError={bossStats.error} />
+        </div>
+
         <MineMenu />
       </div>
     </>
@@ -90,6 +107,29 @@ async function loadLevelSummary(
     return {
       summary: null,
       error: cause instanceof Error ? cause.message : "等级信息加载失败。",
+    };
+  }
+}
+
+/**
+ * 取当前用户的老板数据摘要。
+ *
+ * 与 `loadLevelSummary` 同一条纪律：**取数失败不允许把「我的」页打挂**。
+ * 失败原因交给 `BossStatsPanel` 显示，并给它一个只重取这一块的按钮。
+ *
+ * ⚠️ 五个指标**全部在服务端算**（`lib/constants/bossStats.ts`），页面与浏览器端
+ * 都没有订单数据，也就没有「客户端自己算一套口径」的可能。
+ * 「现在」在这里显式传下去，让最近 30 天的时间窗在同一份快照里只有一个取值。
+ */
+async function loadBossStats(
+  userId: string,
+): Promise<{ summary: BossStatsSummary | null; error: string }> {
+  try {
+    return { summary: await getBossStatsForUser(userId, new Date()), error: "" };
+  } catch (cause) {
+    return {
+      summary: null,
+      error: cause instanceof Error ? cause.message : "数据加载失败。",
     };
   }
 }

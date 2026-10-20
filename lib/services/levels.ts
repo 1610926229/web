@@ -22,8 +22,10 @@ import type { ConsumptionLevelSummary } from "@/lib/types/level";
 /**
  * 取当前用户的消费等级摘要。
  *
- * 金额来自**订单快照**（`totalAmount`），与等级配置无关：即使等级配置不可用，
- * 金额也照常给出，页面因此可以「显示金额 + 说明等级配置有问题」，而不是整块空白。
+ * 金额来自**订单快照**（P1-7 起是 `max(0, actualPaidAmount − refundedAmount)`，
+ * 见 `lib/constants/levels.ts` 的 `effectiveSpendOf`），与等级配置无关：
+ * 即使等级配置不可用，金额也照常给出，页面因此可以「显示金额 + 说明等级配置有问题」，
+ * 而不是整块空白。
  */
 export async function getConsumptionLevelForUser(
   userId: string,

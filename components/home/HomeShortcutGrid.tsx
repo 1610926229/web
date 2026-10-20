@@ -1,8 +1,20 @@
 import Link from "next/link";
 import type { ReactElement } from "react";
-import type { HomeShortcut } from "@/lib/types/content";
+import type { HomeShortcut, QuickEntryIcon } from "@/lib/types/content";
 
-const ICONS: Record<string, () => ReactElement> = {
+/**
+ * 图标表：`QuickEntryIcon` → 内置 SVG。
+ *
+ * ⚠️ 键是**枚举 `QuickEntryIcon`**，不是 `shortcut.id`（P8E-1 之前是后者）。
+ * 这个改动是必须的，不是偏好：入口从这一阶段起由后台新建，id 是随机生成的
+ * （`qe_…`），拿 id 当键的话，新建的入口全都查不到图标，页面上只剩一个空的黑方块。
+ * 图标因此必须由记录上自己的 `icon` 字段决定。
+ *
+ * 类型写成 `Record<QuickEntryIcon, …>` 而不是 `Record<string, …>`：
+ * 前者让「枚举里加了一个取值、这里忘了补」变成**编译错误**，
+ * 后者会让它变成运行期的一个空方块。这是本文件唯一需要类型帮忙的地方。
+ */
+const ICONS: Record<QuickEntryIcon, () => ReactElement> = {
   service: ServiceIcon,
   benefits: BenefitsIcon,
   join: JoinIcon,
@@ -14,10 +26,12 @@ export default function HomeShortcutGrid({ shortcuts }: { shortcuts: HomeShortcu
   return (
     <nav aria-label="快捷入口" className="grid grid-cols-4 gap-1 bg-surface px-2 py-4">
       {shortcuts.map((shortcut) => {
-        const Icon = ICONS[shortcut.id];
+        const Icon = ICONS[shortcut.icon];
         return (
           <Link key={shortcut.id} href={shortcut.href} className="flex flex-col items-center gap-2">
             <span className="flex h-12 w-12 items-center justify-center rounded-[10px] bg-ink">
+              {/* `icon` 由类型保证必然命中，这里的 `?.` 只是防将来有人绕过类型
+                  从接口塞一个未知值进来——那时宁可少一个图标，也不能整页崩掉 */}
               {Icon ? <Icon /> : null}
             </span>
             <span className="text-[13px] text-ink-2">{shortcut.label}</span>

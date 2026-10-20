@@ -15,6 +15,7 @@ import {
   type AdminComplaintStatusFilter,
   type AdminComplaintTypeFilter,
 } from "@/lib/constants/adminComplaints";
+import { isUnresolvedComplaintStatus } from "@/lib/constants/completions";
 import { fetchAdminComplaints } from "@/lib/services/adminHttp";
 import type { AdminComplaintListData } from "@/lib/types/complaint";
 import { formatDateTime } from "@/lib/utils/format";
@@ -269,9 +270,11 @@ export default function AdminComplaintTable({
                         href={`/admin/complaints/${item.id}`}
                         className="text-[13px] text-admin-accent underline-offset-2 hover:underline"
                       >
-                        {item.status === "pending" || item.status === "processing"
-                          ? "去处理"
-                          : "查看详情"}
+                        {/* ⚠️ 判据走 `isUnresolvedComplaintStatus()`（它指向
+                            `OPEN_COMPLAINT_STATUSES`），不在这里再写一遍
+                            「pending || processing」：这行决定操作员要不要点进去，
+                            与待办卡 / `?status=open` 必须是同一组状态。 */}
+                        {isUnresolvedComplaintStatus(item.status) ? "去处理" : "查看详情"}
                       </Link>
                     </td>
                   </tr>

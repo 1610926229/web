@@ -2,7 +2,7 @@ import { fail, ok, toApiError } from "@/lib/api/route";
 import { listAgreements } from "@/lib/services/agreements";
 
 /**
- * 协议与版本介绍（四类内容一次返回）。
+ * 协议与版本介绍（五类内容一次返回）。
  *
  * 权限：**游客可访问**。协议是公开内容，登录与否看到的是同一份数据，
  * 因此这里既不要求登录，也不读会话——没有用户身份，也就没有可以泄漏的用户数据。

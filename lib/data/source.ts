@@ -6,6 +6,7 @@ import type { HomeData } from "@/lib/types/content";
 import type { Product, ProductDetail } from "@/lib/types/product";
 import type { User } from "@/lib/types/user";
 import { mockDataSource } from "./mockSource";
+import { assertRepositoriesReadyOnce } from "./runtime";
 
 /**
  * 服务端可替换数据源。
@@ -67,6 +68,22 @@ export type DataSource = {
   listCompanionGames(): Promise<Game[]>;
 };
 
+/**
+ * 取当前生效的数据源。
+ *
+ * ⚠️ `mockDataSource` 自己**不持有任何数据**：上面那些 `get*` 全部转发给
+ * `lib/data/*Repository.ts` 的访问器，再由访问器按 `DATA_SOURCE` 选 Mock 还是 PostgreSQL。
+ * 也就是说「切换数据源」这件事**不在这个函数里**，把访问器都接好就自动生效了。
+ *
+ * 本函数在这里补的是**清单自检**（PROD-1E · Phase 6 / Phase 7）：Server Component
+ * 路径不经过单个访问器，因此如果某个域漏了 Pg 实现，它不会像 Route Handler 那样
+ * 在 `pickRepository` 里当场抛错。`assertRepositoriesReadyOnce()` 在首次构造
+ * datasource 时把 28 个域**一次性**过一遍，保证这条路径也不存在「悄悄用了 Mock」的缝。
+ *
+ * 它自己 memoize（见 `lib/data/runtime.ts`），并且**只在 `DATA_SOURCE=postgres`
+ * 时真的检查**——Mock 模式下是空操作，不影响任何既有行为。
+ */
 export function getDataSource(): DataSource {
+  assertRepositoriesReadyOnce();
   return mockDataSource;
 }

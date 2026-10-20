@@ -3,13 +3,13 @@
 /* eslint-disable @next/next/no-img-element -- Mock 阶段使用 public/mock 下的本地 SVG 占位图，
    不经 next/image 优化器（优化器默认不支持 SVG）。接入对象存储后统一替换为 next/image。 */
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import {
   STAFF_LOGIN_LABEL,
   STAFF_MOCK_DISABLED_MESSAGE,
 } from "@/lib/constants/staff";
-import { mockLoginStaff } from "@/lib/services/staffHttp";
+import { loginStaffWithPassword, mockLoginStaff } from "@/lib/services/staffHttp";
 import type { StaffLoginOption } from "@/lib/types/staff";
 import { formatDateTime } from "@/lib/utils/format";
 
@@ -35,14 +35,22 @@ export default function StaffLoginPanel({
   options,
   enabled,
   notice,
+  realAuthEnabled = false,
 }: {
   options: StaffLoginOption[];
   enabled: boolean;
   notice: string;
+  /** PROD-4：真实凭据登录是否可用；开启后只展示登录名+密码表单，不再暴露测试账号名单。 */
+  realAuthEnabled?: boolean;
 }) {
   const router = useRouter();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
+
+  // 真实登录表单状态
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [pending, setPending] = useState(false);
 
   async function signIn(staffId: string) {
     if (busyId) return;
@@ -59,6 +67,71 @@ export default function StaffLoginPanel({
       setError(cause instanceof Error ? cause.message : "登录失败，请稍后重试。");
       setBusyId(null);
     }
+  }
+
+  async function signInWithPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    setPending(true);
+    setError("");
+    try {
+      await loginStaffWithPassword({ username: username.trim(), password });
+      router.replace("/staff");
+      router.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "登录失败，请稍后重试。");
+      setPending(false);
+    }
+  }
+
+  if (realAuthEnabled) {
+    return (
+      <form onSubmit={signInWithPassword} className="flex flex-col gap-3">
+        <p className="text-[13px] leading-5 text-ink-3">
+          请使用管理员分配的客服登录名与密码登录。登录状态仅对本工作台有效。
+        </p>
+
+        <label className="flex flex-col gap-1 text-[13px] text-ink-2">
+          登录名
+          <input
+            type="text"
+            name="username"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+            required
+            className="rounded-lg border border-admin-line bg-surface px-3 py-2.5 text-[15px] text-ink outline-none focus:border-admin-accent"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-[13px] text-ink-2">
+          密码
+          <input
+            type="password"
+            name="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="current-password"
+            required
+            className="rounded-lg border border-admin-line bg-surface px-3 py-2.5 text-[15px] text-ink outline-none focus:border-admin-accent"
+          />
+        </label>
+
+        {error ? (
+          <p role="alert" className="text-[13px] leading-5 text-brand-red">
+            {error}
+          </p>
+        ) : null}
+
+        <button
+          type="submit"
+          disabled={pending}
+          className="rounded-lg bg-ink px-6 py-3 text-[15px] font-medium text-white disabled:opacity-60"
+        >
+          {pending ? "登录中…" : STAFF_LOGIN_LABEL}
+        </button>
+      </form>
+    );
   }
 
   if (!enabled) {

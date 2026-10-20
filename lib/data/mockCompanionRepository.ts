@@ -19,10 +19,14 @@ import { getMockStore } from "./mockStore";
  * 不写文件、不写数据库。将来由真实数据库替换（`(user_id)` 唯一索引 + 软删除 + 事务），
  * 本文件的删除不影响上层接口。
  *
- * 建仓时把预置陪玩**逐字段复制**进 Map（连 `reviews` 数组也复制一层），
+ * 建仓时把预置陪玩**逐字段复制**进 Map（数组字段也复制一层），
  * 而不是把 `companionSeed` 里的对象直接放进去：后台会改这些记录，
  * 如果 Map 里存的就是模块级常量里的那个对象，一次编辑就把常量改了——
  * 测试之间互相污染，热更新后也再也回不到初始数据。
+ *
+ * ⚠️ P1-8 起记录上**没有 `reviews` 数组可复制了**：陪玩的公开评价不再存在实体上，
+ * 而是每次由 `lib/services/reviewAggregates.ts` 从评价仓储现算（`D17`）。
+ * 数组字段只剩 `gameIds` / `regions` / `serviceTags` 三个。
  *
  * 并发安全的前提：Node 是单线程的，下面「读—判断—写」的**原子区段内没有 `await`**。
  *
@@ -46,13 +50,14 @@ function createStore(): MockCompanionStore {
   const companions = new Map<string, Companion>();
 
   for (const seed of companionSeed) {
-    companions.set(seed.id, { ...seed, reviews: [...seed.reviews] });
+    companions.set(seed.id, { ...seed });
   }
 
   const companionIdByUser = new Map<string, string>();
   for (const companion of companions.values()) {
-    // 预置数据里这两项都是 null（见 companionSeed 的说明），因此这条循环当前不会登记任何东西；
-    // 保留它，是为了「将来种子补一条带 userId 的记录」时索引自动跟上，而不是静默漏掉。
+    // 预置数据里大部分记录的 `userId` 是 null（平台早期的护航资料没有关联用户），
+    // 但 `cp-10` / `cp-11` 有值——DEV-1 的验收身份正是靠这条循环被登记进来的，
+    // 因此这里**必须**与 `createCompanionRecord()` 用同一个判据（见下方注释）。
     if (companion.userId && companion.removedAt === null) {
       companionIdByUser.set(companion.userId, companion.id);
     }
@@ -68,6 +73,23 @@ export function companionStore(): MockCompanionStore {
 /** 本文件内部取 store 的短名字。 */
 function store(): MockCompanionStore {
   return companionStore();
+}
+
+/**
+ * 按 id **同步**读取一条护航资料（只读，返回副本）。
+ *
+ * ⚠️ 存在的理由只有一个：**伪事务的原子区段里不能有 `await`**，走不了本仓储的
+ * 异步方法。接单事务要在「写下去之前」的最后一步确认这位打手的资料还在架
+ * （`lib/data/companionDispatchTransaction.ts`）——少了这一步，一位刚好被管理员
+ * 下架的打手仍能把单接走，而他随后既看不到订单也提交不了材料。
+ *
+ * ⚠️ 因此本函数**不对外提供 store 本身**：调用方只能取走一条记录的副本，
+ * 拿不到 `Map` 就没有「顺手改一下」的位置。写入仍然只有审核通过与后台管理
+ * 那两处伪事务。
+ */
+export function readCompanionRecord(id: string): Companion | null {
+  const record = store().companions.get(id);
+  return record ? { ...record } : null;
 }
 
 export const mockCompanionRepository: CompanionRepository = {
@@ -182,7 +204,7 @@ export function createCompanionRecord(companion: Companion): CompanionCreateOutc
     }
   }
 
-  current.companions.set(companion.id, { ...companion, reviews: [...companion.reviews] });
+  current.companions.set(companion.id, { ...companion });
   if (companion.userId && companion.removedAt === null) {
     current.companionIdByUser.set(companion.userId, companion.id);
   }

@@ -22,6 +22,8 @@ import {
   type CompanionProfileInput,
 } from "@/lib/constants/adminCompanions";
 import { readCompanionGameId } from "@/lib/constants/companions";
+import { loadReviewAggregate, loadReviewStatsFor } from "./reviewAggregates";
+import { ORDER_DATA_INCONSISTENT_MESSAGE } from "@/lib/constants/dispatch";
 import { countCompanionStates } from "@/lib/constants/admin";
 import {
   IDEMPOTENCY_KEY_PATTERN,
@@ -166,9 +168,15 @@ export async function queryAdminCompanionList(
     });
 
     const start = (query.page - 1) * query.pageSize;
-    const items = rows
-      .slice(start, start + query.pageSize)
-      .map((companion) => toAdminCompanionListItem(companion, names));
+    const visible = rows.slice(start, start + query.pageSize);
+
+    // 评分与评价数是算出来的（D17），且与公开面同源（R3）。
+    // 一次取整页的聚合，避免每行各查一遍用户表。
+    const statsRows = await loadReviewStatsFor(
+      "companion",
+      visible.map((companion) => ({ item: companion, id: companion.id })),
+    );
+    const items = statsRows.map(({ item, stats }) => toAdminCompanionListItem(item, names, stats));
 
     return {
       items,
@@ -200,7 +208,10 @@ export async function getAdminCompanionDetail(
       gameContext(),
     ]);
 
-    return companion ? toAdminCompanionListItem(companion, names) : null;
+    if (!companion) return null;
+
+    const stats = await loadReviewAggregate("companion", companion.id);
+    return toAdminCompanionListItem(companion, names, stats);
   });
 }
 
@@ -257,6 +268,10 @@ function toWriteResult(result: TransactionWriteResult, companionId: string): Adm
       throw new ApiError("BAD_REQUEST", ADMIN_COMPANION_DISABLED_MESSAGE, 400);
     case "operation-conflict":
       throw new ApiError("BAD_REQUEST", ADMIN_COMPANION_OPERATION_CONFLICT_MESSAGE, 400);
+    // P0-11：停用要连带解除他手上的订单，而那份数据不自洽。**停用本身也一笔没写**，
+    // 因此不能报成任何一种 400——那会让管理员以为是自己操作的问题而反复重试同一件事
+    case "inconsistent":
+      throw new ApiError("SERVER_ERROR", ORDER_DATA_INCONSISTENT_MESSAGE, 500);
     default: {
       const { enabled, available, unavailableReason, removedAt } = result.value.updated;
       return {

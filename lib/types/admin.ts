@@ -92,3 +92,56 @@ export type AdminOverview = {
   /** 生成时间（服务端时间），用于判断看到的是什么时候的数据 */
   generatedAt: string;
 };
+
+/**
+ * 经营首页（P1-1）的三个「今日」数字。
+ *
+ * ⚠️ **金额一律是整数「分」**（与全仓一致），转成元只发生在展示层
+ * （`formatYuan()`）。这里没有「元」字段——两个单位同时存在一定会有人读错。
+ *
+ * ⚠️ 字段就是这三个，**没有第四个**：DTO 是这份数据的全部对外形状，
+ * 精确键测试（`tests/adminDashboard.test.mjs`）会把它钉死。
+ */
+export type AdminDashboardMetrics = {
+  /** 今天支付成功的订单数（含今天又被退款的） */
+  todayOrderCount: number;
+  /** 今天成功支付订单的实付金额之和（分）；退款不倒扣 */
+  todayGmvAmount: number;
+  /** 今天实际退出去的金额之和（分）：直接退款 + 售后审核通过 */
+  todayRefundAmount: number;
+};
+
+/**
+ * 经营首页的三个待办数字 —— 「尚未终结且仍需管理员动作」的条目数。
+ *
+ * ⚠️ 字段名 `refunds` 而不是「售后」：本项目**没有**售后聚合实体，
+ * 退款与投诉是两个模块（见 `lib/constants/admin.ts` 的既有说明）。
+ * 这个数就是退款申请里还停在待审核 / 审核中的条数。
+ */
+export type AdminDashboardPending = {
+  /** 待审核 + 审核中的入驻申请 */
+  applications: number;
+  /** 待审核 + 审核中的退款申请 */
+  refunds: number;
+  /** 待处理 + 处理中的投诉 */
+  complaints: number;
+};
+
+/**
+ * 经营首页 DTO（P1-1）。
+ *
+ * **只返回聚合结果**：没有订单数组、没有用户对象、没有游戏账号、没有备注、
+ * 没有分账比例或收益、没有仓储原始记录。要看明细，点卡片进对应的管理页——
+ * 那些页面的 DTO 各自负责自己的字段裁剪。
+ *
+ * `businessDate` 由**服务端**算好（北京时间，`YYYY-MM-DD`）并放进 DTO：
+ * 浏览器不做任何时间计算，因此不可能出现「页面按本地时区算今天、
+ * 服务端按 UTC+8 算今天」这种两侧不一致。
+ */
+export type AdminDashboardDTO = {
+  /** 这份数字属于哪一天（北京时间自然日，`YYYY-MM-DD`） */
+  businessDate: string;
+  metrics: AdminDashboardMetrics;
+  pending: AdminDashboardPending;
+};
+

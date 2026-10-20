@@ -1,4 +1,5 @@
 import { canTransitionCompanionApplication } from "@/lib/constants/adminApplications";
+import { COMPANION_RELEASE_REASON_DISABLED } from "@/lib/constants/dispatch";
 import {
   toCompanionApplicationAuditSnapshot,
   toCompanionAuditSnapshot,
@@ -8,7 +9,11 @@ import {
   NEW_COMPANION_RANK_LABEL,
   NEW_COMPANION_UNAVAILABLE_REASON,
   adminCompanionActionFromPatch,
+  areCompanionFlagsUnchanged,
+  companionFlagAction,
   isCompanionProfileUnchanged,
+  nextCompanionFlags,
+  type CompanionFlagIntent,
 } from "@/lib/constants/adminCompanions";
 import type { AdminAuditAction, AdminAuditSnapshot } from "@/lib/types/adminAudit";
 import type { AdminCompanionProfilePatch, Companion } from "@/lib/types/companion";
@@ -17,6 +22,16 @@ import type {
   CompanionApplicationStatus,
 } from "@/lib/types/companionApplication";
 import { takeReplay, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
+import { releaseOrdersForCompanion } from "./companionOrderTransaction";
+import { setCompanionFlagsPg } from "./pg/adminAuditTransactions";
+import {
+  approveCompanionApplicationPg,
+  rejectCompanionApplicationPg,
+  removeCompanionPg,
+  startReviewCompanionApplicationPg,
+  updateCompanionProfilePg,
+} from "./pg/companionReviewTransactions";
+import { isPostgresDataSourceEnabled } from "./pg/config";
 import {
   applyApplicationReview,
   companionApplicationStore,
@@ -103,7 +118,16 @@ export type AdminCompanionWriteFailure =
   | { kind: "removed" }
   /** 已停用的记录谈不上「暂停 / 恢复接单」——那两个动作的前提是它还在架上 */
   | { kind: "disabled" }
-  | { kind: "operation-conflict" };
+  | { kind: "operation-conflict" }
+  /**
+   * 停用时要解除的订单数据不自洽（P0-11）：派单记录缺失，或完成材料的 pending
+   * 索引与记录对不上。**不可能状态**，报 500。
+   *
+   * ⚠️ 它是唯一一种「停用没做成」的原因，而**停用本身也一笔没写**——
+   * 扫单排在改标志位之前，正是为了不留下「人已停用、单还挂在他名下」
+   * （EX-COMP-01 要禁止的那一瞬）。管理员重试即可。
+   */
+  | { kind: "inconsistent" };
 
 export type AdminCompanionWriteResult =
   | {
@@ -146,7 +170,7 @@ function applicationSnapshots(
  * ⚠️ **只改状态**。开始审核不等于通过：不产生护航资料、不发资格、不写审核时间
  * （那两者是「结果」，这一步还没有结果）。
  */
-export async function startReviewCompanionApplication(
+export async function startReviewCompanionApplicationMock(
   applicationId: string,
   ctx: AdminWriteContext,
 ): Promise<AdminApplicationWriteResult<CompanionApplication>> {
@@ -196,7 +220,7 @@ export async function startReviewCompanionApplication(
  * 审核意见由调用方校验为非空之后传进来（规则在
  * `lib/constants/adminApplications.ts` 的 `normalizeAdminReviewNote()`）。
  */
-export async function rejectCompanionApplication(
+export async function rejectCompanionApplicationMock(
   applicationId: string,
   reviewNote: string,
   ctx: AdminWriteContext,
@@ -258,8 +282,15 @@ function nextCompanionId(companions: Map<string, Companion>): string {
   throw new Error("无法生成不冲突的护航 id");
 }
 
-/** 由被通过的申请构造一条新护航资料。字段来源见 §七：昵称 / 游戏 / 大区 / 标签 / 介绍全部来自申请。 */
-function buildCompanionFromApplication(input: {
+/**
+ * 由被通过的申请构造一条新护航资料。字段来源见 §七：昵称 / 游戏 / 大区 / 标签 / 介绍全部来自申请。
+ *
+ * ⚠️ **导出是为了共用，不是复制**：PostgreSQL 侧的审核通过
+ * （`lib/data/pg/companionReviewTransactions.ts`）也调它。两处各写一份的话，
+ * 「新护航该有哪些字段」迟早会分叉——而分叉的表现是新护航缺一个字段、
+ * 且只在一条存储路径上出现。
+ */
+export function buildCompanionFromApplication(input: {
   application: CompanionApplication;
   id: string;
   sortOrder: number;
@@ -287,14 +318,16 @@ function buildCompanionFromApplication(input: {
     enabled: true,
 
     // 统计从零开始，**不继承任何东西**：没有订单、没有评价、没有鸡腿。
-    // `rating` 用 null 而不是 0：0 分与「暂无评分」是两件事。
+    // 已完成单数与鸡腿数是**记录**（可以数出来），因此给 0。
+    //
+    // ⚠️ P1-8 起**没有 `rating` / `reviewCount` / `reviews` 可以写了**（`D17`）：
+    // 那三项不再是资料上的字段，而是从真实评价记录聚合出来的结果
+    // （`lib/services/reviewAggregates.ts`）。新护航一条评价都没有，
+    // 因此它在页面上显示的就是「暂无评分」——不需要、也不可能在这里预置一个数字。
     completedOrderCount: 0,
-    rating: null,
     tipsCount: 0,
-    reviewCount: 0,
 
     sortOrder: input.sortOrder,
-    reviews: [],
   };
 }
 
@@ -310,7 +343,7 @@ function buildCompanionFromApplication(input: {
  * 即使绕过状态机，第 3 步的索引也只会让它复用同一条记录，
  * 第 2 步的 `(userId, role)` 键同样只会发一次。**三条数据都只有一份。**
  */
-export async function approveCompanionApplication(
+export async function approveCompanionApplicationMock(
   applicationId: string,
   ctx: AdminWriteContext,
 ): Promise<AdminApplicationWriteResult<ApproveApplicationOutcome>> {
@@ -443,7 +476,7 @@ function nextSortOrder(companions: Map<string, Companion>): number {
  * - 本来就是这个状态（用另一个键再停用一次）。
  * 这条规则让「每项写操作有且只有一条审计」多按几次之后依然成立。
  */
-export async function updateCompanionProfile(
+export async function updateCompanionProfileMock(
   companionId: string,
   patch: AdminCompanionProfilePatch,
   ctx: AdminWriteContext,
@@ -500,7 +533,7 @@ export async function updateCompanionProfile(
  * - **启用**：`enabled: true`，**不动**可接单状态（回到名单不等于马上能接单）；
  * - **停用**：`enabled: false` 并强制 `available: false`（下架的记录不可能正在接单）。
  */
-export async function setCompanionFlags(
+export async function setCompanionFlagsMock(
   companionId: string,
   intent: CompanionFlagIntent,
   input: { unavailableReason: string },
@@ -519,16 +552,36 @@ export async function setCompanionFlags(
     return { kind: "disabled" };
   }
 
-  const flags = nextFlags(existing, intent, input);
+  const flags = nextCompanionFlags(existing, intent, input);
   const action = companionFlagAction(intent);
 
-  if (replay?.kind === "replay" || areFlagsUnchanged(existing, flags)) {
+  if (replay?.kind === "replay" || areCompanionFlagsUnchanged(existing, flags)) {
     return {
       kind: "ok",
       value: { previous: { ...existing }, updated: { ...existing }, action },
       changed: false,
       replayed: replay?.kind === "replay",
     };
+  }
+
+  /* —— 第 5 步：**停用**还要立刻解除他手上在履约的订单（P0-11 / EX-COMP-01）—— */
+  // ⚠️ 排在 `applyCompanionFlags` **之前**：扫单可能失败（数据不自洽），
+  // 而失败时不能留下「人已停用、订单还挂在他名下」——那正是 EX-COMP-01 要禁止的那一瞬。
+  // 排在这里，失败时标志位与审计都还没写，管理员重试即可；
+  // 反过来（先改标志位再扫单）就只能二选一：报一个已经发生了一半的失败，或者假装成功。
+  //
+  // ⚠️ 只有 `disable` 会扫：暂停 / 恢复 / 启用都不解除任何履约
+  // （`available = false` 不解除已有订单，EX-SERVICE-05；`enable` 只是回到名单）。
+  // 「移除」（`removeCompanion`）本轮**不做**解除——需求里没有那一条，见 D10。
+  if (intent === "disable") {
+    const released = releaseOrdersForCompanion({
+      companionId,
+      // 触发者是这位管理员，写进每条退出历史的 actorId
+      actorId: ctx.actorId,
+      reason: COMPANION_RELEASE_REASON_DISABLED,
+      at: ctx.at,
+    });
+    if (released.kind !== "ok") return { kind: "inconsistent" };
   }
 
   const written = applyCompanionFlags(companionId, flags);
@@ -547,55 +600,12 @@ export async function setCompanionFlags(
   return { kind: "ok", value: { ...written, action }, changed: true, replayed: false };
 }
 
-/** 一次「能不能接单」动作。与审计动作一一对应，不经过差异推导。 */
-export type CompanionFlagIntent = "pause" | "resume" | "enable" | "disable";
-
-function companionFlagAction(intent: CompanionFlagIntent): AdminAuditAction {
-  switch (intent) {
-    case "pause":
-      return "companion.pause";
-    case "resume":
-      return "companion.resume";
-    case "enable":
-      return "companion.enable";
-    default:
-      return "companion.disable";
-  }
-}
-
-/** 目标状态：只算这三个字段，其余一概不碰。 */
-function nextFlags(
-  existing: Companion,
-  intent: CompanionFlagIntent,
-  input: { unavailableReason: string },
-): { enabled: boolean; available: boolean; unavailableReason: string } {
-  switch (intent) {
-    case "pause":
-      return { enabled: true, available: false, unavailableReason: input.unavailableReason };
-    case "resume":
-      return { enabled: true, available: true, unavailableReason: "" };
-    case "disable":
-      // 下架强制不可接单：一条「已停用但可接单」的记录在结算页会解释不清
-      return { enabled: false, available: false, unavailableReason: existing.unavailableReason };
-    default:
-      return {
-        enabled: true,
-        available: existing.available,
-        unavailableReason: existing.unavailableReason,
-      };
-  }
-}
-
-function areFlagsUnchanged(
-  existing: Companion,
-  flags: { enabled: boolean; available: boolean; unavailableReason: string },
-): boolean {
-  return (
-    existing.enabled === flags.enabled &&
-    existing.available === flags.available &&
-    existing.unavailableReason === flags.unavailableReason
-  );
-}
+/**
+ * 一次「能不能接单」动作的类型，由 `lib/constants/adminCompanions.ts` 定义
+ * （PROD-1C 从本文件搬走，见那里的说明）。这里**再导出一次**，
+ * 是因为服务层与测试都从这个模块取它，搬家不该改变它们的引用路径。
+ */
+export type { CompanionFlagIntent };
 
 /**
  * 移除护航（软删除）。
@@ -603,7 +613,7 @@ function areFlagsUnchanged(
  * ⚠️ **不删除记录**：只写 `removedAt`。历史订单、评价与鸡腿记录都要继续指得到它，
  * 硬删除会让「这位护航以前做过什么」永久消失，而管理后台正是要回答这个问题。
  */
-export async function removeCompanion(
+export async function removeCompanionMock(
   companionId: string,
   ctx: AdminWriteContext,
 ): Promise<AdminCompanionWriteResult> {
@@ -645,4 +655,80 @@ export async function removeCompanion(
     changed: true,
     replayed: false,
   };
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 6 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * `isPostgresDataSourceEnabled()` 的判据是**显式的环境变量**（见 `pg/config.ts`），
+ * 不是「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ *
+ * ⚠️ `setCompanionFlags` 有**既有的** Pg 实现（`setCompanionFlagsPg`，
+ * 住在 `pg/adminAuditTransactions.ts`），这里只把名字转发过去，**不再实现一遍**。
+ */
+
+/** 开始审核：`pending → reviewing`。 */
+export async function startReviewCompanionApplication(
+  applicationId: string,
+  ctx: AdminWriteContext,
+): Promise<AdminApplicationWriteResult<CompanionApplication>> {
+  return isPostgresDataSourceEnabled()
+    ? startReviewCompanionApplicationPg(applicationId, ctx)
+    : startReviewCompanionApplicationMock(applicationId, ctx);
+}
+
+/** 拒绝：`pending | reviewing → rejected`（不产生护航、不发资格）。 */
+export async function rejectCompanionApplication(
+  applicationId: string,
+  reviewNote: string,
+  ctx: AdminWriteContext,
+): Promise<AdminApplicationWriteResult<CompanionApplication>> {
+  return isPostgresDataSourceEnabled()
+    ? rejectCompanionApplicationPg(applicationId, reviewNote, ctx)
+    : rejectCompanionApplicationMock(applicationId, reviewNote, ctx);
+}
+
+/** 通过：改状态 + 发资格 + 建（或关联）护航 + 写审计，四件事同生共死。 */
+export async function approveCompanionApplication(
+  applicationId: string,
+  ctx: AdminWriteContext,
+): Promise<AdminApplicationWriteResult<ApproveApplicationOutcome>> {
+  return isPostgresDataSourceEnabled()
+    ? approveCompanionApplicationPg(applicationId, ctx)
+    : approveCompanionApplicationMock(applicationId, ctx);
+}
+
+/** 编辑护航资料（含启用 / 停用 / 暂停 / 恢复）。 */
+export async function updateCompanionProfile(
+  companionId: string,
+  patch: AdminCompanionProfilePatch,
+  ctx: AdminWriteContext,
+): Promise<AdminCompanionWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? updateCompanionProfilePg(companionId, patch, ctx)
+    : updateCompanionProfileMock(companionId, patch, ctx);
+}
+
+/** 只改「能不能接单」的四个动作：暂停 / 恢复 / 启用 / 停用。 */
+export async function setCompanionFlags(
+  companionId: string,
+  intent: CompanionFlagIntent,
+  input: { unavailableReason: string },
+  ctx: AdminWriteContext,
+): Promise<AdminCompanionWriteResult> {
+  // Pg 实现早已存在（PROD-1C 的 T8），这里只是把路由接上，**不重复实现**
+  return isPostgresDataSourceEnabled()
+    ? setCompanionFlagsPg(companionId, intent, input, ctx)
+    : setCompanionFlagsMock(companionId, intent, input, ctx);
+}
+
+/** 移除护航（软删除，只写 `removedAt`）。 */
+export async function removeCompanion(
+  companionId: string,
+  ctx: AdminWriteContext,
+): Promise<AdminCompanionWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? removeCompanionPg(companionId, ctx)
+    : removeCompanionMock(companionId, ctx);
 }

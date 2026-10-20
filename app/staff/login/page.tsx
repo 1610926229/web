@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import StaffLoginPanel from "@/components/staff/StaffLoginPanel";
+import { isRealAuthEnabled } from "@/lib/auth/realSession";
 import { isMockStaffEnabled } from "@/lib/config/env";
 import { STAFF_MOCK_NOTICE, STAFF_LOGIN_PAGE_TITLE, STAFF_CONSOLE_NAME } from "@/lib/constants/staff";
 import { getStaffLoginOptions, getStaffSession } from "@/lib/services/staffAuth";
@@ -26,7 +27,8 @@ export default async function StaffLoginPage() {
   const staff = await getStaffSession();
   if (staff) redirect("/staff");
 
-  const enabled = isMockStaffEnabled();
+  const realAuthEnabled = isRealAuthEnabled();
+  const enabled = isMockStaffEnabled() && !realAuthEnabled;
 
   return (
     <div className="flex min-h-dvh items-center justify-center bg-page px-4 py-10">
@@ -39,6 +41,7 @@ export default async function StaffLoginPage() {
             options={enabled ? await getStaffLoginOptions() : []}
             enabled={enabled}
             notice={STAFF_MOCK_NOTICE}
+            realAuthEnabled={realAuthEnabled}
           />
         </div>
 

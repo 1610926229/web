@@ -6,6 +6,8 @@ import type {
   ProductStatus,
 } from "@/lib/types/product";
 import { mockCatalogRepository } from "./mockCatalogRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgCatalogRepository } from "./pg/catalogRepository";
 
 /**
  * 商品目录（游戏 / 类目 / 商品 / 规格）的**可替换仓储**（读写）。
@@ -74,7 +76,19 @@ export type AdminProductFilter = {
  * （见 `lib/data/adminCatalogTransaction.ts`），而服务层在此之前还要做 `await`
  * 取游戏与类目目录。让服务层直接产出最终记录，事务里就只剩「写」这一件事。
  */
-export type CatalogProductPatch = Omit<ProductProfilePatch, "specs"> & {
+export type CatalogProductPatch = Omit<
+  ProductProfilePatch,
+  "specs" | "companionRatePercent"
+> & {
+  /**
+   * 分账比例，**整数基点**。
+   *
+   * 线上入参里没有这个键（那一份是 `companionRatePercent` 百分比文本），
+   * 因此这里不能直接从 `ProductProfilePatch` 继承：到了仓储这一层，
+   * 「界面单位」已经全部换成了存储单位（金额是分、比例是基点），
+   * 记录里绝不允许出现百分比字符串。
+   */
+  companionRateBp: number;
   specs: ProductSpecRecord[];
 };
 
@@ -203,6 +217,16 @@ export type CatalogRepository = {
   ): Promise<{ previous: CatalogProductRecord; updated: CatalogProductRecord } | null>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const catalogRepositoryBacking: RepositoryBacking<CatalogRepository> = {
+  name: "catalog",
+  mock: mockCatalogRepository,
+  pg: pgCatalogRepository,
+};
+
 export function getCatalogRepository(): CatalogRepository {
-  return mockCatalogRepository;
+  return pickRepository(catalogRepositoryBacking);
 }

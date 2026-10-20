@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import AdminPageHeading from "@/components/admin/AdminPageHeading";
 import AdminStaffConsole from "@/components/admin/AdminStaffConsole";
+import { isRealAuthEnabled } from "@/lib/auth/realSession";
 import { ADMIN_STAFF_DETAIL_PAGE_TITLE, ADMIN_STAFF_LIST_TITLE } from "@/lib/constants/adminStaff";
 import { getAdminStaffDetail } from "@/lib/services/adminStaff";
 import { toSearchParams } from "@/lib/utils/query";
@@ -35,7 +36,7 @@ export default async function AdminCustomerServiceDetailPage({
         backLabel={ADMIN_STAFF_LIST_TITLE}
       />
 
-      <AdminStaffConsole record={staff} />
+      <AdminStaffConsole record={staff} realAuthEnabled={isRealAuthEnabled()} />
     </div>
   );
 }

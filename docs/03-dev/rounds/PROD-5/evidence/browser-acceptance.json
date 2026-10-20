@@ -1,0 +1,136 @@
+{
+  "base": "http://127.0.0.1:3101",
+  "startedAt": "2026-10-18T17:51:29.430Z",
+  "finishedAt": "2026-10-18T17:51:46.333Z",
+  "results": [
+    {
+      "step": "用户端 /mine 未登录显示登录拦截与模拟微信入口",
+      "ok": true,
+      "detail": "LoginGate + 模拟微信登录（Staging）"
+    },
+    {
+      "step": "Mock 微信身份页可见三个身份且不含角色授予文案",
+      "ok": true,
+      "detail": "3 个 Mock 身份 + 明确不授予角色文案"
+    },
+    {
+      "step": "选择 Mock 微信身份 alpha 后回到 /mine 且只建立用户会话",
+      "ok": true,
+      "detail": "user.id=u_04ca287b-e6ea-45e5-898e-1dcebb14f163 会话 Cookie=chaoge_user_session"
+    },
+    {
+      "step": "同一 Mock 身份再次登录仍是同一个用户",
+      "ok": true,
+      "detail": "same user.id=u_04ca287b-e6ea-45e5-898e-1dcebb14f163"
+    },
+    {
+      "step": "用户会话无法进入管理后台 / 客服工作台",
+      "ok": true,
+      "detail": "/admin→登录页 /staff→登录页 /api/admin/*=401 /api/staff/*=401"
+    },
+    {
+      "step": "伪造 role=admin 的登录请求不产生管理员权限",
+      "ok": true,
+      "detail": "同一身份 user.id=u_04ca287b-e6ea-45e5-898e-1dcebb14f163，/api/admin/staff=401"
+    },
+    {
+      "step": "普通微信用户访问 /companion 显示未绑定提示与绑定说明",
+      "ok": true,
+      "detail": "你还不是护航 + 微信登录不授予护航资格说明"
+    },
+    {
+      "step": "第二个 Mock 身份创建独立用户（与 alpha 不同）",
+      "ok": true,
+      "detail": "alpha=u_04ca287b-e6ea-45e5-898e-1dcebb14f163 beta=u_0f1ad83c-f90a-4667-87c0-e98461b95b2d 不同"
+    },
+    {
+      "step": "微信身份 gamma 登录并进入入驻申请",
+      "ok": true,
+      "detail": "gamma user.id=u_950e0daa-7c78-4ca4-9c4d-82347aed54e5 已有入驻申请（沿用既有申请继续验收）"
+    },
+    {
+      "step": "提交入驻申请（昵称/游戏/大区/标签/经验/介绍）",
+      "ok": true,
+      "detail": "已有申请，读取 /join/status"
+    },
+    {
+      "step": "管理员账号密码登录（原有账号）",
+      "ok": true,
+      "detail": "admin 登录成功进入后台概览"
+    },
+    {
+      "step": "管理员审核通过后 gamma 获得护航工作台",
+      "ok": true,
+      "detail": "gamma 进入护航工作台"
+    },
+    {
+      "step": "未绑定身份 beta 仍无法进入护航工作台",
+      "ok": true,
+      "detail": "beta → 你还不是护航"
+    },
+    {
+      "step": "护航身份与用户身份是同一账号（同一 user.id）",
+      "ok": true,
+      "detail": "companion user.id=u_950e0daa-7c78-4ca4-9c4d-82347aed54e5 与登录身份一致"
+    },
+    {
+      "step": "管理员新建客服账号并设置密码",
+      "ok": true,
+      "detail": "staff.id=staff_d232fdcd-e69b-4258-9703-aecf92f45a5d（新建账号，未触碰既有客服密码）"
+    },
+    {
+      "step": "新客服账号通过 /staff/login 密码登录并进入工作台",
+      "ok": true,
+      "detail": "staff 登录成功，Cookie=chaoge_staff_session"
+    },
+    {
+      "step": "既有客服凭据未被重置（仅记录，不修改）",
+      "ok": true,
+      "detail": "既有客服档案口令登录=401（未修改该账号）"
+    },
+    {
+      "step": "移除本轮新建的测试客服账号（软删除）",
+      "ok": true,
+      "detail": "staff.id=staff_d232fdcd-e69b-4258-9703-aecf92f45a5d 已软删除，记录保留"
+    },
+    {
+      "step": "新用户 beta 进入确认订单页（服务端重算金额）",
+      "ok": true,
+      "detail": "结算页渲染，金额由服务端试算"
+    },
+    {
+      "step": "填写游戏 ID 并提交支付请求",
+      "ok": true,
+      "detail": "requestId 已创建，支付请求待支付"
+    },
+    {
+      "step": "模拟支付成功 → 订单生成",
+      "ok": true,
+      "detail": "支付成功，订单已生成"
+    },
+    {
+      "step": "支付成功页可进入订单详情，订单列表可查且状态为已付款",
+      "ok": true,
+      "detail": "orderNo=YM20261018703439 状态=已付款"
+    },
+    {
+      "step": "刷新订单列表后订单仍存在（服务端持久化）",
+      "ok": true,
+      "detail": "刷新后仍可查 YM20261018703439"
+    }
+  ],
+  "notes": [
+    "gamma 没有待审申请，直接校验工作台权限",
+    "既有客服账号 kefu-xiaoyu 用既有档案口令登录返回 401；未重置任何既有密码"
+  ],
+  "ids": {
+    "alpha": "u_04ca287b-e6ea-45e5-898e-1dcebb14f163",
+    "beta": "u_0f1ad83c-f90a-4667-87c0-e98461b95b2d",
+    "gamma": "u_950e0daa-7c78-4ca4-9c4d-82347aed54e5"
+  },
+  "order": {
+    "requestUrl": "http://127.0.0.1:3101/pay/result?requestId=pr_0be39623-f098-4220-b102-d882dec31f04",
+    "detailUrl": "http://127.0.0.1:3101/orders/ord_a04b61de-7817-4652-9682-8748bc2c3d2c",
+    "orderNo": "YM20261018703439"
+  }
+}

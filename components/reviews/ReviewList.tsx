@@ -7,10 +7,13 @@ import Link from "next/link";
 import { useRef, useState } from "react";
 import EmptyState from "@/components/common/EmptyState";
 import {
+  REVIEW_DIMENSION_EMPTY_LABEL,
+  REVIEW_DIMENSION_LABELS,
   REVIEW_MOCK_NOTICE,
   REVIEW_PAGE_SIZE,
   REVIEW_RANGES,
   REVIEW_RATING_LABELS,
+  REVIEW_STATUS_TONES,
   REVIEW_TABS,
   companionLabel,
   mergePendingReviewPage,
@@ -19,9 +22,11 @@ import {
 import { fetchPendingReviews, fetchReviewedReviews } from "@/lib/services/reviewsHttp";
 import type {
   PendingReviewPage,
+  ReviewDimension,
   ReviewListItem,
   ReviewPendingItem,
   ReviewRange,
+  ReviewRating,
   ReviewTabCounts,
   ReviewTabKey,
   ReviewedReviewPage,
@@ -318,7 +323,17 @@ export default function ReviewList({ initial }: { initial: ReviewInitial }) {
   );
 }
 
-/** 已评价记录：星级与正文在上，订单与打手信息在下。 */
+/**
+ * 已评价记录：两个维度的星级与正文在上，订单与打手信息在下。
+ *
+ * ⚠️ **星级按维度渲染**，没有单个 `rating` 可显示：一条评价最多有两个星级，
+ * 挑一个显示等于替用户决定「哪个星级代表这次消费」。某个维度为 `null` 时
+ * 显示「未评价」而**不是 0 星**——0 星是不存在的取值，显示它会变成一条差评。
+ *
+ * ⚠️ **所有状态都显示 `statusLabel`**（`D8`）：作者看得见自己的每一条记录，
+ * 包括 `pending` / `rejected` / `hidden`。只有 `canResubmit` 为真时才有重提入口（`D9`），
+ * 其余状态不给任何修改入口。
+ */
 function ReviewedCard({ review }: { review: ReviewListItem }) {
   return (
     <article className="rounded-[10px] border border-line bg-surface p-3">
@@ -330,13 +345,33 @@ function ReviewedCard({ review }: { review: ReviewListItem }) {
       />
 
       <div className="mt-2 flex items-center gap-2">
-        <Stars rating={review.rating} />
+        <span
+          className={`text-[12px] font-medium ${STATUS_TONE_CLASS[REVIEW_STATUS_TONES[review.status]]}`}
+        >
+          {review.statusLabel}
+        </span>
         <span className="text-[12px] text-ink-3">{formatDateTime(review.createdAt)}</span>
       </div>
 
-      <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-5 text-ink">
-        {review.content}
-      </p>
+      {/* 被驳回 / 被隐藏时把管理员给的原因原样放出来：作者不知道原因就无法修改（D10） */}
+      {review.status === "rejected" && review.rejectReason ? (
+        <p className="mt-1.5 break-words rounded-[8px] bg-page px-2.5 py-2 text-[12px] leading-5 text-ink-2">
+          驳回原因：{review.rejectReason}
+        </p>
+      ) : null}
+      {review.status === "hidden" && review.hideReason ? (
+        <p className="mt-1.5 break-words rounded-[8px] bg-page px-2.5 py-2 text-[12px] leading-5 text-ink-2">
+          隐藏原因：{review.hideReason}
+        </p>
+      ) : null}
+
+      <div className="mt-2 border-t border-line pt-1">
+        <DimensionRow label={REVIEW_DIMENSION_LABELS.product} dimension={review.productReview} />
+        <DimensionRow
+          label={REVIEW_DIMENSION_LABELS.companion}
+          dimension={review.companionReview}
+        />
+      </div>
 
       {review.evidence.length > 0 ? (
         <ul className="mt-2 grid grid-cols-4 gap-2">
@@ -358,7 +393,51 @@ function ReviewedCard({ review }: { review: ReviewListItem }) {
           打手 {companionLabel(review.companion)} · 完成于 {formatDateTime(review.completedAt)}
         </p>
       </div>
+
+      {/* 只有被驳回的一条能回到表单（D9）；其余状态在这里没有第二个入口 */}
+      {review.canResubmit ? (
+        <div className="mt-2 flex justify-end">
+          <Link
+            href={`/reviews/new/${review.orderId}`}
+            className="flex h-8 items-center rounded-full bg-brand-red px-4 text-[13px] font-medium text-white"
+          >
+            重新提交
+          </Link>
+        </div>
+      ) : null}
     </article>
+  );
+}
+
+/**
+ * 一个评价维度：有就显示星级（和可选的正文），没有就说「未评价」。
+ *
+ * 空维度刻意**不画灰星**：五颗灰星看起来像「打了 0 星」，而这个取值在数据模型里
+ * 根本不存在（`ReviewRating` 是 1–5）。一句话比五颗空星准确得多。
+ */
+function DimensionRow({
+  label,
+  dimension,
+}: {
+  label: string;
+  dimension: ReviewDimension | null;
+}) {
+  return (
+    <div className="border-b border-line py-1.5 last:border-b-0">
+      <div className="flex items-center gap-2">
+        <span className="shrink-0 text-[12px] text-ink-3">{label}</span>
+        {dimension ? (
+          <Stars rating={dimension.rating} />
+        ) : (
+          <span className="text-[13px] text-ink-3">{REVIEW_DIMENSION_EMPTY_LABEL}</span>
+        )}
+      </div>
+      {dimension?.content ? (
+        <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-ink">
+          {dimension.content}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -441,8 +520,22 @@ function ProductRow({
   );
 }
 
+/**
+ * 评价状态 → 文字色。
+ *
+ * 分类取自 `REVIEW_STATUS_TONES`（`neutral` / `positive` / `negative`），
+ * 颜色取自 `@theme` 的售后状态令牌——「审核中」（橙）/「已通过」（绿）/
+ * 「已驳回 · 已被管理员隐藏」（红）各自的语义只有一处答案。
+ * 状态文字始终由 DTO 的 `statusLabel` 给出，颜色只是辅助（§十一）。
+ */
+const STATUS_TONE_CLASS: Record<(typeof REVIEW_STATUS_TONES)[keyof typeof REVIEW_STATUS_TONES], string> = {
+  neutral: "text-status-pending",
+  positive: "text-status-success",
+  negative: "text-status-danger",
+};
+
 /** 星级：星星是图形，读屏用户靠 `aria-label` 知道几星。 */
-function Stars({ rating }: { rating: ReviewListItem["rating"] }) {
+function Stars({ rating }: { rating: ReviewRating }) {
   return (
     <span
       role="img"

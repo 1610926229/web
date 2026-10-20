@@ -1,6 +1,8 @@
 import type { PageResult } from "@/lib/types/common";
 import type { Complaint, ComplaintStatus, ComplaintTypeKey } from "@/lib/types/complaint";
 import { mockComplaintRepository } from "./mockComplaintRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgComplaintRepository } from "./pg/complaintRepository";
 
 /**
  * 管理端投诉查询条件。
@@ -10,8 +12,13 @@ import { mockComplaintRepository } from "./mockComplaintRepository";
  * 而不是「编号在仓储筛、昵称在服务层筛」这种读到一半才发现的分工。
  */
 export type AdminComplaintQueryFilter = {
-  /** null 表示「全部」 */
-  status: ComplaintStatus | null;
+  /**
+   * 命中的**真实领域状态集合**；`null` 表示「全部」。
+   *
+   * ⚠️ 只接受 `ComplaintStatus`：地址栏上的虚拟筛选值 `all` / `open` **不得**
+   * 出现在数据层，服务层调用前已用 `complaintStatusesForFilter()` 解析完毕。
+   */
+  statuses: readonly ComplaintStatus[] | null;
   /** null 表示「全部类型」 */
   type: ComplaintTypeKey | null;
 };
@@ -65,6 +72,15 @@ export type ComplaintRepository = {
   summarizeComplaintsByOrder(orderId: string): Promise<ComplaintOrderStats>;
 
   /**
+   * 某一笔订单的**全部**投诉（跨状态，按提交时间倒序）。
+   *
+   * 供「判断有没有未完结投诉」这类需要看**全部状态**的场景用：`summarizeComplaintsByOrder`
+   * 只给最新一条，而「有没有还停在 pending / processing 的」必须逐条看（同一订单允许多条
+   * 投诉，最新一条已 resolved 不代表没有更早的未完结投诉）。
+   */
+  listComplaintsByOrderId(orderId: string): Promise<Complaint[]>;
+
+  /**
    * 管理端的**全量投诉**查询（P8C）：跨用户、按状态与类型筛选，按提交时间倒序返回全部命中记录。
    *
    * ⚠️ 与用户端的 `queryComplaints` 的关键区别：那个方法的 `userId` 是**查询条件**，
@@ -74,6 +90,16 @@ export type ComplaintRepository = {
   queryComplaintsForAdmin(filter: AdminComplaintQueryFilter): Promise<Complaint[]>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const complaintRepositoryBacking: RepositoryBacking<ComplaintRepository> = {
+  name: "complaint",
+  mock: mockComplaintRepository,
+  pg: pgComplaintRepository,
+};
+
 export function getComplaintRepository(): ComplaintRepository {
-  return mockComplaintRepository;
+  return pickRepository(complaintRepositoryBacking);
 }

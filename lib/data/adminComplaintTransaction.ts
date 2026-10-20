@@ -3,6 +3,8 @@ import { canTransitionComplaint } from "@/lib/constants/adminComplaints";
 import type { Complaint, ComplaintStatus } from "@/lib/types/complaint";
 import { takeReplayForAction, writeAudit, type AdminWriteContext } from "./adminWriteSupport";
 import { applyComplaintStatus, complaintStore } from "./mockComplaintRepository";
+import { isPostgresDataSourceEnabled } from "./pg/config";
+import { applyAdminComplaintIntentPg } from "./pg/complaintTransactions";
 
 /**
  * 管理端投诉处理的**伪事务** —— 三个处理动作的唯一写入入口。
@@ -61,8 +63,15 @@ export type AdminComplaintWriteResult =
 /** 一次投诉处理动作的目标状态。与三个服务函数一一对应。 */
 export type AdminComplaintIntent = "start-processing" | "resolve" | "close";
 
-/** 意图 → 目标状态。**这是全站唯一的一处映射**，服务层与审计动作都从它推导。 */
-const INTENT_TO_STATUS: Record<
+/**
+ * 意图 → 目标状态。**这是全站唯一的一处映射**，服务层与审计动作都从它推导。
+ *
+ * ⚠️ PROD-1D 起 `export`：投诉的 PostgreSQL 事务（`lib/data/pg/complaintTransactions.ts`）
+ * 要复用**同一份**映射。本文件的行为因此**一个字没改**——只是多了一个出口。
+ * 在 Pg 侧再抄一份 `{ "start-processing": "processing", … }` 意味着将来新增一个
+ * 处理动作时只改一处，另一处的投诉会安静地迁到错误的状态上。
+ */
+export const INTENT_TO_STATUS: Record<
   AdminComplaintIntent,
   Extract<ComplaintStatus, "processing" | "resolved" | "closed">
 > = {
@@ -83,7 +92,7 @@ const INTENT_TO_STATUS: Record<
  *   把提交上来的文本写进去会变成一条「处理中但已经有结果」的记录；
  * - 另外两个动作的文本由服务层按各自的必填规则校验过。
  */
-export async function applyAdminComplaintIntent(
+async function applyAdminComplaintIntentMock(
   complaintId: string,
   intent: AdminComplaintIntent,
   result: string,
@@ -140,8 +149,14 @@ export async function applyAdminComplaintIntent(
  * 与 `INTENT_TO_STATUS` 分开写而不是从状态反推：两者恰好一一对应，但**含义不同**——
  * 一个是「记录变成了什么」，一个是「管理者做了什么」。将来若新增一个能到达
  * `closed` 的动作，状态反推会把两条审计记成同一件事。
+ *
+ * ⚠️ 与 `INTENT_TO_STATUS` 同理，PROD-1D 起 `export` 给 Pg 事务复用，
+ * 行为不变。审计动作名一旦分叉，两个存储上「同一个幂等键算不算同一个意图」
+ * （`refineReplayByAction` 那一轴）就会给出不同答案。
  */
-function auditActionOf(intent: AdminComplaintIntent): Parameters<typeof writeAudit>[0]["action"] {
+export function auditActionOf(
+  intent: AdminComplaintIntent,
+): Parameters<typeof writeAudit>[0]["action"] {
   switch (intent) {
     case "start-processing":
       return "complaint.start-processing";
@@ -150,4 +165,31 @@ function auditActionOf(intent: AdminComplaintIntent): Parameters<typeof writeAud
     default:
       return "complaint.close";
   }
+}
+
+// ——————————————————————————— 运行期路由（D3） ———————————————————————————
+
+/*
+ * 服务层 import 的永远是下面这 1 个名字，`DATA_SOURCE` 一变，整条写入路径随之切换。
+ * 上面的 `xxxMock` 是原实现（`globalThis` 伪事务），`pg/complaintTransactions.ts` 的
+ * `xxxPg` 是它的**等价 PostgreSQL 事务**。
+ *
+ * ⚠️ **路由必须留在函数体里，不能只改服务层的 import**：投诉处理写入被
+ * `adminComplaints.ts` / `staffComplaints.ts` 调用，逐个改调用点意味着将来新增一个
+ * 调用点就会漏改一处，而漏改的表现是「Repository 走 Pg、Transaction 走 Mock」的半事务。
+ *
+ * ⚠️ 判据是 `isPostgresDataSourceEnabled()`（显式的 `DATA_SOURCE` 环境变量，见
+ * `pg/config.ts`），**不是**「`DATABASE_URL` 有没有配」——后者会让本地开发悄无声息地切库。
+ */
+
+/** 三个投诉处理动作（开始处理 / 解决 / 关闭）的唯一写入入口。 */
+export async function applyAdminComplaintIntent(
+  complaintId: string,
+  intent: AdminComplaintIntent,
+  result: string,
+  ctx: AdminWriteContext,
+): Promise<AdminComplaintWriteResult> {
+  return isPostgresDataSourceEnabled()
+    ? applyAdminComplaintIntentPg(complaintId, intent, result, ctx)
+    : applyAdminComplaintIntentMock(complaintId, intent, result, ctx);
 }

@@ -6,9 +6,11 @@
 import { useRef, useState } from "react";
 import AdminConfirmDialog from "@/components/admin/AdminConfirmDialog";
 import AdminStaffEditForm from "@/components/admin/AdminStaffEditForm";
+import AdminStaffPasswordReset from "@/components/admin/AdminStaffPasswordReset";
 import AdminStatusBadge, { STAFF_STATE_TONE } from "@/components/admin/AdminStatusBadge";
 import {
   ADMIN_STAFF_CREDENTIAL_NOTICE,
+  ADMIN_STAFF_CREDENTIAL_NOTICE_REAL,
   ADMIN_STAFF_REMOVED_MESSAGE,
   staffLoginabilityNotice,
 } from "@/lib/constants/adminStaff";
@@ -70,8 +72,11 @@ const FLAG_SUCCESS_MESSAGE: Record<FlagIntent, string> = {
  */
 export default function AdminStaffConsole({
   record: initialRecord,
+  realAuthEnabled = false,
 }: {
   record: AdminStaffDetail;
+  /** PROD-4：开启后显示密码重置入口，并使用真实凭据文案。 */
+  realAuthEnabled?: boolean;
 }) {
   const [record, setRecord] = useState(initialRecord);
   /** 每次写成功后自增：编辑表单以它为 key 重挂载，从而以服务端最新值重新填表 */
@@ -265,8 +270,11 @@ export default function AdminStaffConsole({
         }}
       />
 
+      {/* 真实凭据模式：管理员可以重置密码（不能查看），已移除的账号不再提供入口 */}
+      {realAuthEnabled && !removed ? <AdminStaffPasswordReset staffId={record.id} /> : null}
+
       <p className="rounded-xl border border-admin-line bg-page px-4 py-3 text-[12px] leading-5 text-ink-3">
-        {ADMIN_STAFF_CREDENTIAL_NOTICE}
+        {realAuthEnabled ? ADMIN_STAFF_CREDENTIAL_NOTICE_REAL : ADMIN_STAFF_CREDENTIAL_NOTICE}
       </p>
 
       <AdminConfirmDialog

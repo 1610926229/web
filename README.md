@@ -43,7 +43,7 @@ Mock 能力由五个开关控制，取值必须**显式等于字符串 `true`** 
 | 变量 | 作用 |
 |---|---|
 | `ENABLE_MOCK_AUTH` | 用户端模拟登录：`/api/auth/mock-login`、`/api/auth/logout`、`mock_user_id` 会话 Cookie、拦截页上的「模拟微信登录」按钮 |
-| `ENABLE_MOCK_DEBUG` | 调试查询参数：`mockError` / `mockEmpty` / `mockDelay` |
+| `ENABLE_MOCK_DEBUG` | 调试查询参数 `mockError` / `mockEmpty` / `mockDelay`；**并开放 `POST /api/debug/reset`**（清空本进程 Mock 存储，测试专用、**破坏性**，不得开在有真实数据的部署上；**接真实后端时连同该接口一起删除**） |
 | `ENABLE_MOCK_PAYMENT` | 模拟支付：`/api/payments/mock-confirm` 与支付结果页上的「模拟支付成功 / 失败 / 取消」三个按钮 |
 | `ENABLE_MOCK_ADMIN` | **管理端**模拟登录：`/api/admin/auth/*`、`mock_admin_id` 会话 Cookie、`/admin/login` 上的「模拟管理员登录」按钮 |
 | `ENABLE_MOCK_STAFF` | **客服端**模拟登录：`/api/staff/auth/*`、`mock_staff_id` 会话 Cookie、`/staff/login` 上的客服测试账号列表 |
@@ -55,7 +55,7 @@ cp .env.example .env.local   # .env.local 已被 .gitignore 忽略
 **正式部署不要设置这五个变量**。关闭时无需改动任何代码：
 
 - 未开启 `ENABLE_MOCK_AUTH`：两个认证接口返回 404；`mock_user_id` Cookie 不再产生登录身份（伪造该 Cookie 只会看到登录拦截页）；拦截页上不出现任何模拟登录控件。
-- 未开启 `ENABLE_MOCK_DEBUG`：三个调试查询参数被完全忽略，数据与延迟都不受影响，首页照常渲染。
+- 未开启 `ENABLE_MOCK_DEBUG`：三个调试查询参数被完全忽略，数据与延迟都不受影响，首页照常渲染；`POST /api/debug/reset` 返回 **404**（接口不存在）。**注意：开启时该接口会把本进程的全部 Mock 存储清空**，所以这个开关不能开在任何有真实数据的部署上。
 - 未开启 `ENABLE_MOCK_PAYMENT`：模拟支付确认接口返回 404，页面上不出现任何模拟支付控件；此时**创建支付请求仍然可用**（那是真实业务逻辑，不属于模拟渠道），只是待支付的请求无法在本地走到「已支付」。
 - 未开启 `ENABLE_MOCK_ADMIN`：管理端登录与退出接口返回 **404**；`/admin/login` 不出现「模拟管理员登录」按钮，只显示一行说明；伪造 `mock_admin_id` Cookie 拿不到任何权限（管理页面照常跳登录、管理接口 401）。**用户端的 `ENABLE_MOCK_AUTH` 不受影响**，两个开关各自独立。
 - 未开启 `ENABLE_MOCK_STAFF`：客服端登录与退出接口返回 **404**；`/staff/login` 不列出任何测试账号，只显示一行说明；伪造 `mock_staff_id` Cookie 拿不到任何权限（`/staff` 照常跳登录页、客服接口 401）。**另外两个开关都不受影响**，三个开关各自独立。
@@ -106,6 +106,13 @@ http://localhost:3000/api/home?mockEmpty=1
 
 **不调用任何真实微信接口，不使用任何凭据**：会话是名为 `mock_user_id` 的 Cookie，值为 Mock 用户 id。
 
+**在浏览器里换身份**：用户端每个页面的右下角有一个 `Mock 身份（开发工具）` 悬浮按钮，
+展开后能看到当前身份、点一个测试账号即可切换、也可以退出登录（DEV-1）。
+它**替换的是当前会话**（同一个 Cookie），不是同时登录两个账号；
+`ENABLE_MOCK_AUTH` 不为 `true` 时它整块不渲染，名单也不会出现在响应里。
+
+**命令行 / 脚本**：
+
 ```bash
 # 默认用户登录
 curl -i -X POST http://localhost:3000/api/auth/mock-login
@@ -114,6 +121,16 @@ curl -i -X POST -H 'content-type: application/json' \
   -d '{"userId":"u-1002"}' http://localhost:3000/api/auth/mock-login
 curl -X POST http://localhost:3000/api/auth/logout
 ```
+
+⚠️ 测试账号名单（8 位）里**已经有两位一启动就是有效打手**：`u-1022`（夜航）/ `u-1023`（栖迟），
+名下各有预置的护航资料（`cp-10` / `cp-11`，由 `ca-1008` / `ca-1009` 两条已通过的入驻申请产生）。
+**验收打手链路（公共池接单 / 打手「我的订单」/ 取消接单）不需要任何后台审核动作**，
+面板上每个账号右侧的资格标签由服务端 `resolveCompanionAccess()` 现算，只用于显示。
+
+名单里另外几位**还不是打手**，用于走「产生打手」的那几条路：`u-1001` / `u-1010` 是下单用户；
+`u-1002` / `u-1003` 名下分别是「待查看 / 审核中」的入驻申请（后台可直接通过它已有的一条），
+`u-1008` / `u-1009` 没有申请（先提交一条再由后台通过）。
+⚠️ 管理端与用户端是两套 Cookie，同一个浏览器开两个标签页即可互不干扰。
 
 ### Mock 管理端认证（需 `ENABLE_MOCK_ADMIN=true`）
 

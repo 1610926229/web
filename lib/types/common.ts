@@ -10,6 +10,7 @@ export type ApiErrorCode =
   | "UNAUTHORIZED"
   | "FORBIDDEN"
   | "NOT_FOUND"
+  | "TOO_MANY_REQUESTS"
   | "SERVER_ERROR"
   | "NETWORK_ERROR";
 

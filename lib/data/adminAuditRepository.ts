@@ -1,5 +1,7 @@
 import type { AdminAuditAction, AdminAuditEntry, AdminAuditTargetType } from "@/lib/types/adminAudit";
 import { mockAdminAuditRepository } from "./mockAdminAuditRepository";
+import { pickRepository, type RepositoryBacking } from "./datasource";
+import { pgAdminAuditRepository } from "./pg/adminAuditRepository";
 
 /**
  * 管理操作审计仓储。
@@ -35,6 +37,16 @@ export type AdminAuditRepository = {
   countAudits(): Promise<number>;
 };
 
+/**
+ * 本域的两种后端。`pg` 为 `null` 表示「还没有 Pg 实现」——那在 `DATA_SOURCE=postgres` 下
+ * 会被 `pickRepository` 与 `assertAllRepositoriesWired` 立刻抓住，而不是静默回退 Mock。
+ */
+export const adminAuditRepositoryBacking: RepositoryBacking<AdminAuditRepository> = {
+  name: "adminAudit",
+  mock: mockAdminAuditRepository,
+  pg: pgAdminAuditRepository,
+};
+
 export function getAdminAuditRepository(): AdminAuditRepository {
-  return mockAdminAuditRepository;
+  return pickRepository(adminAuditRepositoryBacking);
 }
